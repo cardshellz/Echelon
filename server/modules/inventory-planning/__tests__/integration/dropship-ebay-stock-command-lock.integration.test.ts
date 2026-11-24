@@ -5,7 +5,7 @@ import { cutoverCompositionBaseSql } from "../fixtures/inventory-cutover-composi
 import {
   DROPSHIP_EBAY_STOCK as F, addDropshipLivePush, countDropshipStockRows, createDropshipEbayTarget, installDropshipEbayStockFixture,
 } from "../fixtures/dropship-ebay-stock.fixture";
-import { ensureDropshipEbayStockReady } from "../../quantity-publication";
+import { ensureDropshipEbayStockReady } from "../../application/quantity-publication";
 
 // Channels PR2 (PLAN-CH2 v4.1 §5 and §11.4 PG 29, TST-5): a behaviour pin of the Dropship
 // eBay stock link's command lock and receipts, written and green on main before

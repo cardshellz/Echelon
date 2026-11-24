@@ -11,7 +11,7 @@ import {
   SHIPMENT_LIFECYCLE_SHADOW_LABEL_BATCH_SQL,
   SHIPMENT_LIFECYCLE_SHADOW_ROLE_ASSERTION_SQL,
   type ShipmentLifecycleShadowAuditBatch,
-} from "../../../modules/shipping/shipment-lifecycle-shadow-audit.repository";
+} from "../../../modules/shipping/infrastructure/shipment-lifecycle-shadow-audit.repository";
 import {
   ShipmentLifecycleShadowAuditJobError,
   assertShipmentLifecycleShadowEnabled,
@@ -634,8 +634,8 @@ describe("shipment lifecycle read-only shadow job", () => {
     const root = process.cwd();
     const files = [
       join(root, "server", "jobs", "shipment-lifecycle-shadow-audit.job.ts"),
-      join(root, "server", "modules", "shipping", "shipment-lifecycle-shadow-audit.repository.ts"),
-      join(root, "server", "modules", "shipping", "declared-package-lifecycle-shadow.domain.ts"),
+      join(root, "server", "modules", "shipping", "infrastructure/shipment-lifecycle-shadow-audit.repository.ts"),
+      join(root, "server", "modules", "shipping", "domain/declared-package-lifecycle-shadow.domain.ts"),
     ];
     const importTargets = files.flatMap((file) => {
       const source = readFileSync(file, "utf8");

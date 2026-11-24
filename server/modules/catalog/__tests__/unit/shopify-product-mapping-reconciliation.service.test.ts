@@ -3,22 +3,22 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildShopifyProductMappingSummary,
   type ShopifyProductMappingSource,
-} from "../../shopify-product-mapping.domain";
+} from "../../domain/shopify-product-mapping.domain";
 import {
   buildShopifyOwnershipReview,
   shopifyOwnershipRepairRequestHash,
   type ShopifyOwnershipRepairResult,
-} from "../../shopify-product-mapping-reconciliation.domain";
+} from "../../domain/shopify-product-mapping-reconciliation.domain";
 import {
   createShopifyProductMappingReconciliationService,
-} from "../../shopify-product-mapping-reconciliation.service";
+} from "../../application/shopify-product-mapping-reconciliation.service";
 import {
   type LoadedLocalProduct,
   type ShopifyProductMappingReconciliationRepository,
-} from "../../shopify-product-mapping-reconciliation.repository";
+} from "../../infrastructure/shopify-product-mapping-reconciliation.repository";
 import type {
   ShopifyProductMappingVerifier,
-} from "../../shopify-product-mapping-verifier";
+} from "../../infrastructure/shopify-product-mapping-verifier";
 
 const fixedNow = new Date("2026-07-24T12:00:00.000Z");
 const context = {

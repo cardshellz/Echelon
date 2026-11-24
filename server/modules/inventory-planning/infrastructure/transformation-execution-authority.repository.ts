@@ -3,7 +3,7 @@ import { calculateRecipeDefinitionHash } from "../domain/inventory-availability-
 import type {
   TransformationAuthorityTransaction,
   TransformationExecutionAuthorityPort,
-} from "../../inventory/application/transformation-execution-authority.port";
+} from "../../inventory/transformation-execution-authority.port.api";
 import {
   assertBuildAuthorizationSnapshot,
   authorizeBuildBindingDefinition,
@@ -19,7 +19,7 @@ import {
   type PackageConversionDefinitionRecord,
   type RuntimeAuthorityRecord,
   type TransformationRuntimeEvidence,
-} from "../../inventory/domain/transformation-execution-authority";
+} from "../../inventory/transformation-execution-authority.api";
 
 type QueryOwner = TransformationAuthorityTransaction;
 

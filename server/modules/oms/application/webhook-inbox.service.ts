@@ -1,0 +1,427 @@
+import { createHash } from "crypto";
+import type { Request } from "express";
+import { sql } from "drizzle-orm";
+import { logger } from "../../../platform/observability/logger";
+
+export type WebhookInboxStatus = "received" | "processing" | "succeeded" | "failed" | "dead";
+
+export interface WebhookInboxInput {
+  provider: string;
+  topic: string;
+  eventId: string;
+  idempotencyKey: string;
+  sourceDomain: string | null;
+  payload: unknown;
+  headers: Record<string, string | string[]>;
+}
+
+export interface WebhookInboxReceipt {
+  id: number;
+  status: WebhookInboxStatus;
+  attempts: number;
+  inserted: boolean;
+}
+
+export interface WebhookInboxReplayResult {
+  inboxId: number;
+  retryQueueId: number;
+  provider: string;
+  topic: string;
+  previousStatus: WebhookInboxStatus;
+}
+
+export interface WebhookInboxRetryInput {
+  provider: string;
+  topic: string;
+  payload: unknown;
+  sourceInboxId: number;
+  lastError: string;
+  nextRetryAt?: Date;
+}
+
+const REPLAYABLE_SHOPIFY_OMS_TOPICS = new Set([
+  "orders/paid",
+  "orders/updated",
+  "orders/cancelled",
+  "orders/fulfilled",
+  "refunds/create",
+  "fulfillments/create",
+  "fulfillments/update",
+  "products/create",
+  "products/update",
+  "products/delete",
+]);
+
+const MUTABLE_SHOPIFY_FALLBACK_TOPICS = new Set([
+  "orders/updated",
+  "orders/fulfilled",
+  "fulfillments/create",
+  "fulfillments/update",
+  "products/update",
+]);
+
+function isReplayableWebhookInboxTopic(provider: string, topic: string): boolean {
+  if (provider === "shopify") {
+    return REPLAYABLE_SHOPIFY_OMS_TOPICS.has(topic);
+  }
+  if (provider === "ebay") {
+    return topic.toLowerCase().includes("order");
+  }
+  if (provider === "shipstation") {
+    return topic === "SHIP_NOTIFY";
+  }
+  return false;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+
+  return `{${Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`)
+    .join(",")}}`;
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function headerValue(req: Request, name: string): string | undefined {
+  const value = req.headers[name.toLowerCase()];
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function extractShopifyPayloadEventId(topic: string, payload: any): string | null {
+  if (!payload || typeof payload !== "object") return null;
+
+  if (topic === "refunds/create") {
+    if (payload.id && payload.order_id) return `${payload.order_id}:${payload.id}`;
+    if (payload.id) return String(payload.id);
+  }
+
+  const entityId =
+    String(
+      payload.admin_graphql_api_id ??
+        payload.id ??
+        payload.order_id ??
+        payload.name ??
+        "",
+    ) || null;
+  if (!entityId) return null;
+
+  if (MUTABLE_SHOPIFY_FALLBACK_TOPICS.has(topic)) {
+    return `${entityId}:payload:${sha256(stableJson(payload))}`;
+  }
+
+  return entityId;
+}
+
+export function buildWebhookIdempotencyKey(input: {
+  provider: string;
+  topic: string;
+  sourceDomain?: string | null;
+  eventId: string;
+}): string {
+  return [
+    input.provider,
+    input.topic,
+    input.sourceDomain || "unknown",
+    input.eventId,
+  ].join(":");
+}
+
+export function buildShopifyWebhookInboxInput(
+  req: Request,
+  topic: string,
+  payload: unknown,
+): WebhookInboxInput {
+  const sourceDomain = headerValue(req, "x-shopify-shop-domain") ?? null;
+  const webhookId = headerValue(req, "x-shopify-webhook-id");
+  const fallbackEventId = extractShopifyPayloadEventId(topic, payload);
+  const eventId = webhookId || fallbackEventId || `payload:${sha256(stableJson(payload))}`;
+
+  return {
+    provider: "shopify",
+    topic,
+    eventId,
+    idempotencyKey: buildWebhookIdempotencyKey({
+      provider: "shopify",
+      topic,
+      sourceDomain,
+      eventId,
+    }),
+    sourceDomain,
+    payload,
+    headers: {
+      "x-shopify-shop-domain": sourceDomain || "",
+      "x-shopify-topic": headerValue(req, "x-shopify-topic") || topic,
+      "x-shopify-webhook-id": webhookId || "",
+      "x-shopify-triggered-at": headerValue(req, "x-shopify-triggered-at") || "",
+    },
+  };
+}
+
+function firstRow<T>(result: any): T | undefined {
+  return Array.isArray(result?.rows) ? result.rows[0] : undefined;
+}
+
+export async function recordWebhookReceived(
+  db: any,
+  input: WebhookInboxInput,
+): Promise<WebhookInboxReceipt> {
+  const result = await db.execute(sql`
+    WITH inserted AS (
+      INSERT INTO oms.webhook_inbox (
+        provider,
+        topic,
+        event_id,
+        idempotency_key,
+        source_domain,
+        payload,
+        headers
+      )
+      VALUES (
+        ${input.provider},
+        ${input.topic},
+        ${input.eventId},
+        ${input.idempotencyKey},
+        ${input.sourceDomain},
+        ${JSON.stringify(input.payload)}::jsonb,
+        ${JSON.stringify(input.headers)}::jsonb
+      )
+      ON CONFLICT (idempotency_key) DO NOTHING
+      RETURNING id, status, attempts, true AS inserted
+    )
+    SELECT id, status, attempts, inserted FROM inserted
+    UNION ALL
+    SELECT id, status, attempts, false AS inserted
+    FROM oms.webhook_inbox
+    WHERE idempotency_key = ${input.idempotencyKey}
+      AND NOT EXISTS (SELECT 1 FROM inserted)
+    LIMIT 1
+  `);
+
+  const row = firstRow<WebhookInboxReceipt>(result);
+  if (!row) {
+    throw new Error(`Failed to record webhook inbox row for ${input.provider}/${input.topic}`);
+  }
+
+  return {
+    id: Number(row.id),
+    status: row.status,
+    attempts: Number(row.attempts) || 0,
+    inserted: Boolean(row.inserted),
+  };
+}
+
+export async function markWebhookProcessing(db: any, inboxId: number): Promise<void> {
+  await db.execute(sql`
+    UPDATE oms.webhook_inbox
+    SET status = 'processing',
+        attempts = attempts + 1,
+        last_attempt_at = NOW(),
+        updated_at = NOW()
+    WHERE id = ${inboxId}
+  `);
+}
+
+export async function markWebhookSucceeded(db: any, inboxId: number): Promise<void> {
+  await db.execute(sql`
+    UPDATE oms.webhook_inbox
+    SET status = 'succeeded',
+        last_error = NULL,
+        processed_at = NOW(),
+        updated_at = NOW()
+    WHERE id = ${inboxId}
+  `);
+}
+
+export async function markWebhookFailed(db: any, inboxId: number, error: unknown): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  await db.execute(sql`
+    UPDATE oms.webhook_inbox
+    SET status = 'failed',
+        last_error = ${message},
+        updated_at = NOW()
+    WHERE id = ${inboxId}
+  `);
+}
+
+export async function enqueueWebhookInboxRetry(
+  db: any,
+  input: WebhookInboxRetryInput,
+): Promise<number> {
+  if (!Number.isInteger(input.sourceInboxId) || input.sourceInboxId <= 0) {
+    throw new Error(
+      `sourceInboxId must be a positive integer (got ${input.sourceInboxId})`,
+    );
+  }
+  const provider = input.provider.trim();
+  const topic = input.topic.trim();
+  if (!provider || !topic) {
+    throw new Error("provider and topic are required for webhook inbox retry");
+  }
+
+  const result = await db.execute(sql`
+    INSERT INTO oms.webhook_retry_queue (
+      provider,
+      topic,
+      payload,
+      source_inbox_id,
+      attempts,
+      last_error,
+      next_retry_at,
+      status
+    )
+    VALUES (
+      ${provider},
+      ${topic},
+      ${JSON.stringify(input.payload)}::jsonb,
+      ${input.sourceInboxId},
+      0,
+      ${input.lastError},
+      COALESCE(${input.nextRetryAt ?? null}::timestamptz, NOW()),
+      'pending'
+    )
+    ON CONFLICT (source_inbox_id)
+      WHERE status = 'pending' AND source_inbox_id IS NOT NULL
+    DO UPDATE SET
+      last_error = EXCLUDED.last_error,
+      next_retry_at = LEAST(oms.webhook_retry_queue.next_retry_at, EXCLUDED.next_retry_at),
+      updated_at = NOW()
+    RETURNING id
+  `);
+  const retry = firstRow<{ id: number }>(result);
+  if (!retry) {
+    throw new Error(`failed to enqueue retry for webhook inbox row ${input.sourceInboxId}`);
+  }
+  return Number(retry.id);
+}
+export async function enqueueWebhookInboxReplay(
+  db: any,
+  inboxId: number,
+  operator: string,
+): Promise<WebhookInboxReplayResult> {
+  if (!Number.isInteger(inboxId) || inboxId <= 0) {
+    throw new Error(`webhook inbox id must be a positive integer (got ${inboxId})`);
+  }
+
+  const inboxResult = await db.execute(sql`
+    SELECT id, provider, topic, payload, status
+    FROM oms.webhook_inbox
+    WHERE id = ${inboxId}
+    LIMIT 1
+  `);
+  const inbox = firstRow<{
+    id: number;
+    provider: string;
+    topic: string;
+    payload: unknown;
+    status: WebhookInboxStatus;
+  }>(inboxResult);
+
+  if (!inbox) {
+    throw new Error(`webhook inbox row ${inboxId} not found`);
+  }
+  if (!isReplayableWebhookInboxTopic(inbox.provider, inbox.topic)) {
+    throw new Error(`webhook inbox row ${inboxId} is not a replayable OMS webhook topic`);
+  }
+  if (inbox.status === "succeeded") {
+    throw new Error(`webhook inbox row ${inboxId} already succeeded`);
+  }
+
+  const runReplay = async (tx: any): Promise<{ id: number }> => {
+    const reason = `manual replay from webhook_inbox ${inboxId} by ${operator || "unknown"}`;
+    const retryId = await enqueueWebhookInboxRetry(tx, {
+      provider: inbox.provider,
+      topic: inbox.topic,
+      payload: inbox.payload,
+      sourceInboxId: inboxId,
+      lastError: reason,
+    });
+
+    await tx.execute(sql`
+      UPDATE oms.webhook_inbox
+      SET status = 'received',
+          last_error = NULL,
+          updated_at = NOW()
+      WHERE id = ${inboxId}
+    `);
+
+    return { id: retryId };
+  };
+
+  const retry = typeof db.transaction === "function"
+    ? await db.transaction(runReplay)
+    : await runReplay(db);
+
+  logger.warn("oms.webhook_inbox_service", { message: `[OMS Webhook Inbox] queued replay retry=${retry.id} inbox=${inboxId} topic=${inbox.topic} operator=${operator || "unknown"}` });
+
+  return {
+    inboxId,
+    retryQueueId: Number(retry.id),
+    provider: inbox.provider,
+    topic: inbox.topic,
+    previousStatus: inbox.status,
+  };
+}
+
+export function buildEbayWebhookInboxInput(
+  req: Request,
+  payload: any,
+): WebhookInboxInput {
+  const topic = String(payload?.metadata?.topic || "unknown");
+  const sourceDomain = "ebay";
+  const notificationId = String(payload?.notification?.notificationId || "");
+  const orderId = String(payload?.notification?.data?.orderId || "");
+  const eventId = notificationId || (orderId ? `${topic}:${orderId}` : `payload:${sha256(stableJson(payload))}`);
+
+  return {
+    provider: "ebay",
+    topic,
+    eventId,
+    idempotencyKey: buildWebhookIdempotencyKey({
+      provider: "ebay",
+      topic,
+      sourceDomain,
+      eventId,
+    }),
+    sourceDomain,
+    payload,
+    headers: {
+      "user-agent": headerValue(req, "user-agent") || "",
+      "x-ebay-signature": headerValue(req, "x-ebay-signature") || "",
+      "x-ebay-transmission-id": headerValue(req, "x-ebay-transmission-id") || "",
+    },
+  };
+}
+
+export function buildShipStationWebhookInboxInput(
+  req: Request,
+  resourceUrl: string,
+  payload: unknown,
+): WebhookInboxInput {
+  let sourceDomain: string | null = "shipstation";
+  try {
+    sourceDomain = new URL(resourceUrl).host || "shipstation";
+  } catch {
+    sourceDomain = "shipstation";
+  }
+  const urlDigest = sha256(resourceUrl);
+  const eventId = resourceUrl.length <= 180 ? resourceUrl : `url:${urlDigest}`;
+
+  return {
+    provider: "shipstation",
+    topic: "SHIP_NOTIFY",
+    eventId,
+    idempotencyKey: `shipstation:SHIP_NOTIFY:${urlDigest}`,
+    sourceDomain,
+    payload,
+    headers: {
+      "user-agent": headerValue(req, "user-agent") || "",
+      "x-shipstation-webhook-id": headerValue(req, "x-shipstation-webhook-id") || "",
+    },
+  };
+}

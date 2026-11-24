@@ -1,0 +1,2800 @@
+import { createChannelPricingService } from "../../application/channel-pricing.service";
+import { sendChannelPricingError } from "./channel-pricing.error";
+import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
+import type { Express } from "express";
+import { z } from "zod";
+import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
+import { awaitPageReads, limitPageRead } from "../../../../platform/http/page-read-limit";
+import { channelsStorage } from "../..";
+import { ordersStorage, orderPageQuerySchema } from "../../../orders";
+import { catalogStorage } from "../../../catalog";
+import { warehouseStorage } from "../../../warehouse";
+import { inventoryStorage } from "../../../inventory";
+const storage = { ...channelsStorage, ...ordersStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
+import { requirePermission, requireAuth } from "../../../../routes/middleware";
+import { insertChannelSchema, insertChannelReservationSchema } from "@shared/schema";
+import { db } from "../../../../storage/base";
+import {
+  channelWarehouseAssignments,
+  channelAllocationRules,
+  channels as channelsTable,
+  channelListings,
+  warehouses,
+  products,
+  productVariants,
+  eq, and, inArray, isNull, sql, asc,
+} from "../../../../storage/base";
+import { pool } from "../../../../db";
+import { channelConnections } from "@shared/schema";
+import { ShopifyAdapter } from "../../adapters/shopify.adapter";
+import { ChannelIdentityService } from "../../application/channel-identity.service";
+import { ChannelIdentityError } from "../../domain/channel-identity.domain";
+import { runShopifyWeightBackfill, createShopifyWeightBackfillDeps } from "../../application/shopify-weight-backfill.service";
+import { rowToListingDto } from "../../domain/channel-listings.transform";
+import { toPublicChannelConnection } from "../../domain/channel-connection.transform";
+import { createOmsService } from "../../../oms/channel-order-intake.api";
+import { enqueueShipStationHoldSyncRetry } from "../../../oms/webhook-retry.api";
+import { reserveAndPushAfterHoldRelease } from "../../../orders/hold-release-push.api";
+import { WmsOrderInvariantError } from "../../../wms/order-intake-and-items.api";
+import { randomBytes } from "crypto";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import {
+  isWmsOrderBucket,
+  normalizeSearchTerm,
+  parsePagination,
+  parsePositiveInteger,
+  parseWmsOrderBucket,
+} from "../../application/wms-order-listing";
+import {
+  createInventoryLegacyAdminControlService,
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  sendInventoryLegacyAdminControlError,
+} from "../../../inventory-planning/legacy-admin-control.api";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work.api";
+import {
+  deleteChannelAllocationRuleInTx,
+  deleteChannelWarehouseAssignmentInTx,
+  insertChannelAllocationRuleInTx,
+  insertChannelWarehouseAssignmentInTx,
+  updateChannelAllocationRuleInTx,
+  updateChannelWarehouseAssignmentInTx,
+} from "../../infrastructure/channel-legacy-admin.repository";
+import { logger } from "../../../../platform/observability/logger";
+
+type ChannelRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
+
+type ChannelPricingWriteService = Pick<
+  ReturnType<typeof createChannelPricingService>,
+  "savePrice" | "deletePrice"
+>;
+
+/** Route identities stay separate from the strict body parsed by the pricing owner. */
+export function registerChannelPricingRoutes(
+  app: Express,
+  service: ChannelPricingWriteService = createChannelPricingService(db),
+): void {
+  const routeId = z.coerce.number().int().positive().max(2_147_483_647);
+  const actorId = z.string().trim().min(1).max(200);
+
+  app.get(
+    "/api/channels/:channelId/variants/:variantId/pricing",
+    requirePermission("channels", "view"),
+    async (req, res) => {
+      try {
+        const channelId = routeId.parse(req.params.channelId);
+        const variantId = routeId.parse(req.params.variantId);
+        const pricing = await storage.getChannelPricing(channelId, variantId);
+        res.json(pricing ?? null);
+      } catch (error) {
+        sendChannelPricingError(res, error, "channel_price_read");
+      }
+    },
+  );
+
+  app.put(
+    "/api/channels/:channelId/variants/:variantId/pricing",
+    requirePermission("channels", "edit"),
+    async (req, res) => {
+      try {
+        const result = await service.savePrice(
+          routeId.parse(req.params.channelId),
+          routeId.parse(req.params.variantId),
+          req.body,
+          actorId.parse(req.session?.user?.id),
+          new Date(),
+        );
+        res.json(result.price);
+      } catch (error) {
+        sendChannelPricingError(res, error, "channel_price_save");
+      }
+    },
+  );
+
+  app.delete(
+    "/api/channels/:channelId/variants/:variantId/pricing",
+    requirePermission("channels", "edit"),
+    async (req, res) => {
+      try {
+        z.object({}).strict().parse(req.body ?? {});
+        const deleted = await service.deletePrice(
+          routeId.parse(req.params.channelId),
+          routeId.parse(req.params.variantId),
+          actorId.parse(req.session?.user?.id),
+          new Date(),
+        );
+        res.json({ deleted });
+      } catch (error) {
+        sendChannelPricingError(res, error, "channel_price_delete");
+      }
+    },
+  );
+}
+
+export function registerChannelRoutes(app: Express) {
+  const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService(pool);
+
+  // ============================================
+  // CHANNEL FEEDS (from inventory section)
+  // ============================================
+
+  app.get("/api/inventory/channel-feeds", requireAuth, async (req, res) => {
+    try {
+      const channelType = (req.query.channel as string) || "shopify";
+      const feeds = await storage.getChannelFeedsByChannel(channelType);
+      res.json(feeds);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching channel feeds:", error: error });
+      res.status(500).json({ error: "Failed to fetch feeds" });
+    }
+  });
+
+  // Enable a channel feed for a variant (create the link so sync can push inventory)
+  app.post("/api/channel-feeds/enable", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const parsed = z.object({ channelId: z.number().int().positive().safe(), productVariantId: z.number().int().positive().safe() }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "Valid channelId and productVariantId are required" });
+      const { channelId, productVariantId } = parsed.data;
+
+      const variant = await storage.getProductVariantById(productVariantId);
+      if (!variant) return res.status(404).json({ error: "Variant not found" });
+      if (!isCustomerSellableVariant(variant)) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY",
+          error: "Internal-only variants cannot have a channel inventory feed",
+        });
+      }
+      if (!isInventoryManagedVariant(variant)) {
+        return res.status(409).json({
+          error: "Digital or inventory-untracked variants cannot have an inventory feed",
+        });
+      }
+
+      return await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelFeed,
+        async (transaction) => {
+
+      const destination = await storage.getChannelById(channelId, transaction);
+      if (!destination) return res.status(404).json({ error: "Channel not found" });
+      if (destination.provider === "walmart") return res.status(409).json({ error: "Link the Walmart SKU in the channel's Listing Feed" });
+      if (destination.provider === "shopify") {
+        const productLines = await storage.getProductLineIdsByProduct(variant.productId, transaction);
+        const channelLines = await storage.getActiveChannelProductLineIds(channelId, transaction);
+        if (productLines.length > 0 && !productLines.some((lineId: number) => channelLines.includes(lineId))) {
+          return res.status(403).json({ error: "This product's product line is not assigned to this channel" });
+        }
+        const feed = await new ChannelIdentityService(transaction).ensureShopifyFeed({
+          channelId, productVariantId, sku: variant.sku, actor: String((req as any).user?.id ?? "channel-feed-enable"),
+        }, transaction);
+        return res.json(feed);
+      }
+
+      // Check if feed already exists
+      const existing = await storage.getChannelFeedByChannelAndVariant(channelId, productVariantId, transaction);
+      if (existing) {
+        // Reactivate if disabled
+        if (existing.isActive !== 1) {
+          await storage.reactivateChannelFeed(existing.id, transaction);
+        }
+        return res.json(existing);
+      }
+
+      // Look up channel and variant
+      const channel = await storage.getChannelById(channelId, transaction);
+      if (!channel) return res.status(404).json({ error: "Channel not found" });
+
+      // Shopify already returned through the verified identity owner above.
+      const channelVariantId = variant.sku || String(variant.id);
+
+      const product = await storage.getProductById(variant.productId, transaction);
+
+      // Product line gate: check if this product's lines match the channel's lines
+      if (product) {
+        const prodLines = await storage.getProductLineIdsByProduct(product.id, transaction);
+        if (prodLines.length > 0) {
+          const chLines = await storage.getActiveChannelProductLineIds(channelId, transaction);
+          const overlap = prodLines.some((pl: number) => chLines.includes(pl));
+          if (!overlap) {
+            return res.status(403).json({ error: "This product's product line is not assigned to this channel" });
+          }
+        }
+      }
+
+      const channelProductId = null;
+
+      const feed = await storage.createChannelFeedDirect({
+        channelId,
+        productVariantId,
+        channelType: channel.provider || "manual",
+        channelVariantId,
+        channelProductId,
+        channelSku: variant.sku || null,
+        isActive: 1,
+      }, transaction);
+
+      res.json(feed);
+        },
+      );
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error enabling channel feed:", error: error });
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      if (error instanceof ChannelIdentityError) return res.status(error.status).json({ code: error.code, error: error.message });
+      res.status(500).json({ error: error.message || "Failed to enable feed" });
+    }
+  });
+
+  // ============================================
+  // ORDER MANAGEMENT SYSTEM (OMS) API
+  // ============================================
+
+  // Get WMS orders with channel info. Filtering happens before pagination so
+  // exact searches and operational bucket counts cannot be hidden by page size.
+  app.get("/api/wms/orders", requirePermission("orders", "view"), limitPageRead(async (req, res) => {
+    try {
+      const {
+        bucket: bucketQuery,
+        status,
+        channelId,
+        source,
+        warehouseId,
+        search,
+        limit = "100",
+        offset = "0",
+      } = req.query;
+
+      const bucketValue = firstQueryValue(bucketQuery);
+      if (bucketValue && !isWmsOrderBucket(bucketValue)) {
+        return res.status(400).json({ error: `Invalid WMS order bucket: ${bucketValue}` });
+      }
+
+      const channelIdValue = firstQueryValue(channelId);
+      const parsedChannelId = parsePositiveInteger(channelIdValue);
+      if (channelIdValue && parsedChannelId === undefined) {
+        return res.status(400).json({ error: "channelId must be a positive integer" });
+      }
+
+      const warehouseIdValue = firstQueryValue(warehouseId);
+      const parsedWarehouseId = parsePositiveInteger(warehouseIdValue);
+      if (warehouseIdValue && parsedWarehouseId === undefined) {
+        return res.status(400).json({ error: "warehouseId must be a positive integer" });
+      }
+
+      const limitNum = Math.max(1, parsePagination(firstQueryValue(limit), 100, 250));
+      const offsetNum = parsePagination(firstQueryValue(offset), 0, 2_147_483_647);
+      const sourceValue = firstQueryValue(source);
+      const normalizedSearch = normalizeSearchTerm(firstQueryValue(search));
+      const bucket = parseWmsOrderBucket(bucketValue);
+      const legacyStatusFilter = status
+        ? (Array.isArray(status) ? status : [status]).map(String).filter(Boolean)
+        : [];
+
+      const parsed = orderPageQuerySchema.safeParse({
+        channelId: parsedChannelId,
+        warehouseId: parsedWarehouseId,
+        source: sourceValue,
+        search: normalizedSearch,
+        bucket,
+        statuses: !bucketValue ? legacyStatusFilter : undefined,
+        limit: limitNum,
+        offset: offsetNum,
+      });
+      if (!parsed.success) return res.status(400).json({ error: "Invalid order filters", issues: parsed.error.issues });
+      const page = await storage.getOrderPage(parsed.data);
+      const channelIds = [...new Set(page.orders.flatMap(order => order.channelId ? [order.channelId] : []))];
+      const channels = await awaitPageReads(channelIds.map(id => storage.getChannelById(id)));
+      const channelMap = new Map(channels.flatMap(channel => channel ? [[channel.id, channel] as const] : []));
+      res.json({ ...page, orders: page.orders.map(order => ({
+        ...order, channel: order.channelId ? channelMap.get(order.channelId) ?? null : null,
+      })) });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching OMS orders:", error: error });
+      res.status(500).json({ error: "Failed to fetch orders" });
+    }
+  }));
+
+  // Create a manual order.
+  //
+  // §6 C9c: the WMS factory (server/modules/wms/insert-order.ts) requires
+  // every wms.orders row to link back to an oms_orders row via a non-null
+  // omsFulfillmentOrderId + positive channelId. Manual orders therefore
+  // must create an OMS parent first (source-of-truth for the order) and
+  // then insert the WMS fulfillment row pointing at it.
+  //
+  // channelId is now REQUIRED (was optional.nullable()) to satisfy the
+  // factory invariant. OMS orders also need channelId (non-null in schema).
+  const createOrderSchema = z.object({
+    orderNumber: z.string().min(1, "Order number required"),
+    customerName: z.string().min(1, "Customer name required"),
+    customerEmail: z.string().email().optional().or(z.literal("")),
+    customerPhone: z.string().optional(),
+    channelId: z.number().int().positive("channelId required (positive integer)"),
+    source: z.enum(["shopify", "ebay", "amazon", "etsy", "manual", "api"]).default("manual"),
+    priority: z.enum(["rush", "high", "normal"]).default("normal"),
+    currency: z.string().default("USD"),
+    shippingAddress: z.string().optional(),
+    shippingCity: z.string().optional(),
+    shippingState: z.string().optional(),
+    shippingPostalCode: z.string().optional(),
+    shippingCountry: z.unknown().optional(),
+    notes: z.string().optional(),
+    items: z.array(z.object({
+      sku: z.string().min(1, "SKU required"),
+      name: z.string().min(1, "Item name required"),
+      quantity: z.number().min(1, "Quantity must be at least 1"),
+      location: z.string().optional(),
+      zone: z.string().optional(),
+    })).min(1, "At least one item required"),
+  });
+
+  app.post("/api/wms/orders", requirePermission("orders", "edit"), async (req, res) => {
+    try {
+      const parseResult = createOrderSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({
+          error: "Invalid order data",
+          details: parseResult.error.errors
+        });
+      }
+
+      const data = parseResult.data;
+      // Validate before OMS intake: a rejected country must not leave a parent
+      // order behind when the later WMS write rejects the same address.
+      const shippingCountry = parseCountryCode(data.shippingCountry);
+      const requestedSkus = [...new Set(data.items.map((item) => item.sku.trim().toUpperCase()))];
+      const catalogVariants = await db
+        .select({
+          sku: productVariants.sku,
+          requiresShipping: productVariants.requiresShipping,
+        })
+        .from(productVariants)
+        .where(sql`UPPER(BTRIM(${productVariants.sku})) IN (${sql.join(
+          requestedSkus.map((sku) => sql`${sku}`),
+          sql`, `,
+        )})`);
+      const requiresShippingBySku = new Map(
+        catalogVariants
+          .filter((variant) => variant.sku)
+          .map((variant) => [variant.sku!.trim().toUpperCase(), variant.requiresShipping] as const),
+      );
+
+      // ----------------------------------------------------------------
+      // Step 1: create the OMS parent order (source-of-truth for a manual
+      // order). Reuses omsService.ingestOrder so manual orders benefit
+      // from the same line-item normalization (SKU → product_variant
+      // lookup, idempotency via (channelId, externalOrderId) unique
+      // index) as channel-ingested orders.
+      //
+      // oms_orders has no `source` column — the channel_id FK is the
+      // discriminator. The `source: 'manual'` enum lives on wms.orders
+      // and is stamped below.
+      // ----------------------------------------------------------------
+      const omsService = createOmsService(db);
+      const externalOrderId = `MANUAL-${Date.now()}-${randomBytes(4).toString("hex")}`;
+
+      const omsOrder = await omsService.ingestOrder(
+        data.channelId,
+        externalOrderId,
+        {
+          sourceTopic: "manual/create",
+          externalOrderNumber: data.orderNumber,
+          status: "pending",
+          financialStatus: "paid",
+          fulfillmentStatus: "unfulfilled",
+          customerName: data.customerName,
+          customerEmail: data.customerEmail || undefined,
+          customerPhone: data.customerPhone || undefined,
+          shipToName: data.customerName,
+          shipToAddress1: data.shippingAddress || undefined,
+          shipToCity: data.shippingCity || undefined,
+          shipToState: data.shippingState || undefined,
+          shipToZip: data.shippingPostalCode || undefined,
+          shipToCountry: shippingCountry ?? undefined,
+          currency: data.currency,
+          subtotalCents: 0,
+          shippingCents: 0,
+          taxCents: 0,
+          discountCents: 0,
+          totalCents: 0,
+          notes: data.notes || undefined,
+          orderedAt: new Date(),
+          lineItems: data.items.map((item) => ({
+            sku: item.sku,
+            title: item.name,
+            quantity: item.quantity,
+            paidPriceCents: 0,
+            totalCents: 0,
+            taxable: true,
+            requiresShipping: requiresShippingBySku.get(item.sku.trim().toUpperCase()) ?? true,
+          })),
+        },
+      );
+
+      const omsIdStr = String(omsOrder.id);
+
+      // ----------------------------------------------------------------
+      // Step 2: create the WMS fulfillment row linked to the OMS parent.
+      // The factory (routed via storage.createOrderWithItems →
+      // insertWmsOrder) enforces non-null omsFulfillmentOrderId +
+      // channelId at runtime.
+      // ----------------------------------------------------------------
+      const orderData = {
+        orderNumber: data.orderNumber,
+        customerName: data.customerName,
+        customerEmail: data.customerEmail || null,
+        customerPhone: data.customerPhone || null,
+        channelId: data.channelId, // §6 C9: required non-null linkage
+        source: data.source,
+        priority: data.priority,
+        currency: data.currency,
+        shippingAddress: data.shippingAddress || null,
+        shippingCity: data.shippingCity || null,
+        shippingState: data.shippingState || null,
+        shippingPostalCode: data.shippingPostalCode || null,
+        shippingCountry,
+        notes: data.notes || null,
+        warehouseStatus: "ready" as const,
+        itemCount: data.items.reduce((sum, item) => sum + item.quantity, 0),
+        orderPlacedAt: new Date(),
+        shopifyOrderId: null, // Manual orders don't have Shopify ID
+        externalOrderId: null, // Manual orders don't have external ID
+        sourceTableId: omsIdStr, // link to OMS order for dedup + ship confirm
+        omsFulfillmentOrderId: omsIdStr, // §6 C9: required non-null linkage to OMS
+      };
+
+      // Create items
+      const itemsData = data.items.map(item => ({
+        sku: item.sku,
+        name: item.name,
+        quantity: item.quantity,
+        location: item.location || "UNASSIGNED",
+        zone: item.zone || "U",
+        status: "pending" as const,
+        requiresShipping: requiresShippingBySku.get(item.sku.trim().toUpperCase()) === false ? 0 : 1,
+      }));
+
+      const order = await storage.createOrderWithItems(orderData as any, itemsData as any);
+
+      res.status(201).json(order);
+    } catch (error) {
+      if (error instanceof CountryCodeValidationError) {
+        return res.status(400).json({ code: error.code, error: error.message, field: "shippingCountry" });
+      }
+      if (error instanceof WmsOrderInvariantError) {
+        logger.error("channels.routes", { message: "[manual-order] WMS invariant violation:", error: error });
+        return res.status(500).json({
+          error: "WMS order invariant violation",
+          field: error.field,
+          message: error.message,
+        });
+      }
+      logger.error("channels.routes", { message: "Error creating manual order:", error: error });
+      res.status(500).json({ error: "Failed to create order" });
+    }
+  });
+
+  // Get single order with channel info
+  app.get("/api/wms/orders/:id", requirePermission("orders", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+
+      const order = await storage.getOrderById(id);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      const items = await storage.getOrderItems(id);
+      const channel = order.channelId ? await storage.getChannelById(order.channelId) : null;
+
+      // Pull financial summary from oms_orders (source of truth)
+      let financials: {
+        subtotalCents: number | null;
+        taxCents: number | null;
+        shippingCents: number | null;
+        discountCents: number | null;
+        totalCents: number | null;
+        discountCodes: string[];
+        shippingMethod: string | null;
+      } = {
+        subtotalCents: null,
+        taxCents: null,
+        shippingCents: null,
+        discountCents: null,
+        totalCents: null,
+        discountCodes: [],
+        shippingMethod: null,
+      };
+
+      if (order.sourceTableId) {
+        try {
+          const rawFinancials = await storage.getShopifyOrderFinancials(order.sourceTableId);
+
+          if (rawFinancials) {
+            financials = {
+              subtotalCents: rawFinancials.subtotalCents,
+              taxCents: rawFinancials.taxCents,
+              shippingCents: rawFinancials.shippingCents,
+              discountCents: rawFinancials.discountCents,
+              totalCents: rawFinancials.totalCents,
+              discountCodes: Array.isArray(rawFinancials.discountCodes)
+                ? rawFinancials.discountCodes.map((dc: any) => typeof dc === "string" ? dc : dc.code || dc.title || String(dc))
+                : [],
+              shippingMethod: null,
+            };
+          }
+        } catch {
+          // oms_orders may not have this order yet — fall back silently
+        }
+      }
+
+      // Compute from items as fallback
+      if (financials.subtotalCents == null) {
+        const itemsSubtotal = items.reduce((s: number, i: any) => {
+          if (i.priceCents != null) return s + (i.priceCents * i.quantity);
+          if (i.totalPriceCents != null) return s + i.totalPriceCents + (i.discountCents || 0) * i.quantity;
+          return s;
+        }, 0);
+        if (itemsSubtotal > 0) financials.subtotalCents = itemsSubtotal;
+      }
+      if (financials.totalCents == null) {
+        // totalAmount is no longer accessible on WMS orders
+      }
+      if (financials.discountCents == null) {
+        const itemDiscounts = items.reduce((s: number, i: any) => s + ((i.discountCents || 0) * i.quantity), 0);
+        if (itemDiscounts > 0) financials.discountCents = itemDiscounts;
+      }
+
+      // Look up member plan from members/plans tables (shared DB with shellz-club-app)
+      let memberPlan: string | null = null;
+      if (order.customerEmail) {
+        try {
+          memberPlan = await storage.getMemberPlanByEmail(order.customerEmail);
+        } catch {
+          // members/plans tables may not exist — ignore
+        }
+      }
+
+      res.json({ ...order, items, channel, financials, memberPlan });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching order:", error: error });
+      res.status(500).json({ error: "Failed to fetch order" });
+    }
+  });
+
+  // Update order (for editing manual orders)
+  app.put("/api/wms/orders/:id", requirePermission("orders", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+
+      const order = await storage.getOrderById(id);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      if (order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
+        return res.status(409).json({
+          error: `Cannot modify order in terminal '${order.warehouseStatus}' status`,
+          reason: "order_terminal_status",
+        });
+      }
+
+      const { priority, notes, status, onHold } = req.body;
+
+      // Only allow updating certain fields
+      const updates: any = {};
+      if (priority !== undefined) updates.priority = priority;
+      if (notes !== undefined) updates.notes = notes;
+      if (status !== undefined) updates.status = status;
+      if (onHold !== undefined) updates.onHold = onHold ? 1 : 0;
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid updates provided" });
+      }
+
+      // Use existing update methods for special fields that have side effects
+      if (updates.status) {
+        await storage.updateOrderStatus(id, updates.status);
+        delete updates.status;
+      }
+      if (updates.priority) {
+        await storage.setOrderPriority(id, updates.priority);
+        delete updates.priority;
+      }
+      if (updates.onHold !== undefined) {
+        if (updates.onHold) {
+          await storage.holdOrder(id);
+          await enqueueShipStationHoldSyncRetry(db, id, "hold", "OrderEditHold");
+        } else {
+          await storage.releaseHoldOrder(id);
+          await enqueueShipStationHoldSyncRetry(db, id, "release", "OrderEditRelease");
+          // An order held before its shipment ever reached the engine has
+          // nothing for the hold-release sync to release — re-reserve and push
+          // its never-pushed shipments so the release makes it shippable.
+          await reserveAndPushAfterHoldRelease(db, app.locals.services, id, "OrderEditRelease");
+        }
+        delete updates.onHold;
+      }
+
+      // Use generic update for remaining fields (notes, etc.)
+      if (Object.keys(updates).length > 0) {
+        await storage.updateOrderFields(id, updates);
+      }
+
+      // Fetch updated order
+      const updatedOrder = await storage.getOrderById(id);
+      res.json(updatedOrder);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error updating order:", error: error });
+      res.status(500).json({ error: "Failed to update order" });
+    }
+  });
+
+  // ============================================
+  // CHANNELS MANAGEMENT API
+  // ============================================
+
+  // Get all channels
+  app.get("/api/channels", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const allChannels = await storage.getAllChannels();
+
+      // Enrich with connection info
+      const enrichedChannels = await Promise.all(
+        allChannels.map(async (channel) => {
+          const connection = await storage.getChannelConnection(channel.id);
+          const partnerProfile = channel.type === 'partner'
+            ? await storage.getPartnerProfile(channel.id)
+            : null;
+          return {
+            ...channel,
+            connection: toPublicChannelConnection(connection),
+            partnerProfile: partnerProfile || null
+          };
+        })
+      );
+
+      res.json(enrichedChannels);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching channels:", error: error });
+      res.status(500).json({ error: "Failed to fetch channels" });
+    }
+  });
+
+  // Get single channel
+  app.get("/api/channels/:id", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+
+      const connection = await storage.getChannelConnection(channelId);
+      const partnerProfile = channel.type === 'partner'
+        ? await storage.getPartnerProfile(channelId)
+        : null;
+
+      res.json({
+        ...channel,
+        connection: toPublicChannelConnection(connection),
+        partnerProfile: partnerProfile || null
+      });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching channel:", error: error });
+      res.status(500).json({ error: "Failed to fetch channel" });
+    }
+  });
+
+  // Create channel
+  app.post("/api/channels", requirePermission("channels", "create"), async (req, res) => {
+    try {
+      const channelData = {
+        ...req.body,
+        priority: req.body.priority ?? 0,
+        isDefault: req.body.isDefault ?? 0,
+        status: req.body.status ?? "pending_setup",
+      };
+
+      const parseResult = insertChannelSchema.safeParse(channelData);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Invalid channel data", details: parseResult.error.errors });
+      }
+
+      const createChannel = (executor: ChannelRouteTransaction = db) => storage.createChannel(parseResult.data, executor);
+      const channel = hasLegacyInventoryChannelConfiguration(req.body)
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            legacyInventoryChannelControlFor(req.body),
+            createChannel,
+          )
+        : await createChannel();
+      res.status(201).json(channel);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error creating channel:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: "Failed to create channel" });
+    }
+  });
+
+  // Update channel
+  app.put("/api/channels/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const existing = await storage.getChannelById(channelId);
+      if ((existing?.provider === "walmart" || req.body.provider === "walmart") && req.body.provider && req.body.provider !== existing?.provider) {
+        return res.status(409).json({ error: "Create a dedicated Walmart channel; existing channel providers cannot be converted" });
+      }
+      const updateChannel = (executor: ChannelRouteTransaction = db) => storage.updateChannel(channelId, req.body, executor);
+      const channel = hasLegacyInventoryChannelConfiguration(req.body)
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            legacyInventoryChannelControlFor(req.body),
+            updateChannel,
+          )
+        : await updateChannel();
+
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+
+      res.json(channel);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error updating channel:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: "Failed to update channel" });
+    }
+  });
+
+  // Delete channel
+  app.delete("/api/channels/:id", requirePermission("channels", "delete"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const deleted = await storage.deleteChannel(channelId);
+
+      if (!deleted) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error deleting channel:", error: error });
+      res.status(500).json({ error: "Failed to delete channel" });
+    }
+  });
+
+  // Update channel connection
+  app.put("/api/channels/:id/connection", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+
+      if (channel.provider === "walmart") return res.status(409).json({ error: "Use the Walmart connection setup" });
+      const connection = await storage.upsertChannelConnection({
+        ...req.body,
+        channelId,
+      });
+
+      res.json(toPublicChannelConnection(connection));
+    } catch (error) {
+      if (error instanceof EbayBusinessPolicyError) return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
+      logger.error("channels.routes", { message: "Error updating channel connection:", error: error });
+      res.status(500).json({ error: "Failed to update channel connection" });
+    }
+  });
+
+  // Auto-setup Shopify connection using configured secrets
+  app.post("/api/channels/:id/setup-shopify", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+
+      if (channel.provider !== 'shopify') {
+        return res.status(400).json({ error: "This channel is not a Shopify channel" });
+      }
+
+      // Read credentials from request body (per-channel, not env vars)
+      const { shopDomain: rawDomain, accessToken } = req.body as { shopDomain?: string; accessToken?: string };
+      if (!rawDomain || !accessToken) {
+        return res.status(400).json({
+          error: "Missing credentials",
+          message: "Please provide shopDomain and accessToken",
+        });
+      }
+      // Normalize: "my-store" → "my-store.myshopify.com"
+      const shopDomain = rawDomain.includes('.myshopify.com') ? rawDomain : `${rawDomain}.myshopify.com`;
+      const store = shopDomain.replace(/\.myshopify\.com$/, '');
+
+      // Test the connection by fetching shop info
+      const testResponse = await fetch(
+        `https://${store}.myshopify.com/admin/api/2024-01/shop.json`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": accessToken,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (!testResponse.ok) {
+        return res.status(400).json({
+          error: "Failed to connect to Shopify",
+          message: `Shopify API returned ${testResponse.status}`
+        });
+      }
+
+      const shopData = await testResponse.json();
+
+      // Create/update the connection (store credentials per-channel)
+      const connection = await storage.upsertChannelConnection({
+        channelId,
+        shopDomain,
+        accessToken,
+        syncStatus: 'connected',
+        lastSyncAt: new Date(),
+      });
+
+      // Update channel status to active
+      await storage.updateChannel(channelId, { status: 'active' });
+
+      // Fetch Shopify locations
+      let locations: any[] = [];
+      try {
+        const locResponse = await fetch(
+          `https://${store}.myshopify.com/admin/api/2024-01/locations.json`,
+          {
+            headers: {
+              "X-Shopify-Access-Token": accessToken,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        if (locResponse.ok) {
+          const locData = await locResponse.json();
+          locations = (locData.locations || []).map((loc: any) => ({
+            id: String(loc.id),
+            name: loc.name,
+            address1: loc.address1,
+            city: loc.city,
+            province: loc.province,
+            country: loc.country_name,
+            active: loc.active,
+          }));
+        }
+      } catch (locErr) {
+        logger.warn("channels.routes", { message: "Could not fetch Shopify locations:", detail: locErr });
+      }
+
+      // Fetch current warehouse mappings
+      const warehouses = await storage.getAllWarehouses();
+      const mappings = warehouses
+        .filter((w: any) => w.shopifyLocationId)
+        .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
+
+      // Connecting an account is not evidence that its products share catalog IDs.
+      // Feed discovery/enable verifies destination listings through the identity owner.
+      const feedsCreated = 0;
+      const feedsUpdated = 0;
+
+      res.json({
+        success: true,
+        connection: toPublicChannelConnection(connection),
+        shop: {
+          name: shopData.shop?.name,
+          domain: shopData.shop?.domain,
+          email: shopData.shop?.email,
+        },
+        locations,
+        mappings,
+        feeds: { created: feedsCreated, updated: feedsUpdated, requiresDestinationMapping: true },
+      });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error setting up Shopify connection:", error: error });
+      res.status(500).json({ error: "Failed to setup Shopify connection" });
+    }
+  });
+
+  // Fetch Shopify locations for a connected channel
+  app.get("/api/channels/:id/shopify-locations", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+      if (!channel) return res.status(404).json({ error: "Channel not found" });
+      if (channel.provider !== 'shopify') return res.status(400).json({ error: "Not a Shopify channel" });
+
+      // Read credentials from channel's stored connection
+      const connRecord = await storage.getChannelConnection(channelId);
+      if (!connRecord?.shopDomain || !connRecord?.accessToken) {
+        return res.status(400).json({ error: "Channel has no Shopify credentials. Please connect first." });
+      }
+      const store = connRecord.shopDomain.replace(/\.myshopify\.com$/, '');
+
+      const locResponse = await fetch(
+        `https://${store}.myshopify.com/admin/api/2024-01/locations.json`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": connRecord.accessToken,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      if (!locResponse.ok) {
+        return res.status(502).json({ error: `Shopify API returned ${locResponse.status}` });
+      }
+      const locData = await locResponse.json();
+      const locationsList = (locData.locations || []).map((loc: any) => ({
+        id: String(loc.id),
+        name: loc.name,
+        address1: loc.address1,
+        city: loc.city,
+        province: loc.province,
+        country: loc.country_name,
+        active: loc.active,
+      }));
+
+      // Include current warehouse mappings
+      const warehouses = await storage.getAllWarehouses();
+      const mappingsList = warehouses
+        .filter((w: any) => w.shopifyLocationId)
+        .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
+
+      res.json({ locations: locationsList, mappings: mappingsList });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching Shopify locations:", error: error });
+      res.status(500).json({ error: "Failed to fetch Shopify locations" });
+    }
+  });
+
+  // Save Shopify location → warehouse mappings
+  app.post("/api/channels/:id/map-locations", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+      if (!channel) return res.status(404).json({ error: "Channel not found" });
+
+      const { mappings } = req.body as { mappings: Array<{ shopifyLocationId: string; warehouseId: number | null }> };
+      if (!Array.isArray(mappings)) {
+        return res.status(400).json({ error: "mappings must be an array" });
+      }
+
+      // Clear all existing Shopify location mappings first
+      const allWarehouses = await storage.getAllWarehouses();
+      for (const wh of allWarehouses) {
+        if ((wh as any).shopifyLocationId) {
+          await storage.updateWarehouse(wh.id, { shopifyLocationId: null } as any);
+        }
+      }
+
+      // Apply new mappings
+      for (const m of mappings) {
+        if (m.warehouseId) {
+          await storage.updateWarehouse(m.warehouseId, { shopifyLocationId: m.shopifyLocationId } as any);
+        }
+      }
+
+      // Return updated state
+      const updatedWarehouses = await storage.getAllWarehouses();
+      const updatedMappings = updatedWarehouses
+        .filter((w: any) => w.shopifyLocationId)
+        .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
+
+      res.json({ success: true, mappings: updatedMappings });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error saving location mappings:", error: error });
+      res.status(500).json({ error: "Failed to save location mappings" });
+    }
+  });
+
+  // Update partner profile
+  app.put("/api/channels/:id/partner-profile", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+
+      if (channel.type !== 'partner') {
+        return res.status(400).json({ error: "Partner profile only available for partner channels" });
+      }
+
+      const profile = await storage.upsertPartnerProfile({
+        channelId,
+        ...req.body
+      });
+
+      res.json(profile);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error updating partner profile:", error: error });
+      res.status(500).json({ error: "Failed to update partner profile" });
+    }
+  });
+
+  // ============================================
+  // CHANNEL PRODUCT PUSH API
+  // ============================================
+
+  // Preview resolved product for a channel (master + overrides merged)
+  app.get("/api/channel-push/preview/:productId/:channelId", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelProductPush } = req.app.locals.services;
+      const productId = parseInt(req.params.productId);
+      const channelId = parseInt(req.params.channelId);
+      const resolved = await channelProductPush.getResolvedProductForChannel(productId, channelId);
+      if (!resolved) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      res.json(resolved);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error previewing product:", error: error });
+      res.status(500).json({ error: "Failed to preview product" });
+    }
+  });
+
+  // ⛔ PRODUCT PUSH DISABLED — all three push endpoints return 403.
+  // The push feature is not production-ready and has caused data loss
+  // (deleted images, created phantom products, set listings to draft).
+  // To re-enable, restore the original handlers from git history.
+
+  // Push product to all active channels — DISABLED
+  app.post("/api/channel-push/product/:productId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
+  });
+
+  // Push product to specific channel — DISABLED
+  app.post("/api/channel-push/product/:productId/channel/:channelId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
+  });
+
+  // Push all products to a channel (bulk) — DISABLED
+  app.post("/api/channel-push/all/:channelId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
+  });
+
+
+  // GET debug: check image push credentials + show first product without making any changes
+  app.get("/api/channel-push/images/:channelId/debug", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT p.id, p.name, p.shopify_product_id,
+            COUNT(pa.id) AS asset_count,
+            MIN(pa.url) AS sample_url
+          FROM products p
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, p.shopify_product_id
+          LIMIT 3
+        `);
+
+        // Check channel_connections credentials
+        const connCheck = await client.query(`
+          SELECT channel_id, shop_domain,
+            CASE WHEN access_token IS NOT NULL AND access_token != '' THEN 'SET' ELSE 'EMPTY' END AS access_token_status,
+            LENGTH(access_token) AS token_length
+          FROM channel_connections WHERE channel_id = 36
+        `);
+
+        // Check channel_listings for fresh Shopify IDs
+        const listingsCheck = await client.query(`
+          SELECT p.id, p.name, p.shopify_product_id AS products_shopify_id, cl.external_product_id AS listings_shopify_id
+          FROM products p
+          LEFT JOIN (
+            SELECT DISTINCT ON (pv.product_id) pv.product_id, cl2.external_product_id
+            FROM channels.channel_listings cl2
+            JOIN catalog.product_variants pv ON pv.id = cl2.product_variant_id
+            WHERE cl2.channel_id = 36 AND cl2.external_product_id IS NOT NULL
+            ORDER BY pv.product_id ASC, cl2.id DESC
+          ) cl ON cl.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL
+          LIMIT 5
+        `);
+
+        res.json({
+          envVarsSet: { shopDomain: !!shopDomain, accessToken: !!accessToken },
+          shopDomainValue: shopDomain || "NOT SET",
+          sampleProducts: result.rows,
+          channelCredentials: connCheck.rows,
+          shopifyIdComparison: listingsCheck.rows,
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST test: push images for ONE product and return full Shopify response
+  app.post("/api/channel-push/images/:channelId/test", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+      if (!shopDomain || !accessToken) return res.status(500).json({ error: "SHOPIFY_SHOP_DOMAIN or SHOPIFY_ACCESS_TOKEN not set" });
+
+      const domain = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+      const baseUrl = `https://${domain}/admin/api/2024-01`;
+      const headers = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
+
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT p.id, p.name, p.shopify_product_id,
+            json_agg(json_build_object('url', pa.url, 'position', pa.position) ORDER BY pa.position ASC) AS assets
+          FROM products p
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, p.shopify_product_id
+          LIMIT 1
+        `);
+
+        if (result.rows.length === 0) return res.json({ error: "No products with shopify_product_id and assets found" });
+
+        const row = result.rows[0];
+        const images = (row.assets as any[]).filter((a: any) => a.url).map((a: any, i: number) => ({ src: a.url, position: i + 1 }));
+
+        const shopifyUrl = `${baseUrl}/products/${row.shopify_product_id}.json`;
+        const payload = { product: { id: Number(row.shopify_product_id), images } };
+
+        const resp = await fetch(shopifyUrl, { method: "PUT", headers, body: JSON.stringify(payload) });
+        const body = await resp.text();
+
+        res.json({
+          productId: row.id,
+          productName: row.name,
+          shopifyProductId: row.shopify_product_id,
+          shopifyUrl,
+          imageCount: images.length,
+          shopifyStatus: resp.status,
+          shopifyResponse: body.substring(0, 1000),
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Push images only to Shopify — uses ShopifyAdapter.pushImagesOnly (same credential path as orchestrator)
+  app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const adapter = new ShopifyAdapter(db);
+
+      // Respond immediately — image push takes too long for a synchronous request
+      res.json({ status: "started", message: "Image push started in background. Check Heroku logs for progress." });
+
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT
+            p.id AS product_id, p.name,
+            COALESCE(cl_data.shopify_product_id, p.shopify_product_id) AS shopify_product_id,
+            json_agg(json_build_object('url', pa.url, 'position', pa.position, 'alt', pa.alt_text, 'file_data', encode(pa.file_data, 'base64'), 'mime_type', pa.mime_type) ORDER BY pa.position ASC) AS assets
+          FROM products p
+          JOIN catalog.product_assets pa ON pa.product_id = p.id
+          LEFT JOIN (
+            SELECT DISTINCT ON (pv.product_id)
+              pv.product_id,
+              cl.external_product_id AS shopify_product_id
+            FROM channels.channel_listings cl
+            JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
+            WHERE cl.channel_id = $1 AND cl.external_product_id IS NOT NULL
+            ORDER BY pv.product_id ASC, cl.id DESC
+          ) cl_data ON cl_data.product_id = p.id
+          WHERE pa.url IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, cl_data.shopify_product_id, p.shopify_product_id
+          ORDER BY p.id ASC
+        `, [channelId]);
+
+        const rows = result.rows.filter((r: any) => r.shopify_product_id);
+        if (rows.length === 0) {
+          return res.json({ total: 0, updated: 0, skipped: 0, errors: 0, message: "No products with Shopify IDs and assets" });
+        }
+
+        let updated = 0, skipped = 0, errors = 0;
+        const errorDetails: string[] = [];
+        const BATCH = 5;
+
+        for (let i = 0; i < rows.length; i += BATCH) {
+          const batch = rows.slice(i, i + BATCH);
+          const batchResults = await Promise.allSettled(batch.map(async (row: any) => {
+            const images = (row.assets as any[])
+              .filter((a: any) => a.url)
+              .map((a: any, idx: number) => ({ url: a.url, altText: a.alt || null, position: idx, fileData: a.file_data || null, mimeType: a.mime_type || null }));
+            if (images.length === 0) return "skipped";
+            await adapter.pushImagesOnly(channelId, row.shopify_product_id, images);
+            return "updated";
+          }));
+
+          for (const r of batchResults) {
+            if (r.status === "fulfilled") {
+              r.value === "skipped" ? skipped++ : updated++;
+            } else {
+              errors++;
+              errorDetails.push(r.reason?.message?.substring(0, 200) || "unknown");
+            }
+          }
+          if (i + BATCH < rows.length) await new Promise((r) => setTimeout(r, 200));
+        }
+
+        logger.info("channels.routes", { message: `[ImagePush] Complete: ${updated} updated, ${skipped} skipped, ${errors} errors` });
+        // Send result only if not already responded (background mode)
+        if (!res.headersSent) {
+          res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 5) });
+        }
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "[ImagePush] Error:", error: error });
+      if (!res.headersSent) res.status(500).json({ error: error?.message || "Failed to push images" });
+    }
+  });
+
+
+  // Get channel sync status for a product
+  app.get("/api/products/:productId/channel-status", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const activeChannels = await storage.getAllChannels();
+      const statuses = [];
+      for (const channel of activeChannels) {
+        const listings = await storage.getChannelListingsByProduct(channel.id, productId);
+        const override = await storage.getChannelProductOverride(channel.id, productId);
+        statuses.push({
+          channelId: channel.id,
+          channelName: channel.name,
+          provider: channel.provider,
+          isListed: override ? override.isListed === 1 : true,
+          listings: listings.map((l) => ({
+            variantId: l.productVariantId,
+            externalProductId: l.externalProductId,
+            externalVariantId: l.externalVariantId,
+            syncStatus: l.syncStatus,
+            syncError: l.syncError,
+            lastSyncedAt: l.lastSyncedAt,
+          })),
+        });
+      }
+      res.json(statuses);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching channel status:", error: error });
+      res.status(500).json({ error: "Failed to fetch channel status" });
+    }
+  });
+
+  // ============================================
+  // CHANNEL LISTINGS (external IDs per variant)
+  // ============================================
+  // Read-only feed for the Product Detail page so operators can see which
+  // external channels each variant is listed on, copy the external ID, and
+  // jump to the channel admin without querying the DB.
+  app.get(
+    "/api/products/:productId/channel-listings",
+    requirePermission("channels", "view"),
+    async (req, res) => {
+      try {
+        const productId = parseInt(req.params.productId, 10);
+        if (!Number.isFinite(productId) || productId <= 0) {
+          return res.status(400).json({ error: "Invalid productId" });
+        }
+
+        // Single join query; ordered by sku then channel name for stable UI rendering.
+        const rows = await db
+          .select({
+            listingId: channelListings.id,
+            channelId: channelListings.channelId,
+            channelName: channelsTable.name,
+            channelProvider: channelsTable.provider,
+            shopDomain: channelConnections.shopDomain,
+            productVariantId: channelListings.productVariantId,
+            variantSku: productVariants.sku,
+            // §17 Rule fix: include is_active so the transform can mark
+            // listings whose underlying variant has been archived as
+            // "archived" instead of misleadingly showing "active".
+            variantIsActive: productVariants.isActive,
+            externalProductId: channelListings.externalProductId,
+            externalVariantId: channelListings.externalVariantId,
+            externalUrl: channelListings.externalUrl,
+            syncStatus: channelListings.syncStatus,
+            syncError: channelListings.syncError,
+            createdAt: channelListings.createdAt,
+            updatedAt: channelListings.updatedAt,
+            lastSyncedAt: channelListings.lastSyncedAt,
+          })
+          .from(channelListings)
+          .innerJoin(productVariants, eq(productVariants.id, channelListings.productVariantId))
+          .innerJoin(channelsTable, eq(channelsTable.id, channelListings.channelId))
+          .leftJoin(channelConnections, eq(channelConnections.channelId, channelsTable.id))
+          .where(eq(productVariants.productId, productId))
+          .orderBy(
+            asc(productVariants.sku),
+            asc(channelsTable.name),
+          );
+
+        const listings = rows.map(rowToListingDto);
+
+        res.json({ listings });
+      } catch (error) {
+        logger.error("channels.routes", { message: "Error fetching channel listings:", error: error });
+        res.status(500).json({ error: "Failed to fetch channel listings" });
+      }
+    },
+  );
+
+  // ============================================
+  // CHANNEL PRODUCT OVERRIDES API
+  // ============================================
+
+  app.get("/api/channels/:channelId/products/:productId/overrides", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const override = await storage.getChannelProductOverride(channelId, productId);
+      res.json(override || null);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching product override:", error: error });
+      res.status(500).json({ error: "Failed to fetch override" });
+    }
+  });
+
+  app.put("/api/channels/:channelId/products/:productId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const override = await storage.upsertChannelProductOverride({
+        channelId,
+        productId,
+        ...req.body,
+      });
+      res.json(override);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error saving product override:", error: error });
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
+      res.status(500).json({ error: "Failed to save override" });
+    }
+  });
+
+  app.delete("/api/channels/:channelId/products/:productId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const deleted = await storage.deleteChannelProductOverride(channelId, productId);
+      res.json({ deleted });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error deleting product override:", error: error });
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
+      res.status(500).json({ error: "Failed to delete override" });
+    }
+  });
+
+  // Channel variant overrides
+  app.get("/api/channels/:channelId/variants/:variantId/overrides", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const override = await storage.getChannelVariantOverride(channelId, variantId);
+      res.json(override || null);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch variant override" });
+    }
+  });
+
+  app.put("/api/channels/:channelId/variants/:variantId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const variant = await storage.getProductVariantById(variantId);
+      if (!variant) return res.status(404).json({ error: "Variant not found" });
+      if (req.body?.isListed !== 0 && !isCustomerSellableVariant(variant)) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY",
+          error: "Internal-only variants cannot be listed on a channel",
+        });
+      }
+      const override = await storage.upsertChannelVariantOverride({
+        channelId,
+        productVariantId: variantId,
+        ...req.body,
+      });
+      res.json(override);
+    } catch (error) {
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
+      res.status(500).json({ error: "Failed to save variant override" });
+    }
+  });
+
+  app.delete("/api/channels/:channelId/variants/:variantId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const deleted = await storage.deleteChannelVariantOverride(channelId, variantId);
+      res.json({ deleted });
+    } catch (error) {
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
+      res.status(500).json({ error: "Failed to delete variant override" });
+    }
+  });
+
+  registerChannelPricingRoutes(app);
+
+  // Channel asset overrides
+  app.get("/api/channels/:channelId/products/:productId/asset-overrides", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const overrides = await storage.getChannelAssetOverridesByProduct(channelId, productId);
+      res.json(overrides);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch asset overrides" });
+    }
+  });
+
+  app.put("/api/channels/:channelId/assets/:assetId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const assetId = parseInt(req.params.assetId);
+      const override = await storage.upsertChannelAssetOverride({
+        channelId,
+        productAssetId: assetId,
+        ...req.body,
+      });
+      res.json(override);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save asset override" });
+    }
+  });
+
+  app.delete("/api/channels/:channelId/assets/:assetId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const assetId = parseInt(req.params.assetId);
+      const deleted = await storage.deleteChannelAssetOverride(channelId, assetId);
+      res.json({ deleted });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete asset override" });
+    }
+  });
+
+  // Channel listings
+  app.get("/api/channels/:channelId/listings", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = req.query.productId ? parseInt(req.query.productId as string) : undefined;
+      if (productId) {
+        const listings = await storage.getChannelListingsByProduct(channelId, productId);
+        res.json(listings);
+      } else {
+        // Return all listings for this channel
+        const allListings = await storage.getChannelListingsByChannel(channelId);
+        res.json(allListings);
+      }
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch listings" });
+    }
+  });
+
+  // ============================================
+  // CHANNEL RESERVATIONS API
+  // ============================================
+
+  // Get all reservations (optionally filtered by channel)
+  app.get("/api/channel-reservations", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = req.query.channelId ? parseInt(req.query.channelId as string) : undefined;
+      const reservations = await storage.getChannelReservations(channelId);
+      res.json(reservations);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error fetching reservations:", error: error });
+      res.status(500).json({ error: "Failed to fetch reservations" });
+    }
+  });
+
+  // Upsert reservation
+  app.post("/api/channel-reservations", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const parseResult = insertChannelReservationSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Invalid reservation data", details: parseResult.error.errors });
+      }
+
+      if (parseResult.data.productVariantId) {
+        const variant = await storage.getProductVariantById(parseResult.data.productVariantId);
+        if (!variant) return res.status(404).json({ error: "Variant not found" });
+        if (!isCustomerSellableVariant(variant)) {
+          return res.status(409).json({
+            code: "VARIANT_INTERNAL_ONLY",
+            error: "Internal-only variants cannot have channel allocation settings",
+          });
+        }
+      }
+
+      const reservation = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelReserve,
+        (transaction) => storage.upsertChannelReservation(parseResult.data, transaction),
+      );
+      res.json(reservation);
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error creating reservation:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: "Failed to create reservation" });
+    }
+  });
+
+  // Delete reservation
+  app.delete("/api/channel-reservations/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelReserve,
+        (transaction) => storage.deleteChannelReservation(id, transaction),
+      );
+
+      if (!deleted) {
+        return res.status(404).json({ error: "Reservation not found" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      logger.error("channels.routes", { message: "Error deleting reservation:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: "Failed to delete reservation" });
+    }
+  });
+
+  // --- Channel Product Allocation (product-level rules per channel) ---
+
+  app.get("/api/channel-product-allocation", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const rows = await storage.getAllChannelProductAllocations();
+      res.json(rows);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to get allocations" });
+    }
+  });
+
+  app.get("/api/channel-product-allocation/:channelId/:productId", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const row = await storage.getChannelProductAllocation(channelId, productId);
+      res.json(row || null);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to get allocation" });
+    }
+  });
+
+  app.put("/api/channel-product-allocation", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { channelId, productId, minAtpBase, maxAtpBase, isListed, notes } = req.body;
+
+      if (!channelId || !productId) {
+        return res.status(400).json({ error: "channelId and productId are required" });
+      }
+
+      const result = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => storage.upsertChannelProductAllocation({
+          channelId,
+          productId,
+          minAtpBase: minAtpBase ?? null,
+          maxAtpBase: maxAtpBase ?? null,
+          isListed: isListed ?? 1,
+          notes: notes ?? null,
+        }, transaction),
+      );
+      res.json(result);
+    } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message || "Failed to save allocation" });
+    }
+  });
+
+  app.delete("/api/channel-product-allocation/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => storage.deleteChannelProductAllocation(id, transaction),
+      );
+      res.json({ success: true });
+    } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message || "Failed to delete allocation" });
+    }
+  });
+
+  // --- Product-level allocation data for ProductDetail Channels tab ---
+
+  app.get("/api/products/:productId/allocation", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) return res.status(400).json({ error: "Invalid product ID" });
+
+      return await inventoryLegacyAdminControl.executeLegacyRead(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocationRead,
+        async (transaction, context) => {
+
+      const activeChannels = await storage.getActiveChannels(transaction);
+      const variants = (await storage.getProductVariantsByProductId(productId, transaction))
+        .filter(isInventoryManagedVariant);
+      const variantIds = variants.map((v: any) => v.id);
+
+      // Product-level allocation rules per channel
+      const productAllocs = await storage.getChannelProductAllocationsByProduct(productId, transaction);
+
+      // Variant-level reservations for this product's variants
+      const variantReservations = await storage.getChannelReservationsByVariantIds(variantIds, transaction);
+
+      // Feed data for this product's variants
+      const feeds = await storage.getChannelFeedsByVariantIds(variantIds, transaction);
+
+      // ATP data
+      const atpBase = await context.legacy.getAtpBase(productId);
+      const variantAtp = await context.legacy.getAtpPerVariant(productId);
+
+      res.json({
+        channels: activeChannels,
+        variants: variants.map((v: any) => ({
+          id: v.id,
+          sku: v.sku,
+          name: v.name,
+          unitsPerVariant: v.unitsPerVariant,
+          atpUnits: variantAtp.find((va: any) => va.productVariantId === v.id)?.atpUnits ?? 0,
+        })),
+        atpBase,
+        productAllocations: productAllocs,
+        variantReservations,
+        feeds,
+      });
+        },
+      );
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error fetching product allocation:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message || "Failed to fetch product allocation" });
+    }
+  });
+
+  // --- SKU typeahead for channel allocation ---
+  app.get("/api/channel-allocation/search", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const q = ((req.query.q as string) || "").trim();
+      if (q.length < 2) return res.json([]);
+
+      const results = await storage.searchVariantsWithInventory(q);
+      res.json(results);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- Product Lines CRUD ---
+
+  // List all product lines.
+  // Accepts an optional `status` query param ("active" | "draft" | "archived"
+  // | "all"). The product counts on each line honor the same scope filter
+  // that the center list view uses, so the sidebar badge and the list
+  // contents can never disagree. See product-line-scope.ts.
+  app.get("/api/product-lines", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const status = typeof req.query.status === "string" ? req.query.status : undefined;
+      const result = await storage.getProductLinesWithCounts(status);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Unified product list for the Product Lines page center table.
+  // Registered BEFORE :id so the literal "products" segment wins.
+  // ?filter=all|unassigned|line:<id>  [&search=] [&status=active|draft|archived|all] [&vendor=]
+  // [&page=1] [&limit=50]
+  app.get("/api/product-lines/products", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const filterRaw = (req.query.filter as string) || "all";
+      const search = (req.query.search as string) || "";
+      const status = (req.query.status as string) || "";
+      const vendor = (req.query.vendor as string) || "";
+      const page = Math.max(1, parseInt((req.query.page as string) || "1"));
+      const limit = Math.min(500, Math.max(1, parseInt((req.query.limit as string) || "50")));
+
+      let filter: "all" | "unassigned" | { lineId: number };
+      if (filterRaw === "all") {
+        filter = "all";
+      } else if (filterRaw === "unassigned") {
+        filter = "unassigned";
+      } else if (filterRaw.startsWith("line:")) {
+        const lineId = parseInt(filterRaw.slice("line:".length));
+        if (!Number.isInteger(lineId) || lineId <= 0) {
+          return res.status(400).json({ error: "Invalid line id in filter" });
+        }
+        filter = { lineId };
+      } else {
+        return res.status(400).json({ error: "filter must be 'all', 'unassigned', or 'line:<id>'" });
+      }
+
+      const result = await storage.listProductsForLineView({ filter, search, status, vendor, page, limit });
+      res.json({ ...result, page, limit });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Bulk unassign: remove these products from every product line.
+  // Registered BEFORE :id/... so the literal "bulk-unassign" segment wins.
+  // Body: { productIds: number[] }
+  app.post("/api/product-lines/bulk-unassign", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const body = req.body as { productIds?: number[] };
+      const productIds = Array.isArray(body.productIds)
+        ? body.productIds.filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+      if (productIds.length === 0) {
+        return res.status(400).json({ error: "productIds must be a non-empty array" });
+      }
+      const removed = await storage.removeProductsFromAllLines(productIds);
+      res.json({ requested: productIds.length, removed });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get single product line with details.
+  // :id can be a numeric line id or the string "unassigned" (when combined with /stats below).
+  app.get("/api/product-lines/:id", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.id);
+
+      const line = await storage.getProductLineById(lineId);
+      if (!line) return res.status(404).json({ error: "Product line not found" });
+
+      // Get assigned products
+      const assignedProducts = await storage.getProductLineAssignedProducts(lineId);
+
+      // Get assigned channels
+      const assignedChannels = await storage.getProductLineAssignedChannels(lineId);
+
+      res.json({ ...line, products: assignedProducts, channels: assignedChannels });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Create product line
+  app.post("/api/product-lines", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { code, name, description } = req.body;
+      if (!code || !name) return res.status(400).json({ error: "code and name required" });
+
+      const created = await storage.createProductLine({ code, name, description });
+      res.json(created);
+    } catch (error: any) {
+      if (error.code === "23505") return res.status(409).json({ error: "Product line code already exists" });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Update product line
+  app.put("/api/product-lines/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.id);
+      const { name, description, isActive, sortOrder } = req.body;
+
+      const updated = await storage.updateProductLine(lineId, { name, description, isActive, sortOrder });
+      if (!updated) return res.status(404).json({ error: "Product line not found" });
+
+      res.json(updated);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Assign products to a product line (bulk)
+  app.put("/api/product-lines/:id/products", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.id);
+      const { productIds } = req.body as { productIds: number[] };
+      if (!Array.isArray(productIds)) return res.status(400).json({ error: "productIds array required" });
+
+      await storage.replaceProductLineProducts(lineId, productIds);
+
+      res.json({ productLineId: lineId, productCount: productIds.length });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Add product(s) to a product line.
+  // Accepts either { productId: number } (legacy single add) or { productIds: number[] } (bulk add).
+  app.post("/api/product-lines/:id/products", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.id);
+      const body = req.body as { productId?: number; productIds?: number[] };
+
+      if (Array.isArray(body.productIds)) {
+        const ids = body.productIds.filter((n) => Number.isInteger(n) && n > 0);
+        if (ids.length === 0) return res.status(400).json({ error: "productIds must be a non-empty array of positive integers" });
+        const added = await storage.addProductsToProductLine(lineId, ids);
+        return res.json({ productLineId: lineId, requested: ids.length, added, alreadyAssigned: ids.length - added });
+      }
+
+      if (body.productId && Number.isInteger(body.productId)) {
+        const created = await storage.addProductToProductLine(lineId, body.productId);
+        return res.json(created || { productLineId: lineId, productId: body.productId, alreadyAssigned: true });
+      }
+
+      return res.status(400).json({ error: "productId or productIds required" });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Aggregate stats for a line (or the virtual "unassigned" bucket).
+  // :id can be a numeric line id or the string "unassigned".
+  // Accepts an optional `status` query param so the stats panel and the
+  // Unassigned sidebar badge stay in lockstep with the list view.
+  app.get("/api/product-lines/:id/stats", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const raw = req.params.id;
+      const target: number | "unassigned" = raw === "unassigned" ? "unassigned" : parseInt(raw);
+      if (typeof target === "number" && !Number.isInteger(target)) {
+        return res.status(400).json({ error: "Invalid line id" });
+      }
+      const status = typeof req.query.status === "string" ? req.query.status : undefined;
+      const stats = await storage.getProductLineInventoryStats(target, status);
+      if (typeof target === "number") {
+        const assignedChannels = await storage.getProductLineAssignedChannels(target);
+        return res.json({ ...stats, channelCount: assignedChannels.filter((c) => c.isActive).length });
+      }
+      return res.json({ ...stats, channelCount: 0 });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Bulk move products from source (a line id, "unassigned", or "any") to target line.
+  // Body: { productIds: number[], fromLineId?: number | "unassigned" | "any" }
+  //   - fromLineId = number        → remove from that line, add to target
+  //   - fromLineId = "unassigned"  → just add to target (they weren't on any line)
+  //   - fromLineId = "any" | absent → remove from ALL other lines, add to target (true move)
+  app.post("/api/product-lines/:id/products/bulk-move", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const targetLineId = parseInt(req.params.id);
+      if (!Number.isInteger(targetLineId) || targetLineId <= 0) {
+        return res.status(400).json({ error: "Invalid target line id" });
+      }
+      const body = req.body as { productIds?: number[]; fromLineId?: number | string };
+      const productIds = Array.isArray(body.productIds)
+        ? body.productIds.filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+      if (productIds.length === 0) {
+        return res.status(400).json({ error: "productIds must be a non-empty array" });
+      }
+
+      const target = await storage.getProductLineById(targetLineId);
+      if (!target) return res.status(404).json({ error: "Target product line not found" });
+
+      const from = body.fromLineId;
+      let removed = 0;
+      if (from === "any" || from === undefined || from === null) {
+        // Remove from every line they're currently on, then add to target
+        const allRemoved = await storage.removeProductsFromAllLines(productIds);
+        removed = allRemoved;
+      } else if (from === "unassigned") {
+        // No-op on removal; just add to target
+      } else if (typeof from === "number" || (typeof from === "string" && /^\d+$/.test(from))) {
+        const fromId = typeof from === "number" ? from : parseInt(from);
+        if (fromId === targetLineId) {
+          return res.status(400).json({ error: "fromLineId and target are the same" });
+        }
+        removed = await storage.removeProductsFromLine(fromId, productIds);
+      } else {
+        return res.status(400).json({ error: "fromLineId must be a line id, 'unassigned', or 'any'" });
+      }
+
+      const added = await storage.addProductsToProductLine(targetLineId, productIds);
+
+      res.json({
+        targetLineId,
+        fromLineId: from ?? "any",
+        requested: productIds.length,
+        removedFromSource: removed,
+        addedToTarget: added,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Remove product from a product line
+  app.delete("/api/product-lines/:lineId/products/:productId", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.lineId);
+      const productId = parseInt(req.params.productId);
+
+      await storage.removeProductFromProductLine(lineId, productId);
+
+      res.json({ ok: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Assign product lines to a channel
+  app.put("/api/channels/:id/product-lines", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const { productLineIds } = req.body as { productLineIds: number[] };
+      if (!Array.isArray(productLineIds)) return res.status(400).json({ error: "productLineIds array required" });
+
+      await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => storage.replaceChannelProductLines(channelId, productLineIds, transaction),
+      );
+
+      res.json({ channelId, productLineCount: productLineIds.length });
+    } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get product lines assigned to a channel
+  app.get("/api/channels/:id/product-lines", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const assigned = await storage.getChannelProductLinesForChannel(channelId);
+      res.json(assigned);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- Channel Allocation View (grid data for UI) ---
+
+  app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), limitPageRead(async (req, res) => {
+    try {
+      return await inventoryLegacyAdminControl.executeLegacyRead(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocationRead,
+        async (transaction, context) => {
+
+      const search = ((req.query.search as string) || "").trim().toLowerCase();
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
+      // Filter: "all" | "unfed:<channelId>" | "override" | "blocked"
+      const filter = ((req.query.filter as string) || "").trim();
+      const productLineId = req.query.productLineId ? parseInt(req.query.productLineId as string) : null;
+
+      // Load available product lines for the dropdown
+      const allProductLines = await storage.getActiveProductLinesForDropdown(transaction);
+
+      // Get all active channels
+      const activeChannels = await storage.getActiveChannels(transaction);
+
+      // Get ALL variants that have inventory (not just ones with feeds)
+      let allVariantIds = await storage.getVariantIdsWithInventory(transaction);
+
+      // Product line filter: restrict to products in the selected line
+      if (productLineId) {
+        const lineProductIds = await storage.getProductLineProductIds(productLineId, transaction);
+
+        if (lineProductIds.length > 0) {
+          const lineVariantIds = new Set(await storage.getVariantIdsByProductIds(lineProductIds, transaction));
+          allVariantIds = allVariantIds.filter((id: number) => lineVariantIds.has(id));
+        } else {
+          allVariantIds = [];
+        }
+      }
+      if (allVariantIds.length === 0) {
+        const emptyStats = activeChannels.reduce((acc: any, c: any) => {
+          acc[c.id] = { fed: 0, unfed: 0, blocked: 0, overrides: 0 };
+          return acc;
+        }, {});
+        return res.json({ channels: activeChannels, rows: [], totalCount: 0, page, limit, stats: { totalVariants: 0, channels: emptyStats } });
+      }
+
+      // Load all variants and products
+      const allVariants = await storage.getProductVariantsByIds(allVariantIds, transaction);
+      const productIds = Array.from(new Set(allVariants.map((v: any) => v.productId)));
+      const prods = await storage.getProductsByIds(productIds, transaction);
+      const prodMap = new Map(prods.map((pr: any) => [pr.id, pr]));
+
+      // Load active feeds (for hasFeed display per cell)
+      const feeds = await storage.getActiveChannelFeeds(transaction);
+
+      // Load all allocation rules + reservations (needed for stats and filtering)
+      const productAllocs = await storage.getAllChannelProductAllocations(transaction);
+      const allReservations = await storage.getChannelReservationsByVariantIds(allVariantIds, transaction);
+
+      // Build feed lookup: channelId -> Set of variantIds
+      const feedsByChannel = new Map<number, Set<number>>();
+      for (const f of feeds) {
+        if (!f.channelId) continue;
+        if (!feedsByChannel.has(f.channelId)) feedsByChannel.set(f.channelId, new Set());
+        feedsByChannel.get(f.channelId)!.add(f.productVariantId);
+      }
+
+      // Build reservation lookup
+      const reservationMap = new Map<string, any>();
+      for (const r of allReservations) {
+        if ((r as any).channelId) {
+          reservationMap.set(`${(r as any).channelId}:${(r as any).productVariantId}`, r);
+        }
+      }
+
+      // Build product alloc lookup
+      const productAllocMap = new Map<string, any>();
+      for (const pa of productAllocs) {
+        productAllocMap.set(`${pa.channelId}:${pa.productId}`, pa);
+      }
+
+      // Build product line eligibility maps: product -> lines, channel -> lines
+      const productLineMap = await storage.getProductLineProductMap(transaction);
+      const channelLineMap = await storage.getChannelProductLineMap(transaction);
+
+      // Compute global stats (across ALL variants, not filtered)
+      const channelStats: Record<number, { fed: number; unfed: number; blocked: number; overrides: number }> = {};
+      for (const c of activeChannels) {
+        const fedSet = feedsByChannel.get(c.id) ?? new Set();
+        let blocked = 0, overrides = 0;
+        for (const v of allVariants) {
+          const pa = productAllocMap.get(`${c.id}:${v.productId}`);
+          if (pa?.isListed === 0) blocked++;
+          const res = reservationMap.get(`${c.id}:${v.id}`);
+          if (res?.overrideQty != null) overrides++;
+        }
+        channelStats[c.id] = {
+          fed: fedSet.size,
+          unfed: allVariants.length - fedSet.size,
+          blocked,
+          overrides,
+        };
+      }
+
+      // Sync stats per channel (last sync, recent errors)
+      const syncStatsPerChannel: Record<number, { lastSyncAt: string | null; lastError: string | null; recentErrors: number; syncStatus: string | null }> = {};
+      for (const c of activeChannels) {
+        // Last successful sync from feeds
+        const fedSet = feedsByChannel.get(c.id) ?? new Set();
+        let lastSyncAt: string | null = null;
+        for (const f of feeds) {
+          if (f.channelId === c.id && f.lastSyncedAt) {
+            const ts = new Date(f.lastSyncedAt).toISOString();
+            if (!lastSyncAt || ts > lastSyncAt) lastSyncAt = ts;
+          }
+        }
+
+        // Recent errors (last 24h)
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const recentErrors = await storage.getChannelSyncErrorCount(c.id, oneDayAgo, transaction);
+
+        // Last error message
+        let lastError: string | null = null;
+        if (recentErrors > 0) {
+          lastError = await storage.getLastChannelSyncError(c.id, transaction);
+          // Truncate long HTML errors
+          if (lastError && lastError.length > 200) lastError = lastError.substring(0, 200) + "...";
+        }
+
+        // Connection status
+        const syncStatus = await storage.getChannelConnectionStatus(c.id, transaction);
+
+        syncStatsPerChannel[c.id] = {
+          lastSyncAt,
+          lastError,
+          recentErrors,
+          syncStatus,
+        };
+      }
+
+      // Server-side search filter
+      let filteredVariants = allVariants;
+      if (search) {
+        filteredVariants = filteredVariants.filter((v: any) => {
+          const prod = prodMap.get(v.productId);
+          return (v.sku || "").toLowerCase().includes(search)
+            || (v.name || "").toLowerCase().includes(search)
+            || (prod?.name || "").toLowerCase().includes(search)
+            || (prod?.sku || "").toLowerCase().includes(search);
+        });
+      }
+
+      // Apply status filter
+      if (filter.startsWith("unfed:")) {
+        const channelId = parseInt(filter.split(":")[1]);
+        const fedSet = feedsByChannel.get(channelId) ?? new Set();
+        filteredVariants = filteredVariants.filter((v: any) => !fedSet.has(v.id));
+      } else if (filter === "override") {
+        filteredVariants = filteredVariants.filter((v: any) =>
+          activeChannels.some((c: any) => reservationMap.get(`${c.id}:${v.id}`)?.overrideQty != null)
+        );
+      } else if (filter === "blocked") {
+        filteredVariants = filteredVariants.filter((v: any) =>
+          activeChannels.some((c: any) => productAllocMap.get(`${c.id}:${v.productId}`)?.isListed === 0)
+        );
+      }
+
+      const totalCount = filteredVariants.length;
+      const paginatedVariants = filteredVariants.slice((page - 1) * limit, page * limit);
+
+      // Batch ATP
+      const paginatedProductIds = Array.from(new Set(paginatedVariants.map((v: any) => v.productId)));
+      const atpMap = await context.legacy.getBulkAtp(paginatedProductIds);
+
+      const variantAtpMap = new Map<number, any>();
+      for (const pid of paginatedProductIds) {
+        const variantAtp = await context.legacy.getAtpPerVariant(pid);
+        for (const v of variantAtp) {
+          variantAtpMap.set(v.productVariantId, v);
+        }
+      }
+
+      // Build grid rows — effective ATP mirrors sync engine logic
+      const rows = paginatedVariants.map((v: any) => {
+        const prod = prodMap.get(v.productId);
+        const vatpInfo = variantAtpMap.get(v.id);
+        const atpBase = atpMap.get(v.productId) ?? 0;
+        const rawAtpUnits = vatpInfo?.atpUnits ?? 0;
+        const unitsPerVariant = vatpInfo?.unitsPerVariant ?? v.unitsPerVariant ?? 1;
+
+        const channelData: Record<number, any> = {};
+        for (const c of activeChannels) {
+          const feed = feeds.find((f: any) => f.channelId === c.id && f.productVariantId === v.id);
+          const prodAlloc = productAllocMap.get(`${c.id}:${v.productId}`);
+          const varRes = reservationMap.get(`${c.id}:${v.id}`);
+
+          let effective = rawAtpUnits;
+          let status = "normal";
+
+          // 0. PRODUCT LINE GATE — check if product's lines overlap with channel's lines
+          const prodLines = productLineMap.get(v.productId);
+          const chanLines = channelLineMap.get(c.id);
+          const isEligible = !prodLines || !chanLines || prodLines.size === 0 || chanLines.size === 0
+            || Array.from(prodLines).some(lid => chanLines.has(lid));
+
+          if (!isEligible) {
+            channelData[c.id] = {
+              hasFeed: false,
+              lastSyncedQty: null,
+              lastSyncedAt: null,
+              productFloor: null,
+              productCap: null,
+              isListed: 1,
+              variantFloor: null,
+              variantCap: null,
+              overrideQty: null,
+              effectiveAtp: 0,
+              status: "not_eligible",
+              isEligible: false,
+            };
+            continue;
+          }
+
+          // 1. VARIANT HARD OVERRIDE — absolute precedence
+          if ((varRes as any)?.overrideQty != null) {
+            effective = (varRes as any).overrideQty;
+            status = effective === 0 ? "override_zero" : "override";
+          } else {
+            // 2. PRODUCT BLOCK
+            if (prodAlloc?.isListed === 0) {
+              effective = 0;
+              status = "blocked";
+            }
+
+            // 3. CHANNEL ALLOCATION (% or fixed)
+            if (status === "normal") {
+              if ((c as any).allocationFixedQty != null) {
+                const allocUnits = Math.floor((c as any).allocationFixedQty / unitsPerVariant);
+                effective = Math.min(effective, allocUnits);
+              } else if ((c as any).allocationPct != null) {
+                const allocBase = Math.floor(atpBase * (c as any).allocationPct / 100);
+                const allocUnits = Math.floor(allocBase / unitsPerVariant);
+                effective = Math.min(effective, allocUnits);
+              }
+            }
+
+            // 4. PRODUCT FLOOR
+            if (status === "normal" && prodAlloc?.minAtpBase != null && atpBase < prodAlloc.minAtpBase) {
+              effective = 0;
+              status = "product_floor";
+            }
+
+            // 5. PRODUCT CAP
+            if (status === "normal" && prodAlloc?.maxAtpBase != null) {
+              const capUnits = Math.floor(prodAlloc.maxAtpBase / unitsPerVariant);
+              effective = Math.min(effective, capUnits);
+            }
+
+            // 6. VARIANT FLOOR + CAP
+            if (status === "normal" && varRes) {
+              if ((varRes as any).minStockBase != null && (varRes as any).minStockBase > 0 && effective < (varRes as any).minStockBase) {
+                effective = 0;
+                status = "variant_floor";
+              }
+              if ((varRes as any).maxStockBase != null && effective > 0) {
+                const maxUnits = Math.floor((varRes as any).maxStockBase / unitsPerVariant);
+                effective = Math.min(effective, maxUnits);
+              }
+            }
+          }
+
+          channelData[c.id] = {
+            hasFeed: !!feed,
+            lastSyncedQty: feed?.lastSyncedQty ?? null,
+            lastSyncedAt: feed?.lastSyncedAt ?? null,
+            productFloor: prodAlloc?.minAtpBase ?? null,
+            productCap: prodAlloc?.maxAtpBase ?? null,
+            isListed: prodAlloc?.isListed ?? 1,
+            variantFloor: (varRes as any)?.minStockBase ?? null,
+            variantCap: (varRes as any)?.maxStockBase ?? null,
+            overrideQty: (varRes as any)?.overrideQty ?? null,
+            effectiveAtp: Math.max(effective, 0),
+            status,
+            isEligible: true,
+          };
+        }
+
+        return {
+          productVariantId: v.id,
+          productId: v.productId,
+          sku: v.sku || prod?.sku || "",
+          productName: prod?.name || "",
+          variantName: v.name || "",
+          unitsPerVariant: v.unitsPerVariant,
+          atpBase,
+          atpUnits: rawAtpUnits,
+          channels: channelData,
+        };
+      });
+
+      // Build product line name lookup
+      const plNameMap = new Map(allProductLines.map((pl: any) => [pl.id, pl.name]));
+
+      // Include allocation config + product line names on channel objects
+      const channelsWithAllocation = activeChannels.map((c: any) => {
+        const lineIds = channelLineMap.get(c.id);
+        const lineNames = lineIds ? Array.from(lineIds).map(id => plNameMap.get(id)).filter(Boolean) : [];
+        return {
+          ...c,
+          allocationPct: c.allocationPct ?? null,
+          allocationFixedQty: c.allocationFixedQty ?? null,
+          productLineNames: lineNames,
+        };
+      });
+
+      res.json({
+        channels: channelsWithAllocation,
+        rows,
+        totalCount,
+        page,
+        limit,
+        productLines: allProductLines,
+        activeProductLineId: productLineId,
+        stats: {
+          totalVariants: allVariants.length,
+          channels: channelStats,
+          sync: syncStatsPerChannel,
+        },
+      });
+        },
+      );
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error building allocation grid:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message || "Failed to build allocation grid" });
+    }
+  }));
+
+  // ============================================
+  // CHANNEL WAREHOUSE ASSIGNMENTS API (new parallel model)
+  // ============================================
+
+  // List all assignments (with warehouse name)
+  app.get("/api/channel-warehouse-assignments", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const rows = await db
+        .select({
+          id: channelWarehouseAssignments.id,
+          channelId: channelWarehouseAssignments.channelId,
+          warehouseId: channelWarehouseAssignments.warehouseId,
+          priority: channelWarehouseAssignments.priority,
+          enabled: channelWarehouseAssignments.enabled,
+          createdAt: channelWarehouseAssignments.createdAt,
+          updatedAt: channelWarehouseAssignments.updatedAt,
+          warehouseName: warehouses.name,
+          warehouseCode: warehouses.code,
+          warehouseType: warehouses.warehouseType,
+          channelName: channelsTable.name,
+        })
+        .from(channelWarehouseAssignments)
+        .leftJoin(warehouses, eq(channelWarehouseAssignments.warehouseId, warehouses.id))
+        .leftJoin(channelsTable, eq(channelWarehouseAssignments.channelId, channelsTable.id))
+        .orderBy(channelWarehouseAssignments.channelId, channelWarehouseAssignments.priority);
+
+      res.json(rows);
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error fetching warehouse assignments:", error: error });
+      res.status(500).json({ error: error.message || "Failed to fetch warehouse assignments" });
+    }
+  });
+
+  // Create assignment
+  app.post("/api/channel-warehouse-assignments", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const schema = z.object({
+        channelId: z.number().int().positive(),
+        warehouseId: z.number().int().positive(),
+        priority: z.number().int().default(0),
+        enabled: z.boolean().default(true),
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
+      }
+
+      const [created] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
+        (transaction) => insertChannelWarehouseAssignmentInTx(transaction, parsed.data),
+      );
+      res.status(201).json(created);
+    } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      if (error.code === "23505") {
+        return res.status(409).json({ error: "This warehouse is already assigned to this channel" });
+      }
+      logger.error("channels.routes", { message: "Error creating warehouse assignment:", error: error });
+      res.status(500).json({ error: error.message || "Failed to create warehouse assignment" });
+    }
+  });
+
+  // Update assignment (priority, enabled)
+  app.put("/api/channel-warehouse-assignments/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const schema = z.object({
+        priority: z.number().int().optional(),
+        enabled: z.boolean().optional(),
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
+      }
+
+      const updates: any = { ...parsed.data, updatedAt: new Date() };
+      const [updated] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
+        (transaction) => updateChannelWarehouseAssignmentInTx(transaction, id, updates),
+      );
+
+      if (!updated) return res.status(404).json({ error: "Assignment not found" });
+      res.json(updated);
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error updating warehouse assignment:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message || "Failed to update warehouse assignment" });
+    }
+  });
+
+  // Delete assignment
+  app.delete("/api/channel-warehouse-assignments/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const [deleted] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
+        (transaction) => deleteChannelWarehouseAssignmentInTx(transaction, id),
+      );
+
+      if (!deleted) return res.status(404).json({ error: "Assignment not found" });
+      res.json({ success: true });
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error deleting warehouse assignment:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message || "Failed to delete warehouse assignment" });
+    }
+  });
+
+  // ============================================
+  // CHANNEL ALLOCATION RULES API (new parallel model)
+  // ============================================
+
+  const allocationRuleSchema = z.object({
+    channelId: z.number().int().positive().nullable(), // null = global "All Channels" rule
+    productId: z.number().int().positive().nullable().optional(),
+    productVariantId: z.number().int().positive().nullable().optional(),
+    mode: z.enum(["mirror", "share", "fixed"]),
+    sharePct: z.number().int().min(1).max(100).nullable().optional(),
+    fixedQty: z.number().int().min(0).nullable().optional(),
+    floorAtp: z.number().int().min(0).default(0),
+    floorType: z.enum(["units", "days"]).default("units"),
+    ceilingQty: z.number().int().min(0).nullable().optional(),
+    eligible: z.boolean().default(true),
+    notes: z.string().nullable().optional(),
+  }).refine((data) => {
+    if (data.mode === "share" && (data.sharePct == null || data.sharePct <= 0)) return false;
+    if (data.mode === "fixed" && data.fixedQty == null) return false;
+    return true;
+  }, { message: "share mode requires sharePct; fixed mode requires fixedQty" });
+
+  // List all rules (with optional ?channelId= filter)
+  app.get("/api/channel-allocation-rules", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = req.query.channelId ? parseInt(req.query.channelId as string) : undefined;
+
+      let query = db
+        .select({
+          id: channelAllocationRules.id,
+          channelId: channelAllocationRules.channelId,
+          productId: channelAllocationRules.productId,
+          productVariantId: channelAllocationRules.productVariantId,
+          mode: channelAllocationRules.mode,
+          sharePct: channelAllocationRules.sharePct,
+          fixedQty: channelAllocationRules.fixedQty,
+          floorAtp: channelAllocationRules.floorAtp,
+          floorType: channelAllocationRules.floorType,
+          ceilingQty: channelAllocationRules.ceilingQty,
+          eligible: channelAllocationRules.eligible,
+          notes: channelAllocationRules.notes,
+          createdAt: channelAllocationRules.createdAt,
+          updatedAt: channelAllocationRules.updatedAt,
+          channelName: channelsTable.name,
+          productName: products.name,
+          variantName: productVariants.name,
+          variantSku: productVariants.sku,
+        })
+        .from(channelAllocationRules)
+        .leftJoin(channelsTable, eq(channelAllocationRules.channelId, channelsTable.id))
+        .leftJoin(products, eq(channelAllocationRules.productId, products.id))
+        .leftJoin(productVariants, eq(channelAllocationRules.productVariantId, productVariants.id));
+
+      if (channelId) {
+        // Show rules for this channel PLUS global rules (channelId IS NULL)
+        query = query.where(
+          sql`(${channelAllocationRules.channelId} = ${channelId} OR ${channelAllocationRules.channelId} IS NULL)`
+        ) as any;
+      }
+
+      const rows = await (query as any).orderBy(channelAllocationRules.channelId, channelAllocationRules.productId, channelAllocationRules.productVariantId);
+      res.json(rows);
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error fetching allocation rules:", error: error });
+      res.status(500).json({ error: error.message || "Failed to fetch allocation rules" });
+    }
+  });
+
+  // Get rules for a specific channel (with product/variant names)
+  app.get("/api/channel-allocation-rules/:channelId", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      if (isNaN(channelId)) return res.status(400).json({ error: "Invalid channel ID" });
+
+      const rows = await db
+        .select({
+          id: channelAllocationRules.id,
+          channelId: channelAllocationRules.channelId,
+          productId: channelAllocationRules.productId,
+          productVariantId: channelAllocationRules.productVariantId,
+          mode: channelAllocationRules.mode,
+          sharePct: channelAllocationRules.sharePct,
+          fixedQty: channelAllocationRules.fixedQty,
+          floorAtp: channelAllocationRules.floorAtp,
+          floorType: channelAllocationRules.floorType,
+          ceilingQty: channelAllocationRules.ceilingQty,
+          eligible: channelAllocationRules.eligible,
+          notes: channelAllocationRules.notes,
+          createdAt: channelAllocationRules.createdAt,
+          updatedAt: channelAllocationRules.updatedAt,
+          channelName: channelsTable.name,
+          productName: products.name,
+          variantName: productVariants.name,
+          variantSku: productVariants.sku,
+        })
+        .from(channelAllocationRules)
+        .leftJoin(channelsTable, eq(channelAllocationRules.channelId, channelsTable.id))
+        .leftJoin(products, eq(channelAllocationRules.productId, products.id))
+        .leftJoin(productVariants, eq(channelAllocationRules.productVariantId, productVariants.id))
+        .where(eq(channelAllocationRules.channelId, channelId))
+        .orderBy(channelAllocationRules.productId, channelAllocationRules.productVariantId);
+
+      res.json(rows);
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error fetching channel allocation rules:", error: error });
+      res.status(500).json({ error: error.message || "Failed to fetch channel allocation rules" });
+    }
+  });
+
+  // Create rule
+  app.post("/api/channel-allocation-rules", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const parsed = allocationRuleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid rule data", details: parsed.error.errors });
+      }
+
+      const data = {
+        channelId: parsed.data.channelId ?? null, // null = global "All Channels" rule
+        productId: parsed.data.productId ?? null,
+        productVariantId: parsed.data.productVariantId ?? null,
+        mode: parsed.data.mode,
+        sharePct: parsed.data.mode === "share" ? parsed.data.sharePct! : null,
+        fixedQty: parsed.data.mode === "fixed" ? parsed.data.fixedQty! : null,
+        floorAtp: parsed.data.floorAtp,
+        floorType: parsed.data.floorType ?? "units",
+        ceilingQty: parsed.data.ceilingQty ?? null,
+        eligible: parsed.data.eligible,
+        notes: parsed.data.notes ?? null,
+      };
+
+      if (data.productVariantId) {
+        const [variant] = await db
+          .select({ salesEligibility: productVariants.salesEligibility })
+          .from(productVariants)
+          .where(eq(productVariants.id, data.productVariantId))
+          .limit(1);
+        if (!variant) return res.status(404).json({ error: "Variant not found" });
+        if (!isCustomerSellableVariant(variant)) {
+          return res.status(409).json({
+            code: "VARIANT_INTERNAL_ONLY",
+            error: "Internal-only variants cannot have channel allocation rules",
+          });
+        }
+      }
+
+      const [created] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => insertChannelAllocationRuleInTx(transaction, data),
+      );
+
+      // Trigger immediate sync for the affected product
+      if (created.productId) {
+        const { inventoryPublicationWork } = req.app.locals.services;
+        if (inventoryPublicationWork) {
+          inventoryPublicationWork.syncProduct(created.productId, "allocation_rule_created")
+            .catch((err: any) => logger.warn("channels.routes", { message: `[AllocationRule] Post-create sync failed: ${err.message}` }));
+        }
+      }
+
+      res.status(201).json(created);
+    } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      if (error.code === "23505") {
+        return res.status(409).json({ error: "A rule already exists for this channel/product/variant combination" });
+      }
+      logger.error("channels.routes", { message: "Error creating allocation rule:", error: error });
+      res.status(500).json({ error: error.message || "Failed to create allocation rule" });
+    }
+  });
+
+  // Update rule
+  app.put("/api/channel-allocation-rules/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const updateSchema = z.object({
+        mode: z.enum(["mirror", "share", "fixed"]).optional(),
+        sharePct: z.number().int().min(1).max(100).nullable().optional(),
+        fixedQty: z.number().int().min(0).nullable().optional(),
+        floorAtp: z.number().int().min(0).optional(),
+        floorType: z.enum(["units", "days"]).optional(),
+        ceilingQty: z.number().int().min(0).nullable().optional(),
+        eligible: z.boolean().optional(),
+        notes: z.string().nullable().optional(),
+      });
+
+      const parsed = updateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
+      }
+
+      const updates: any = { ...parsed.data, updatedAt: new Date() };
+
+      // Clean up mode-dependent fields
+      if (updates.mode) {
+        if (updates.mode !== "share") updates.sharePct = null;
+        if (updates.mode !== "fixed") updates.fixedQty = null;
+      }
+
+      const [updated] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => updateChannelAllocationRuleInTx(transaction, id, updates),
+      );
+
+      if (!updated) return res.status(404).json({ error: "Rule not found" });
+
+      // Trigger immediate sync for the affected product
+      if (updated.productId) {
+        const { inventoryPublicationWork } = req.app.locals.services;
+        if (inventoryPublicationWork) {
+          inventoryPublicationWork.syncProduct(updated.productId, "allocation_rule_updated")
+            .catch((err: any) => logger.warn("channels.routes", { message: `[AllocationRule] Post-update sync failed: ${err.message}` }));
+        }
+      }
+
+      res.json(updated);
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error updating allocation rule:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message || "Failed to update allocation rule" });
+    }
+  });
+
+  // Delete rule
+  app.delete("/api/channel-allocation-rules/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const [deleted] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => deleteChannelAllocationRuleInTx(transaction, id),
+      );
+
+      if (!deleted) return res.status(404).json({ error: "Rule not found" });
+      res.json({ success: true });
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error deleting allocation rule:", error: error });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      res.status(500).json({ error: error.message || "Failed to delete allocation rule" });
+    }
+  });
+
+  // ============================================
+  // ADMIN: SHOPIFY WEIGHT BACKFILL
+  // ============================================
+  // Fill catalog.product_variants.weight_grams from Shopify
+  // (inventoryItem.measurement.weight) for variants where it is still NULL.
+  // Never overwrites a non-null weight. dryRun defaults to true.
+  app.post("/api/channels/admin/shopify-weight-backfill", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const schema = z.object({
+        dryRun: z.boolean().optional(),
+        limit: z.number().int().positive().optional(),
+        channelId: z.number().int().positive().optional(),
+      });
+      const parsed = schema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request body", details: parsed.error.errors });
+      }
+
+      const report = await runShopifyWeightBackfill(
+        {
+          dryRun: parsed.data.dryRun ?? true,
+          limit: parsed.data.limit,
+          channelId: parsed.data.channelId,
+        },
+        createShopifyWeightBackfillDeps(db, parsed.data.channelId),
+      );
+
+      res.json(report);
+    } catch (error: any) {
+      // runShopifyWeightBackfill never throws — this guards the route plumbing itself.
+      logger.error("channels.routes", { message: "Error running Shopify weight backfill:", error: error });
+      res.status(500).json({ error: error?.message || "Failed to run Shopify weight backfill" });
+    }
+  });
+
+  // Get average daily usage (velocity) for a product — used by UI for days-of-cover preview
+  app.get("/api/channel-allocation/velocity/:productId", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) return res.status(400).json({ error: "Invalid product ID" });
+
+      const lookbackDays = 90;
+      const result: any = await db.execute(sql`
+        SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
+        FROM wms.order_items oi
+        JOIN wms.orders o ON o.id = oi.order_id
+        JOIN catalog.product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+        WHERE pv.product_id = ${productId}
+          AND o.cancelled_at IS NULL
+          AND o.warehouse_status != 'cancelled'
+          AND oi.status != 'cancelled'
+          AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+      `);
+
+      const totalOutbound = Number(result.rows?.[0]?.total_outbound ?? result[0]?.total_outbound ?? 0);
+      const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
+
+      res.json({
+        productId,
+        lookbackDays,
+        totalOutbound: Math.round(totalOutbound),
+        avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
+      });
+    } catch (error: any) {
+      logger.error("channels.routes", { message: "Error fetching product velocity:", error: error });
+      res.status(500).json({ error: error.message || "Failed to fetch velocity" });
+    }
+  });
+}
+
+function firstQueryValue(value: unknown): string | undefined {
+  if (Array.isArray(value)) return value.length > 0 ? String(value[0]) : undefined;
+  return typeof value === "string" ? value : undefined;
+}
+
+const LEGACY_INVENTORY_CHANNEL_CONFIGURATION_FIELDS = Object.freeze([
+  "allocationPct",
+  "allocationFixedQty",
+  "syncEnabled",
+  "syncMode",
+  "sweepIntervalMinutes",
+] as const);
+
+function hasLegacyInventoryChannelConfiguration(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return LEGACY_INVENTORY_CHANNEL_CONFIGURATION_FIELDS.some((field) =>
+    Object.prototype.hasOwnProperty.call(value, field));
+}
+
+function legacyInventoryChannelControlFor(value: unknown) {
+  if (
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (["allocationPct", "allocationFixedQty"] as const).some((field) =>
+      Object.prototype.hasOwnProperty.call(value, field))
+  ) {
+    return INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation;
+  }
+  return INVENTORY_LEGACY_ADMIN_CONTROLS.channelSync;
+}

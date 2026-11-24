@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { VendorService } from "../../vendor.service";
+import { VendorService } from "../../application/vendor.service";
 
 function buildHarness() {
   const auditValues = vi.fn(async () => []);

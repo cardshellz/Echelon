@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { computeShipmentReceiptCustodyCoverage, summarizeShipmentReceiptCustodyCoverage, assertShipmentCustodyAdmission,
   type ShipmentReceiptCustodyEvidence, type ShipmentCustodyObservationEvidence, type ShipmentCustodyAcceptanceEvidence } from "../../domain/shipment-receipt-custody";
-import { readShipmentReceiptCustodyCoverage } from "../../shipment-receipt-custody.repository";
-import { ShipmentReceiptCoverageError } from "../../receiving-shipment-coverage";
+import { readShipmentReceiptCustodyCoverage } from "../../infrastructure/shipment-receipt-custody.repository";
+import { ShipmentReceiptCoverageError } from "../../application/receiving-shipment-coverage";
 
 function observation(changes: Partial<ShipmentCustodyObservationEvidence> = {}): ShipmentCustodyObservationEvidence {
   return { id: 90, receivingOrderId: 60, receivingLineId: 70, purchaseOrderId: 10, inboundShipmentId: 40, receiptStatus: "closed",

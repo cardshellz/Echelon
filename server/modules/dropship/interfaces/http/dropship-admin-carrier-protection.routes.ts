@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { carrierProtectionValidationError, type DropshipCarrierProtectionService } from "../../application/dropship-carrier-protection-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipCarrierProtectionServiceFromEnv } from "../../infrastructure/dropship-carrier-protection.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipAdminCarrierProtectionRoutes(
   app: Express,
@@ -72,6 +73,6 @@ function sendError(res: Response, error: unknown): Response {
     const status = error.code.includes("NOT_FOUND") ? 404 : error.code.includes("CONFLICT") || error.code.includes("ASSIGNED") || error.code.includes("NOT_ACTIVE") ? 409 : 400;
     return res.status(status).json({ error: { code: error.code, message: error.message, context: error.context } });
   }
-  console.error("[DropshipCarrierProtectionRoutes] Unexpected error:", error);
+  logger.error("dropship.admin_carrier_protection_routes", { message: "[DropshipCarrierProtectionRoutes] Unexpected error:", error: error });
   return res.status(500).json({ error: { code: "DROPSHIP_CARRIER_PROTECTION_INTERNAL_ERROR", message: "Carrier-protection request failed." } });
 }

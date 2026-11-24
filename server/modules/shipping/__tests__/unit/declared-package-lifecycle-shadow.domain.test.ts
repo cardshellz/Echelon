@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { describe, expect, it } from "vitest";
 
-import { normalizeShipStationLabelObservation } from "../../carrier-tracking.domain";
-import { buildHistoricalShipStationContentsSystemRecoveryEvent } from "../../historical-shipstation-contents-recovery.domain";
+import { normalizeShipStationLabelObservation } from "../../domain/carrier-tracking.domain";
+import { buildHistoricalShipStationContentsSystemRecoveryEvent } from "../../domain/historical-shipstation-contents-recovery.domain";
 import {
   adaptPersistedDeclaredPackageLifecycleEvidence,
   projectPersistedDeclaredPackageLifecycleShadow,
@@ -12,7 +12,7 @@ import {
   type PersistedConfirmedCarrierEvidenceRow,
   type PersistedDeclaredPackageEvidence,
   type PersistedShippingProviderLabelEventRow,
-} from "../../declared-package-lifecycle-shadow.domain";
+} from "../../domain/declared-package-lifecycle-shadow.domain";
 
 const providerPhysicalShipmentId = "44001";
 const trackingNumber = "1Z999AA10123456784";

@@ -4,8 +4,8 @@ import type { StockSelectionQueryClient } from "@shared/types/stock-publication-
 import type {
   StockLinkCandidatePage, StockLinkCarriedSkuRow, StockLinkConfirmation, StockLinkRecentChange, StockLinkRecentCursor,
   StockLinkSizeSkuRow, StockLinkSource,
-} from "../../inventory-planning/application/stock-link.ports";
-import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/domain/stock-link-errors";
+} from "../../inventory-planning/stock-link.ports.api";
+import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/stock-link-errors.api";
 import { shopifyStockLinkFingerprint } from "../adapters/shopify-stock-link.adapter";
 import { CHANNEL_VARIANT_OVERRIDES_LOCK_SQL } from "./channel-variant-override-lock";
 

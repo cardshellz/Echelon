@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { readPurchaseRfqOrigins } from "../../purchase-rfq-origin.repository";
-import type { Transaction } from "../../purchase-workspace-read";
+import { readPurchaseRfqOrigins } from "../../infrastructure/purchase-rfq-origin.repository";
+import type { Transaction } from "../../application/purchase-workspace-read";
 
 const source = {
   id: 1, rfqId: 2, rfqNumber: "RFQ-2", rfqLineId: 3, purchaseOrderLineId: 4,

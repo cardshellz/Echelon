@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipListingPushStatusService, DropshipVendorListingPushJob } from "../../application/dropship-listing-push-status-service";
 import { DropshipError } from "../../domain/errors";
 import { registerDropshipListingPushStatusRoutes, statusForListingPushStatusError } from "../../interfaces/http/dropship-listing-push-status.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 
@@ -77,7 +78,7 @@ describe("dropship vendor listing push status route", () => {
     expect(notFound.status).toBe(404);
     expect(await notFound.json()).toEqual({ error: { code: "DROPSHIP_LISTING_PUSH_JOB_NOT_FOUND", message: "That listing push was not found." } });
 
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const errorSpy = spyLoggerJson("error");
     service.fail = new Error("boom");
     const failed = await fetch(`${server.url}/api/dropship/listing-push-jobs/31`);
     expect(failed.status).toBe(500);

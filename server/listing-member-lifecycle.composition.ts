@@ -10,14 +10,14 @@ import {
   PgDropshipMarketplaceCredentialRepository,
   RefreshingDropshipEbayRegistrationCredentialProvider,
 } from "./modules/dropship/ebay-registration-credentials.api";
-import { createChannelEbayQuantityRequestAdmission, createDropshipEbayQuantityRequestAdmission } from "./modules/inventory-planning/quantity-publication";
+import { createChannelEbayQuantityRequestAdmission, createDropshipEbayQuantityRequestAdmission } from "./modules/inventory-planning/quantity-publication.api";
 import { ListingMemberLifecycleError } from "./modules/marketplace-listings/domain/listing-member-lifecycle";
 import { EbayListingMemberAdapter } from "./modules/marketplace-listings/infrastructure/providers/ebay/ebay-listing-member.adapter";
 import { ShopifyListingMemberAdapter } from "./modules/marketplace-listings/infrastructure/providers/shopify-listing-member.adapter";
 import { PostgresListingMemberLifecycleRepository } from "./modules/marketplace-listings/infrastructure/pg-listing-member-lifecycle.repository";
 import type { ListingMemberLifecycleDependencies, ListingMemberLifecycleAdapter } from "./modules/marketplace-listings/application/listing-member-lifecycle.port";
 import type { ListingLifecycleStore } from "./modules/marketplace-listings/application/listing-lifecycle-ports";
-import type { EbayQuantityRequestAdmission } from "./modules/channels/quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "./modules/channels/application/quantity-publication-request";
 
 const directConnectionSchema = z.object({
   provider: z.string(),

@@ -16,7 +16,7 @@ vi.mock("../../../../routes/middleware", () => ({
         ? next()
         : res.status(403).json({ error: "Forbidden" }),
 }));
-import { registerCostOriginRepairRoutes } from "../../cost-origin-repair.routes";
+import { registerCostOriginRepairRoutes } from "../../interfaces/http/cost-origin-repair.routes";
 import { OriginRepairError } from "../../domain/cost-origin-repair";
 
 const input = {

@@ -6,6 +6,7 @@ import { SubscriptionCommandError } from "../../application/subscription.use-cas
 import { createSellingPlanGroupUseCase, listSellingPlanGroupsUseCase } from "../../application/selling-plan.use-cases";
 import { runBillingPassWithLock } from "../../application/subscription.scheduler";
 import { requireAuth, requirePermission } from "../../../../routes/middleware";
+import { logger } from "../../../../platform/observability/logger";
 
 function staffActor(req: Request): string {
   const sessionUser = (req as any).session?.user;
@@ -31,7 +32,7 @@ function sendSubscriptionCommandError(res: Response, logPrefix: string, err: unk
     return;
   }
   const message = err instanceof Error ? err.message : "Unexpected subscription error";
-  console.error(`${logPrefix}:`, message);
+  logger.error("subscriptions.subscription_routes", { message: `${logPrefix}:`, error: message });
   res.status(500).json({ success: false, error: message });
 }
 
@@ -50,7 +51,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       const stats = await storage.getDashboardStats();
       res.json(stats);
     } catch (err: any) {
-      console.error("[SubRoutes] Dashboard error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Dashboard error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -68,7 +69,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       });
       res.json(result);
     } catch (err: any) {
-      console.error("[SubRoutes] List error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] List error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -88,7 +89,7 @@ export function registerSubscriptionRoutes(app: Express): void {
 
       res.json({ subscription: detail, billingLogs: billingLogs.rows, events });
     } catch (err: any) {
-      console.error("[SubRoutes] Detail error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Detail error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -169,7 +170,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       const sellingPlanMap = await storage.getSellingPlanMap();
       res.json({ plans, sellingPlanMap });
     } catch (err: any) {
-      console.error("[SubRoutes] Plans list error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Plans list error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -211,7 +212,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       });
       res.json(result);
     } catch (err: any) {
-      console.error("[SubRoutes] Billing log error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Billing log error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -226,7 +227,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       });
       res.json(events);
     } catch (err: any) {
-      console.error("[SubRoutes] Events error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Events error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -241,7 +242,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       const result = await createSellingPlanGroupUseCase(productGid);
       res.json({ success: true, ...result });
     } catch (err: any) {
-      console.error("[SubRoutes] Setup selling plans error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Setup selling plans error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -256,7 +257,7 @@ export function registerSubscriptionRoutes(app: Express): void {
         message: "Subscription webhooks are disabled in Echelon and owned by shellz-club-app.",
       });
     } catch (err: any) {
-      console.error("[SubRoutes] Webhook registration error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Webhook registration error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -267,7 +268,7 @@ export function registerSubscriptionRoutes(app: Express): void {
       const groups = await listSellingPlanGroupsUseCase();
       res.json(groups);
     } catch (err: any) {
-      console.error("[SubRoutes] Shopify plans error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Shopify plans error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -285,10 +286,10 @@ export function registerSubscriptionRoutes(app: Express): void {
       }
       res.json({ success: true, ...result });
     } catch (err: any) {
-      console.error("[SubRoutes] Manual billing run error:", err.message);
+      logger.error("subscriptions.subscription_routes", { message: "[SubRoutes] Manual billing run error:", error: err.message });
       res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  console.log("[SubRoutes] Subscription admin routes registered");
+  logger.info("subscriptions.subscription_routes", { message: "[SubRoutes] Subscription admin routes registered" });
 }

@@ -14,7 +14,7 @@ import type {
   CanonicalAvailabilityCycleCountReconciliationResult,
   CanonicalAvailabilityReservationStatusProjection,
 } from "@shared/types/inventory-availability-claims";
-import type { VariantAtp } from "../inventory/atp.service";
+import type { VariantAtp } from "../inventory/atp.service.api";
 
 export type DrizzleDb = {
   select: (...args: any[]) => any;

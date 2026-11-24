@@ -22,9 +22,9 @@ import type {
 } from "@shared/types/inventory-availability-claims";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { pool } from "../../../db";
-import { InventoryQuantityError } from "../../inventory/domain/quantity-ledger";
-import { costEvidenceTransactionFromPg } from "../../inventory/infrastructure/cost-evidence-pg";
-import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
+import { InventoryQuantityError } from "../../inventory/quantity-ledger.api";
+import { costEvidenceTransactionFromPg } from "../../inventory/cost-evidence-pg.api";
+import { lockInventoryCostGraph } from "../../inventory/cost-evidence.repository.api";
 import type { AssemblyWorkOwner } from "../../warehouse/cutover-work.api";
 import type { CanonicalClaimBuildMutationPort } from "../application/canonical-claim-build.port";
 import type {

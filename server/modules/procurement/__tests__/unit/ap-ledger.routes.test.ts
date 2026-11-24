@@ -78,24 +78,25 @@ vi.mock("../../../../middleware/idempotency", () => ({
   requireIdempotency: mocks.requireIdempotency,
 }));
 
-vi.mock("../../ap-ledger.service", () => ({
+vi.mock("../../application/ap-ledger.service", () => ({
   ...mocks.apLedger,
 }));
 
-vi.mock("../../ap-payment-commands", () => ({
+vi.mock("../../application/ap-payment-commands", () => ({
   apPaymentCommands: mocks.apPaymentCommands,
 }));
 
-vi.mock("../../ap-invoice-commands", () => ({
+vi.mock("../../application/ap-invoice-commands", () => ({
   apInvoiceCommands: mocks.apInvoiceCommands,
 }));
-vi.mock("../../ap-invoice-transition.routes", () => ({ registerInvoiceTransitionPreviewRoutes: vi.fn() }));
+vi.mock("../../interfaces/http/ap-invoice-transition.routes", () => ({ registerInvoiceTransitionPreviewRoutes: vi.fn() }));
 
-vi.mock("../../ap-invoice-replacement.commands", () => ({
+vi.mock("../../application/ap-invoice-replacement.commands", () => ({
   apInvoiceReplacementCommands: mocks.apInvoiceReplacementCommands,
 }));
 
-import { registerApLedgerRoutes } from "../../ap-ledger.routes";
+import { registerApLedgerRoutes } from "../../interfaces/http/ap-ledger.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 function buildApp(): Express {
   const app = express();
@@ -163,7 +164,7 @@ describe("AP ledger routes", () => {
   });
   it("reports failed work-list reads as unavailable without exposing database messages", async () => {
     mocks.apLedger.listInvoiceWorkList.mockRejectedValue(new Error("Internal connection detail"));
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       server = await startServer(buildApp());
       const response = await requestJson(server.url, "GET", "/api/vendor-invoices/work-list");

@@ -8,7 +8,7 @@ import {
   buildProposedPieceVariant,
   classifyPieceVariantCandidate,
   previewPieceVariantBackfill,
-} from "../../piece-variant-backfill.service";
+} from "../../application/piece-variant-backfill.service";
 
 const FIXED_CLOCK = () => new Date("2026-09-16T12:00:00.000Z");
 

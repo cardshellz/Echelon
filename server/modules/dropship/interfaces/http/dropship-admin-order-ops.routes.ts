@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipOrderOpsService } from "../../application/dropship-order-ops-service";
 import { createDropshipOrderOpsServiceFromEnv } from "../../infrastructure/dropship-order-ops.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -154,7 +155,7 @@ function sendDropshipOrderOpsError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[DropshipAdminOrderOpsRoutes] Unexpected order ops error:", error);
+  logger.error("dropship.admin_order_ops_routes", { message: "[DropshipAdminOrderOpsRoutes] Unexpected order ops error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_ORDER_OPS_INTERNAL_ERROR",

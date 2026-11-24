@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createPoFinancialEvidenceService } from "../../po-financial-evidence.service";
-import { readPoFinancialEvidenceSource } from "../../po-financial-evidence.repository";
-import { createPurchaseOrderListRepository } from "../../purchase-order-list.repository";
-import { createPurchaseOrderListService } from "../../purchase-order-list.service";
+import { createPoFinancialEvidenceService } from "../../application/po-financial-evidence.service";
+import { readPoFinancialEvidenceSource } from "../../infrastructure/po-financial-evidence.repository";
+import { createPurchaseOrderListRepository } from "../../infrastructure/purchase-order-list.repository";
+import { createPurchaseOrderListService } from "../../application/purchase-order-list.service";
 import { PoFinancialRefreshFixture, REFRESH_ACTOR } from "./po-financial-refresh.fixture";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

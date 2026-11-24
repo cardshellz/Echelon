@@ -1,10 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { VARIANT_SALES_ELIGIBILITIES } from "@shared/catalog/variant-sales-eligibility";
-import { isProductEffectivelyListed, isVariantSellable } from "../ebay-listing-eligibility";
-import type { ChannelListingSyncState } from "../../marketplace-listings/domain/channel-listing-sync";
-import { selectChannelListing } from "../../marketplace-listings/domain/channel-listing-selection";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
+import { isProductEffectivelyListed, isVariantSellable } from "../application/ebay-listing-eligibility";
+import type { ChannelListingSyncState } from "../../marketplace-listings/channel-listing-sync.api";
+import { selectChannelListing } from "../../marketplace-listings/channel-listing-selection.api";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
 import type { SyncFilter } from "./ebay-active-listing-sync";
 
 const variant = z.object({

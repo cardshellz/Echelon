@@ -22,6 +22,7 @@ import {
 import type { CustomerReturnLiveService } from "../../application/customer-return-live.service";
 import { CustomerReturnLiveError } from "../../application/customer-return-live-error";
 import { registerCustomerReturnLabelRoutes, type CustomerReturnLabelRouteDependencies } from "./customer-return-label.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 const API_ROOT = CUSTOMER_RETURN_PREVIEW_API_PATH;
 const PAGE_PREFIXES = [CUSTOMER_RETURN_PORTAL_PATH, CUSTOMER_RETURN_PORTAL_LEGACY_PATH];
@@ -46,9 +47,9 @@ export function registerCustomerReturnPreviewRoutes(app: Express, dependencies: 
     const event = { operation, code };
     try {
       if (dependencies.reportFailure) dependencies.reportFailure(event);
-      else console.error(JSON.stringify(event));
+      else logger.error("returns.customer_return_preview_routes", { error: JSON.stringify(event) });
     } catch {
-      console.error(JSON.stringify({ operation, code: "RETURN_PREVIEW_REPORTING_FAILED" }));
+      logger.error("RETURN_PREVIEW_REPORTING_FAILED", { operation, code: "RETURN_PREVIEW_REPORTING_FAILED" });
     }
   }
 

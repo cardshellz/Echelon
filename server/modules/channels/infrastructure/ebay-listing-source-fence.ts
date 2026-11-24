@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { EbayListingSyncError, type EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
+import { EbayListingSyncError, type EbayListingSyncIdentity } from "../domain/ebay-listing-sync.domain";
 
 /** Fence the saved account, eligibility and mapping inputs through a local
  * listing command's commit. Caller acquires the canonical account lock first. */

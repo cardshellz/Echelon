@@ -5,8 +5,8 @@ import {
   type DropshipListingEconomics,
   type DropshipListingPresentation,
 } from "../../../../shared/dropship/listing-presentation";
-import type { CatalogVariantImage, CatalogVariantMediaReader } from "../../catalog/catalog-media.reader";
-import type { CatalogPublicationPhoto, CatalogVariantPublicationPhotos } from "../../catalog/catalog-publication-images.reader";
+import type { CatalogVariantImage, CatalogVariantMediaReader } from "../../catalog/catalog-media.reader.api";
+import type { CatalogPublicationPhoto, CatalogVariantPublicationPhotos } from "../../catalog/catalog-publication-images.reader.api";
 import { DropshipError } from "../domain/errors";
 import { listingPhotoLeftOutReason } from "../domain/listing-photo-reasons";
 import type { DropshipProductCost, DropshipProductCostReader } from "./dropship-product-cost";

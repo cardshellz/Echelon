@@ -3,15 +3,15 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const WMS_SYNC_SRC = readFileSync(
-  resolve(__dirname, "../../wms-sync.service.ts"),
+  resolve(__dirname, "../../application/wms-sync.service.ts"),
   "utf8",
 );
 const ORDER_ITEM_COMMANDS_SRC = readFileSync(
-  resolve(__dirname, "../../../wms/order-item-commands.ts"),
+  resolve(__dirname, "../../../wms/application/order-item-commands.ts"),
   "utf8",
 );
 const WMS_ORDER_MUTATIONS_SRC = readFileSync(
-  resolve(__dirname, "../../../wms/wms-order-mutations.repository.ts"),
+  resolve(__dirname, "../../../wms/infrastructure/wms-order-mutations.repository.ts"),
   "utf8",
 );
 

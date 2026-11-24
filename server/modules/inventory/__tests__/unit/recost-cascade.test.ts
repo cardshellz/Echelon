@@ -15,7 +15,7 @@ vi.mock("../../infrastructure/cost-evidence.repository", async (importOriginal) 
 describe("COGSService.cascadeRecostForLot", () => {
   it("updates COGS rows when lot cost changes", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
 
     const executeResults: any[] = [];
     let executeCallCount = 0;
@@ -54,7 +54,7 @@ describe("COGSService.cascadeRecostForLot", () => {
 
   it("returns zero when no COGS rows need updating", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
 
     const db = {
       select: vi.fn(),
@@ -76,7 +76,7 @@ describe("COGSService.cascadeRecostForLot", () => {
 
   it("updateLotLandedCost triggers cascade after cost update", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
 
     const executeCalls: string[] = [];
     let executeCallCount = 0;
@@ -131,14 +131,14 @@ describe("COGSService.cascadeRecostForLot", () => {
     expect(executeCalls).toContain("cascade_update");
   });
   it("computes extended COGS deltas beyond Number multiplication precision exactly", async () => {
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
     const db = { execute: vi.fn().mockResolvedValueOnce({ rows: [{ id: 1, qty: 16, unit_cost_mills: "0" }] }).mockResolvedValue({ rows: [] }) };
     const result = await (new COGSService(db as any) as any).cascadeRecostForLotMills(10, Number.MAX_SAFE_INTEGER);
     expect(result).toEqual({ rowsUpdated: 1, totalDeltaCents: 1441151880758559 });
   });
 
   it("rejects an unrepresentable aggregate delta before writing COGS", async () => {
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
     const db = { execute: vi.fn().mockResolvedValue({ rows: [{ id: 1, qty: 101, unit_cost_mills: "0" }] }) };
     await expect((new COGSService(db as any) as any).cascadeRecostForLotMills(10, Number.MAX_SAFE_INTEGER)).rejects.toMatchObject({ code: "COST_EVIDENCE_INVALID_INTEGER" });
     expect(db.execute).toHaveBeenCalledTimes(1);

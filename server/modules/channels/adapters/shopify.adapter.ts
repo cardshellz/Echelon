@@ -11,7 +11,7 @@ import { parseDecimalCents, sumCents, readIntegerCents } from "@shared/money-rea
 
 import { and, eq } from "drizzle-orm";
 import { resolveProviderCountryCode } from "@shared/country-code";
-import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../provider-request-limits";
+import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../application/provider-request-limits";
 import {
   channelConnections,
   warehouses,
@@ -36,19 +36,20 @@ import type {
   FulfillmentPushResult,
   CancellationPayload,
   CancellationPushResult,
-} from "../channel-adapter.interface";
-import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
+} from "../domain/channel-adapter.interface";
+import { InventoryPublicationConfigurationError } from "../domain/channel-adapter.interface";
 import {
   SHOPIFY_INVENTORY_WRITE_PATH,
   ShopifyInventoryWriteRejectedError,
   isShopifyInventoryWrite,
   shopifyInventoryWriteRejectionCode,
 } from "./shopify-inventory-write.error";
-import { providerRestIdentitySchema } from "../channel-identity.domain";
+import { providerRestIdentitySchema } from "../domain/channel-identity.domain";
 import { ShopifyMarketplaceListingConnector } from "../listing-connectors/shopify-listing.connector";
-import type { QuantityPublicationAdmission } from "../../inventory-planning/application/quantity-publication-admission.port";
+import type { QuantityPublicationAdmission } from "../../inventory-planning/quantity-publication-admission.port.api";
 
 import crypto from "crypto";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -570,19 +571,19 @@ export class ShopifyAdapter implements IChannelAdapter {
         if (img.fileData) {
           // Already downloaded and stored in DB — use directly
           base64 = img.fileData;
-          console.log(`[pushImagesOnly] Using stored file_data for ${filename}`);
+          logger.info("channels.shopify_adapter", { message: `[pushImagesOnly] Using stored file_data for ${filename}` });
         } else {
           // Download now
           const resp = await fetch(img.url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
           });
           if (!resp.ok) {
-            console.warn(`[pushImagesOnly] Failed to download image ${img.url}: ${resp.status}`);
+            logger.warn("channels.shopify_adapter", { message: `[pushImagesOnly] Failed to download image ${img.url}: ${resp.status}` });
             continue;
           }
           const buffer = Buffer.from(await resp.arrayBuffer());
           base64 = buffer.toString("base64");
-          console.log(`[pushImagesOnly] Downloaded ${filename} (${buffer.length} bytes)`);
+          logger.info("channels.shopify_adapter", { message: `[pushImagesOnly] Downloaded ${filename} (${buffer.length} bytes)` });
         }
 
         shopifyImages.push({
@@ -592,7 +593,7 @@ export class ShopifyAdapter implements IChannelAdapter {
           ...(img.altText ? { alt: img.altText } : {}),
         });
       } catch (err: any) {
-        console.warn(`[pushImagesOnly] Error processing image ${img.url}:`, err.message);
+        logger.warn("channels.shopify_adapter", { message: `[pushImagesOnly] Error processing image ${img.url}:`, error: err.message });
       }
     }
 
@@ -611,7 +612,7 @@ export class ShopifyAdapter implements IChannelAdapter {
     let position = (existing?.images?.length || 0) + 1;
     for (const img of shopifyImages) {
       if (existingFilenames.has(img.filename)) {
-        console.log(`[pushImagesOnly] Skipping existing image: ${img.filename}`);
+        logger.info("channels.shopify_adapter", { message: `[pushImagesOnly] Skipping existing image: ${img.filename}` });
         continue;
       }
       await this.shopifyPost(
@@ -726,7 +727,7 @@ export class ShopifyAdapter implements IChannelAdapter {
       // Rate limit handling
       if (response.status === 429) {
         const retryAfter = boundedProviderRetryAfterSeconds(response.headers.get("Retry-After"), 2);
-        console.warn(`[ShopifyAdapter] Rate limited, retrying in ${retryAfter}s (attempt ${attempt})`);
+        logger.warn("channels.shopify_adapter", { message: `[ShopifyAdapter] Rate limited, retrying in ${retryAfter}s (attempt ${attempt})` });
         await this.delay(retryAfter * 1000);
         continue;
       }
@@ -735,7 +736,7 @@ export class ShopifyAdapter implements IChannelAdapter {
         const errorBody = await response.text();
         if (attempt < MAX_RETRIES && response.status >= 500) {
           const backoff = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
-          console.warn(`[ShopifyAdapter] Server error ${response.status}, retrying in ${backoff}ms`);
+          logger.warn("channels.shopify_adapter", { message: `[ShopifyAdapter] Server error ${response.status}, retrying in ${backoff}ms` });
           await this.delay(backoff);
           continue;
         }

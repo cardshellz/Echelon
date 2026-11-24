@@ -6,7 +6,7 @@ import {
   DISCOVER_FEEDS_BATCH_SIZE,
   createChannelSyncService,
   type FeedDiscoveryIdentityPort,
-} from "../../sync.service";
+} from "../../application/sync.service";
 import {
   MAX_SHOPIFY_RETRY_AFTER_MS,
   fetchOrdersFulfillmentStatus,
@@ -245,7 +245,7 @@ describe("CHN-1 Sales Channels and Listings Safeguards (COM-03, COM-04, COM-05, 
 
   describe("COM-07 (C-B4): Retirement of dead direct-push tail in channels/sync.service.ts", () => {
     it("contains no dead direct-push helpers or raw inventory_levels/set.json fetch calls in sync.service.ts", () => {
-      const syncServicePath = path.resolve(__dirname, "../../sync.service.ts");
+      const syncServicePath = path.resolve(__dirname, "../../application/sync.service.ts");
       const source = fs.readFileSync(syncServicePath, "utf8");
       expect(source).not.toContain("pushWithRetry");
       expect(source).not.toContain("pushToChannel");

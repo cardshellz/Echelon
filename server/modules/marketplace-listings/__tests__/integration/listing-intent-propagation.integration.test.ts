@@ -1,6 +1,6 @@
 import pg from "pg";
 import { PostgresEbayListingSyncRepository } from "../../../channels/infrastructure/ebay-listing-sync.repository";
-import { EbayListingSyncService } from "../../../channels/ebay-listing-sync.service";
+import { EbayListingSyncService } from "../../../channels/application/ebay-listing-sync.service";
 import { PgDropshipListingPreviewRepository } from "../../../dropship/infrastructure/dropship-listing-preview.repository";
 import type {
   CreateDropshipListingPushJobRepositoryInput,

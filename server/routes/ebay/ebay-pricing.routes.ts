@@ -5,12 +5,13 @@ import { db } from "../../db";
 import { requireAuth, requirePermission } from "../middleware";
 import { products, productVariants } from "@shared/schema";
 import { EBAY_CHANNEL_ID } from "./ebay-utils";
-import { createChannelPricingService } from "../../modules/channels/channel-pricing.service";
+import { createChannelPricingService } from "../../modules/channels/application/channel-pricing.service";
 import { sendChannelPricingError } from "../../modules/channels/interfaces/http/channel-pricing.error";
 import {
   resolveChannelListingPrice,
   ChannelPricingResolutionError,
-} from "../../modules/channels/channel-pricing-resolver";
+} from "../../modules/channels/application/channel-pricing-resolver";
+import { logger } from "../../platform/observability/logger";
 
 type EbayPricingRuleService = Pick<
   ReturnType<typeof createChannelPricingService>,
@@ -108,7 +109,7 @@ registerEbayPricingRuleRoutes(router);
       })
       .from(productVariants)
       .where(eq(productVariants.id, variantId));
-      
+
       if (varResult.length === 0) { res.status(404).json({ error: "Variant not found" }); return; }
 
       const variant = varResult[0];
@@ -133,7 +134,7 @@ registerEbayPricingRuleRoutes(router);
         effectivePrice: (effectivePrice / 100).toFixed(2),
       });
     } catch (err: any) {
-      console.error("[eBay Effective Price] Error:", err.message);
+      logger.error("routes.ebay_pricing_routes", { message: "[eBay Effective Price] Error:", error: err.message });
       res.status(err instanceof ChannelPricingResolutionError ? err.status : 500).json({ error: err.message, ...(err instanceof ChannelPricingResolutionError ? { code: err.code } : {}) });
     }
   });
@@ -182,7 +183,7 @@ registerEbayPricingRuleRoutes(router);
 
       res.json({ prices });
     } catch (err: any) {
-      console.error("[eBay Effective Prices] Error:", err.message);
+      logger.error("routes.ebay_pricing_routes", { message: "[eBay Effective Prices] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

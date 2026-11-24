@@ -87,7 +87,7 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     expect(invoice.body).toMatchObject({ invoicedAmountCents: PAYMENT_FLOW.invoiceCents,
       paidAmountCents: paid, creditedAmountCents: credited, balanceCents: balance });
     const { db } = await import("../../../../db");
-    const { createPoFinancialEvidenceService } = await import("../../po-financial-evidence.service");
+    const { createPoFinancialEvidenceService } = await import("../../application/po-financial-evidence.service");
     const poId = invoiceId === PAYMENT_FLOW.invoiceA ? PAYMENT_FLOW.poA : PAYMENT_FLOW.poB;
     expect(await createPoFinancialEvidenceService(db).readWorkflow(poId)).toMatchObject({
       state: balance === 0 ? "settled" : "payment_due", evidence: { state: "complete", invoicedAmountCents: PAYMENT_FLOW.invoiceCents,
@@ -164,7 +164,7 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     let credit = await approved(10_000);
     if (command === "reverse") credit = result(await apply(credit, 10_000)).credit;
     const { pool: modulePool } = await import("../../../../db");
-    const { getApSummary } = await import("../../ap-ledger.service");
+    const { getApSummary } = await import("../../application/ap-ledger.service");
     const at = new Date("2026-10-13T12:00:00Z");
     const before = await getApSummary({ now: at });
     const barrier = createApSummaryReadBarrier(modulePool);
@@ -412,7 +412,7 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     await expect(fixture.pool.query("UPDATE procurement.vendor_invoices SET invoiced_amount_cents=200000 WHERE id=71"))
       .rejects.toMatchObject({ code: "23514" });
     const { db } = await import("../../../../db");
-    const { createInvoiceQuantityCorrectionService } = await import("../../invoice-quantity-correction.service");
+    const { createInvoiceQuantityCorrectionService } = await import("../../application/invoice-quantity-correction.service");
     await fixture.pool.query("INSERT INTO inventory.warehouse_settings(warehouse_code,require_approval) VALUES('DEFAULT',false)");
     const direct = await createInvoiceQuantityCorrectionService(db, () => new Date("2026-10-19T12:00:00Z")).context(1, PAYMENT_ACTORS.owner);
     expect(direct).toMatchObject({ canApprove: false, blockedReason: expect.stringContaining("credit") });

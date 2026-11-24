@@ -15,7 +15,7 @@ import {
   createPurchaseOrderLineCommands,
   vendorCatalogPricingMatches,
   vendorCatalogQuoteUsability,
-} from "../../purchase-order-line-commands";
+} from "../../application/purchase-order-line-commands";
 
 const VERSION = "2026-07-13T12:34:56.789Z";
 const PG_INTEGER_MAX = 2_147_483_647;
@@ -576,7 +576,7 @@ describe("vendor catalog pricing provenance", () => {
 });
 
 const source = readFileSync(
-  join(process.cwd(), "server", "modules", "procurement", "purchase-order-line-commands.ts"),
+  join(process.cwd(), "server", "modules", "procurement", "application/purchase-order-line-commands.ts"),
   "utf8",
 );
 

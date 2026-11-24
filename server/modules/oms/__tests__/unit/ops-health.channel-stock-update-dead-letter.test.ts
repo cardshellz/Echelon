@@ -3,13 +3,13 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   channelStockUpdateDeadLetterDestinationCountSql,
   channelStockUpdateDeadLetterDestinationSampleSql,
-} from "../../../inventory-planning/channel-stock-update-dead-letters";
+} from "../../../inventory-planning/channel-stock-update-dead-letters.api";
 import {
   CHANNEL_STOCK_UPDATE_DEAD_LETTER_CODE,
   CHANNEL_STOCK_UPDATE_DEAD_LETTER_MESSAGE,
   getOmsOpsHealth,
-} from "../../ops-health.service";
-import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
+} from "../../application/ops-health.service";
+import { evaluateOmsOpsAlert } from "../../application/oms-ops-alert.service";
 
 // Channels PR1 (PLAN-CH-v3 section 6, Ops Health): a channel store's stock updates the
 // outbox refused for good (for example Shopify 404/422) are critical and reach the alert.

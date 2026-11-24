@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   CHANNEL_FULFILLMENT_REPAIR_SOURCES,
   resolveChannelFulfillmentNotifyCustomer,
-} from "../../channel-fulfillment-notification.policy";
+} from "../../domain/channel-fulfillment-notification.policy";
 
 import {
   ChannelFulfillmentPlanningError,
   planChannelFulfillmentCommands,
   type PhysicalShipmentForChannelFulfillment,
-} from "../../channel-fulfillment-command";
+} from "../../application/channel-fulfillment-command";
 
 function packageInput(
   overrides: Partial<PhysicalShipmentForChannelFulfillment> = {},

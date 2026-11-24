@@ -6,7 +6,7 @@ import {
   parseHistoricalShipStationContentsAuditCliOptions,
   runHistoricalShipStationContentsAuditJob,
 } from "../../historical-shipstation-contents-audit.job";
-import { normalizeHistoricalShipStationContentsAuditRepositoryOptions } from "../../../modules/shipping/historical-shipstation-contents-audit.repository";
+import { normalizeHistoricalShipStationContentsAuditRepositoryOptions } from "../../../modules/shipping/infrastructure/historical-shipstation-contents-audit.repository";
 
 const environment = {
   HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_ENABLED: "true",

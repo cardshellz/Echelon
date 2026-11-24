@@ -2,16 +2,16 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { deriveOmsLineAuthority } from "../../oms-line-authority";
-import { buildOmsLineAuthorityEvent } from "../../oms-line-authority-ledger";
+import { deriveOmsLineAuthority } from "../../application/oms-line-authority";
+import { buildOmsLineAuthorityEvent } from "../../application/oms-line-authority-ledger";
 
 const OMS_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../oms.service.ts"),
+  resolve(__dirname, "../../application/oms.service.ts"),
   "utf8",
 );
 
 const OMS_WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
+  resolve(__dirname, "../../application/oms-webhooks.ts"),
   "utf8",
 );
 

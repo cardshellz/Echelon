@@ -6,6 +6,7 @@ import type {
 import { requireInternalApiKey } from "../../../../routes/middleware";
 import { DestinationScopeReadService } from "../../application/destination-scope-reader";
 import { PostgresDestinationScopeReader } from "../../infrastructure/destination-scope-reader";
+import { logger } from "../../../../platform/observability/logger";
 
 const destinationScopeResponseSchema = z.object({
   scopes: z.array(z.object({
@@ -47,13 +48,9 @@ export function registerDestinationScopeReaderRoutes(
         const scopes = await dependencies.listActiveDestinationScopes();
         return res.json(destinationScopeResponseSchema.parse({ scopes }));
       } catch (error) {
-        console.error(JSON.stringify({
-          code: "DESTINATION_SCOPE_READ_FAILED",
-          message: "Active shipping destination scopes could not be read.",
-          context: {
+        logger.error("DESTINATION_SCOPE_READ_FAILED", { code: "DESTINATION_SCOPE_READ_FAILED", message: "Active shipping destination scopes could not be read.", context: {
             error: error instanceof Error ? error.message : String(error),
-          },
-        }));
+          } });
         return res.status(500).json({
           error: {
             code: "DESTINATION_SCOPE_READ_FAILED",

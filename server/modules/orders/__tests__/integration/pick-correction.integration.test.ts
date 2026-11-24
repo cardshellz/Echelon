@@ -4,9 +4,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { PickCorrectionService, createPickCorrectionService } from "../../pick-correction.service";
-import { releaseLineItemFromHold } from "../../../wms/line-item-hold";
-import { assertNoOpenPickCorrection, observeMissingPick, readPickCorrection, requireCorrectivePick } from "../../../wms/pick-correction.repository";
+import { PickCorrectionService, createPickCorrectionService } from "../../application/pick-correction.service";
+import { releaseLineItemFromHold } from "../../../wms/application/line-item-hold";
+import { assertNoOpenPickCorrection, observeMissingPick, readPickCorrection, requireCorrectivePick } from "../../../wms/infrastructure/pick-correction.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

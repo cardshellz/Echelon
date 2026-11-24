@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
-import type { EbayQuantityRequestAdmission } from "../../../channels/quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "../../../channels/application/quantity-publication-request";
 import { QuantityPublicationAdmissionError } from "../../../inventory-planning/domain/quantity-publication-admission";
 import { listingEndQuantityScope, parseListingEndResolvedIdentity } from "../../domain/listing-end-claims";
 import {

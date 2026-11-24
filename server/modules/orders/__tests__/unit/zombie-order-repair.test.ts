@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 
-vi.mock("../../cancel-wms-order", () => ({
+vi.mock("../../application/cancel-wms-order", () => ({
   cancelWmsOrderAndRelease: vi.fn(async () => ({ transitioned: true, releasedItems: 1, releaseFailed: false })),
   completeWmsOrderAndRelease: vi.fn(async () => ({ transitioned: true, releasedItems: 0, releaseFailed: false })),
 }));
 
 import { logger } from "../../../../platform/observability/logger";
-import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../cancel-wms-order";
+import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../application/cancel-wms-order";
 import {
   decideZombieRepairAction,
   OMS_ORDER_STILL_OPEN_FOR_WMS_ORDER_O,
@@ -16,7 +16,7 @@ import {
   ZOMBIE_REPAIR_REASON,
   ZOMBIE_REPAIR_SKIPPED_CODE,
   ZOMBIE_REPAIR_SKIPPED_OPEN_ORDER_CODE,
-} from "../../zombie-order-repair";
+} from "../../application/zombie-order-repair";
 
 const reservation = { releaseOrderReservation: vi.fn() } as any;
 

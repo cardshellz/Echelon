@@ -13,7 +13,7 @@ import {
   type ShopifyStaffOAuthRepository,
   type ShopifyStaffOAuthResult,
   type ShopifyStaffOAuthToken,
-} from "../shopify-staff-oauth.types";
+} from "../domain/shopify-staff-oauth.types";
 
 // The caller supplies the existing public Identity reader. Importing this
 // repository must not initialize the application database through a barrel.

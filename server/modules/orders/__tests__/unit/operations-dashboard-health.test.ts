@@ -4,7 +4,7 @@ vi.mock("../../../warehouse/settings.api", () => ({
   getSettingsForWarehouse: vi.fn(async () => null),
 }));
 
-import { OperationsDashboardService } from "../../operations-dashboard.service";
+import { OperationsDashboardService } from "../../application/operations-dashboard.service";
 
 function sqlText(query: any): string {
   return (query?.queryChunks ?? [])

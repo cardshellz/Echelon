@@ -6,7 +6,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { loadShopifyReadinessCandidates } from "../../../oms/infrastructure/shopify-readiness-candidates.repository";
 
 const RECONCILE_SRC = readFileSync(
-  resolve(__dirname, "../../shopify-order-reconciliation.ts"),
+  resolve(__dirname, "../../application/shopify-order-reconciliation.ts"),
   "utf8",
 );
 
@@ -44,7 +44,7 @@ describe("reconcileCancellations is wired into the 15-min reconciliation interva
 });
 
 const READINESS_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../../oms/shopify-line-readiness.service.ts"),
+  resolve(__dirname, "../../../oms/application/shopify-line-readiness.service.ts"),
   "utf8",
 );
 

@@ -1,5 +1,5 @@
-import { ebayIntentAccount, prepareEbayChannelIntent } from "../ebay-prepared-intent";
-import { ebayBusinessPolicies } from "../ebay-business-policies";
+import { ebayIntentAccount, prepareEbayChannelIntent } from "../application/ebay-prepared-intent";
+import { ebayBusinessPolicies } from "../application/ebay-business-policies";
 import { db } from "../../../db";
 import {
   EBAY_CHANNEL_ID,
@@ -19,12 +19,12 @@ import {
 } from "@shared/schema";
 import { eq, and, sql, inArray, asc, or, isNotNull } from "drizzle-orm";
 import { EbayMarketplaceListingConnector } from "../listing-connectors/ebay-listing.connector";
-import { buildEbayRouteListingDraft } from "../ebay-listing-draft";
+import { buildEbayRouteListingDraft } from "../application/ebay-listing-draft";
 import {
   createEbayRouteListingLifecycleClient,
   getExistingEbayListingPhotos,
 } from "./ebay-listing-client";
-import { isVariantSellable, isExistingEbayListingSyncCandidate } from "../ebay-listing-eligibility";
+import { isVariantSellable, isExistingEbayListingSyncCandidate } from "../application/ebay-listing-eligibility";
 
 import { pool } from "../../../db";
 import { channelConnections } from "@shared/schema";
@@ -34,21 +34,21 @@ import {
   EbayListingSyncService,
   EbayExistingListingSyncExecution,
   type PreparedEbayListingSync,
-} from "../ebay-listing-sync.service";
+} from "../application/ebay-listing-sync.service";
 import { PostgresEbayListingSyncRepository } from "./ebay-listing-sync.repository";
 import {
   EbayListingSyncError,
   type EbayListingSyncIdentity,
-} from "../ebay-listing-sync.domain";
+} from "../domain/ebay-listing-sync.domain";
 import {
   captureEbayListingSourceIdentity,
   assertEbayListingSourceIdentityUnchanged,
   resolveExistingEbayListingIdentity,
-} from "../ebay-existing-listing-identity";
-import { admitEbayListingSyncProducts } from "../ebay-listing-sync-admission";
+} from "../application/ebay-existing-listing-identity";
+import { admitEbayListingSyncProducts } from "../application/ebay-listing-sync-admission";
 import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay-marketplace-registration.factory";
 import { quantityProviderResponseRecovery, automaticEbayPublicationRecovery, ebayPublicationReconciliationRepository, ebayPublicationRejectionReader,
-  EbayPublicationContentRefreshRejectedError } from "../../inventory-planning/quantity-publication";
+  EbayPublicationContentRefreshRejectedError } from "../../inventory-planning/quantity-publication.api";
 import {
   type EbayProductSyncResult,
 } from "@shared/types/ebay-listing-sync";
@@ -57,22 +57,22 @@ import {
   resolveChannelPriceResolution,
   delay,
 } from "./ebay-listing-helpers";
-import type { EbayListingMappingSource } from "../ebay-listing-mapping.service";
-import { EbayListingOperationExecution, EbayPublicationCompletionExecution } from "../ebay-publication-completion.service";
+import type { EbayListingMappingSource } from "../application/ebay-listing-mapping.service";
+import { EbayListingOperationExecution, EbayPublicationCompletionExecution } from "../application/ebay-publication-completion.service";
 import { prepareEbayPublicationCompletion } from "./ebay-listing-push";
 import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibility";
-import { EbayListingWithdrawalExecution,EbayWithdrawalOperationExecution } from "../ebay-listing-withdrawal.service";
+import { EbayListingWithdrawalExecution,EbayWithdrawalOperationExecution } from "../application/ebay-listing-withdrawal.service";
 import { prepareEbayWithdrawal } from "./ebay-listing-withdrawal";
 import { ensureEbayListingInventoryReady } from "./ebay-listing-inventory-readiness";
-import { requestStockLinkChecks } from "../../inventory-planning/quantity-publication";
-import { quantityPublicationScopeSchema, type QuantityPublicationScope } from "../../inventory-planning/domain/quantity-publication-admission";
-import { ChannelRecoverySyncService } from "../../marketplace-listings/application/channel-recovery-sync.service";
+import { requestStockLinkChecks } from "../../inventory-planning/quantity-publication.api";
+import { quantityPublicationScopeSchema, type QuantityPublicationScope } from "../../inventory-planning/quantity-publication-admission-domain.api";
+import { ChannelRecoverySyncService } from "../../marketplace-listings/channel-recovery-sync.service.api";
 import { retainedPublicationEffectEvidenceSchema, type RetainedPublicationEffectEvidence,
-  type ReconciliationContentVerification } from "../../inventory-planning/domain/publication-recovery-evidence";
-import { ebayListingFailureDiagnostic } from "../ebay-listing-failure-diagnostic";
+  type ReconciliationContentVerification } from "../../inventory-planning/publication-recovery-evidence.api";
+import { ebayListingFailureDiagnostic } from "../application/ebay-listing-failure-diagnostic";
 import { logger } from "../../../platform/observability/logger";
-import { withListingWorkPermit } from "../../marketplace-listings/listing-work-permits";
-import { ebayListingPublicationScopes } from "../ebay-listing-request-recovery";
+import { withListingWorkPermit } from "../../marketplace-listings/listing-work-permits.api";
+import { ebayListingPublicationScopes } from "../application/ebay-listing-request-recovery";
 import { proveEbayStockOnlyEffects } from "../adapters/ebay/ebay-recovery-effects";
 export interface SyncFilter {
   productIds?: number[];

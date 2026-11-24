@@ -3,12 +3,12 @@ import { describe, expect, it } from "vitest";
 import type {
   ChannelFulfillmentCommand,
   ChannelFulfillmentCommandItem,
-} from "../../channel-fulfillment-command";
+} from "../../application/channel-fulfillment-command";
 import {
   buildSupplementalChannelFulfillmentScope,
   reconcileChannelFulfillmentCommandSet,
   type ExistingChannelFulfillmentCommandSnapshot,
-} from "../../channel-fulfillment-command-reconciliation";
+} from "../../application/channel-fulfillment-command-reconciliation";
 
 const firstItem: ChannelFulfillmentCommandItem = {
   physicalShipmentItemId: 101,

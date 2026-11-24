@@ -8,7 +8,7 @@ import {
   parseWmsOrderBucket,
   type WmsOrderListOrder,
   isWmsOrderOnHold,
-} from "../../wms-order-listing";
+} from "../../application/wms-order-listing";
 
 function order(overrides: Partial<WmsOrderListOrder>): WmsOrderListOrder {
   return {

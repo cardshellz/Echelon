@@ -14,6 +14,7 @@ import {
 import { buildCustomerReturnOrderNumberAliases, CustomerReturnOrderReferenceError } from "../domain/customer-return-order-reference";
 import { inspectionQueries as queries } from "./customer-return-local-inspection.queries";
 import { deriveLocalInspectionIssues } from "./customer-return-local-inspection.issues";
+import { logger } from "../../../platform/observability/logger";
 
 const positiveId = z.number().int().positive().safe();
 const approvedDomainsSchema = z.array(z.string().trim().toLowerCase()
@@ -163,8 +164,8 @@ export class PostgresCustomerReturnLocalInspectionReader implements CustomerRetu
       const event = { operation, code: error.code };
       try {
         if (this.options.reportFailure) this.options.reportFailure(event);
-        else console.error(JSON.stringify(event));
-      } catch { console.error(JSON.stringify({ operation, code: "RETURN_INSPECTION_REPORTING_FAILED" })); }
+        else logger.error("returns.customer_return_local_inspection_reader", { error: JSON.stringify(event) });
+      } catch { logger.error("RETURN_INSPECTION_REPORTING_FAILED", { operation, code: "RETURN_INSPECTION_REPORTING_FAILED" }); }
       throw error;
     }
   }

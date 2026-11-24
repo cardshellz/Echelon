@@ -15,15 +15,16 @@ vi.mock("../../../../routes/middleware", () => ({
   },
 }));
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
-vi.mock("../../ap-ledger.service", () => ({}));
+vi.mock("../../application/ap-ledger.service", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
-vi.mock("../../shipment-cost-update.commands", async importOriginal => ({
-  ...await importOriginal<typeof import("../../shipment-cost-update.commands")>(),
+vi.mock("../../application/shipment-cost-update.commands", async importOriginal => ({
+  ...await importOriginal<typeof import("../../application/shipment-cost-update.commands")>(),
   createShipmentCostUpdateCommands: () => ({ execute: mocks.execute }),
 }));
-import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
-import { ShipmentTrackingError } from "../../shipment-tracking.service";
+import { registerInboundShipmentRoutes } from "../../interfaces/http/inbound-shipment.routes";
+import { ShipmentTrackingError } from "../../application/shipment-tracking.service";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 describe("shipment cost workflow HTTP boundaries", () => {
   let server: http.Server;
@@ -84,7 +85,7 @@ describe("shipment cost workflow HTTP boundaries", () => {
     expect(mocks.cancel).toHaveBeenCalledWith(42, "cancelling-operator", "Supplier withdrew shipment");
   });
   it("returns a recoverable unavailable outcome without leaking source failures", async () => {
-    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logged = spyLoggerJson("error");
     mocks.cancel.mockRejectedValue(new Error("private database credential"));
     const response = await cancel();
     expect(response.status).toBe(503);
@@ -143,7 +144,7 @@ describe("shipment cost workflow HTTP boundaries", () => {
     expect(await response.json()).toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS" });
   });
   it("logs failures without leaking database details through either endpoint", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     mocks.getCostReview.mockRejectedValue(new Error("private SELECT evidence"));
     mocks.execute.mockRejectedValue(new Error("private UPDATE evidence"));
     for (const response of [await read(), await update()]) {

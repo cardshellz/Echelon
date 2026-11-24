@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const DASHBOARD_SRC = readFileSync(
-  resolve(__dirname, "../../enterprise-dashboard.service.ts"),
+  resolve(__dirname, "../../application/enterprise-dashboard.service.ts"),
   "utf8",
 );
 const DB_SRC = readFileSync(resolve(__dirname, "../../../../db.ts"), "utf8");

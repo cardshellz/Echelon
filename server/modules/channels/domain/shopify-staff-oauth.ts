@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { ShopifyStaffOAuthError, type ShopifyStaffOAuthConfig } from "../shopify-staff-oauth.types";
+import { ShopifyStaffOAuthError, type ShopifyStaffOAuthConfig } from "./shopify-staff-oauth.types";
 
 export const AUTHORIZATION_WINDOW_MS = 10 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_MS = 120 * 1000;

@@ -4,6 +4,7 @@ import type { DropshipOpsSurfaceService } from "../../application/dropship-ops-s
 import { DropshipError } from "../../domain/errors";
 import { createDropshipOpsSurfaceServiceFromEnv } from "../../infrastructure/dropship-ops-surface.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipOpsSurfaceRoutes(
   app: Express,
@@ -115,7 +116,7 @@ function sendDropshipOpsSurfaceError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[DropshipOpsSurfaceRoutes] Unexpected ops surface error:", error);
+  logger.error("dropship.ops_surface_routes", { message: "[DropshipOpsSurfaceRoutes] Unexpected ops surface error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_OPS_SURFACE_INTERNAL_ERROR",

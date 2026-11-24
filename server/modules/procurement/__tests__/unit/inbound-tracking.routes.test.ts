@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Express, Request, Response } from "express";
-import type { InboundTrackingService } from "../../inbound-tracking.service";
-import { InboundTrackingError } from "../../inbound-tracking.domain";
-vi.mock("../../inbound-tracking.runtime",()=>({getInboundTrackingService:vi.fn()}));
+import type { InboundTrackingService } from "../../application/inbound-tracking.service";
+import { InboundTrackingError } from "../../domain/inbound-tracking.domain";
+vi.mock("../../application/inbound-tracking.runtime",()=>({getInboundTrackingService:vi.fn()}));
 vi.mock("../../../../routes/middleware",()=>({requirePermission:vi.fn((resource:string,action:string)=>({resource,action}))}));
-import { registerInboundTrackingRoutes } from "../../inbound-tracking.routes";
+import { registerInboundTrackingRoutes } from "../../interfaces/http/inbound-tracking.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 function setup(){
   const definitions=new Map<string,unknown[]>();
   const app={get:(path:string,...handlers:unknown[])=>definitions.set(`GET ${path}`,handlers),put:(path:string,...handlers:unknown[])=>definitions.set(`PUT ${path}`,handlers),post:(path:string,...handlers:unknown[])=>definitions.set(`POST ${path}`,handlers)};
@@ -34,7 +35,7 @@ describe("inbound tracking HTTP boundaries",()=>{
   it("returns classified conflicts and hides unexpected error content",async()=>{
     const {run,response,service}=setup(); service.read.mockRejectedValue(new InboundTrackingError("TRACKING_SHIPMENT_NOT_FOUND","Shipment not found.",404));
     await run("GET /api/inbound-shipments/:id/tracking",{params:{id:"7"}}); expect(response.status).toHaveBeenCalledWith(404);
-    const log=vi.spyOn(console,"error").mockImplementation(()=>{});
+    const log=spyLoggerJson("error");
     try{service.read.mockRejectedValue(new Error("credential-secret"));await run("GET /api/inbound-shipments/:id/tracking",{params:{id:"7"}});expect(response.status).toHaveBeenCalledWith(500);expect(JSON.stringify(log.mock.calls)).not.toContain("credential-secret");expect(JSON.stringify(response.json.mock.calls)).not.toContain("credential-secret");}finally{log.mockRestore();}
   });
 });

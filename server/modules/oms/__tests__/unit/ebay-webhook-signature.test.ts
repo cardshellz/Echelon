@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { EbayApiRequestError } from "../../../channels/adapters/ebay/ebay-api-error";
-import { createEbayOrderWebhookHandler } from "../../ebay-order-ingestion";
-import { createEbayWebhookSignatureVerifier } from "../../ebay-webhook-signature";
+import { createEbayOrderWebhookHandler } from "../../application/ebay-order-ingestion";
+import { createEbayWebhookSignatureVerifier } from "../../application/ebay-webhook-signature";
 
 function generateEcdsaKeyPair() {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", {

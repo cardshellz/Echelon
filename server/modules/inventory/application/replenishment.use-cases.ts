@@ -28,7 +28,7 @@ import {
   cycleCounts,
   cycleCountItems,
 } from "@shared/schema";
-import { calculateRemainingCapacity, findOverflowBin } from "../inventory-utils";
+import { calculateRemainingCapacity, findOverflowBin } from "../domain/inventory-utils";
 import { notify } from "../../notifications/in-app-notifications.api";
 import { getSettingsForWarehouse as sharedGetSettingsForWarehouse } from "../../warehouse/settings.api";
 import type {
@@ -691,7 +691,7 @@ export class ReplenishmentUseCases {
   ): Promise<{ task: ReplenTask; moved: number }> {
     const result = await this.executeTask(task.id, userId ?? "system:auto-replen");
     const finalTask = await this.getTaskById(task.id);
-    console.log(`${tag} task ${task.id} executed, moved ${result.moved} units`);
+    logger.info("inventory.replenishment_use_cases", { message: `${tag} task ${task.id} executed, moved ${result.moved} units` });
     return { task: finalTask ?? task, moved: result.moved };
   }
 
@@ -1210,7 +1210,7 @@ export class ReplenishmentUseCases {
         );
       } catch (err: any) {
         if (operationKey) throw err;
-        console.warn(`[Replen] checkReplenForLocation: variant=${productVariantId} loc=${warehouseLocationId} error:`, err?.message);
+        logger.warn("inventory.replenishment_use_cases", { message: `[Replen] checkReplenForLocation: variant=${productVariantId} loc=${warehouseLocationId} error:`, error: err?.message });
       }
     }
   }
@@ -1292,7 +1292,7 @@ export class ReplenishmentUseCases {
       try {
         await this.checkReplenForLocation(task.toLocationId);
       } catch (err: any) {
-        console.warn(`[Replen] Failed to re-evaluate task target loc ${task.toLocationId}:`, err?.message);
+        logger.warn("inventory.replenishment_use_cases", { message: `[Replen] Failed to re-evaluate task target loc ${task.toLocationId}:`, error: err?.message });
       }
     }
 
@@ -1308,7 +1308,7 @@ export class ReplenishmentUseCases {
       try {
         await this.checkReplenForLocation(locId as number);
       } catch (err: any) {
-         console.warn(`[Replen] Failed to re-evaluate product pick loc ${locId}:`, err?.message);
+         logger.warn("inventory.replenishment_use_cases", { message: `[Replen] Failed to re-evaluate product pick loc ${locId}:`, error: err?.message });
       }
     }
   }
@@ -2276,12 +2276,12 @@ export class ReplenishmentUseCases {
     });
 
     if (eval_.status === "skip") {
-      console.log(`${_tag} EXIT: ${eval_.skipReason}`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} EXIT: ${eval_.skipReason}` });
       await this.rememberTriggeredTask(productVariantId, warehouseLocationId, null, context);
       return null;
     }
     if (eval_.status === "dedup") {
-      console.log(`${_tag} EXIT: dedup — existing task #${eval_.existingTaskId}`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} EXIT: dedup — existing task #${eval_.existingTaskId}` });
       await this.rememberTriggeredTask(productVariantId, warehouseLocationId, eval_.existingTask, context);
       if (
         eval_.existingTask.executionMode === "inline" &&
@@ -2297,7 +2297,7 @@ export class ReplenishmentUseCases {
     const { replenMethod, priority, sourceLocationType, autoReplen, sourcePriority } = params;
 
     if (eval_.status === "needed_stockout") {
-      console.log(`${_tag} no source location found — trying cascade`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} no source location found — trying cascade` });
       if (resolvedSourceVariantId) {
         const cascadeResult = await this.tryCascadeReplen({
           sourceVariantId: resolvedSourceVariantId,
@@ -2328,7 +2328,7 @@ export class ReplenishmentUseCases {
 
       if (context?.blocksShipment !== true) {
         notify("stockout", notification).catch(() => {});
-        console.log(`${_tag} EXIT: no source stock; routed to review notification without creating a fake replen task`);
+        logger.info("inventory.replenishment_use_cases", { message: `${_tag} EXIT: no source stock; routed to review notification without creating a fake replen task` });
         await this.rememberTriggeredTask(productVariantId, warehouseLocationId, null, context);
         return null;
       }
@@ -2357,7 +2357,7 @@ export class ReplenishmentUseCases {
             context,
           ),
         } satisfies InsertReplenTask, eval_.level.variantQty, context);
-      console.log(`${_tag} EXIT: created BLOCKED task — no source stock in ${sourceLocationType} locations`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} EXIT: created BLOCKED task — no source stock in ${sourceLocationType} locations` });
       notify("stockout", {
         ...notification,
         data: { ...notification.data, taskId: blockedTask.id },
@@ -2367,7 +2367,7 @@ export class ReplenishmentUseCases {
 
     const { sourceLocation, sourceVariant, qtySourceUnits, qtyTargetUnits, executionMode } = eval_;
 
-    console.log(`${_tag} CREATING TASK: from=${sourceLocation!.code}(id=${sourceLocation!.id}) to=${location.code} qty=${qtySourceUnits}x${sourceVariant.unitsPerVariant}=${qtyTargetUnits} method=${replenMethod}`);
+    logger.info("inventory.replenishment_use_cases", { message: `${_tag} CREATING TASK: from=${sourceLocation!.code}(id=${sourceLocation!.id}) to=${location.code} qty=${qtySourceUnits}x${sourceVariant.unitsPerVariant}=${qtyTargetUnits} method=${replenMethod}` });
     const task = await this.insertTriggeredTask({ operationKey: context?.operationKey ?? null,
         replenRuleId: rule?.id ?? null,
         fromLocationId: sourceLocation!.id,
@@ -2403,7 +2403,7 @@ export class ReplenishmentUseCases {
     }
 
     if (sourceLocation!.isPickable !== 1) {
-      console.log(`[Replen] Task ${task.id} source ${sourceLocation!.code} is non-pickable — queued for warehouse associate, not returned to picker`);
+      logger.info("inventory.replenishment_use_cases", { message: `[Replen] Task ${task.id} source ${sourceLocation!.code} is non-pickable — queued for warehouse associate, not returned to picker` });
       return null;
     }
 
@@ -2617,7 +2617,7 @@ export class ReplenishmentUseCases {
       const currentTask = EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
         ? await this.reResolveTaskSourceBeforeExecute(existingTask, userId)
         : existingTask;
-      console.log(`${_tag} reusing active task ${currentTask.id} status=${currentTask.status}`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} reusing active task ${currentTask.id} status=${currentTask.status}` });
       if (
         currentTask.executionMode === "inline" &&
         supportsInlineReplenishment(currentTask.replenMethod) &&
@@ -2643,7 +2643,7 @@ export class ReplenishmentUseCases {
       return blockedTask ? { task: blockedTask, moved: 0 } : null;
     }
     if (!guidance.needed || guidance.stockout || !guidance.sourceLocationId) {
-      console.log(`${_tag} guidance says no replen needed or stockout — skipping`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} guidance says no replen needed or stockout — skipping` });
       await this.rememberTriggeredTask(pickVariantId, toLocationId, null, context);
       return null;
     }
@@ -2695,10 +2695,10 @@ export class ReplenishmentUseCases {
 
     let moved = 0;
     if (task.executionMode === "inline") {
-      console.log(`${_tag} created task ${task.id}, executing immediately...`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} created task ${task.id}, executing immediately...` });
       return this.executeInlineTaskAutomatically(task as ReplenTask, userId, _tag);
     } else {
-      console.log(`${_tag} created task ${task.id}, executionMode is queue. Leaving as pending.`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} created task ${task.id}, executionMode is queue. Leaving as pending.` });
     }
 
     // Re-read task to get final state
@@ -2726,7 +2726,7 @@ export class ReplenishmentUseCases {
       const currentTask = EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
         ? await this.reResolveTaskSourceBeforeExecute(existingTask, userId)
         : existingTask;
-      console.log(`${_tag} reusing active task ${currentTask.id} status=${currentTask.status}`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} reusing active task ${currentTask.id} status=${currentTask.status}` });
       return { task: currentTask, moved: 0 };
     }
 
@@ -2734,7 +2734,7 @@ export class ReplenishmentUseCases {
       currentQtyOverride: 0,
     });
     if (!guidance.needed || guidance.stockout || !guidance.sourceLocationId) {
-      console.log(`${_tag} no queueable source found`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} no queueable source found` });
       await this.rememberTriggeredTask(pickVariantId, toLocationId, null, context);
       return null;
     }
@@ -2745,7 +2745,7 @@ export class ReplenishmentUseCases {
       .where(eq(warehouseLocations.id, guidance.sourceLocationId))
       .limit(1);
     if (!sourceLocation || sourceLocation.isPickable === 1) {
-      console.log(`${_tag} source is pickable; inline/source-empty flow owns this`);
+      logger.info("inventory.replenishment_use_cases", { message: `${_tag} source is pickable; inline/source-empty flow owns this` });
       return null;
     }
 
@@ -2790,7 +2790,7 @@ export class ReplenishmentUseCases {
       ),
     } satisfies InsertReplenTask, guidance.observedVariantQty!, context);
 
-    console.log(`${_tag} created queued task ${task.id} from short-pick report`);
+    logger.info("inventory.replenishment_use_cases", { message: `${_tag} created queued task ${task.id} from short-pick report` });
     return { task: task as ReplenTask, moved: 0, guidance };
   }
 
@@ -3533,7 +3533,7 @@ export class ReplenishmentUseCases {
       try {
         await this.executeTask(upstreamTask.id, "system:auto-replen");
       } catch (autoErr: any) {
-        console.warn(`[Replen] Cascade auto-execute failed for task ${upstreamTask.id}:`, autoErr?.message);
+        logger.warn("inventory.replenishment_use_cases", { message: `[Replen] Cascade auto-execute failed for task ${upstreamTask.id}:`, detail: autoErr?.message });
       }
     }
 

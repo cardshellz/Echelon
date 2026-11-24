@@ -12,13 +12,13 @@
  */
 
 import { centsToDollarString } from "@shared/utils/money";
-import { prepareChannelPublicationWeight } from "../../../marketplace-listings/domain/channel-package-weight";
+import { prepareChannelPublicationWeight } from "../../../marketplace-listings/channel-package-weight.api";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
-import type { ChannelPackagePlan } from "../../../marketplace-listings/domain/channel-package";
+import type { ChannelPackagePlan } from "../../../marketplace-listings/channel-package.api";
 import type { EbayPackageSource, EbayPackageMaintenanceProof } from "./ebay-listing-package";
 import type { EbayPreparedPackageType } from "./ebay-package-classification";
-import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
+import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../domain/ebay-listing-photos.domain";
 
 import type {
   EbayInventoryItem,
@@ -30,7 +30,7 @@ import type {
 import type {
   ChannelListingPayload,
   ChannelVariantPayload,
-} from "../../channel-adapter.interface";
+} from "../../domain/channel-adapter.interface";
 import {
   resolveEbayCategoryMapping,
   buildItemSpecifics,

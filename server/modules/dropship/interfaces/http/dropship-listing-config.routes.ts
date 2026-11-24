@@ -4,7 +4,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipListingConfigService } from "../../application/dropship-listing-config-service";
 import { replaceDropshipStoreListingConfigRequestSchema } from "../../application/dropship-listing-config-dtos";
 import { DropshipError } from "../../domain/errors";
-import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work.api";
 import { createDropshipListingConfigServiceFromEnv } from "../../infrastructure/dropship-listing-config.factory";
 import { logDropshipRouteFailure } from "./dropship-route-failure-log";
 

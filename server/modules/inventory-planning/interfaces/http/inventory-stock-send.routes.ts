@@ -4,6 +4,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { InventoryStockSendError, InventoryStockSendService } from "../../application/inventory-stock-send.service";
 import { PostgresInventoryStockSendStore } from "../../infrastructure/inventory-stock-send.repository";
 import { InventoryAvailabilityRuntimePublicationError } from "../../application/inventory-availability-runtime-publication.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const root = "/api/inventory-planning/admin/stock-send";
 export function registerInventoryStockSendRoutes(app: Express,
@@ -45,6 +46,6 @@ function sendError(res: Response, error: unknown): void {
     res.status(409).json({ error: { code: error.code, message: error.message, definitiveRejected: true } }); return;
   }
   const code = error && typeof error === "object" && "code" in error ? String(error.code) : "UNKNOWN";
-  console.error(JSON.stringify({ event: "inventory_stock_send_failed", code: /^[A-Z0-9_]{1,100}$/.test(code) ? code : "UNKNOWN" }));
+  logger.error("inventory_stock_send_failed", { event: "inventory_stock_send_failed", code: /^[A-Z0-9_]{1,100}$/.test(code) ? code : "UNKNOWN" });
   res.status(503).json({ error: { code: "STOCK_SEND_UNCONFIRMED", message: "The stock-send result is not confirmed. Retry the same send to recover its result.", definitiveRejected: false } });
 }

@@ -14,7 +14,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
    */
   it("pickFromLots returns existing COGS rows on retry (no duplicate insert)", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
 
     const existingCogs = [
       { inventoryLotId: 10, qty: 3, unitCostCents: 500 },
@@ -70,7 +70,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
    */
   it("pickFromLots inserts COGS on first pick (no prior rows)", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
 
     const lots = [
       {
@@ -145,7 +145,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
     "rejects invalid injected pick timestamp %s before allocating or changing inventory",
     async (invalidInstant) => {
       process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-      const { InventoryLotService } = await import("../../lots.service");
+      const { InventoryLotService } = await import("../../application/lots.service");
       const db = {
         select: vi.fn(() => ({ from: vi.fn().mockReturnThis(), where: vi.fn().mockResolvedValue([]) })),
         execute: vi.fn(), insert: vi.fn(), update: vi.fn(), delete: vi.fn(), transaction: vi.fn(),
@@ -164,7 +164,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
   it("appends only the next pick delta when prior COGS matches WMS progress", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const insertedCosts: any[] = [];
     let selectCallCount = 0;
     const db = {
@@ -226,7 +226,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
   it("rejects a new pick delta when existing COGS does not match WMS progress", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const db = {
       select: vi.fn(() => ({
         from: vi.fn().mockReturnThis(),
@@ -262,7 +262,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
   it("rejects an incremental pick that would split legacy WMS custody across locations", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     let selectCallCount = 0;
     const db = {
       select: vi.fn(() => {
@@ -319,7 +319,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
   it("does not subtract already-picked units from remaining lot on-hand", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
 
     const lots = [
       {
@@ -369,7 +369,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
   it("rejects a COGS mill total that exceeds the safe integer range before inventory moves", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     let selectCallCount = 0;
     const db = {
       select: vi.fn(() => {
@@ -418,7 +418,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
   it("keeps replacement picks out of stock reserved for customer orders", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
 
     const lots = [
       {
@@ -459,7 +459,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
    */
   it("unpickFromLots deletes COGS rows and restores lot qty", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
 
     const cogsRows = [
       { id: 1, orderId: 100, orderItemId: 200, inventoryLotId: 10,
@@ -509,7 +509,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
   it("partially unpicks the newest allocation without deleting remaining COGS", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const set = vi.fn().mockReturnThis();
     const where = vi.fn().mockReturnThis();
     const returning = vi.fn(async () => [{ id: 2 }]);
@@ -546,7 +546,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
   it("rejects an unpick shortfall before changing lots or COGS", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const db = {
       select: vi.fn(() => ({
         from: vi.fn().mockReturnThis(),

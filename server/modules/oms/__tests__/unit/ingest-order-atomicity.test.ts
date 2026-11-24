@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const OMS_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../oms.service.ts"),
+  resolve(__dirname, "../../application/oms.service.ts"),
   "utf8",
 );
 

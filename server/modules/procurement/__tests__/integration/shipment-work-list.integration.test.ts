@@ -4,7 +4,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { inboundShipments, inboundShipmentLines, purchaseOrderLines, purchaseOrders } from "@shared/schema";
 import { getTableConfig } from "drizzle-orm/pg-core";
-import { readShipmentList, countShipmentList } from "../../shipment-work-list.repository";
+import { readShipmentList, countShipmentList } from "../../infrastructure/shipment-work-list.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

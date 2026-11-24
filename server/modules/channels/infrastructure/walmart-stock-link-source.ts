@@ -4,9 +4,9 @@ import type { StockSelectionQueryClient } from "@shared/types/stock-publication-
 import type {
   StockLinkCandidatePage, StockLinkCarriedSkuRow, StockLinkEnrollmentListing, StockLinkEnrollmentSource, StockLinkEnrollmentWrite,
   StockLinkEnrollmentWriteResult, StockLinkEnrollmentWriter, StockLinkRecentChange,
-} from "../../inventory-planning/application/stock-link.ports";
-import type { VerifiedListingStockService } from "../../inventory-planning/application/verified-listing-stock.service";
-import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/domain/stock-link-errors";
+} from "../../inventory-planning/stock-link.ports.api";
+import type { VerifiedListingStockService } from "../../inventory-planning/verified-listing-stock.service.api";
+import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/stock-link-errors.api";
 import { walmartListingAccount, type WalmartChannelService } from "../adapters/walmart/walmart-channel.service";
 
 /**

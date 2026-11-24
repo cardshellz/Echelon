@@ -1,7 +1,7 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { inspectCatalogImage } from "../../catalog-image-inspection";
-import { catalogRenditionProfile, prepareCatalogPublicationRendition } from "../../catalog-publication-rendition";
+import { inspectCatalogImage } from "../../domain/catalog-image-inspection";
+import { catalogRenditionProfile, prepareCatalogPublicationRendition } from "../../domain/catalog-publication-rendition";
 
 describe("Catalog publication renditions", () => {
   it.each([

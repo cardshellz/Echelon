@@ -12,8 +12,8 @@ import { AssemblyWorkService } from "../../work/application/assembly-work.servic
 import { AssemblyPackingService } from "../../work/application/assembly-packing.service";
 import { AssemblyPackingRepository } from "../../work/infrastructure/assembly-packing.repository";
 import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
-import { recordAssemblyOutputPickLocation } from "../../../wms/assembly-output-pick-command";
-import { readOrderPackingSources } from "../../../wms/packing-source-reader";
+import { recordAssemblyOutputPickLocation } from "../../../wms/application/assembly-output-pick-command";
+import { readOrderPackingSources } from "../../../wms/infrastructure/packing-source-reader";
 import { config, start, TIME } from "../assembly-work.fixture";
 
 loadEnv({ path: resolve(process.cwd(), ".env.test") });

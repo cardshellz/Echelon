@@ -20,7 +20,7 @@ import { installWarehouseOperationMigration } from "../../../orders/__tests__/fi
 import { InventoryUseCases } from "../../application/inventory.use-cases";
 import { ReplenishmentUseCases } from "../../application/replenishment.use-cases";
 import { createInventoryMethods } from "../../infrastructure/inventory.repository";
-import { createInventoryLotService } from "../../lots.service";
+import { createInventoryLotService } from "../../application/lots.service";
 import { PostgresTransformationExecutionAuthorityRepository } from "../../../inventory-planning/infrastructure/transformation-execution-authority.repository";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));

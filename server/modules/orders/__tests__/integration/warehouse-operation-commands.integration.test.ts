@@ -26,14 +26,14 @@ import {
   deliverPickingFollowup,
   executePickingCommand,
   freezeCanonicalPickingRequest,
-} from "../../../wms/picking-command.repository";
+} from "../../../wms/infrastructure/picking-command.repository";
 import { creditTransferToReplenishment } from "../../../inventory/infrastructure/replenishment-transfer-credit.repository";
 import { changeReplenishmentTask } from "../../../inventory/application/replenishment-task-command";
 import { reportReplenishmentException } from "../../../inventory/application/report-replenishment-exception";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 import { ReplenishmentUseCases } from "../../../inventory/application/replenishment.use-cases";
-import { reconcileWmsPickingProgress } from "../../../wms/picking-progress.repository";
-import { createPickingCommandLog } from "../../../wms/picking-command-log.repository";
+import { reconcileWmsPickingProgress } from "../../../wms/infrastructure/picking-progress.repository";
+import { createPickingCommandLog } from "../../../wms/infrastructure/picking-command-log.repository";
 import { legacyTransformationExecutionAuthority } from "../../../inventory/application/transformation-execution-authority.port";
 import { createManualReplenishmentTask } from "../../../inventory/application/create-manual-replenishment-task";
 

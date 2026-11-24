@@ -91,16 +91,35 @@ DO $$ DECLARE r record; BEGIN
   END LOOP;
 END $$;
 
--- ── 2b. shellz-club's public tables (explicit allowlist) ───────────
--- Excluded on purpose: _migrations (Echelon's), adjustment_reasons (shadow stub).
+-- ── 2b. shellz-club's public tables (reconciled against 33 baseline public.* tables) ──
+-- Complete classification of all 33 `public.*` tables in `migrations/baseline/schema.sql`:
+--
+--   A. Transfer to `shellz_club` (11 live `public.*` tables below):
+--      `__cardshellz_manual_migrations`, `__drizzle_migrations`, `app_settings`,
+--      `auto_draft_runs`, `background_jobs`, `reorder_exclusion_rules`,
+--      `shopify_collections`, `shopify_order_items`, `shopify_orders`,
+--      `shopify_products`, `shopify_variants`.
+--      (Note: 8 names from the 2026-06 draft — `blockchain_config`, `discounts`,
+--      `pricing_rules`, `purchase_order_lines`, `purchase_orders`, `vendor_products`,
+--      `vendors`, `warehouse_settings` — no longer exist in `public.*`; canonical
+--      Echelon equivalents live in `dropship.*`, `procurement.*`, and `inventory.*`.)
+--
+--   B. Keep on Echelon default credential — active Echelon `public.*` tables (6):
+--      `_migrations`, `audit_events`, `financial_command_recoveries`,
+--      `financial_command_results`, `idempotency_keys`, `scheduler_runs`.
+--
+--   C. Keep on Echelon default credential — retired pre-schema-split shadow stubs (16):
+--      `adjustment_reasons`, `auth_permissions`, `auth_role_permissions`, `auth_roles`,
+--      `catalog_assets`, `catalog_products`, `channel_pricing_rules`, `channels`,
+--      `dropship_vendor_products`, `dropship_vendors`, `inventory_items`,
+--      `order_line_costs`, `startup_inventory_anomalies`, `sync_settings`,
+--      `uom_variants`, `users`.
 DO $$ DECLARE t text; BEGIN
   FOREACH t IN ARRAY ARRAY[
     '__cardshellz_manual_migrations','__drizzle_migrations','app_settings',
-    'auto_draft_runs','background_jobs','blockchain_config','discounts',
-    'pricing_rules','purchase_order_lines','purchase_orders',
-    'reorder_exclusion_rules','shopify_collections','shopify_order_items',
-    'shopify_orders','shopify_products','shopify_variants','vendor_products',
-    'vendors','warehouse_settings'
+    'auto_draft_runs','background_jobs','reorder_exclusion_rules',
+    'shopify_collections','shopify_order_items','shopify_orders',
+    'shopify_products','shopify_variants'
   ] LOOP
     IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname='public' AND tablename=t) THEN
       EXECUTE format('ALTER TABLE public.%I OWNER TO shellz_club', t);
@@ -122,14 +141,12 @@ ALTER DEFAULT PRIVILEGES FOR ROLE shellz_club IN SCHEMA membership
 ALTER DEFAULT PRIVILEGES FOR ROLE shellz_club IN SCHEMA membership
   GRANT USAGE, SELECT ON SEQUENCES TO PUBLIC;
 
--- Echelon keeps DML on the transferred public tables (it reads/writes shopify_orders):
+-- Echelon keeps DML on the transferred public tables (reads/writes shopify_orders, shopify_variants, app_settings):
 DO $$ DECLARE t text; BEGIN
   FOREACH t IN ARRAY ARRAY[
-    'app_settings','auto_draft_runs','background_jobs','blockchain_config',
-    'discounts','pricing_rules','purchase_order_lines','purchase_orders',
-    'reorder_exclusion_rules','shopify_collections','shopify_order_items',
-    'shopify_orders','shopify_products','shopify_variants','vendor_products',
-    'vendors','warehouse_settings'
+    'app_settings','auto_draft_runs','background_jobs','reorder_exclusion_rules',
+    'shopify_collections','shopify_order_items','shopify_orders',
+    'shopify_products','shopify_variants'
   ] LOOP
     IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname='public' AND tablename=t) THEN
       EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO %I', t, current_user);
@@ -137,11 +154,13 @@ DO $$ DECLARE t text; BEGIN
   END LOOP;
 END $$;
 
--- shellz on Echelon's channels schema: read + future FKs.
+-- shellz on Echelon's channels + identity read seams: read + future FKs.
 GRANT USAGE ON SCHEMA channels TO shellz_club;
 GRANT SELECT ON ALL TABLES IN SCHEMA channels TO shellz_club;
 GRANT REFERENCES ON channels.channels TO shellz_club;
 ALTER DEFAULT PRIVILEGES IN SCHEMA channels GRANT SELECT ON TABLES TO shellz_club;
+GRANT USAGE ON SCHEMA identity TO shellz_club;
+GRANT SELECT ON identity.users, public.users TO shellz_club;
 
 -- ── 2d. public schema usability + role hygiene ─────────────────────
 GRANT USAGE, CREATE ON SCHEMA public TO shellz_club;

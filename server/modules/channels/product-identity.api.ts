@@ -9,4 +9,4 @@
 export {
   upsertChannelProductIdentity,
   removeChannelProductIdentities,
-} from "./channel-product-identity.repository";
+} from "./infrastructure/channel-product-identity.repository";

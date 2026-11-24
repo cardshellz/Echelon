@@ -1,10 +1,14 @@
 import pg from "pg";
 import { setTimeout as delay } from "node:timers/promises";
-import { createDatabasePoolConfig } from "../database-pool-config";
+import {
+  createDatabasePoolConfig,
+  resolvePostgresPoolSslConfig,
+} from "../database-pool-config";
 import { PostgresInventoryCutoverOpeningRepository } from "../modules/inventory-planning/infrastructure/inventory-cutover-opening.repository";
 import { lockOpeningCaptureWorker, PostgresInventoryOpeningCaptureRepository } from "../modules/inventory-planning/infrastructure/inventory-opening-capture.repository";
 import { runOpeningCapture } from "../modules/inventory-planning/application/inventory-opening-capture.worker";
 import { observeInventoryCapture } from "../modules/inventory-planning/infrastructure/inventory-cutover-capture-stage";
+import { logger } from "../platform/observability/logger";
 
 const POLL_MS = 2_000;
 const MAX_CAPTURE_MS = 10 * 60_000;
@@ -12,9 +16,9 @@ const CLEANUP_INTERVAL_MS = 60 * 60_000;
 const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
 if (!connectionString) throw new Error("Inventory capture worker requires a database connection.");
 const pool = new pg.Pool(createDatabasePoolConfig({ connectionString, max: 3,
-  ssl: process.env.EXTERNAL_DATABASE_URL || connectionString.includes("amazonaws.com") ? { rejectUnauthorized: false } : undefined,
+  ssl: resolvePostgresPoolSslConfig(connectionString),
   connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000, query_timeout: 65_000 }));
-const log = (entry: Record<string, unknown>) => console.log(JSON.stringify(entry));
+const log = (entry: Record<string, unknown>) => logger.info("jobs.run_inventory_opening_capture", { detail: JSON.stringify(entry) });
 const fatal = () => { log({ event: "inventory_opening_capture_worker_stopped", code: "WORKER_INTERRUPTED" }); process.exit(1); };
 // Disconnect closes the snapshot/lock; replacement workers fail interrupted
 // artifacts rather than mixing old pages with a newly captured snapshot.

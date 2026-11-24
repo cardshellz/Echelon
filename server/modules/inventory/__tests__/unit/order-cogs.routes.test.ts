@@ -18,7 +18,7 @@ vi.mock("../../../../routes/middleware", () => {
   return { requirePermission: () => pass, requireAuth: pass, requireAssignedSystemRole: () => pass, upload: { single: () => pass } };
 });
 
-import { registerInventoryRoutes } from "../../inventory.routes";
+import { registerInventoryRoutes } from "../../interfaces/http/inventory.routes";
 
 describe("order COGS HTTP read contract", () => {
   const cogs = { getOrderCOGS: vi.fn(), getOrderCOGSByNumber: vi.fn() };

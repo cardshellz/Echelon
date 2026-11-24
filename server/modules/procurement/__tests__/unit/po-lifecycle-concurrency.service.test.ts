@@ -12,7 +12,7 @@ import {
   vendorProducts,
   vendors,
 } from "@shared/schema";
-import { createPurchasingService } from "../../purchasing.service";
+import { createPurchasingService } from "../../application/purchasing.service";
 
 function baseStorage(overrides: Record<string, unknown> = {}) {
   return {

@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SRC = readFileSync(resolve(__dirname, "../../wms-sync.service.ts"), "utf-8");
+const SRC = readFileSync(resolve(__dirname, "../../application/wms-sync.service.ts"), "utf-8");
 
 describe("wms-sync.service :: Dropship warehouse authority", () => {
   it("consults the pinned Dropship warehouse before the fulfillment router", () => {

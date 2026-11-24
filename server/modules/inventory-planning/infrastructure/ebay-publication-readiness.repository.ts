@@ -11,7 +11,7 @@ import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutov
 import { PublicationMappingPreparationStore, readTargets } from "./publication-mapping-preparation.repository";
 import { applyExactEbaySkuMappingsInsideTransaction } from "./exact-ebay-sku-mapping.apply";
 import { captureEbayPublicationReadiness, readinessDigest } from "./ebay-publication-readiness.read";
-import { lockEbayListingPreparationScope, validateEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope";
+import { lockEbayListingPreparationScope, validateEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope.api";
 import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 type ConnectionPool = Pick<Pool, "connect">;

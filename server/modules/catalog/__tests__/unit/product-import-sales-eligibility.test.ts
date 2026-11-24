@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../shopify-import-connection-guard", () => ({ filterConnectionOwnedShopifyProducts: async (products: unknown) => products }));
+vi.mock("../../domain/shopify-import-connection-guard", () => ({ filterConnectionOwnedShopifyProducts: async (products: unknown) => products }));
 
 const mocks = vi.hoisted(() => ({
   getProductVariantBySku: vi.fn(),
@@ -36,7 +36,7 @@ vi.mock("../../../../storage/base", () => ({
   and: vi.fn(),
 }));
 
-import { createProductImportService } from "../../product-import.service";
+import { createProductImportService } from "../../application/product-import.service";
 
 describe("Shopify product import sales eligibility", () => {
   beforeEach(() => {

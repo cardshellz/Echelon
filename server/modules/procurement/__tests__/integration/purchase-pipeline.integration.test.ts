@@ -4,10 +4,10 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPurchasePipelineRepository, type PipelineDatabase } from "../../purchase-pipeline.repository";
-import { projectPurchasePipeline } from "../../purchase-pipeline.service";
-import { createSupplierProgressService } from "../../supplier-progress.service";
-import { recordCostRevision } from "../../cost-source-revision.repository";
+import { createPurchasePipelineRepository, type PipelineDatabase } from "../../infrastructure/purchase-pipeline.repository";
+import { projectPurchasePipeline } from "../../application/purchase-pipeline.service";
+import { createSupplierProgressService } from "../../application/supplier-progress.service";
+import { recordCostRevision } from "../../infrastructure/cost-source-revision.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

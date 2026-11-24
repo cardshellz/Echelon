@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyCommerceOrigin } from "../../archon-commerce-origin";
+import { classifyCommerceOrigin } from "../../application/archon-commerce-origin";
 describe("commerce origin", () => {
   it("preserves Shopify connector identity while classifying TikTok in direct and bridged payloads", () => {
     for (const raw of [

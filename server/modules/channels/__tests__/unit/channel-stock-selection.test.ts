@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { stockPublicationSelectionSchema } from "@shared/types/stock-publication-selection";
-import { resolveChannelStockSelection, type ChannelStockSelectionFacts } from "../../channel-stock-selection.domain";
+import { resolveChannelStockSelection, type ChannelStockSelectionFacts } from "../../domain/channel-stock-selection.domain";
 
 function facts(): ChannelStockSelectionFacts {
   return { channelId: 1, channelConnectionId: 2, provider: "ebay", productId: 10, productVariantIds: [101],

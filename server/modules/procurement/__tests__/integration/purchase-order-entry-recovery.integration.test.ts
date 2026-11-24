@@ -21,11 +21,11 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target, property) {
   const value = Reflect.get(connection.database, property);
   return typeof value === "function" ? value.bind(connection.database) : value;
 } }) }));
-import { procurementMethods } from "../../procurement.storage";
-import { productMethods } from "../../../catalog/catalog.storage";
-import { createPurchasingService } from "../../purchasing.service";
-import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
-import { PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL } from "../../purchase-order-entry.commands";
+import { procurementMethods } from "../../infrastructure/procurement.storage";
+import { productMethods } from "../../../catalog/infrastructure/catalog.storage";
+import { createPurchasingService } from "../../application/purchasing.service";
+import { registerPurchaseOrderRoutes } from "../../interfaces/http/purchase-order.routes";
+import { PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL } from "../../application/purchase-order-entry.commands";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

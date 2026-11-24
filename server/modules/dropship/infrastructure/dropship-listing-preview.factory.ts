@@ -1,8 +1,8 @@
 import { db, pool } from "../../../db";
-import { PgCatalogVariantMediaReader } from "../../catalog/catalog-media.reader";
-import { createCatalogPublicImageUrl } from "../../catalog/catalog-public-image";
-import { PgCatalogVariantPublicationPhotoReader } from "../../catalog/catalog-publication-images.reader";
-import { createAllocationEngine } from "../../channels/allocation-engine.service";
+import { PgCatalogVariantMediaReader } from "../../catalog/catalog-media.reader.api";
+import { createCatalogPublicImageUrl } from "../../catalog/catalog-public-image.api";
+import { PgCatalogVariantPublicationPhotoReader } from "../../catalog/catalog-publication-images.reader.api";
+import { createAllocationEngine } from "../../channels/allocation-engine.service.api";
 import { resolveDropshipPublicationPreview } from "./dropship-listing-publication-preview.provider";
 import {
   createAuthorityAwareInventoryAtpService,

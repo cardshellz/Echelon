@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveReconciledWmsOrderItemStatus } from "../../wms-line-reconciliation";
+import { deriveReconciledWmsOrderItemStatus } from "../../application/wms-line-reconciliation";
 
 describe("deriveReconciledWmsOrderItemStatus", () => {
   it("reopens a previously fulfilled line when channel authority increases", () => {

@@ -12,11 +12,12 @@ import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { ChannelListingCatalogRepository } from "../../../channels/channel-listing-catalog.repository";
+import { ChannelListingCatalogRepository } from "../../../channels/infrastructure/channel-listing-catalog.repository";
 import { createHash } from "node:crypto";
-import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
-import { readPublicCatalogImage } from "../../../catalog/catalog-publication-images.reader";
-import { MAX_PRODUCT_IMAGE_BYTES } from "../../../catalog/product-image-download.service";
+import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
+import { readPublicCatalogImage } from "../../../catalog/infrastructure/catalog-publication-images.reader";
+import { MAX_PRODUCT_IMAGE_BYTES } from "../../../catalog/application/product-image-download.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -216,7 +217,7 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
       await database.pool.query(`INSERT INTO catalog.product_variants VALUES
         (11,20,'SKU-11','Single sleeve','piece',1,NULL,NULL,true,true,true,'sellable',1,99,NULL);`);
       await upload(png, "image/png", 10);
-      const log = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const log = spyLoggerJson("warn");
       try {
         const noPublicOrigin = new ChannelListingCatalogRepository(database.pool, createCatalogPublicImageUrl({}));
         const page = await noPublicOrigin.catalog(104, { variantIds: "10,11" });
@@ -229,10 +230,11 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
           name: "Sleeves", title: "Catalog title", sku: "SKU-11", variantName: "Single sleeve", priceCents: 99,
         });
         expect(page.items.find(item => item.variantId === 11)?.imageIssues).toBeUndefined();
-        expect(log).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+        expect(log).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({
           event: "channel_listing.catalog_image_unavailable", channelId: 104, variantId: 10,
           images: [{ assetId: 8, code: "CATALOG_PUBLIC_URL_REQUIRED" }],
-        }));
+        });
       } finally { log.mockRestore(); }
     });
     it.each([

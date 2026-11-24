@@ -6,7 +6,7 @@ import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { stopOrderForMarketplaceCancel, type DropshipMarketplaceCancelStopDeps } from "../../dropship-marketplace-cancel";
+import { stopOrderForMarketplaceCancel, type DropshipMarketplaceCancelStopDeps } from "../../application/dropship-marketplace-cancel";
 
 /**
  * OMS's stop for an accepted dropship order eBay cancelled (eBay sync-back

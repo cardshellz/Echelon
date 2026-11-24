@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) =>
   (req: Request, res: Response, next: NextFunction) => req.headers["x-permission"] === `${resource}:${action}` ? next() : res.status(403).json({ error: "Forbidden" }) }));
-import { registerShipmentCostExceptionRoutes } from "../../shipment-cost-exception.routes";
+import { registerShipmentCostExceptionRoutes } from "../../interfaces/http/shipment-cost-exception.routes";
 const input = { sourceVersion: "a".repeat(64), action: "accept", reason: "Historical receipt records reviewed." };
 describe("shipment exception HTTP boundary", () => {
   const service = { context: vi.fn(), decide: vi.fn() };

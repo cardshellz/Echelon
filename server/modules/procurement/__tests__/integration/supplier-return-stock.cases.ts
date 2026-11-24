@@ -2,16 +2,16 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { sql } from "drizzle-orm";
 import { expect, it } from "vitest";
-import type { AmendmentDatabase, AmendmentTransaction } from "../../po-quantity-amendment.repository";
+import type { AmendmentDatabase, AmendmentTransaction } from "../../infrastructure/po-quantity-amendment.repository";
 import type { InventoryUseCases } from "../../../inventory/application/inventory.use-cases";
-import type { ReceivingService } from "../../receiving.service";
+import type { ReceivingService } from "../../application/receiving.service";
 import { previewSupplierReturnStock, readSupplierReturnInventoryEvidence } from "../../../inventory/application/supplier-return-stock";
 import { readUnallocatedLotCosts } from "../../../inventory/infrastructure/cost-quantity.repository";
-import { InventoryLotService } from "../../../inventory/lots.service";
-import { recordSupplierReturn, createSupplierReturnReader } from "../../supplier-return.service";
+import { InventoryLotService } from "../../../inventory/application/lots.service";
+import { recordSupplierReturn, createSupplierReturnReader } from "../../application/supplier-return.service";
 import { SupplierReturnFollowupService } from "../../../inventory/application/supplier-return-followup.service";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
-import { createReceiptShipmentQuantityCorrectionService, quantityCorrectionScope } from "../../receipt-shipment-quantity-correction.service";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
+import { createReceiptShipmentQuantityCorrectionService, quantityCorrectionScope } from "../../application/receipt-shipment-quantity-correction.service";
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence.repository";
 
 export interface SupplierReturnStockFixture {
@@ -100,7 +100,7 @@ export function registerSupplierReturnStockCases(fixture: SupplierReturnStockFix
       previewVersion: correctionPreview.previewVersion });
     expect(currentCorrection).toMatchObject({ httpStatus: 409, body: { code: "QUANTITY_CORRECTION_BLOCKED" } });
     expect(await evidence()).toEqual(after);
-    const { ReceiptReversalService } = await import("../../receipt-reversal.service");
+    const { ReceiptReversalService } = await import("../../application/receipt-reversal.service");
     const reversal = new ReceiptReversalService(fixture.database() as ConstructorParameters<typeof ReceiptReversalService>[0]);
     for (const operation of [
       () => reversal.reverseReceivingLine({ receivingLineId: receipt.lineId, qty: 1, reason: "Incorrect attempt to correct returned stock", idempotencyKey: randomUUID(), userId: fixture.actorId }),

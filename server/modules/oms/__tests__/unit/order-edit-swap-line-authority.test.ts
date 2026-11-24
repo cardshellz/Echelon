@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveOmsLineAuthority, getOmsLineMaterializableQuantity } from "../../oms-line-authority";
+import { deriveOmsLineAuthority, getOmsLineMaterializableQuantity } from "../../application/oms-line-authority";
 
 // #64592 (2026-10-21): the merchant swapped SHLZ-TOP-35PT-BLU-C1000 for
 // SHLZ-TOP-35PT-CLR-C1000 in Shopify at the same $119. No new payment means no

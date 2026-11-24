@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PurchaseWorkspace } from "@shared/procurement/purchase-workspace";
-import { projectPurchaseCostTrace, type PurchaseCostEvidence } from "../../purchase-cost-trace.service";
+import { projectPurchaseCostTrace, type PurchaseCostEvidence } from "../../application/purchase-cost-trace.service";
 
 const purchase: PurchaseWorkspace["purchase"] = {
   id: 17, poNumber: "PO-17", status: "in_transit", physicalStatus: "in_transit", financialStatus: "paid",

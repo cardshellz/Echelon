@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
-import { createCatalogBackfillService, type CatalogBackfillService } from "../../catalog-backfill.service";
+import { createCatalogBackfillService, type CatalogBackfillService } from "../../application/catalog-backfill.service";
 
 // ---------------------------------------------------------------------------
 // Mock DB with controllable query responses

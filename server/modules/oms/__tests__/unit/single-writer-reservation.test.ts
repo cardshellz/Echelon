@@ -16,9 +16,9 @@ import { resolve } from "node:path";
 
 const read = (p: string) => readFileSync(resolve(__dirname, p), "utf8");
 
-const OMS_SERVICE_SRC = read("../../oms.service.ts");
-const WMS_SYNC_SRC = read("../../wms-sync.service.ts");
-const RESERVATION_SRC = read("../../../channels/reservation.service.ts");
+const OMS_SERVICE_SRC = read("../../application/oms.service.ts");
+const WMS_SYNC_SRC = read("../../application/wms-sync.service.ts");
+const RESERVATION_SRC = read("../../../channels/application/reservation.service.ts");
 const DROPSHIP_ACCEPT_SRC = read(
   "../../../dropship/infrastructure/dropship-order-acceptance.repository.ts",
 );
@@ -29,7 +29,7 @@ const INDEX_SRC = readFileSync(
   resolve(__dirname, "../../../../index.ts"),
   "utf8",
 );
-const FLOW_RECON_SRC = read("../../oms-flow-reconciliation.service.ts");
+const FLOW_RECON_SRC = read("../../application/oms-flow-reconciliation.service.ts");
 
 describe("P0.1a — single reservation writer", () => {
   it("OMS reserveInventory delegates to the WMS path and never reserves with OMS line ids", () => {
@@ -82,7 +82,7 @@ describe("P0.1c — cancels release, shortfalls log, detector re-reserves", () =
   });
 
   it("the hourly OMS↔WMS sweep cancels via the single entrypoint", () => {
-    const omsWmsSweepSrc = read("../../../orders/oms-wms-cancel-reconcile.scheduler.ts");
+    const omsWmsSweepSrc = read("../../../orders/application/oms-wms-cancel-reconcile.scheduler.ts");
     expect(INDEX_SRC).toContain("startOmsWmsCancelReconcileScheduler(");
     expect(omsWmsSweepSrc).toMatch(
       /cancelWmsOrderAndRelease\(\s*db,\s*services\.reservation,\s*row\.id,\s*"oms_wms_reconcile"/,

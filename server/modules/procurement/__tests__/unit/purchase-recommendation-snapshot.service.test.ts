@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildPurchaseRecommendationRunInput,
   createPurchaseRecommendationSnapshotService,
-} from "../../purchase-recommendation-snapshot.service";
+} from "../../application/purchase-recommendation-snapshot.service";
 import {
   buildPurchasingForecastPolicyCohort,
   DEFAULT_PURCHASING_FORECAST_POLICY,
-} from "../../purchasing-forecast-policy";
-import type { PurchasingRecommendationItem } from "../../purchasing-recommendation.engine";
+} from "../../application/purchasing-forecast-policy";
+import type { PurchasingRecommendationItem } from "../../application/purchasing-recommendation.engine";
 
 function recommendation(overrides: Partial<PurchasingRecommendationItem> = {}): PurchasingRecommendationItem {
   return {

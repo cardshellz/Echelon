@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createReservationService } from "../../reservation.service";
+import { createReservationService } from "../../application/reservation.service";
 
 /**
  * P0.1b — order-scoped, idempotent release.

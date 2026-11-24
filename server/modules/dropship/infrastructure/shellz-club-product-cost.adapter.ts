@@ -6,6 +6,7 @@ import {
   normalizeShopifyCostIdentity, resolveDropshipProductCost, unavailableDropshipProductCost,
   type ShellzClubCostOverride, type ShellzClubWholesaleAssignment,
 } from "../domain/dropship-product-cost";
+import { logger } from "../../../platform/observability/logger";
 
 type CostClient = Pick<PoolClient, "query" | "release">;
 type CostPool = { connect(): Promise<CostClient> };
@@ -46,7 +47,7 @@ export class PgShellzClubProductCostAdapter implements DropshipProductCostReader
   constructor(
     private readonly dbPool: CostPool = defaultPool,
     private readonly reportReadFailure: (input: { vendorId: number; variantCount: number; code: "source_read_failed"; sqlState: string | null; stage: string }) => void =
-      (input) => console.warn("[dropship-product-cost] source read unavailable", input),
+      (input) => logger.warn("dropship.shellz_club_product_cost_adapter", { message: "[dropship-product-cost] source read unavailable", detail: input }),
     private readonly ownsTransaction = true,
   ) {}
 

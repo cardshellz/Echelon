@@ -1,5 +1,5 @@
 import { parseDecimalCents } from "@shared/money-read";
-import { ebayBusinessPolicies } from "../ebay-business-policies";
+import { ebayBusinessPolicies } from "../application/ebay-business-policies";
 import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 /**
  * eBay Channel Adapter
@@ -40,9 +40,9 @@ import type {
   FulfillmentPushResult,
   CancellationPayload,
   CancellationPushResult,
-} from "../channel-adapter.interface";
-import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
-import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
+} from "../domain/channel-adapter.interface";
+import { InventoryPublicationConfigurationError } from "../domain/channel-adapter.interface";
+import { QuantityPublicationAdmissionError } from "../../inventory-planning/quantity-publication-admission-domain.api";
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
@@ -62,10 +62,11 @@ import type {
 
 import crypto from "crypto";
 import { readExistingEbayListingPhotos } from "./ebay/ebay-listing-photos.reader";
-import type { EbayListingPhotoResolver } from "../ebay-listing-photos.service";
+import type { EbayListingPhotoResolver } from "../application/ebay-listing-photos.service";
 import { createEbayMarketplaceRegistrationAdapters } from "./ebay/ebay-marketplace-registration.factory";
-import { observeExistingEbayPublication } from "../ebay-existing-listing-identity";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
+import { observeExistingEbayPublication } from "../application/ebay-existing-listing-identity";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -158,10 +159,7 @@ export class EbayAdapter implements IChannelAdapter {
         // Rate limiting between products
         await this.delay(500);
       } catch (err: any) {
-        console.error(
-          `[EbayAdapter] Failed to push listing for product ${listing.productId}:`,
-          err.message,
-        );
+        logger.error("channels.ebay_adapter", { message: `[EbayAdapter] Failed to push listing for product ${listing.productId}:`, error: err.message });
         results.push({
           productId: listing.productId,
           status: "error",
@@ -582,10 +580,8 @@ export class EbayAdapter implements IChannelAdapter {
         ...fresh,
         availableQuantity: item.allocatedQty,
       } as any);
-      console.warn(
-        `[EbayAdapter] Healed stale offerId for SKU ${item.sku}: ` +
-          `${item.externalVariantId} -> ${fresh.offerId}`,
-      );
+      logger.warn("channels.ebay_adapter", { detail: `[EbayAdapter] Healed stale offerId for SKU ${item.sku}: ` +
+          `${item.externalVariantId} -> ${fresh.offerId}` });
       return {
         variantId: item.variantId,
         pushedQty: item.allocatedQty,
@@ -593,9 +589,7 @@ export class EbayAdapter implements IChannelAdapter {
         refreshedExternalVariantId: fresh.offerId,
       };
     } catch (err: any) {
-      console.warn(
-        `[EbayAdapter] Stale-offer recovery failed for SKU ${item.sku}: ${err.message}`,
-      );
+      logger.warn("channels.ebay_adapter", { message: `[EbayAdapter] Stale-offer recovery failed for SKU ${item.sku}: ${err.message}` });
       return null;
     }
   }
@@ -727,9 +721,7 @@ export class EbayAdapter implements IChannelAdapter {
       await this.delay(200);
     }
 
-    console.log(
-      `[EbayAdapter] Polled ${orders.length} orders since ${sinceStr} for channel ${channelId}`,
-    );
+    logger.info("channels.ebay_adapter", { message: `[EbayAdapter] Polled ${orders.length} orders since ${sinceStr} for channel ${channelId}` });
 
     return orders;
   }
@@ -754,18 +746,14 @@ export class EbayAdapter implements IChannelAdapter {
     // Verify it's an order notification
     if (payload?.metadata?.topic !== "MARKETPLACE.ORDER.CREATED" &&
         payload?.metadata?.topic !== "ORDER_CONFIRMATION") {
-      console.log(
-        `[EbayAdapter] Ignoring non-order notification: ${payload?.metadata?.topic}`,
-      );
+      logger.info("channels.ebay_adapter", { message: `[EbayAdapter] Ignoring non-order notification: ${payload?.metadata?.topic}` });
       return null;
     }
 
     // Extract order ID from notification
     const orderData = (payload.notification?.data as unknown) as EbayOrderConfirmationData;
     if (!orderData?.orderId) {
-      console.warn(
-        `[EbayAdapter] Order notification missing orderId`,
-      );
+      logger.warn("channels.ebay_adapter", { message: `[EbayAdapter] Order notification missing orderId` });
       return null;
     }
 
@@ -774,9 +762,7 @@ export class EbayAdapter implements IChannelAdapter {
     const fullOrder = await client.getOrder(orderData.orderId);
 
     if (!fullOrder) {
-      console.warn(
-        `[EbayAdapter] Could not fetch order ${orderData.orderId}`,
-      );
+      logger.warn("channels.ebay_adapter", { message: `[EbayAdapter] Could not fetch order ${orderData.orderId}` });
       return null;
     }
 

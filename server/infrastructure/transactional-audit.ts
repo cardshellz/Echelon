@@ -1,6 +1,7 @@
 import type { db } from "../db";
 import { auditEvents } from "@shared/schema";
 import { sql } from "drizzle-orm";
+import { logger } from "../platform/observability/logger";
 
 type AuditEventWriteClient = Pick<typeof db, "insert">;
 export type AuditEventInsertRow = typeof auditEvents.$inferInsert;
@@ -28,13 +29,7 @@ export async function persistAuditEvent(
 ): Promise<void> {
   const timestamp = options.timestamp ?? new Date();
   if (options.emitStructuredLog !== false)
-    console.log(
-      JSON.stringify({
-        timestamp: timestamp.toISOString(),
-        level: "AUDIT",
-        ...payload,
-      }),
-    );
+    logger.info("infrastructure.transactional_audit", { timestamp: timestamp.toISOString(), ...payload });
   await client
     .insert(auditEvents)
     .values({

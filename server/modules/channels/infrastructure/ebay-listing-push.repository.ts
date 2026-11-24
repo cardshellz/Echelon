@@ -1,8 +1,8 @@
 import { z } from "zod";
 import type { Pool, PoolClient } from "pg";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
-import { EbayListingPushSkipped } from "../ebay-listing-push.service";
-import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../ebay-listing-workflow-lock";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
+import { EbayListingPushSkipped } from "../application/ebay-listing-push.service";
+import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../application/ebay-listing-workflow-lock";
 import type { EbayListingConnectorResult, EbayListingRebuildResult } from "../listing-connectors/ebay-listing.connector";
 
 const nullableText = z.string().nullable();

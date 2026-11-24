@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { readShipmentBillingOwnership } from "../../shipment-billing-ownership.repository";
-import type { ApLedgerDbClient } from "../../ap-ledger.service";
+import { readShipmentBillingOwnership } from "../../infrastructure/shipment-billing-ownership.repository";
+import type { ApLedgerDbClient } from "../../application/ap-ledger.service";
 import { resolveShipmentBillingOwnership } from "../../domain/shipment-billing-ownership";
 import { shipmentCostBillingOwnershipSchema, invoiceSourceCapabilitySchema } from "@shared/procurement/shipment-billing-ownership";
 const cost = { id: 31, shipmentId: 1, vendorId: 6, invoiceId: 71, currency: "USD" };

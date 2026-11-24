@@ -36,9 +36,9 @@ vi.mock("../../../orders", () => ({ ordersStorage: {} }));
 vi.mock("../..", () => ({
   procurementStorage: { getVendorById: mocks.vendor, getAllVendors: async () => [] },
 }));
-vi.mock("../../purchase-order-list.service", async original => ({ ...await original<typeof import("../../purchase-order-list.service")>(), getPurchaseOrderList: mocks.readList }));
-vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/purchase-order-list.service", async original => ({ ...await original<typeof import("../../application/purchase-order-list.service")>(), getPurchaseOrderList: mocks.readList }));
+vi.mock("../../application/ap-ledger.service", () => ({}));
+vi.mock("../../application/po-exceptions.service", () => ({
   countOpenExceptions: mocks.count,
   listExceptions: mocks.list,
   PoExceptionError: class extends Error {},
@@ -46,7 +46,7 @@ vi.mock("../../po-exceptions.service", () => ({
 vi.mock("../../../../platform/observability/logger", () => ({
   logger: { error: mocks.log },
 }));
-vi.mock("../../po-email-outbox.service", () => ({
+vi.mock("../../application/po-email-outbox.service", () => ({
   enqueuePurchaseOrderEmail: vi.fn(),
   listPurchaseOrderEmailDeliveries: vi.fn(),
   replayDeadLetterPurchaseOrderEmail: vi.fn(),
@@ -70,7 +70,7 @@ vi.mock("../../../../middleware/idempotency", () => ({
     () => (_req: Request, _res: Response, next: NextFunction) =>
       next(),
 }));
-import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
+import { registerPurchaseOrderRoutes } from "../../interfaces/http/purchase-order.routes";
 
 function workflow(status: "received" | "approved" | "disputed" | "paid") {
   const settled = status === "paid";

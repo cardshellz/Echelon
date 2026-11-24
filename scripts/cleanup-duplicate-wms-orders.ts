@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Pool, type PoolClient } from "pg";
-import { cancelUnstartedWmsOrderItemsForRetiredOrder } from "../server/modules/wms/order-item-maintenance-commands";
+import { cancelUnstartedWmsOrderItemsForRetiredOrder } from "../server/modules/wms/application/order-item-maintenance-commands";
 
 type Mode = "dry-run" | "execute";
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { deriveReconcileEvent } from "../../reconcile-derive";
-import type { EngineOrderState, CanonicalShipmentEvent } from "../../types";
+import { deriveReconcileEvent } from "../../domain/reconcile-derive";
+import type { EngineOrderState, CanonicalShipmentEvent } from "../../domain/types";
 
 const DEFAULT_REF = { engine: "shipstation", engineOrderRef: "9999" };
 

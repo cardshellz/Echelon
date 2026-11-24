@@ -20,11 +20,11 @@ import {
   type ValidatedChannelCancelEvent,
   type ValidatedChannelOrder,
   type ValidatedChannelRefundEvent,
-} from "../../channels/channel-adapter.interface";
+} from "../../channels/channel-adapter.interface.api";
 import type { EbayApiClient, EbayOrder } from "../../channels/ebay-connector.api";
-import { extractEbayShipByDate } from "../ebay-shipby";
-import { createEbayWebhookSignatureVerifier } from "../ebay-webhook-signature";
-import type { LineItemData, OrderData } from "../oms.service";
+import { extractEbayShipByDate } from "../application/ebay-shipby";
+import { createEbayWebhookSignatureVerifier } from "../application/ebay-webhook-signature";
+import type { LineItemData, OrderData } from "../application/oms.service";
 
 // eBay reports pricingSummary.priceDiscount as a negative amount ("-1.50").
 export function ebayDollarsToCents(value: string | undefined | null): number {

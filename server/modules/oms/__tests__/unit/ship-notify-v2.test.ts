@@ -44,7 +44,7 @@ function readShipStationSource(): string {
         .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
     : [];
   return [
-    readFileSync(resolve(__dirname, "../../shipstation.service.ts"), "utf-8"),
+    readFileSync(resolve(__dirname, "../../application/shipstation.service.ts"), "utf-8"),
     ...subFiles,
   ].join("\n");
 }
@@ -53,7 +53,8 @@ import {
   createShipStationService,
   type ManualShipmentContentsAuthority,
   type ManualShipmentNotificationInput,
-} from "../../shipstation.service";
+} from "../../application/shipstation.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // ─── Mock helpers ────────────────────────────────────────────────────
 
@@ -1733,9 +1734,9 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    spyLoggerJson("log");
+    spyLoggerJson("warn");
+    spyLoggerJson("error");
   });
 
   afterEach(() => {
@@ -1947,6 +1948,9 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
 
   it.each([
     ["INVENTORY_PUBLICATION_TARGET_BUSY", true],
+    // Lock contention (e.g. on cutover_admission_fence) must keep a durable
+    // pick-correction wait alive instead of forcing operator review.
+    ["55P03", true],
     ["CLAIM_DISPATCH_SOURCE_PICKED_MISSING", false],
   ] as const)("classifies inventory failure %s at the real carrier confirmation boundary as retryable=%s", async (code, retryable) => {
     const rows = happyPathRows();
@@ -1958,8 +1962,13 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
         shipment_purpose: "customer_fulfillment", shipment_item_purpose: "customer_fulfillment" }],
     }, { rows: [] });
     const mock = makeDb(rows);
+    const messages: Record<typeof code, string> = {
+      INVENTORY_PUBLICATION_TARGET_BUSY: "Publication target is busy",
+      "55P03": "could not obtain lock on row in relation \"cutover_admission_fence\"",
+      CLAIM_DISPATCH_SOURCE_PICKED_MISSING: "Exact picked custody is missing",
+    };
     const inventoryCore = { recordShipment: vi.fn().mockRejectedValue(Object.assign(
-      new Error(code === "INVENTORY_PUBLICATION_TARGET_BUSY" ? "Publication target is busy" : "Exact picked custody is missing"), { code },
+      new Error(messages[code]), { code },
     )) };
     globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
 
@@ -2014,7 +2023,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
     rows.splice(5, 0, { rows: [mappedSource, unmappedSource] }, { rows: [] });
     const mock = makeDb(rows);
     const inventoryCore = { recordShipment: vi.fn().mockResolvedValue(undefined) };
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
     globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
 
     await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
@@ -2032,7 +2041,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
     rows.splice(5, 0, { rows: [unmappedSource] }, { rows: [] });
     const mock = makeDb(rows);
     const inventoryCore = { recordShipment: vi.fn() };
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
     globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
 
     await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
@@ -2233,9 +2242,9 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    spyLoggerJson("log");
+    spyLoggerJson("warn");
+    spyLoggerJson("error");
   });
 
   afterEach(() => {
@@ -2456,11 +2465,11 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   it("shipment creation is unreachable for terminal or unknown parents (source invariants)", async () => {
     const src = readShipStationSource();
     const wmsShipmentsRepoSrc = readFileSync(
-      resolve(__dirname, "../../../wms/outbound-shipments-mutations.repository.ts"),
+      resolve(__dirname, "../../../wms/infrastructure/outbound-shipments-mutations.repository.ts"),
       "utf-8",
     );
     const wmsShipmentItemsRepoSrc = readFileSync(
-      resolve(__dirname, "../../../wms/outbound-shipment-items-mutations.repository.ts"),
+      resolve(__dirname, "../../../wms/infrastructure/outbound-shipment-items-mutations.repository.ts"),
       "utf-8",
     );
     const fnStart = src.indexOf("async function resolveShipmentByOrderKey(");

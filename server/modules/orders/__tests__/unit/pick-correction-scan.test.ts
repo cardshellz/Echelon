@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { completeCorrectivePickSchema, type PickCorrection } from "@shared/pick-corrections";
-import { PickCorrectionService } from "../../pick-correction.service";
+import { PickCorrectionService } from "../../application/pick-correction.service";
 
 // 2026-10-09, #63936/#63938: the corrective-pick card refused a scan of the
 // product's real barcode. It compared only against the order line's copied

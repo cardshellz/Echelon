@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { createPurchasingService } from "../../purchasing.service";
+import { createPurchasingService } from "../../application/purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PR3a: createReceiptFromShipment — receive AGAINST an inbound shipment.

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import { createDropshipPlatformLogger } from "./dropship-platform-logger";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 const dropshipWorkerSweepNameSchema = z.enum([
   "listing_push",
@@ -208,10 +209,10 @@ function logWorkerOpsEvent(
     context: event.context ?? {},
   });
   if (level === "error") {
-    console.error(payload);
+    platformLogger.error("dropship.worker_ops_service", { error: payload });
   } else if (level === "warn") {
-    console.warn(payload);
+    platformLogger.warn("dropship.worker_ops_service", { detail: payload });
   } else {
-    console.info(payload);
+    platformLogger.info("dropship.worker_ops_service", { detail: payload });
   }
 }

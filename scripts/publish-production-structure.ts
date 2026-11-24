@@ -27,6 +27,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import pg from "pg";
+import { resolvePostgresPoolSslConfig } from "../server/database-pool-config";
 import { PRODUCTION_STRUCTURE_BRANCH, buildPublication } from "./migrations/production-structure.mjs";
 import { CheckError } from "./ci/disposable-database";
 import { publishFilesToBranch } from "./ci/github-branch-publisher";
@@ -54,15 +55,21 @@ function databaseUrlFromEnv(env: NodeJS.ProcessEnv): URL {
   }
 }
 
-async function readAppliedMigrations(environment: Record<string, string>): Promise<string[]> {
+async function readAppliedMigrations(
+  databaseUrl: URL,
+  environment: Record<string, string>,
+  env: NodeJS.ProcessEnv,
+): Promise<string[]> {
   const client = new pg.Client({
     host: environment.PGHOST,
     port: Number(environment.PGPORT),
     user: environment.PGUSER,
     password: environment.PGPASSWORD,
     database: environment.PGDATABASE,
-    // Same trust setting the application and the migration runner use for Heroku Postgres.
-    ssl: { rejectUnauthorized: false },
+    ssl: resolvePostgresPoolSslConfig(databaseUrl.toString(), {
+      ...env,
+      NODE_ENV: env.NODE_ENV || "production",
+    }),
     options: environment.PGOPTIONS,
     statement_timeout: STATEMENT_TIMEOUT_MS,
   });
@@ -88,12 +95,13 @@ async function main(): Promise<void> {
     throw new CheckError("PUBLISH_STRUCTURE_GITHUB_SETTINGS_MISSING", "SCHEMA_STRUCTURE_GITHUB_TOKEN and SCHEMA_STRUCTURE_GITHUB_REPOSITORY are required to publish.");
   }
 
-  const environment = libpqEnvironment(databaseUrlFromEnv(env), { production: true });
+  const databaseUrl = databaseUrlFromEnv(env);
+  const environment = libpqEnvironment(databaseUrl, { production: true });
   // The clock is read once, here at the edge; everything below receives it.
   const capturedAt = new Date();
   const publication = buildPublication({
     rawDump: dumpStructure(environment, "PUBLISH_STRUCTURE_DUMP_FAILED", env),
-    applied: await readAppliedMigrations(environment),
+    applied: await readAppliedMigrations(databaseUrl, environment, env),
     capturedAt,
   });
   const summary = { capturedAt: publication.heartbeat.capturedAt, structureSha256: publication.heartbeat.structureSha256 };

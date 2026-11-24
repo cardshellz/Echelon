@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyLegacyPoReceiveConfigRemediation,
   previewLegacyPoReceiveConfigRemediation,
-} from "../../legacy-po-receive-config-remediation.service";
+} from "../../application/legacy-po-receive-config-remediation.service";
 
 const activeMappingRow = {
   line_id: 176,

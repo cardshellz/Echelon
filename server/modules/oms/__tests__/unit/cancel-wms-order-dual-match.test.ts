@@ -14,7 +14,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const WMS_SYNC_SRC = readFileSync(
-  resolve(__dirname, "../../wms-sync.service.ts"),
+  resolve(__dirname, "../../application/wms-sync.service.ts"),
   "utf-8",
 );
 

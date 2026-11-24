@@ -41,14 +41,15 @@ import {
   recordRetryFailure,
   WEBHOOK_RETRY_CLAIM_LEASE_MS,
   WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS,
-} from "../../webhook-retry.worker";
+} from "../../application/webhook-retry.worker";
 import {
   buildShopifyFulfillmentRetryEnvelope,
   enqueueShopifyFulfillmentWebhookRetry,
   receiptRecoveryOwnedStatus,
   sourceChannelIdFromRetryPayload,
   sourceEventIdFromRetryPayload,
-} from "../../shopify-fulfillment-webhook-retry";
+} from "../../application/shopify-fulfillment-webhook-retry";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // ─── DB mock helpers ─────────────────────────────────────────────────
 
@@ -79,7 +80,7 @@ function makeDb(opts: { updateThrows?: Error } = {}) {
 // ─── Source files for regression checks ──────────────────────────────
 
 const WORKER_SRC = readFileSync(
-  resolve(__dirname, "../../webhook-retry.worker.ts"),
+  resolve(__dirname, "../../application/webhook-retry.worker.ts"),
   "utf-8",
 );
 const SHOPIFY_ROUTES_SRC = readFileSync(
@@ -87,11 +88,11 @@ const SHOPIFY_ROUTES_SRC = readFileSync(
   "utf-8",
 );
 const OMS_WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
+  resolve(__dirname, "../../application/oms-webhooks.ts"),
   "utf-8",
 );
 const FULFILLMENT_RETRY_SRC = readFileSync(
-  resolve(__dirname, "../../shopify-fulfillment-webhook-retry.ts"),
+  resolve(__dirname, "../../application/shopify-fulfillment-webhook-retry.ts"),
   "utf-8",
 );
 
@@ -99,14 +100,14 @@ const FULFILLMENT_RETRY_SRC = readFileSync(
 
 describe("recordRetryFailure :: shopify dead-letter formatting", () => {
   beforeEach(() => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    spyLoggerJson("error");
   });
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
   it("emits CRITICAL: log with topic, queue row ID, attempts, and error for generic shopify topic", async () => {
-    const errSpy = vi.spyOn(console, "error");
+    const errSpy = spyLoggerJson("error");
     const { db } = makeDb();
 
     await recordRetryFailure(
@@ -116,7 +117,7 @@ describe("recordRetryFailure :: shopify dead-letter formatting", () => {
     );
 
     const critical = errSpy.mock.calls.find((args) =>
-      String(args[0] ?? "").startsWith("CRITICAL:"),
+      String(args[0] ?? "").includes("CRITICAL:"),
     );
     expect(critical).toBeDefined();
     const logStr = String(critical![0]);
@@ -127,7 +128,7 @@ describe("recordRetryFailure :: shopify dead-letter formatting", () => {
   });
 
   it("emits CRITICAL: with shopify_fulfillment_push headline", async () => {
-    const errSpy = vi.spyOn(console, "error");
+    const errSpy = spyLoggerJson("error");
     const { db } = makeDb();
 
     await recordRetryFailure(
@@ -138,7 +139,7 @@ describe("recordRetryFailure :: shopify dead-letter formatting", () => {
     );
 
     const critical = errSpy.mock.calls.find((args) =>
-      String(args[0] ?? "").startsWith("CRITICAL:"),
+      String(args[0] ?? "").includes("CRITICAL:"),
     );
     expect(critical).toBeDefined();
     expect(String(critical![0])).toContain("Shopify Fulfillment Push Dead-Lettered");
@@ -146,7 +147,7 @@ describe("recordRetryFailure :: shopify dead-letter formatting", () => {
   });
 
   it("does NOT emit CRITICAL on transient failures (pending status)", async () => {
-    const errSpy = vi.spyOn(console, "error");
+    const errSpy = spyLoggerJson("error");
     const { db } = makeDb();
 
     await recordRetryFailure(
@@ -156,7 +157,7 @@ describe("recordRetryFailure :: shopify dead-letter formatting", () => {
     );
 
     const critical = errSpy.mock.calls.find((args) =>
-      String(args[0] ?? "").startsWith("CRITICAL:"),
+      String(args[0] ?? "").includes("CRITICAL:"),
     );
     expect(critical).toBeUndefined();
   });
@@ -178,7 +179,7 @@ describe("recordRetryFailure :: shopify dead-letter formatting", () => {
   });
 
   it("fences stale claim owners (rowCount === 0) without mirroring inbox dead status or emitting CRITICAL logs", async () => {
-    const errSpy = vi.spyOn(console, "error");
+    const errSpy = spyLoggerJson("error");
     const execute = vi.fn(async () => ({ rows: [] }));
     const db: any = {
       update: vi.fn(() => ({
@@ -204,7 +205,7 @@ describe("recordRetryFailure :: shopify dead-letter formatting", () => {
     expect(result.applied).toBe(false);
     expect(execute).not.toHaveBeenCalled();
     const critical = errSpy.mock.calls.find((args) =>
-      String(args[0] ?? "").startsWith("CRITICAL:"),
+      String(args[0] ?? "").includes("CRITICAL:"),
     );
     expect(critical).toBeUndefined();
   });

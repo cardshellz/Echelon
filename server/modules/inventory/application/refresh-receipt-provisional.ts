@@ -7,7 +7,7 @@ import {
   type CostEvidenceTransaction,
   type CostRevisionInput,
 } from "../infrastructure/cost-evidence.repository";
-import { readLatestCostApplicationStatuses } from "../cost-application-public";
+import { readLatestCostApplicationStatuses } from "./cost-application-public";
 import { readLatestLandedCostRevisions } from "../../procurement/cost-source-evidence.api";
 
 /** Inventory owns this derived flag. Supplier coverage is evaluated per frozen

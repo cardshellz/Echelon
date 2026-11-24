@@ -11,7 +11,7 @@ const databaseTests = databaseUrl && process.env.ECHELON_TEST_DATABASE_DISPOSABL
 
 databaseTests.sequential('PO exception lifecycle with real PostgreSQL evidence', () => {
   const fixture = new PoFinancialRefreshFixture();
-  let owner: typeof import('../../po-exceptions.service');
+  let owner: typeof import('../../application/po-exceptions.service');
   const actor = 'exception-lifecycle-reviewer';
   const input = {
     poId: 10, kind: 'qty_short' as const, severity: 'warn' as const,
@@ -22,7 +22,7 @@ databaseTests.sequential('PO exception lifecycle with real PostgreSQL evidence',
   beforeAll(async () => {
     await fixture.start(databaseUrl!);
     await fixture.pool.query(readFileSync('migrations/0566_po_exceptions.sql', 'utf8'));
-    owner = await import('../../po-exceptions.service');
+    owner = await import('../../application/po-exceptions.service');
   });
   beforeEach(() => fixture.seed());
   afterAll(() => fixture.stop());

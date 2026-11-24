@@ -13,8 +13,8 @@ vi.mock("../../../../storage/base", () => ({
   reorderExclusionRules: {},
 }));
 
-import { loadPurchasingRecommendationContext } from "../../purchasing-recommendation-context.service";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import { loadPurchasingRecommendationContext } from "../../application/purchasing-recommendation-context.service";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
 
 function selectChain(rows: unknown[]) {
   const chain: any = {

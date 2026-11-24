@@ -30,7 +30,7 @@ vi.mock("../../../../routes/middleware", () => ({
   },
 }));
 
-vi.mock("../../demand-events.service", () => {
+vi.mock("../../application/demand-events.service", () => {
   class DemandEventError extends Error {
     constructor(
       public readonly code: string,
@@ -43,7 +43,7 @@ vi.mock("../../demand-events.service", () => {
   return { ...mocks, DemandEventError };
 });
 
-import { registerDemandEventRoutes } from "../../demand-events.routes";
+import { registerDemandEventRoutes } from "../../interfaces/http/demand-events.routes";
 
 function buildApp(): Express {
   const app = express();

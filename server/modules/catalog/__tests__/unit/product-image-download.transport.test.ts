@@ -2,8 +2,8 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { describe, expect, it, vi } from "vitest";
-import { fetchProductImage, type ProductImageTransportDependencies } from "../../product-image-download.transport";
-import { MAX_PRODUCT_IMAGE_BYTES } from "../../product-image-download.service";
+import { fetchProductImage, type ProductImageTransportDependencies } from "../../infrastructure/product-image-download.transport";
+import { MAX_PRODUCT_IMAGE_BYTES } from "../../application/product-image-download.service";
 
 const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 type Reply = { status?: number; headers?: Record<string, string>; body?: Buffer; interrupted?: boolean };

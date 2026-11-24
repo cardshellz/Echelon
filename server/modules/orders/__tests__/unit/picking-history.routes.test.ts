@@ -18,9 +18,10 @@ vi.mock("../../../../routes/middleware", () => ({
     next();
   },
 }));
-import { registerPickingHistoryRoutes } from "../../picking-history.routes";
-import { PickingHistoryRepository } from "../../picking-history.repository";
+import { registerPickingHistoryRoutes } from "../../interfaces/http/picking-history.routes";
+import { PickingHistoryRepository } from "../../infrastructure/picking-history.repository";
 import { db } from "../../../../db";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 describe("bounded all-date picking history HTTP contract", () => {
   const page = vi.fn<PickingHistoryRepository["page"]>();
@@ -28,7 +29,7 @@ describe("bounded all-date picking history HTTP contract", () => {
   let url: string;
   beforeEach(async () => {
     page.mockReset().mockResolvedValue({ orders: [], total: 0, limit: 50, offset: 0 });
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
     const app = express();
     registerPickingHistoryRoutes(app, { page });
     server = createServer(app);
@@ -72,7 +73,7 @@ describe("bounded all-date picking history HTTP contract", () => {
     const response = await get();
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ code: "PICKING_HISTORY_READ_FAILED", error: "Failed to load picking history. Please retry." });
-    expect(console.error).toHaveBeenCalledOnce();
+    expect(getLoggerJsonSpy("error")).toHaveBeenCalledOnce();
   });
   it("also rejects invalid internal reads without touching the database", async () => {
     const repository = new PickingHistoryRepository(db);
@@ -80,10 +81,10 @@ describe("bounded all-date picking history HTTP contract", () => {
     await expect(repository.page({ channelId: -1 })).rejects.toThrow();
   });
   it("does not repurpose the active queue or its self-healing reads for history", () => {
-    const source = readFileSync(resolve(__dirname, "../../picking-history.repository.ts"), "utf8");
+    const source = readFileSync(resolve(__dirname, "../../infrastructure/picking-history.repository.ts"), "utf8");
     expect(source).toContain('accessMode: "read only"');
     expect(source).not.toMatch(/getPickQueue|\.insert\(|\.update\(|\.delete\(|NOW\(\)|INTERVAL/i);
-    const active = readFileSync(resolve(__dirname, "../../orders.storage.ts"), "utf8");
+    const active = readFileSync(resolve(__dirname, "../../infrastructure/orders.storage.ts"), "utf8");
     const queueSql = active.slice(active.indexOf("async getPickQueueOrders"), active.indexOf("const orderRows ="));
     expect(queueSql).not.toContain("24 hours");
     expect(queueSql).not.toContain("o.warehouse_status = 'completed'");

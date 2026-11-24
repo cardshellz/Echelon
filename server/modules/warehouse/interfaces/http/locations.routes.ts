@@ -12,6 +12,7 @@ import { insertProductLocationSchema, updateProductLocationSchema, productLocati
 import type { InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
 import { broadcastOrdersUpdated } from "../../../../websocket";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerLocationRoutes(app: Express) {
 
@@ -22,7 +23,7 @@ export function registerLocationRoutes(app: Express) {
       const locations = await storage.getAllProductsWithLocations();
       res.json(locations);
     } catch (error) {
-      console.error("Error fetching locations:", error);
+      logger.error("warehouse.locations_routes", { message: "Error fetching locations:", error: error });
       res.status(500).json({ error: "Failed to fetch locations" });
     }
   });
@@ -39,7 +40,7 @@ export function registerLocationRoutes(app: Express) {
 
       res.json(location);
     } catch (error) {
-      console.error("Error fetching location:", error);
+      logger.error("warehouse.locations_routes", { message: "Error fetching location:", error: error });
       res.status(500).json({ error: "Failed to fetch location" });
     }
   });
@@ -56,7 +57,7 @@ export function registerLocationRoutes(app: Express) {
 
       res.json(location);
     } catch (error) {
-      console.error("Error fetching location by SKU:", error);
+      logger.error("warehouse.locations_routes", { message: "Error fetching location by SKU:", error: error });
       res.status(500).json({ error: "Failed to fetch location" });
     }
   });
@@ -105,7 +106,7 @@ export function registerLocationRoutes(app: Express) {
 
       res.status(201).json(location);
     } catch (error: any) {
-      console.error("Error creating location:", error);
+      logger.error("warehouse.locations_routes", { message: "Error creating location:", error: error });
       if (error.code === "23505") { // Unique constraint violation
         return res.status(409).json({ error: "Product already has a location assigned" });
       }
@@ -150,7 +151,7 @@ export function registerLocationRoutes(app: Express) {
 
       res.json(location);
     } catch (error: any) {
-      console.error("Error updating location:", error);
+      logger.error("warehouse.locations_routes", { message: "Error updating location:", error: error });
       if (error.code === "23505") {
         return res.status(409).json({ error: "SKU already exists" });
       }
@@ -172,7 +173,7 @@ export function registerLocationRoutes(app: Express) {
 
       res.status(204).send();
     } catch (error) {
-      console.error("Error deleting location:", error);
+      logger.error("warehouse.locations_routes", { message: "Error deleting location:", error: error });
       res.status(500).json({ error: "Failed to delete location" });
     }
   });
@@ -251,7 +252,7 @@ export function registerLocationRoutes(app: Express) {
         productLocation: updated
       });
     } catch (error: any) {
-      console.error("Error moving product location:", error);
+      logger.error("warehouse.locations_routes", { message: "Error moving product location:", error: error });
       res.status(500).json({ error: error.message || "Failed to move product" });
     }
   });
@@ -279,7 +280,7 @@ export function registerLocationRoutes(app: Express) {
       res.setHeader("Content-Disposition", "attachment; filename=product_locations.csv");
       res.send(csv);
     } catch (error) {
-      console.error("Error exporting locations:", error);
+      logger.error("warehouse.locations_routes", { message: "Error exporting locations:", error: error });
       res.status(500).json({ error: "Failed to export locations" });
     }
   });
@@ -373,7 +374,7 @@ export function registerLocationRoutes(app: Express) {
         totalErrors: errors.length
       });
     } catch (error) {
-      console.error("Error importing locations:", error);
+      logger.error("warehouse.locations_routes", { message: "Error importing locations:", error: error });
       res.status(500).json({ error: "Failed to import locations" });
     }
   });
@@ -434,7 +435,7 @@ export function registerLocationRoutes(app: Express) {
         message: `Updated ${updated} items across ${ordersChecked} active orders`
       });
     } catch (error) {
-      console.error("Error syncing locations to queue:", error);
+      logger.error("warehouse.locations_routes", { message: "Error syncing locations to queue:", error: error });
       res.status(500).json({ error: "Failed to sync locations" });
     }
   });

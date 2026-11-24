@@ -18,12 +18,12 @@ import {
   normalizePoLinePricing,
   type NormalizedPoLinePricing,
 } from "@shared/utils/po-line-pricing";
-import type { PurchaseOrderEntryTransaction } from "../purchase-order-entry.repository";
+import type { PurchaseOrderEntryTransaction } from "../infrastructure/purchase-order-entry.repository";
 import {
   vendorCatalogPricingMatches,
   vendorCatalogQuoteUsability,
-} from "../purchase-order-line-commands";
-import { checkReceiveVariantChosen } from "../receive-configuration-policy";
+} from "../application/purchase-order-line-commands";
+import { checkReceiveVariantChosen } from "../application/receive-configuration-policy";
 import type { CalculatedLineCosts, PurchasingCosting } from "./purchasing-costing";
 import {
   auditDate,

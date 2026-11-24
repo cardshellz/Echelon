@@ -6,7 +6,7 @@ import {
   resolveShipStationTrackingApiKey,
   resolveShipStationTrackingWebhookSecret,
   SHIPSTATION_TRACKING_API_BASE_URL,
-} from "../../shipstation-tracking-api-config";
+} from "../../application/shipstation-tracking-api-config";
 
 const originalTrackingKey = process.env.SHIPSTATION_TRACKING_API_KEY;
 const originalV2Key = process.env.SHIPSTATION_V2_API_KEY;

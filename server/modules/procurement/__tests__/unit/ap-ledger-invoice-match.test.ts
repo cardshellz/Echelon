@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Keep the COGS dependency without importing unrelated inventory repository owners.
 vi.mock("../../../inventory", async () => ({
-  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+  COGSService: (await import("../../../inventory/application/cogs.service")).COGSService,
 }));
 
 // These owner fixtures isolate financial state changes. The real PostgreSQL
@@ -63,11 +63,11 @@ vi.mock("drizzle-orm", () => ({
   asc: vi.fn((value: unknown) => value),
   like: vi.fn(),
 }));
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectMatchMismatch: mocks.detectMatchMismatch,
   detectFinancialExceptions: vi.fn(),
 }));
-vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
+vi.mock("../../../inventory/application/cogs.service", () => ({ COGSService: class {} }));
 
 function selectChain(rows: unknown[]) {
   const chain: any = {};
@@ -146,7 +146,7 @@ describe("runInvoiceMatch", () => {
         [{ id: 12, status }],
       ]);
       mocks.db.transaction.mockImplementationOnce(async (callback: any) => callback(tx));
-      const { runInvoiceMatch } = await import("../../ap-ledger.service");
+      const { runInvoiceMatch } = await import("../../application/ap-ledger.service");
 
       const result = await runInvoiceMatch(12, "ops-user");
 
@@ -169,7 +169,7 @@ describe("runInvoiceMatch", () => {
       [{ id: 12, status: "approved" }, { id: 13, status: "received" }],
     ]);
     mocks.db.transaction.mockImplementationOnce(async (callback: any) => callback(tx));
-    const { runInvoiceMatch } = await import("../../ap-ledger.service");
+    const { runInvoiceMatch } = await import("../../application/ap-ledger.service");
 
     const result = await runInvoiceMatch(12, "ops-user");
 
@@ -187,7 +187,7 @@ describe("runInvoiceMatch", () => {
       [{ id: 12, vendorId: 4, status: "voided", paidAmountCents: 0 }],
     ]);
     mocks.db.transaction.mockImplementationOnce(async (callback: any) => callback(tx));
-    const { runInvoiceMatch } = await import("../../ap-ledger.service");
+    const { runInvoiceMatch } = await import("../../application/ap-ledger.service");
 
     await expect(runInvoiceMatch(12, "ops-user")).rejects.toMatchObject({
       statusCode: 409,

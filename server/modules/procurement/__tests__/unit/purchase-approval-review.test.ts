@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { purchaseApprovalLinesFingerprint } from "../../purchase-approval-review";
+import { purchaseApprovalLinesFingerprint } from "../../application/purchase-approval-review";
 
 const line = { id: 11, purchaseOrderId: 1, status: "open", sku: "TEST-A", orderQty: 1, unitCostCents: 10000, lineTotalCents: 10000, updatedAt: new Date("2026-10-23T12:00:00Z") };
 describe("purchase approval persisted line review", () => {

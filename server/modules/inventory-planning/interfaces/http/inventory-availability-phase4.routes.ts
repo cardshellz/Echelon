@@ -46,6 +46,7 @@ import {
   InventoryAvailabilityShadowRepositoryError,
   PostgresInventoryAvailabilityShadowRepository,
 } from "../../infrastructure/inventory-availability-shadow.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 type Phase4Service = Pick<InventoryAvailabilityClaimSimulationService, "runSimulation">;
 type ActivationDryRunService = Pick<InventoryAvailabilityActivationDryRunService, "runDryRun">;
@@ -283,10 +284,7 @@ function sendPhase4Error(res: Response, error: unknown, action: string): Respons
       },
     });
   }
-  console.error(JSON.stringify({
-    code: "INVENTORY_AVAILABILITY_PHASE4_FAILED",
-    action,
-    errorCode: error instanceof InventoryAvailabilityClaimSimulationRepositoryError
+  logger.error("INVENTORY_AVAILABILITY_PHASE4_FAILED", { code: "INVENTORY_AVAILABILITY_PHASE4_FAILED", errorCode: error instanceof InventoryAvailabilityClaimSimulationRepositoryError
       ? error.code
       : error instanceof InventoryAvailabilityClaimSimulationServiceError
         ? error.code
@@ -300,9 +298,7 @@ function sendPhase4Error(res: Response, error: unknown, action: string): Respons
               ? error.code
             : error instanceof InventoryAvailabilityShadowRepositoryError
               ? error.code
-              : null,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+              : null, error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({
     error: { code: "INVENTORY_AVAILABILITY_PHASE4_FAILED", message: `Failed to ${action}.` },
   });

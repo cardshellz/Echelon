@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { PgCatalogVariantMediaReader } from "../../catalog-media.reader";
+import { PgCatalogVariantMediaReader } from "../../infrastructure/catalog-media.reader";
 
 describe("catalog-owned variant media reader", () => {
   it("batch-loads only product-level or current variant images with publishing order preserved", async () => {

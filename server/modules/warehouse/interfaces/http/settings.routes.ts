@@ -4,7 +4,8 @@ import { warehouseStorage } from "../..";
 import { inventoryStorage } from "../../../inventory";
 const storage = { ...warehouseStorage, ...inventoryStorage };
 import { requirePermission, requireAuth } from "../../../../routes/middleware";
-import { sendInventoryQuantityError } from "../../../inventory/interfaces/quantity-command.middleware";
+import { sendInventoryQuantityError } from "../../../inventory/quantity-command.middleware.api";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerSettingsRoutes(app: Express) {
   // ============================================
@@ -17,7 +18,7 @@ export function registerSettingsRoutes(app: Express) {
       const result = await storage.getAllSettings();
       res.json(result);
     } catch (error) {
-      console.error("Error fetching settings:", error);
+      logger.error("warehouse.settings_routes", { message: "Error fetching settings:", error: error });
       res.status(500).json({ error: "Failed to fetch settings" });
     }
   });
@@ -69,7 +70,7 @@ export function registerSettingsRoutes(app: Express) {
 
       res.json({ success: true });
     } catch (error) {
-      console.error("Error updating settings:", error);
+      logger.error("warehouse.settings_routes", { message: "Error updating settings:", error: error });
       res.status(500).json({ error: "Failed to update settings" });
     }
   });
@@ -80,7 +81,7 @@ export function registerSettingsRoutes(app: Express) {
       const reasons = await storage.getActiveAdjustmentReasons();
       res.json(reasons);
     } catch (error) {
-      console.error("Error fetching adjustment reasons:", error);
+      logger.error("warehouse.settings_routes", { message: "Error fetching adjustment reasons:", error: error });
       res.status(500).json({ error: "Failed to fetch adjustment reasons" });
     }
   });
@@ -93,7 +94,7 @@ export function registerSettingsRoutes(app: Express) {
       const reason = await storage.createAdjustmentReason(req.body);
       res.status(201).json(reason);
     } catch (error) {
-      console.error("Error creating adjustment reason:", error);
+      logger.error("warehouse.settings_routes", { message: "Error creating adjustment reason:", error: error });
       res.status(500).json({ error: "Failed to create adjustment reason" });
     }
   });
@@ -141,7 +142,7 @@ export function registerSettingsRoutes(app: Express) {
         skipped
       });
     } catch (error) {
-      console.error("Error seeding adjustment reasons:", error);
+      logger.error("warehouse.settings_routes", { message: "Error seeding adjustment reasons:", error: error });
       res.status(500).json({ error: "Failed to seed adjustment reasons" });
     }
   });
@@ -156,7 +157,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.getAll());
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error fetching cycle counts:", error);
+      logger.error("warehouse.settings_routes", { message: "Error fetching cycle counts:", error: error });
       res.status(500).json({ error: "Failed to fetch cycle counts" });
     }
   });
@@ -167,7 +168,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.getById(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error fetching cycle count:", error);
+      logger.error("warehouse.settings_routes", { message: "Error fetching cycle count:", error: error });
       res.status(500).json({ error: "Failed to fetch cycle count" });
     }
   });
@@ -178,7 +179,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.getVarianceSummary(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error fetching variance summary:", error);
+      logger.error("warehouse.settings_routes", { message: "Error fetching variance summary:", error: error });
       res.status(500).json({ error: "Failed to fetch variance summary" });
     }
   });
@@ -190,7 +191,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.getReconciliationPreview(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error generating reconciliation preview:", error);
+      logger.error("warehouse.settings_routes", { message: "Error generating reconciliation preview:", error: error });
       res.status(500).json({ error: "Failed to generate reconciliation preview" });
     }
   });
@@ -202,7 +203,7 @@ export function registerSettingsRoutes(app: Express) {
       res.status(201).json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error creating cycle count:", error);
+      logger.error("warehouse.settings_routes", { message: "Error creating cycle count:", error: error });
       res.status(500).json({ error: "Failed to create cycle count" });
     }
   });
@@ -232,7 +233,7 @@ export function registerSettingsRoutes(app: Express) {
       res.status(201).json({ ...initialized, cycleCountId: cc.id });
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error creating quick count:", error);
+      logger.error("warehouse.settings_routes", { message: "Error creating quick count:", error: error });
       res.status(500).json({ error: error.message || "Failed to create quick count" });
     }
   });
@@ -243,7 +244,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.initialize(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error initializing cycle count:", error);
+      logger.error("warehouse.settings_routes", { message: "Error initializing cycle count:", error: error });
       res.status(500).json({ error: "Failed to initialize cycle count" });
     }
   });
@@ -259,7 +260,7 @@ export function registerSettingsRoutes(app: Express) {
       ));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error recording count:", error);
+      logger.error("warehouse.settings_routes", { message: "Error recording count:", error: error });
       res.status(500).json({ error: "Failed to record count" });
     }
   });
@@ -270,7 +271,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.resetItem(parseInt(req.params.id), parseInt(req.params.itemId)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error resetting count item:", error);
+      logger.error("warehouse.settings_routes", { message: "Error resetting count item:", error: error });
       res.status(500).json({ error: "Failed to reset count item" });
     }
   });
@@ -285,7 +286,7 @@ export function registerSettingsRoutes(app: Express) {
       ));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error setting investigation hold:", error);
+      logger.error("warehouse.settings_routes", { message: "Error setting investigation hold:", error: error });
       res.status(500).json({ error: "Failed to set investigation hold" });
     }
   });
@@ -302,7 +303,7 @@ export function registerSettingsRoutes(app: Express) {
       ));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error syncing cycle count expected:", error);
+      logger.error("warehouse.settings_routes", { message: "Error syncing cycle count expected:", error: error });
       res.status(500).json({ error: error.message || "Failed to sync expected qty" });
     }
   });
@@ -322,7 +323,7 @@ export function registerSettingsRoutes(app: Express) {
       ));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error resolving with transfer:", error);
+      logger.error("warehouse.settings_routes", { message: "Error resolving with transfer:", error: error });
       res.status(500).json({ error: error.message || "Failed to resolve with transfer" });
     }
   });
@@ -342,7 +343,7 @@ export function registerSettingsRoutes(app: Express) {
       ));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error resolving item:", error);
+      logger.error("warehouse.settings_routes", { message: "Error resolving item:", error: error });
       res.status(500).json({ error: error.message || "Failed to resolve item" });
     }
   });
@@ -353,7 +354,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.addFoundItem(parseInt(req.params.id), req.body, req.session.user?.id));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error adding found item:", error);
+      logger.error("warehouse.settings_routes", { message: "Error adding found item:", error: error });
       res.status(500).json({ error: "Failed to add found item" });
     }
   });
@@ -369,7 +370,7 @@ export function registerSettingsRoutes(app: Express) {
     } catch (error: any) {
       if (sendInventoryQuantityError(res, error)) return;
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error approving variance:", error);
+      logger.error("warehouse.settings_routes", { message: "Error approving variance:", error: error });
       res.status(500).json({ error: "Failed to approve variance" });
     }
   });
@@ -383,7 +384,7 @@ export function registerSettingsRoutes(app: Express) {
       ));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error bulk approving variances:", error);
+      logger.error("warehouse.settings_routes", { message: "Error bulk approving variances:", error: error });
       res.status(500).json({ error: "Failed to bulk approve variances" });
     }
   });
@@ -397,7 +398,7 @@ export function registerSettingsRoutes(app: Express) {
       if (error.code === "23505" || error.message?.includes("unique")) {
         return res.status(409).json({ error: "A variant with this SKU already exists. Try refreshing." });
       }
-      console.error("Error creating variant from cycle count item:", error);
+      logger.error("warehouse.settings_routes", { message: "Error creating variant from cycle count item:", error: error });
       res.status(500).json({ error: "Failed to create variant" });
     }
   });
@@ -408,7 +409,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.complete(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error completing cycle count:", error);
+      logger.error("warehouse.settings_routes", { message: "Error completing cycle count:", error: error });
       res.status(500).json({ error: "Failed to complete cycle count" });
     }
   });
@@ -419,7 +420,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.cancel(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error cancelling cycle count:", error);
+      logger.error("warehouse.settings_routes", { message: "Error cancelling cycle count:", error: error });
       res.status(500).json({ error: "Failed to cancel cycle count" });
     }
   });
@@ -430,7 +431,7 @@ export function registerSettingsRoutes(app: Express) {
       res.json(await ccService.delete(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error deleting cycle count:", error);
+      logger.error("warehouse.settings_routes", { message: "Error deleting cycle count:", error: error });
       res.status(500).json({ error: "Failed to delete cycle count" });
     }
   });

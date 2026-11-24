@@ -1,4 +1,4 @@
-import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
+import { syncActiveListings } from "../../modules/channels/ebay-listing-sync.api";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";
@@ -22,6 +22,7 @@ import {
   replaceEbayProductAspectOverrides,
   replaceEbayTypeAspectDefaults,
 } from "../../modules/channels/ebay-route-admin.api";
+import { logger } from "../../platform/observability/logger";
 
 export const router = express.Router();
 
@@ -59,7 +60,7 @@ export const router = express.Router();
 
       if (!resp.ok) {
         const errText = await resp.text();
-        console.error("[eBay Category Tree] API error:", resp.status, errText);
+        logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Category Tree] API error:", details: [resp.status, errText] });
         res.status(resp.status).json({ error: `eBay API error: ${resp.status}` });
         return;
       }
@@ -81,7 +82,7 @@ export const router = express.Router();
       setCache("root", result);
       res.json(result);
     } catch (err: any) {
-      console.error("[eBay Category Tree] Error:", err.message);
+      logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Category Tree] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -129,7 +130,7 @@ export const router = express.Router();
 
       if (!resp.ok) {
         const errText = await resp.text();
-        console.error("[eBay Category Children] API error:", resp.status, errText);
+        logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Category Children] API error:", details: [resp.status, errText] });
         res.status(resp.status).json({ error: `eBay API error: ${resp.status}` });
         return;
       }
@@ -162,7 +163,7 @@ export const router = express.Router();
       setCache(cacheKey, result);
       res.json(result);
     } catch (err: any) {
-      console.error("[eBay Category Children] Error:", err.message);
+      logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Category Children] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -203,7 +204,7 @@ export const router = express.Router();
 
       if (!resp.ok) {
         const errText = await resp.text();
-        console.error("[eBay Category Search] API error:", resp.status, errText);
+        logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Category Search] API error:", details: [resp.status, errText] });
         res.status(resp.status).json({ error: `eBay API error: ${resp.status}` });
         return;
       }
@@ -228,7 +229,7 @@ export const router = express.Router();
 
       res.json({ categories });
     } catch (err: any) {
-      console.error("[eBay Category Search] Error:", err.message);
+      logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Category Search] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -338,7 +339,7 @@ export const router = express.Router();
 
         res.json({ aspects: aspectsList, categoryId });
     } catch (err: any) {
-      console.error("[eBay Category Aspects] Error:", err.message);
+      logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Category Aspects] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -353,14 +354,14 @@ export const router = express.Router();
       const result = await db.select()
         .from(ebayTypeAspectDefaults)
         .where(eq(ebayTypeAspectDefaults.productTypeSlug, productTypeSlug));
-      
+
       const defaults: Record<string, string> = {};
       for (const r of result) {
         defaults[r.aspectName] = r.aspectValue;
       }
       res.json({ defaults });
     } catch (err: any) {
-      console.error("[eBay Type Aspect Defaults] Error:", err.message);
+      logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Type Aspect Defaults] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -390,7 +391,7 @@ export const router = express.Router();
       }
       res.json({ defaults: result });
     } catch (err: any) {
-      console.error("[eBay Type Aspect Defaults Save] Error:", err.message);
+      logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Type Aspect Defaults Save] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -409,14 +410,14 @@ export const router = express.Router();
       const result = await db.select()
         .from(ebayProductAspectOverrides)
         .where(eq(ebayProductAspectOverrides.productId, productId));
-      
+
       const overrides: Record<string, string> = {};
       for (const r of result) {
         overrides[r.aspectName] = r.aspectValue;
       }
       res.json({ overrides });
     } catch (err: any) {
-      console.error("[eBay Product Aspects] Error:", err.message);
+      logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Product Aspects] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -449,7 +450,7 @@ export const router = express.Router();
       }
       res.json({ overrides: result });
     } catch (err: any) {
-      console.error("[eBay Product Aspects Save] Error:", err.message);
+      logger.error("routes.ebay_taxonomy_routes", { message: "[eBay Product Aspects Save] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

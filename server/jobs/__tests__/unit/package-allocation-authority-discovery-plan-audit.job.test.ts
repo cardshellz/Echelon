@@ -11,7 +11,7 @@ import {
 } from "../../package-allocation-authority-discovery-plan-audit.job";
 import type {
   PackageAllocationDiscoveryPlanAuditReport,
-} from "../../../modules/shipping/package-allocation-authority-discovery-plan-audit.repository";
+} from "../../../modules/shipping/infrastructure/package-allocation-authority-discovery-plan-audit.repository";
 
 const LOCAL_URL = "postgresql://audit:test-password@localhost:5432/echelon";
 

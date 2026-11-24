@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
+import { storedEbayListingSyncJobSchema } from "../../domain/ebay-listing-sync.domain";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -40,15 +40,15 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {
   hasUnfinishedRecoveryWork = fixture.unfinished;
 } }));
-vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { hasOutstanding: fixture.outstanding },
+vi.mock("../../../inventory-planning/application/quantity-publication", () => ({ quantityProviderResponseRecovery: { hasOutstanding: fixture.outstanding },
   automaticEbayPublicationRecovery: {}, ebayPublicationReconciliationRepository: {},
   ebayPublicationRejectionReader: { read: vi.fn() },
   EbayPublicationContentRefreshRejectedError: class extends Error {
     constructor(readonly code: string, message: string) { super(message); }
   },
 }));
-vi.mock("../../ebay-listing-sync.service", async importOriginal => {
-  const actual = await importOriginal<typeof import("../../ebay-listing-sync.service")>();
+vi.mock("../../application/ebay-listing-sync.service", async importOriginal => {
+  const actual = await importOriginal<typeof import("../../application/ebay-listing-sync.service")>();
   return { ...actual, EbayListingSyncService: class {
     async enqueue(identity: { productId: number }, actor: string, key: string) {
       fixture.queued.push({ identity, actor, key });

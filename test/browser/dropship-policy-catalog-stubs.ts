@@ -226,7 +226,7 @@ import {
 } from "../../server/modules/dropship/domain/vendor-selection-ends";
 // PR C's push fence (PLAN-C v4.1 §6.2): its codes and words, for the run problems of a target whose end is open.
 import { LISTING_END_FENCE_CODES, LISTING_END_FENCE_WORDS } from "../../server/modules/dropship/domain/listing-end-fence";
-import { publicationSelectionBusyIssue } from "../../server/modules/inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../server/modules/inventory-planning/publication-selection-work.api";
 
 /**
  * The stub Card Shellz server and fixtures the Catalog page's browser journeys run against

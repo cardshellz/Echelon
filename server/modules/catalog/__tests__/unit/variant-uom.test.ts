@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateVariantUomWrite } from "../../variant-uom";
+import { validateVariantUomWrite } from "../../domain/variant-uom";
 
 describe("validateVariantUomWrite", () => {
   it("accepts a complete Piece definition", () => {

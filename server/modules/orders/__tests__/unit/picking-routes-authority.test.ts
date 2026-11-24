@@ -48,8 +48,8 @@ function parseRouteWirings(filePath: string): RouteWiring[] {
 }
 
 describe("WMS picking route capability wiring (Batch B1)", () => {
-  const pickingRoutes = parseRouteWirings("server/modules/orders/picking.routes.ts");
-  const pickingHistoryRoutes = parseRouteWirings("server/modules/orders/picking-history.routes.ts");
+  const pickingRoutes = parseRouteWirings("server/modules/orders/interfaces/http/picking.routes.ts");
+  const pickingHistoryRoutes = parseRouteWirings("server/modules/orders/interfaces/http/picking-history.routes.ts");
 
   it.each([
     ["GET", "/api/picking/queue", ["requireAuth", "requirePermission(picking,view)"]],

@@ -26,8 +26,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { deriveReconcileEvent } from "../../../shipping/reconcile-derive";
-import type { EngineOrderState, CanonicalShipmentEvent } from "../../../shipping/types";
+import { deriveReconcileEvent } from "../../../shipping/domain/reconcile-derive";
+import type { EngineOrderState, CanonicalShipmentEvent } from "../../../shipping/domain/types";
 
 // ─── Helpers under test (replicated from server/index.ts reconcile) ─────
 
@@ -51,8 +51,8 @@ async function reconcileOneShipment(
     oms_order_status?: string;
   },
   ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string },
-  dispatchShipmentEvent: typeof import("../../../orders/shipment-rollup").dispatchShipmentEvent,
-  recomputeOrderStatusFromShipments: typeof import("../../../orders/shipment-rollup").recomputeOrderStatusFromShipments,
+  dispatchShipmentEvent: typeof import("../../../orders/application/shipment-rollup").dispatchShipmentEvent,
+  recomputeOrderStatusFromShipments: typeof import("../../../orders/application/shipment-rollup").recomputeOrderStatusFromShipments,
 ) {
   const shipmentId = row.shipment_id;
 

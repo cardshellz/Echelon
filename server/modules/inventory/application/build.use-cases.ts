@@ -28,6 +28,7 @@ import {
   type BuildQueryRepository,
 } from "../infrastructure/build-query.repository";
 import type { TransformationExecutionAuthorityPort } from "./transformation-execution-authority.port";
+import { logger } from "../../../platform/observability/logger";
 
 type BuildDb = ConstructorParameters<typeof BuildRepository>[0];
 export type BuildInventoryChangeTrigger =
@@ -182,22 +183,11 @@ export class BuildUseCases {
         try {
           this.inventoryChangedCallback(variantId, "recipe_version_created");
         } catch (error: any) {
-          console.warn(JSON.stringify({
-            event: "build_recipe_inventory_notification_failed",
-            recipeId: Number(result.id),
-            productVariantId: variantId,
-            error: error?.message ?? String(error),
-          }));
+          logger.warn("build_recipe_inventory_notification_failed", { event: "build_recipe_inventory_notification_failed", recipeId: Number(result.id), productVariantId: variantId, error: error?.message ?? String(error) });
         }
       }
     }
-    console.info(JSON.stringify({
-      event: result.alreadyApplied ? "build_recipe_version_reused" : "build_recipe_version_created",
-      recipeId: Number(result.id),
-      recipeCode: String(result.code),
-      recipeVersion: Number(result.version),
-      actorId: normalized.actorId,
-    }));
+    logger.info("inventory.build_use_cases", { event: result.alreadyApplied ? "build_recipe_version_reused" : "build_recipe_version_created", recipeId: Number(result.id), recipeCode: String(result.code), recipeVersion: Number(result.version), actorId: normalized.actorId });
     return result;
   }
 
@@ -257,13 +247,7 @@ export class BuildUseCases {
       try {
         this.inventoryChangedCallback(variantId, trigger);
       } catch (error: any) {
-        console.warn(JSON.stringify({
-          event: "build_inventory_notification_failed",
-          buildOrderId,
-          productVariantId: variantId,
-          trigger,
-          error: error?.message ?? String(error),
-        }));
+        logger.warn("build_inventory_notification_failed", { event: "build_inventory_notification_failed", buildOrderId, productVariantId: variantId, trigger, error: error?.message ?? String(error) });
       }
     }
   }
@@ -272,12 +256,7 @@ export class BuildUseCases {
     const id = requirePositiveInteger(buildOrderId, "buildOrderId");
     const result = await this.repository.releaseOrder(id, actorId, txOverride);
     await this.notifyInventoryChanged(id, "build_released");
-    console.info(JSON.stringify({
-      event: "build_order_released",
-      buildOrderId: id,
-      actorId: actorId ?? null,
-      status: result.status,
-    }));
+    logger.info("build_order_released", { event: "build_order_released", buildOrderId: id, actorId: actorId ?? null, status: result.status });
     return result;
   }
 
@@ -292,17 +271,7 @@ export class BuildUseCases {
     if (!result.alreadyPosted) {
       await this.notifyInventoryChanged(command.buildOrderId, "build_completed");
     }
-    console.info(JSON.stringify({
-      event: result.alreadyPosted ? "build_run_reused" : "build_run_posted",
-      buildOrderId: result.buildOrderId,
-      buildRunId: result.buildRunId,
-      runNumber: result.runNumber,
-      buildsCompleted: result.buildsCompleted,
-      completedBuilds: result.completedBuilds,
-      plannedBuilds: result.plannedBuilds,
-      status: result.status,
-      actorId: command.actorId ?? null,
-    }));
+    logger.info("inventory.build_use_cases", { event: result.alreadyPosted ? "build_run_reused" : "build_run_posted", buildOrderId: result.buildOrderId, buildRunId: result.buildRunId, runNumber: result.runNumber, buildsCompleted: result.buildsCompleted, completedBuilds: result.completedBuilds, plannedBuilds: result.plannedBuilds, status: result.status, actorId: command.actorId ?? null });
     return result;
   }
 
@@ -330,12 +299,7 @@ export class BuildUseCases {
     if (!result.alreadyCancelled && result.releasedReservationQty > 0) {
       await this.notifyInventoryChanged(command.buildOrderId, "build_cancelled");
     }
-    console.info(JSON.stringify({
-      event: result.alreadyCancelled ? "build_cancellation_reused" : "build_order_cancelled",
-      buildOrderId: result.buildOrderId,
-      releasedReservationQty: result.releasedReservationQty,
-      actorId: command.actorId ?? null,
-    }));
+    logger.info("inventory.build_use_cases", { event: result.alreadyCancelled ? "build_cancellation_reused" : "build_order_cancelled", buildOrderId: result.buildOrderId, releasedReservationQty: result.releasedReservationQty, actorId: command.actorId ?? null });
     return result;
   }
 
@@ -351,15 +315,7 @@ export class BuildUseCases {
     if (!result.alreadyReversed) {
       await this.notifyInventoryChanged(command.buildOrderId, "build_reversed");
     }
-    console.info(JSON.stringify({
-      event: result.alreadyReversed ? "build_reversal_reused" : "build_run_reversed",
-      buildOrderId: result.buildOrderId,
-      buildRunId: result.buildRunId,
-      reversalId: result.reversalId,
-      restoredComponentQty: result.restoredComponentQty,
-      removedOutputQty: result.removedOutputQty,
-      actorId: command.actorId ?? null,
-    }));
+    logger.info("inventory.build_use_cases", { event: result.alreadyReversed ? "build_reversal_reused" : "build_run_reversed", buildOrderId: result.buildOrderId, buildRunId: result.buildRunId, reversalId: result.reversalId, restoredComponentQty: result.restoredComponentQty, removedOutputQty: result.removedOutputQty, actorId: command.actorId ?? null });
     return result;
   }
 }

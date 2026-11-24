@@ -27,11 +27,11 @@ function readShipStationSource(): string {
         .sort()
         .map((f) => readFileSync(resolve(subDir, f), "utf8"))
     : [];
-  return [read("../../shipstation.service.ts"), ...subFiles].join("\n");
+  return [read("../../application/shipstation.service.ts"), ...subFiles].join("\n");
 }
 
 const SS_SRC = readShipStationSource();
-const WMS_SHIPMENTS_REPO_SRC = read("../../../wms/outbound-shipments-mutations.repository.ts");
+const WMS_SHIPMENTS_REPO_SRC = read("../../../wms/infrastructure/outbound-shipments-mutations.repository.ts");
 
 describe("P0.4 — SHIP_NOTIFY creation paths are closed", () => {
   it("every remaining outbound_shipments INSERT is a 918406-sanctioned child", () => {

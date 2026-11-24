@@ -19,8 +19,8 @@ import {
   type ListingReview,
   type ListingTaxonomy,
 } from "@shared/types/channel-listing-publication";
-import type { ChannelCatalogService } from "../../channels/channel-catalog.service";
-import { ChannelProviderError } from "../../channels/channel-provider.error";
+import type { ChannelCatalogService } from "../../channels/channel-catalog.service.api";
+import { ChannelProviderError } from "../../channels/channel-provider.error.api";
 import type {
   ListingPublicationProvider,
   PreparedListingItem,
@@ -28,7 +28,7 @@ import type {
 import { ListingSubmissionError } from "./listing-publication-provider.port";
 import type { ListingPublicationStore } from "./listing-publication-store.port";
 import type { ListingUpdateStore } from "./listing-update-ports";
-import type { ListingSetupIntent } from "../../inventory-planning/application/listing-setup-intent";
+import type { ListingSetupIntent } from "../../inventory-planning/listing-setup-intent.api";
 import {
   ListingPublicationError,
   listingAccountKey,
@@ -40,6 +40,7 @@ import {
   type ListingSnapshot,
   type StoredListingOperation,
 } from "../domain/listing-publication";
+import { logger } from "../../../platform/observability/logger";
 
 export interface ListingPublicationCatalog {
   catalog(
@@ -494,13 +495,7 @@ export class ListingPublicationService {
         processed++;
       } catch (error) {
         failed++;
-        console.error(
-          JSON.stringify({
-            operation: "listing_publication_worker",
-            id: operation.id,
-            code: safeCode(error),
-          }),
-        );
+        logger.error("marketplace-listings.listing_publication_service", { operation: "listing_publication_worker", id: operation.id, code: safeCode(error) });
       }
     }
     return { processed, failed };
@@ -798,8 +793,7 @@ export class ListingPublicationService {
               item.stockState = "blocked";
               item.stockErrorCode = safeCode(error);
               item.error = safeMessage(error);
-              console.error(JSON.stringify({ operation: "listing_recreation_stock", operationId: operation.id,
-                variantId: item.variantId, code: safeCode(error) }));
+              logger.error("marketplace-listings.listing_publication_service", { operation: "listing_recreation_stock", operationId: operation.id, variantId: item.variantId, code: safeCode(error) });
               await persist();
               continue;
             }

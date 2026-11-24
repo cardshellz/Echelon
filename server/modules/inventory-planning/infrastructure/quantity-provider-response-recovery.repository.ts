@@ -12,6 +12,7 @@ import {
   quantityPublicationScopeLockKey,
 } from "./quantity-publication-admission.repository";
 import { journalContractNoRequestProof, recoverNoRequestAttemptInsideTransaction, type QuantityNoRequestAttempt } from "./quantity-provider-preflight-recovery.repository";
+import { logger } from "../../../platform/observability/logger";
 
 /** One writer for canonical response recovery, shared by scheduled recovery and
  * the exact publication checkpoint transaction. Caller holds every scope lock
@@ -187,15 +188,8 @@ export class PostgresQuantityProviderResponseRecovery {
         "PUBLICATION_RESPONSE_RECOVERY_FAILED",
         "Saved request-evidence recovery could not commit. It will be checked again.",
       );
-      console.error(
-        JSON.stringify({
-          operation: "quantity_provider_response_recovery",
-          code: failure.code,
-          at: timestamp.toISOString(),
-          sqlState:
-            error instanceof Error && "code" in error ? error.code : null,
-        }),
-      );
+      logger.error("inventory-planning.quantity_provider_response_recovery_repository", { operation: "quantity_provider_response_recovery", code: failure.code, at: timestamp.toISOString(), sqlState:
+            error instanceof Error && "code" in error ? error.code : null });
       throw Object.assign(failure, { cause });
     } finally {
       client.release(discard);

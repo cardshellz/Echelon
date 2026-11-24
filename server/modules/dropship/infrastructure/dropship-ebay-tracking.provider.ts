@@ -18,7 +18,7 @@ import type {
   EbayShippingFulfillmentRequest,
   EbayShippingFulfillmentResponse,
 } from "../../channels/ebay-connector.api";
-import { ChannelFulfillmentProviderError } from "../../channels/channel-fulfillment-provider.error";
+import { ChannelFulfillmentProviderError } from "../../channels/channel-fulfillment-provider.error.api";
 import {
   isEbayResourceAuthFailureStatus,
   recordEbayAccessTokenRejection,

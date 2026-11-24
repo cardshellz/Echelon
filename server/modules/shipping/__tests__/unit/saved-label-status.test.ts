@@ -2,21 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 import {
   normalizeSavedLabelStatusObservation,
   verifyHistoricalStatusLabelAlias,
-} from "../../saved-label-status.domain";
-import { SavedLabelStatusWorker } from "../../saved-label-status.worker";
+} from "../../domain/saved-label-status.domain";
+import { SavedLabelStatusWorker } from "../../application/saved-label-status.worker";
 import {
   complexHistory,
   complexProvider,
 } from "../../../returns/__tests__/support/complex-return-scenario";
-import { deriveSalesChannelDeliveryEvidence } from "../../sales-channel-delivery.domain";
+import { deriveSalesChannelDeliveryEvidence } from "../../domain/sales-channel-delivery.domain";
 import {
   SavedLabelStatusSourceError,
   type SavedLabelStatusSourceReader,
-} from "../../saved-label-status.source";
+} from "../../application/saved-label-status.source";
 import type {
   SavedLabelStatusStore,
   SavedLabelStatusClaim,
-} from "../../saved-label-status.repository";
+} from "../../infrastructure/saved-label-status.repository";
 
 const now = new Date("2026-10-30T12:00:00Z");
 const source = {

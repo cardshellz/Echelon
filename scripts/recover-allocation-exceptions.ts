@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import pg from "pg";
-import { recoverCompletedWmsOrderItemPickState } from "../server/modules/wms/order-item-maintenance-commands";
+import { recoverCompletedWmsOrderItemPickState } from "../server/modules/wms/application/order-item-maintenance-commands";
 
 type CliOptions = {
   execute: boolean;

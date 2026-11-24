@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { CostSourceRevision } from "@shared/procurement/cost-source-contracts";
-import { resolveCost } from "../cost-resolver";
+import { resolveCost } from "../application/cost-resolver";
 import { normalizeLotCosts, recordedUnitCostMills, lotCostNeedsReview, type LotCosts } from "../domain/lot-cost";
 import { costInteger, CostEvidenceError, type CostEvidenceTransaction } from "./cost-evidence.repository";
 import { returnableCostQuantities, ReturnCostQuantityError } from "../domain/return-cost-quantity";

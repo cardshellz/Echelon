@@ -5,9 +5,9 @@ import type { request } from "node:https";
 import { describe,expect,it,vi } from "vitest";
 import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import { inventoryCostReportEventSchema } from "@shared/procurement/cost-report-delivery";
-import { buildCostReportEnvelope,costReportInventoryEffectMatches,CostReportingError,nextReportFailure,parseReportConfiguration,reportHash,verifyReportAcknowledgement,type ReportTransportConfiguration } from "../../cost-reporting.domain";
-import { isPublicReportAddress,sendCostReport } from "../../cost-reporting.transport";
-import { CostReportingService } from "../../cost-reporting.service";
+import { buildCostReportEnvelope,costReportInventoryEffectMatches,CostReportingError,nextReportFailure,parseReportConfiguration,reportHash,verifyReportAcknowledgement,type ReportTransportConfiguration } from "../../domain/cost-reporting.domain";
+import { isPublicReportAddress,sendCostReport } from "../../infrastructure/cost-reporting.transport";
+import { CostReportingService } from "../../application/cost-reporting.service";
 
 export const configuration:ReportTransportConfiguration = {id:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",sourceSystemId:"synthetic-echelon",endpoint:"https://reports.example.com/api/integrations/procurement-cost-reports",token:"synthetic-credential-00000000000000",enabled:true};
 const now = new Date("2026-09-07T12:00:00Z");

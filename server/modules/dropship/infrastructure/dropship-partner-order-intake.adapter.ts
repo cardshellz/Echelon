@@ -19,7 +19,7 @@ import {
   type ValidatedChannelCancelEvent,
   type ValidatedChannelOrder,
   type ValidatedChannelRefundEvent,
-} from "../../channels/channel-adapter.interface";
+} from "../../channels/channel-adapter.interface.api";
 
 export interface DropshipPartnerOrderIntakeAdapterOptions {
   webhookSecret?: string;

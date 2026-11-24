@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 const repositorySource = readFileSync(
   resolve(
     process.cwd(),
-    "server/modules/oms/channel-fulfillment-authority.repository.ts",
+    "server/modules/oms/infrastructure/channel-fulfillment-authority.repository.ts",
   ),
   "utf8",
 );

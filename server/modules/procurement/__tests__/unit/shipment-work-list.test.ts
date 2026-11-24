@@ -1,15 +1,15 @@
-import type { ShipmentExceptionReader } from "../../shipment-cost-exception.repository";
-import type { PurchaseCostStatusSnapshotReader } from "../../purchase-cost-status-snapshot.repository";
+import type { ShipmentExceptionReader } from "../../infrastructure/shipment-cost-exception.repository";
+import type { PurchaseCostStatusSnapshotReader } from "../../infrastructure/purchase-cost-status-snapshot.repository";
 import type { ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shipmentWorkListQuerySchema, shipmentWorkListPageSchema, matchesShipmentCostFilter, type ShipmentWorkListItem } from "@shared/procurement/shipment-work-list";
-import { createShipmentTrackingService } from "../../shipment-tracking.service";
-import { readShipmentCostReviewInTransaction, readShipmentCostReviewProjectionsInTransaction } from "../../shipment-cost-review.repository";
-import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts } from "../../shipment-health-evidence.repository";
-vi.mock("../../shipment-physical-read.repository", () => ({ readShipmentPhysicalLines: vi.fn(async (_tx: unknown, ids: number[]) =>
+import { createShipmentTrackingService } from "../../application/shipment-tracking.service";
+import { readShipmentCostReviewInTransaction, readShipmentCostReviewProjectionsInTransaction } from "../../infrastructure/shipment-cost-review.repository";
+import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts } from "../../infrastructure/shipment-health-evidence.repository";
+vi.mock("../../infrastructure/shipment-physical-read.repository", () => ({ readShipmentPhysicalLines: vi.fn(async (_tx: unknown, ids: number[]) =>
   new Map(ids.map(id => [id, [{ id: id * 10, inboundShipmentId: id, qtyShipped: 1, cartonCount: null }]]))) }));
-vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn(), readShipmentProvisionalLotCounts: vi.fn() }));
-vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewProjectionsInTransaction: vi.fn() }));
+vi.mock("../../infrastructure/shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn(), readShipmentProvisionalLotCounts: vi.fn() }));
+vi.mock("../../infrastructure/shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewProjectionsInTransaction: vi.fn() }));
 
 const item = (id: number, status = "draft"): ShipmentWorkListItem => ({ id, shipmentNumber: `SHP-${id}`, status,
   mode: "sea_fcl", carrierName: null, forwarderName: null, containerNumber: null, originPort: null,

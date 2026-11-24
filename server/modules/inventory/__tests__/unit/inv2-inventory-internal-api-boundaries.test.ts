@@ -99,20 +99,20 @@ describe("Batch INV-2: Inventory Internal API Boundaries & CI-03", () => {
   it("rejects literal direct/alias/re-export/dynamic imports of private inventory repositories from non-inventory modules", () => {
     expect(
       privateInventoryImports(
-        "server/modules/catalog/catalog.storage.ts",
-        'import { cancelProductReplenishmentTasksInTx } from "../inventory/infrastructure/replenishment-archive.repository";',
+        "server/modules/catalog/infrastructure/catalog.storage.ts",
+        'import { cancelProductReplenishmentTasksInTx } from "../../inventory/infrastructure/replenishment-archive.repository";',
       ),
     ).toEqual(["server/modules/inventory/infrastructure/replenishment-archive.repository.ts"]);
     expect(
       privateInventoryImports(
-        "server/modules/orders/operations-dashboard.service.ts",
-        'import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";',
+        "server/modules/orders/application/operations-dashboard.service.ts",
+        'import { shipmentQuantityEvidenceProjection } from "../../inventory/infrastructure/shipment-quantity-evidence.sql";',
       ),
     ).toEqual(["server/modules/inventory/infrastructure/shipment-quantity-evidence.sql.ts"]);
     expect(
       privateInventoryImports(
-        "server/modules/catalog/catalog.storage.ts",
-        'import { cancelProductReplenishmentTasksInTx } from "../inventory/catalog-inventory.api";',
+        "server/modules/catalog/infrastructure/catalog.storage.ts",
+        'import { cancelProductReplenishmentTasksInTx } from "../../inventory/catalog-inventory.api";',
       ),
     ).toEqual([]);
   });

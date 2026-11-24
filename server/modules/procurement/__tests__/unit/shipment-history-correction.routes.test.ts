@@ -5,12 +5,12 @@ import express, { type Request, type Response, type NextFunction } from "express
 import { beforeAll, afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { historyContext, historyInput } from "../../../../../test/fixtures/shipment-history-correction";
 import { planShipmentHistoryCorrection } from "../../domain/shipment-history-correction";
-import type { createShipmentHistoryCorrectionService } from "../../shipment-history-correction.service";
+import type { createShipmentHistoryCorrectionService } from "../../application/shipment-history-correction.service";
 
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) =>
   (req: Request, res: Response, next: NextFunction) => req.headers["x-permission"] === `${resource}:${action}` ? next() : res.status(403).json({ error: "Permission denied" }) }));
 vi.mock("../../../../platform/observability/logger", () => ({ logger: { info: vi.fn(), error: vi.fn() } }));
-import { registerShipmentHistoryCorrectionRoutes } from "../../shipment-history-correction.routes";
+import { registerShipmentHistoryCorrectionRoutes } from "../../interfaces/http/shipment-history-correction.routes";
 
 type Service = ReturnType<typeof createShipmentHistoryCorrectionService>;
 describe("shipment history correction HTTP boundary", () => {

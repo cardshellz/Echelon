@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeShipStationLabelObservation } from "../../carrier-tracking.domain";
-import type { PersistedDeclaredPackageEvidence } from "../../declared-package-lifecycle-shadow.domain";
-import { assessVoidedLabelExclusion, type VoidedLabelPostingFacts } from "../../package-allocation-voided-label.domain";
-import { resolvePackageAllocationAuthorityEvidence } from "../../package-allocation-authority-resolution.service";
-import { packageAllocationGroupPreviousPlanSchema } from "../../package-allocation-group.domain";
+import { normalizeShipStationLabelObservation } from "../../domain/carrier-tracking.domain";
+import type { PersistedDeclaredPackageEvidence } from "../../domain/declared-package-lifecycle-shadow.domain";
+import { assessVoidedLabelExclusion, type VoidedLabelPostingFacts } from "../../domain/package-allocation-voided-label.domain";
+import { resolvePackageAllocationAuthorityEvidence } from "../../application/package-allocation-authority-resolution.service";
+import { packageAllocationGroupPreviousPlanSchema } from "../../domain/package-allocation-group.domain";
 
 const groupKey = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const sourceId = 7001;

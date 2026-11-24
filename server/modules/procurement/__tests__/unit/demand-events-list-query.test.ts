@@ -11,7 +11,7 @@ vi.mock("../../../../db", () => ({
   },
 }));
 
-import { listDemandEvents } from "../../demand-events.service";
+import { listDemandEvents } from "../../application/demand-events.service";
 
 const dialect = new PgDialect();
 

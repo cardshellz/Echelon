@@ -12,11 +12,11 @@ vi.mock("../../../identity", () => ({ hasPermission: mocks.permission, readCurre
   })) }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.log } }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
-vi.mock("../../receiving-entry.commands", async original => ({ ...await original<typeof import("../../receiving-entry.commands")>(),
+vi.mock("../../application/receiving-entry.commands", async original => ({ ...await original<typeof import("../../application/receiving-entry.commands")>(),
   createReceivingEntryCommands: () => ({ execute: mocks.execute }) }));
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
-import { hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../receiving-entry.commands";
-import { registerReceivingEntryRoutes } from "../../receiving-entry.routes";
+import { hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../application/receiving-entry.commands";
+import { registerReceivingEntryRoutes } from "../../interfaces/http/receiving-entry.routes";
 
 const key = "receiving-entry-http-001";
 const routes = [

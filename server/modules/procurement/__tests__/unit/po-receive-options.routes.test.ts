@@ -1,6 +1,6 @@
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 // Planning endpoints have their own route suite; this fixture registers only the owner under test.
-vi.mock("../../purchase-planning-policy.routes", () => ({ registerPurchasePlanningPolicyRoutes: vi.fn() }));
+vi.mock("../../interfaces/http/purchase-planning-policy.routes", () => ({ registerPurchasePlanningPolicyRoutes: vi.fn() }));
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -30,13 +30,13 @@ vi.mock("../../../../modules/catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
-vi.mock("../../procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
-vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
+vi.mock("../../infrastructure/procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
+vi.mock("../../application/ap-ledger.service", () => ({}));
+vi.mock("../../application/po-document", () => ({ renderPoHtml: vi.fn() }));
 vi.mock("../../../notifications/email-delivery.api", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
-import { registerPurchasingRoutes } from "../../procurement.routes";
+import { registerPurchasingRoutes } from "../../interfaces/http/procurement.routes";
 
 function buildPurchasingMock(overrides: Record<string, any> = {}) {
   return {

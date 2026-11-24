@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { HistoricalShipStationContentsClient } from "../../historical-shipstation-contents-audit.client";
-import { buildHistoricalShipStationContentsRecoveryEvidence } from "../../historical-shipstation-contents-recovery.domain";
+import type { HistoricalShipStationContentsClient } from "../../infrastructure/historical-shipstation-contents-audit.client";
+import { buildHistoricalShipStationContentsRecoveryEvidence } from "../../domain/historical-shipstation-contents-recovery.domain";
 import {
   classifyReviewedShipStationContents,
   HistoricalShipStationContentsReviewService,
@@ -9,7 +9,7 @@ import {
   type HistoricalShipStationContentsReviewCandidate,
   type HistoricalShipStationContentsReviewRepository,
   type HistoricalShipStationContentsReviewSnapshot,
-} from "../../historical-shipstation-contents-review.service";
+} from "../../application/historical-shipstation-contents-review.service";
 
 const providerObservationHash = "a".repeat(64);
 const candidate: HistoricalShipStationContentsReviewCandidate = Object.freeze({

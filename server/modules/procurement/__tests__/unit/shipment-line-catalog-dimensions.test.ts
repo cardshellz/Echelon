@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { shipmentLineEditableSchema } from "@shared/procurement/shipment-line-command";
-import { catalogDimensionsForShipmentLine } from "../../shipment-line-catalog-dimensions";
+import { catalogDimensionsForShipmentLine } from "../../application/shipment-line-catalog-dimensions";
 
 // ESS-TOP-STD-SLV-CLR-C1000 as stored in catalog.product_variants: 18.001 lb
 // and 18 x 9 x 6 in. Its PO line could not be added to a shipment because

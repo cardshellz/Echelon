@@ -4,13 +4,13 @@ import { getTableConfig, PgDialect, type PgTable } from "drizzle-orm/pg-core";
 import { beforeAll, beforeEach, afterAll, describe, expect, it, vi } from "vitest";
 import * as schema from "@shared/schema";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { resolveOrderLineCatalogIdentity } from "../../order-line-catalog-identity.service";
-import { createOmsService } from "../../oms.service";
-import { normalizeShopifyLineItems } from "../../shopify-line-item-normalizer";
-import { buildWmsLineItemFromOmsLine } from "../../wms-sync.service";
+import { resolveOrderLineCatalogIdentity } from "../../application/order-line-catalog-identity.service";
+import { createOmsService } from "../../application/oms.service";
+import { normalizeShopifyLineItems } from "../../application/shopify-line-item-normalizer";
+import { buildWmsLineItemFromOmsLine } from "../../application/wms-sync.service";
 import { createHistoricalOrderLineIdentityRepairService } from "../../application/historical-order-line-identity-repair.service";
 import { orderEditProjectionQueryFixtureSql } from "../../../order-edits/__tests__/fixtures/order-edit-projection.fixture";
-import { bridgeShopifyOrderToOms } from "../../shopify-bridge";
+import { bridgeShopifyOrderToOms } from "../../application/shopify-bridge";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

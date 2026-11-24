@@ -22,12 +22,12 @@ function readShipStationSource(): string {
         .sort()
         .map((f) => readFileSync(resolve(subDir, f), "utf8"))
     : [];
-  return [readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"), ...subFiles].join("\n");
+  return [readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf8"), ...subFiles].join("\n");
 }
 
 const SHIPSTATION_SRC = readShipStationSource();
 const PROJECTION_SRC = readFileSync(
-  fileURLToPath(new URL("../../../wms/channel-fulfillment-projection.repository.ts", import.meta.url)),
+  fileURLToPath(new URL("../../../wms/infrastructure/channel-fulfillment-projection.repository.ts", import.meta.url)),
   "utf8",
 );
 const quantityProjectionSql: string[] = [];
@@ -93,7 +93,7 @@ describe("D-NOMATCH: no-match SHIP_NOTIFY surfacing", () => {
       ),
     );
     expect(fnBlock).toContain("ship_notify_no_match");
-    expect(fnBlock).toContain("JSON.stringify");
+    expect(fnBlock).toContain("logger.error");
   });
 
   it("persists a WMS reconciliation exception for unmatched shipments", () => {

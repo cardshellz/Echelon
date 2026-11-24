@@ -129,9 +129,13 @@ allocation engine. Rewards state remains owned by the Club app.
 
 1. Verified product and member discounts establish each eligible item subtotal.
 2. Existing order percentages use that same subtotal, without compounding.
-   A native per-line allocation must equal one of the two adjacent integer cents
-   around the exact percentage. This covers the captured Shopify rounding; it is
-   not a tolerance for an arbitrary difference in order totals.
+   Shopify's per-line allocation of a native percentage code is used as given.
+   Shopify rounds the order total once and settles the leftover cents on items
+   of its choosing, so an allocation can fall outside the two cents adjacent to
+   that item's own percentage (order #65231: $4.79 on a $32.00 item at 15%).
+   The earlier adjacent-cent rule refused such orders. The engine still applies
+   that rule to allocations it computes itself, and the financial quote must
+   still reconcile to Shopify's item subtotal and order total.
 3. Existing native fixed codes retain their actual checkout allocations on the
    original items. Their face value is not a new credit budget. Added items get
    no allocation from that old code. Extra quantity is staged as another line

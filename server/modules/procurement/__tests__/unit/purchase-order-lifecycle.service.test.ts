@@ -7,7 +7,7 @@ import {
   buildFinancialTransitionChange,
   buildPhysicalTransitionChange,
   getAllowedLegacyTransitions,
-} from "../../purchase-order-lifecycle.service";
+} from "../../application/purchase-order-lifecycle.service";
 
 describe("purchase-order-lifecycle.service", () => {
   it("builds a physical transition patch with legacy status compatibility", () => {

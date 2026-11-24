@@ -3,9 +3,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import * as schema from "@shared/schema";
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
-import { createChannelPricingService, type ChannelPricingService } from "../../channel-pricing.service";
-import { ChannelListingCatalogRepository } from "../../channel-listing-catalog.repository";
-import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
+import { createChannelPricingService, type ChannelPricingService } from "../../application/channel-pricing.service";
+import { ChannelListingCatalogRepository } from "../../infrastructure/channel-listing-catalog.repository";
+import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
 import { createChannelPricingTestDatabase, pricingSnapshot } from "../fixtures/channel-pricing-owner.fixture";
 import type { InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 

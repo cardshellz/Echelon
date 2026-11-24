@@ -3,6 +3,7 @@ import { DropshipError } from "../../domain/errors";
 import type { DropshipNotificationService } from "../../application/dropship-notification-service";
 import { createDropshipNotificationServiceFromEnv } from "../../infrastructure/dropship-notification.factory";
 import { requireDropshipAuth, requireDropshipSensitiveActionProof } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipNotificationRoutes(
   app: Express,
@@ -72,7 +73,7 @@ function sendDropshipNotificationError(res: Response, error: unknown): Response 
     });
   }
 
-  console.error("[DropshipNotificationRoutes] Unexpected notification error:", error);
+  logger.error("dropship.notification_routes", { message: "[DropshipNotificationRoutes] Unexpected notification error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_NOTIFICATION_INTERNAL_ERROR",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { channelOrderObservationSchema, reconcileChannelOrderLineDisposition, type ChannelOrderObservation } from "../../channel-order-observation";
+import { channelOrderObservationSchema, reconcileChannelOrderLineDisposition, type ChannelOrderObservation } from "../../application/channel-order-observation";
 
 const line = { externalLineItemId: "1", quantity: 3, cancelledQuantity: 1, paidPriceCents: 100, totalCents: 300, providerStates: [] };
 const before = { quantity: 3, cancelled_quantity: 0, refunded_quantity: 0, authority_fulfillable_quantity: 3, authorization_status: "paid" };

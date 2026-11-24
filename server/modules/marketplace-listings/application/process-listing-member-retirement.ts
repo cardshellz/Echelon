@@ -8,6 +8,7 @@ import type {
   ListingMemberLifecycleDependencies,
   ListingMemberLifecycleSession,
 } from "./listing-member-lifecycle.port";
+import { logger } from "../../../platform/observability/logger";
 
 export const RETIREMENT_VERIFICATION_LIMIT = 5;
 
@@ -47,15 +48,7 @@ export async function processListingMemberRetirement(
       error instanceof ListingMemberLifecycleError
         ? error.message
         : "The sales channel could not confirm removal.";
-    console.error(
-      JSON.stringify({
-        operation: "listing_member_retirement",
-        operationId: record.operationId,
-        provider: record.identity.provider,
-        productVariantId: record.identity.productVariantId,
-        code,
-      }),
-    );
+    logger.error("marketplace-listings.process_listing_member_retirement", { operation: "listing_member_retirement", operationId: record.operationId, provider: record.identity.provider, productVariantId: record.identity.productVariantId, code });
     return session.save(
       submitted ? "retiring" : "failed",
       code,

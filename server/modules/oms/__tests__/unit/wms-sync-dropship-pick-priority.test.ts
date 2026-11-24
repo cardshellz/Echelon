@@ -14,8 +14,8 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../../db", () => ({ db: { execute: harness.execute } }));
-vi.mock("../../../orders/sort-rank", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../orders/sort-rank")>()),
+vi.mock("../../../orders/domain/sort-rank", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../orders/domain/sort-rank")>()),
   // priority.shipping_base.standard in production.
   getShippingBase: async () => 100,
 }));
@@ -23,8 +23,8 @@ vi.mock("../../../../platform/observability/logger", () => ({
   logger: { debug: vi.fn(), info: harness.info, warn: harness.warn, error: vi.fn() },
 }));
 
-import { WmsSyncService } from "../../wms-sync.service";
-import type { LegacyMemberMatch } from "../../member-resolver-dry-run";
+import { WmsSyncService } from "../../application/wms-sync.service";
+import type { LegacyMemberMatch } from "../../application/member-resolver-dry-run";
 
 const DROPSHIP_OMS_CHANNEL_ID = 103;
 const SHOPIFY_CHANNEL_ID = 36;
@@ -332,7 +332,6 @@ describe("WmsSyncService pick priority for other orders (unchanged)", () => {
 
   it("scores the shipping base alone and records a failed lookup when the membership read fails", async () => {
     harness.execute.mockRejectedValue(new Error("connection terminated"));
-    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     const result = await determinePriority(createService(), shopifyOrder());
 
@@ -342,8 +341,7 @@ describe("WmsSyncService pick priority for other orders (unchanged)", () => {
       memberPlanColor: null,
       legacyMember: { outcome: "lookup_failed" },
     });
-    expect(consoleWarn).toHaveBeenCalledOnce();
-    consoleWarn.mockRestore();
+    expect(harness.warn).toHaveBeenCalledOnce();
   });
 
   it("scores a non-member with the shipping base alone", async () => {

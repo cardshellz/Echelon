@@ -6,7 +6,7 @@ import {
   type ListingCatalogItem,
   type ListingDraftItem,
 } from "@shared/types/channel-listing-publication";
-import { ChannelProviderError } from "../../channels/channel-provider.error";
+import { ChannelProviderError } from "../../channels/channel-provider.error.api";
 import { ListingPublicationError, listingHash } from "../domain/listing-publication";
 import {
   assertRecreationEvidence,

@@ -1,6 +1,7 @@
 import type { Response } from "express";
 import { ZodError } from "zod";
-import { ChannelPricingError } from "../../channel-pricing.domain";
+import { ChannelPricingError } from "../../domain/channel-pricing.domain";
+import { logger } from "../../../../platform/observability/logger";
 
 function postgresSqlState(error: unknown): string | undefined {
   if (error === null || typeof error !== "object") return undefined;
@@ -38,7 +39,7 @@ export function sendChannelPricingError(
     : "UnknownError";
 
   // Only exception type and SQLSTATE are diagnostic data; messages may contain SQL or values.
-  console.error(JSON.stringify({ operation, code, errorName, sqlState: postgresSqlState(error) }));
+  logger.error("channels.channel_pricing_error", { operation, code, errorName, sqlState: postgresSqlState(error) });
   response.status(known ? error.status : invalid ? 400 : 500).json({
     code,
     error: message,

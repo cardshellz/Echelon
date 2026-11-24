@@ -250,7 +250,7 @@ async function loadProductionCode() {
   const [connectorModule, clientModule, draftModule, packageModule] = await Promise.all([
     import("../server/modules/channels/listing-connectors/ebay-listing.connector"),
     import("../server/modules/channels/infrastructure/ebay-listing-client"),
-    import("../server/modules/channels/ebay-listing-draft"),
+    import("../server/modules/channels/application/ebay-listing-draft"),
     import("../server/modules/channels/adapters/ebay/ebay-listing-package"),
   ]);
   return { ...connectorModule, ...clientModule, ...draftModule, ...packageModule };

@@ -30,8 +30,8 @@ vi.mock("../../../../routes/middleware", () => ({
 }));
 vi.mock("../../../../db", () => ({ db: {} }));
 import { logger } from "../../../../platform/observability/logger";
-import { registerPoFinancialEvidenceRoutes } from "../../po-financial-evidence.routes";
-import { PoFinancialEvidenceSourceError } from "../../po-financial-evidence.repository";
+import { registerPoFinancialEvidenceRoutes } from "../../interfaces/http/po-financial-evidence.routes";
+import { PoFinancialEvidenceSourceError } from "../../infrastructure/po-financial-evidence.repository";
 
 const complete = (): PoFinancialEvidence => ({
   purchaseOrderId: 10,

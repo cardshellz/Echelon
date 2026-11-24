@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PackageReconciliationService } from "../../package-reconciliation.service";
+import { PackageReconciliationService } from "../../application/package-reconciliation.service";
 
 const now=new Date('2026-09-17T14:00:00Z');
 const request={sourceItemIds:[1],actor:'operator',reason:'Confirmed combined package',commandKey:'test-reconcile',correctedPreviousLabelIds:[]};

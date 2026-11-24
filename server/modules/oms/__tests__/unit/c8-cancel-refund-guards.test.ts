@@ -14,27 +14,27 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const WMS_SYNC_SRC = readFileSync(
-  fileURLToPath(new URL("../../wms-sync.service.ts", import.meta.url)),
+  fileURLToPath(new URL("../../application/wms-sync.service.ts", import.meta.url)),
   "utf8",
 );
 
 const OMS_WEBHOOKS_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../oms-webhooks.ts", import.meta.url),
+    new URL("../../application/oms-webhooks.ts", import.meta.url),
   ),
   "utf8",
 );
 
 const REFUND_CASCADE_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../shopify-refund-cascade.service.ts", import.meta.url),
+    new URL("../../application/shopify-refund-cascade.service.ts", import.meta.url),
   ),
   "utf8",
 );
 
 const EXPECTED_RETURN_COMMAND_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../../wms/expected-return-commands.ts", import.meta.url),
+    new URL("../../../wms/application/expected-return-commands.ts", import.meta.url),
   ),
   "utf8",
 );
@@ -55,7 +55,7 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
   // (its reservations were consumed by picks), and the release is
   // idempotent so a failure can be retried by the reconciler.
   const CANCEL_HELPER_SRC = readFileSync(
-    fileURLToPath(new URL("../../../orders/cancel-wms-order.ts", import.meta.url)),
+    fileURLToPath(new URL("../../../orders/application/cancel-wms-order.ts", import.meta.url)),
     "utf8",
   );
 

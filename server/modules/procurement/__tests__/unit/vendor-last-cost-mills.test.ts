@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { resolveSupplierCost } from "../../purchasing-recommendation.engine";
+import { resolveSupplierCost } from "../../application/purchasing-recommendation.engine";
 
 describe("vendor last-purchase mills", () => {
   it("uses exact last-paid mills for legacy supplier mappings", () => {

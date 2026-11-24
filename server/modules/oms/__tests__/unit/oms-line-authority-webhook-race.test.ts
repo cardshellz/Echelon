@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { deriveOmsLineAuthority } from "../../oms-line-authority";
+import { deriveOmsLineAuthority } from "../../application/oms-line-authority";
 
 /**
  * Regression: concurrent orders/paid + orders/updated webhook race that dropped
@@ -22,15 +22,15 @@ import { deriveOmsLineAuthority } from "../../oms-line-authority";
  */
 
 const AUTHORITY_SRC = readFileSync(
-  resolve(__dirname, "../../oms-line-authority.ts"),
+  resolve(__dirname, "../../application/oms-line-authority.ts"),
   "utf8",
 );
 const WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
+  resolve(__dirname, "../../application/oms-webhooks.ts"),
   "utf8",
 );
 const OMS_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../oms.service.ts"),
+  resolve(__dirname, "../../application/oms.service.ts"),
   "utf8",
 );
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { completeWmsOrderAndRelease } from "../../cancel-wms-order";
+import { completeWmsOrderAndRelease } from "../../application/cancel-wms-order";
 
 /**
  * 'completed'-status fix (2026-07) — terminal-complete twin of the P0.1c

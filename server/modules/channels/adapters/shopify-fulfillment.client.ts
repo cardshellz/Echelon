@@ -1,6 +1,6 @@
 import type { ShopifyAdminGraphQLClient } from "../../shopify/admin-gql-client.api";
 import type { ShopifyIdentityConnection } from "./shopify-identity.reader";
-import { ChannelFulfillmentProviderError } from "../channel-fulfillment-provider.error";
+import { ChannelFulfillmentProviderError } from "../domain/channel-fulfillment-provider.error";
 import {
   isShopifyAdminGraphQLConnectionValid,
   requestShopifyAdminGraphQL,

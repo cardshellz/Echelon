@@ -9,6 +9,7 @@ import {
 } from "../../application/inventory-publication-global-control.service";
 import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
 import { PostgresInventoryPublicationGlobalControlStore } from "../../infrastructure/inventory-publication-global-control.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 export interface InventoryPublicationGlobalControlRouteDependencies {
   service?: Pick<InventoryPublicationGlobalControlService, "change">;
@@ -70,10 +71,7 @@ function sendError(res: Response, error: unknown): Response {
       },
     });
   }
-  console.error(JSON.stringify({
-    code: "PUBLICATION_GLOBAL_CONTROL_FAILED",
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  logger.error("PUBLICATION_GLOBAL_CONTROL_FAILED", { code: "PUBLICATION_GLOBAL_CONTROL_FAILED", error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({
     error: {
       code: "PUBLICATION_GLOBAL_CONTROL_FAILED",

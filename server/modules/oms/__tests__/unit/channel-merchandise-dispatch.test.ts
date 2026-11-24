@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { verifyRefundedChannelMerchandise } from "../../channel-merchandise-dispatch.service";
+import { verifyRefundedChannelMerchandise } from "../../application/channel-merchandise-dispatch.service";
 import type { ShopifyMerchandiseSnapshot } from "../../infrastructure/shopify-merchandise-snapshot";
 
 const version = "2026-10-24T12:00:00.000Z";

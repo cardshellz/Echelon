@@ -31,7 +31,7 @@ function readPurchasingServiceSource(): string {
         .sort()
         .map((name) => fs.readFileSync(path.join(subDir, name), "utf8"))
     : [];
-  return [readRepoFile("server/modules/procurement/purchasing.service.ts"), ...subFiles].join("\n");
+  return [readRepoFile("server/modules/procurement/application/purchasing.service.ts"), ...subFiles].join("\n");
 }
 
 describe("PROC-2: costing boundary decoupling, legacy bypass retirement, and shared UI validation", () => {
@@ -127,7 +127,7 @@ describe("PROC-2: costing boundary decoupling, legacy bypass retirement, and sha
         "server/modules/inventory/application/refresh-receipt-provisional.ts",
       );
       const purchaseCostApplicationSource = readRepoFile(
-        "server/modules/procurement/purchase-cost-application.service.ts",
+        "server/modules/procurement/application/purchase-cost-application.service.ts",
       );
 
       expect(applyCostRevisionSource).not.toContain("procurement.receiving_lines");
@@ -138,15 +138,15 @@ describe("PROC-2: costing boundary decoupling, legacy bypass retirement, and sha
       expect(refreshReceiptProvisionalSource).toContain('from "../../procurement/cost-source-evidence.api"');
 
       expect(purchaseCostApplicationSource).not.toContain("inventory.cost_applications");
-      expect(purchaseCostApplicationSource).not.toContain("../inventory/application/");
-      expect(purchaseCostApplicationSource).toContain('from "../inventory/cost-application-public"');
+      expect(purchaseCostApplicationSource).not.toContain("inventory/application/");
+      expect(purchaseCostApplicationSource).toContain('from "../../inventory/cost-application-public.api"');
     });
   });
 
   describe("PROC-08 (PROC-B6): legacy allocator and AP payment bypass retirement", () => {
     it("retires getAllocatedLineCostsForPo from purchasing and receiving services", () => {
       const purchasingSource = readPurchasingServiceSource();
-      const receivingSource = readRepoFile("server/modules/procurement/receiving.service.ts");
+      const receivingSource = readRepoFile("server/modules/procurement/application/receiving.service.ts");
 
       expect(purchasingSource).not.toContain("getAllocatedLineCostsForPo");
       expect(receivingSource).not.toContain("getAllocatedLineCostsForPo");
@@ -154,9 +154,9 @@ describe("PROC-2: costing boundary decoupling, legacy bypass retirement, and sha
 
     it("ensures all production server routes/services use createApPaymentCommands().recordPayment rather than legacy ApLedgerService.recordPayment", () => {
       const apLedgerRoutesSource = readRepoFile(
-        "server/modules/procurement/ap-ledger.routes.ts",
+        "server/modules/procurement/interfaces/http/ap-ledger.routes.ts",
       );
-      const apLedgerSource = readRepoFile("server/modules/procurement/ap-ledger.service.ts");
+      const apLedgerSource = readRepoFile("server/modules/procurement/application/ap-ledger.service.ts");
 
       expect(apLedgerRoutesSource).toContain("apPaymentCommands.recordPayment(");
       expect(apLedgerRoutesSource).not.toContain("apLedger.recordPayment(");

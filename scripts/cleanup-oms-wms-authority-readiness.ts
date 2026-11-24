@@ -20,7 +20,7 @@ import { Pool, type PoolClient } from "pg";
 import {
   clearHistoricalOrphanOmsLineReferences,
   closeReopenedFullyPickedWmsOrderItems,
-} from "../server/modules/wms/order-item-maintenance-commands";
+} from "../server/modules/wms/application/order-item-maintenance-commands";
 
 type Mode = "dry-run" | "execute";
 

@@ -3,7 +3,7 @@ import {
   InvalidAuthorityCleanupAuditInputError,
   recordOmsWmsAuthorityCleanupAudit,
   type OmsWmsAuthorityCleanupAuditInput,
-} from "../../oms-wms-authority-cleanup-audit.repository";
+} from "../../infrastructure/oms-wms-authority-cleanup-audit.repository";
 
 const VALID_INPUT: OmsWmsAuthorityCleanupAuditInput = {
   runId: "11111111-1111-4111-8111-111111111111",

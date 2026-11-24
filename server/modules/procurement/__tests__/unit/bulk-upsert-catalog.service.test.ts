@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { supplierEvidenceCatalogStateFingerprint } from "../../supplier-evidence-catalog-state";
-import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+import { supplierEvidenceCatalogStateFingerprint } from "../../application/supplier-evidence-catalog-state";
+import { createPurchasingService, PurchasingError } from "../../application/purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Spec A follow-up: bulkUpsertVendorCatalog unit tests.

@@ -3,7 +3,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../infrastructure/scheduler-lock", () => ({ withAdvisoryLock: vi.fn() }));
 
-import { getFreezeMaxAgeDays, runCycleCountFreezeGuard } from "../../cycle-count-freeze-guard.scheduler";
+import { getFreezeMaxAgeDays, runCycleCountFreezeGuard } from "../../application/cycle-count-freeze-guard.scheduler";
 
 describe("getFreezeMaxAgeDays", () => {
   const orig = process.env.CYCLE_COUNT_FREEZE_MAX_AGE_DAYS;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildShipmentCostException, shipmentExceptionVersion, type ShipmentExceptionFacts } from "../../shipment-cost-exception.policy";
+import { buildShipmentCostException, shipmentExceptionVersion, type ShipmentExceptionFacts } from "../../domain/shipment-cost-exception.policy";
 import { formatShipmentExceptionAmount, shipmentExceptionRequestSchema } from "@shared/procurement/shipment-cost-exception";
 import type { CostSourceRevision } from "@shared/procurement/cost-source-contracts";
 

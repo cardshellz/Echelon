@@ -7,7 +7,7 @@ import {
   runDropshipWritebackCatchUp,
   runFulfillmentSweep,
   runShipStationProviderLabelRecoverySweep,
-} from "../../fulfillment-sweeper.scheduler";
+} from "../../application/fulfillment-sweeper.scheduler";
 
 function queryText(query: any): string {
   return (query?.queryChunks ?? [])

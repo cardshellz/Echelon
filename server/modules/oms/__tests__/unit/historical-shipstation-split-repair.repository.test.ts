@@ -3,14 +3,14 @@ import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createHistoricalShipStationSplitRepairRepository } from "../../historical-shipstation-split-repair.repository";
+import { createHistoricalShipStationSplitRepairRepository } from "../../infrastructure/historical-shipstation-split-repair.repository";
 import type {
   HistoricalSplitRepairFlags,
   HistoricalSplitRepairPackagePlan,
-} from "../../historical-shipstation-split-repair.service";
+} from "../../application/historical-shipstation-split-repair.service";
 
 const source = fs.readFileSync(
-  path.resolve(process.cwd(), "server/modules/oms/historical-shipstation-split-repair.repository.ts"),
+  path.resolve(process.cwd(), "server/modules/oms/infrastructure/historical-shipstation-split-repair.repository.ts"),
   "utf8",
 );
 

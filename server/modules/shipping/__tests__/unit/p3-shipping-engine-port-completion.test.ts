@@ -220,7 +220,7 @@ describe("P3.3 ShippingEngine Port Completion", () => {
 
     it("exposes engineRefResolution on GET /api/sync/status", () => {
       const syncControlSrc = readSrc(
-        "server/modules/channels/sync-control.routes.ts",
+        "server/modules/channels/interfaces/http/sync-control.routes.ts",
       );
       expect(syncControlSrc).toContain("getEngineRefResolutionMetrics");
       expect(syncControlSrc).toContain(
@@ -494,7 +494,7 @@ describe("P3.3 ShippingEngine Port Completion", () => {
     });
 
     it("routes shipstation-sweeper.ts through createShipStationApiRequester with zero raw fetch() calls", () => {
-      const sweeperSrc = readSrc("server/modules/oms/shipstation-sweeper.ts");
+      const sweeperSrc = readSrc("server/modules/oms/application/shipstation-sweeper.ts");
       expect(sweeperSrc).toContain("createShipStationApiRequester");
       expect(sweeperSrc).not.toMatch(/\bfetch\s*\(/);
     });

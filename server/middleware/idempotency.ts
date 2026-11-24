@@ -10,6 +10,7 @@ import {
   purgeExpiredIdempotencyKeysDrizzle,
   updateIdempotencyKeyDrizzle,
 } from "../infrastructure/idempotency-keys.repository";
+import { logger } from "../platform/observability/logger";
 
 export const IDEMPOTENCY_IN_PROGRESS_LEASE_MS = 2 * 60 * 1000;
 export const IDEMPOTENCY_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
@@ -111,7 +112,7 @@ export function requireIdempotency() {
       try {
         await deleteUnclaimedIdempotencyKeyDrizzle(db, idempotencyKey);
       } catch (cleanupErr) {
-        console.error(`[Idempotency] Failed to release unclaimed key ${idempotencyKey}:`, cleanupErr);
+        logger.error("middleware.idempotency", { message: `[Idempotency] Failed to release unclaimed key ${idempotencyKey}:`, error: cleanupErr });
       }
     };
 
@@ -119,7 +120,7 @@ export function requireIdempotency() {
       try {
         await deleteIdempotencyKeyDrizzle(db, idempotencyKey);
       } catch (cleanupErr) {
-        console.error(`[Idempotency] Failed to release expired key ${idempotencyKey}:`, cleanupErr);
+        logger.error("middleware.idempotency", { message: `[Idempotency] Failed to release expired key ${idempotencyKey}:`, error: cleanupErr });
       }
     };
 
@@ -130,7 +131,7 @@ export function requireIdempotency() {
       }
       lastExpiredPruneAtMs = nowMs;
       void purgeExpiredIdempotencyKeysDrizzle(db, new Date(nowMs)).catch((err) => {
-        console.warn("[Idempotency] Opportunistic expired-key prune failed:", err);
+        logger.warn("middleware.idempotency", { message: "[Idempotency] Opportunistic expired-key prune failed:", error: err });
       });
     };
 
@@ -231,7 +232,7 @@ export function requireIdempotency() {
           expiresAt: new Date(Date.now() + IDEMPOTENCY_COMPLETED_TTL_MS),
         })
           .catch(async (err) => {
-            console.error(`[Idempotency] Failed to save response for key ${idempotencyKey}:`, err);
+            logger.error("middleware.idempotency", { message: `[Idempotency] Failed to save response for key ${idempotencyKey}:`, error: err });
             await releaseUnclaimedKey();
           })
           .finally(() => {
@@ -252,7 +253,7 @@ export function requireIdempotency() {
 
       next();
     } catch (error) {
-      console.error("[Idempotency] Middleware error:", error);
+      logger.error("middleware.idempotency", { message: "[Idempotency] Middleware error:", error: error });
       return res.status(500).json({ error: "Internal Server Error during idempotency check" });
     }
   };

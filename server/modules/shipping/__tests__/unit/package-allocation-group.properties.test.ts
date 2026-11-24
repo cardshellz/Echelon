@@ -7,8 +7,8 @@ import {
   type PackageAllocationGroupPlannerInput,
   type PackageAllocationGroupPlannerResultV1,
   type PackageAllocationGroupSourceLine,
-} from "../../package-allocation-group.domain";
-import type { DeclaredPackageLifecycleEvent } from "../../declared-package-lifecycle.domain";
+} from "../../domain/package-allocation-group.domain";
+import type { DeclaredPackageLifecycleEvent } from "../../domain/declared-package-lifecycle.domain";
 
 const groupKey = "5618eb26-f51f-4d8c-a59e-b1f6de9e72d4";
 const sourceId = 7_301;

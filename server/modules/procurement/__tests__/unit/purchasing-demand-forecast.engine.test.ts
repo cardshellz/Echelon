@@ -3,7 +3,7 @@ import {
   buildPurchasingDemandForecastBasis,
   buildPurchasingDemandForecastBlend,
   buildPurchasingDemandForecastWindowDiagnostics,
-} from "../../purchasing-demand-forecast.engine";
+} from "../../application/purchasing-demand-forecast.engine";
 
 describe("purchasing demand forecast engine", () => {
   it("builds an auditable recent-order velocity forecast basis", () => {

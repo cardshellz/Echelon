@@ -8,7 +8,7 @@ const { enqueueOmsWmsSyncRetryMock } = vi.hoisted(() => {
   };
 });
 
-vi.mock("../../webhook-retry.worker", () => ({
+vi.mock("../../application/webhook-retry.worker", () => ({
   enqueueOmsWmsSyncRetry: enqueueOmsWmsSyncRetryMock,
   enqueueShipStationShipmentPushRetry: vi.fn().mockResolvedValue(undefined),
 }));
@@ -20,7 +20,7 @@ import {
   parseValidatedChannelOrder,
   parseValidatedChannelRefund,
   type ChannelOrderAdapter,
-} from "../../../channels/channel-adapter.interface";
+} from "../../../channels/domain/channel-adapter.interface";
 import {
   createDefaultChannelOrderAdapterRegistry,
   ingestAndRoute,

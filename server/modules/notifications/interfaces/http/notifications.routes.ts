@@ -1,6 +1,7 @@
 import type { Express, Response } from "express";
 import { requireAuth, requirePermission } from "../../../../routes/middleware";
 import * as notificationService from "../../application/notifications.service";
+import { logger } from "../../../../platform/observability/logger";
 
 function getSessionUserId(req: any): string {
   return req.user?.id ?? req.session.user!.id;
@@ -46,7 +47,7 @@ function handleNotificationRouteError(res: Response, err: unknown, fallbackMessa
     });
     return;
   }
-  console.error(`[Notifications Routes] ${fallbackMessage}`, err);
+  logger.error("notifications.routes", { message: `[Notifications Routes] ${fallbackMessage}`, error: err });
   res.status(500).json({ error: fallbackMessage });
 }
 

@@ -5,6 +5,7 @@ import { openingCaptureIdSchema, openingCaptureRequestSchema, openingCaptureChun
 import { requirePermission } from "../../../../routes/middleware";
 import type { InventoryOpeningCapturePort } from "../../application/inventory-opening-capture.port";
 import { InventoryCutoverOpeningError } from "../../application/inventory-cutover-opening.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const ROOT = "/api/inventory-planning/admin/cutover-opening/captures";
 const actorSchema = z.string().trim().min(1).max(100);
@@ -12,7 +13,7 @@ const noQuery = z.object({}).strict();
 function sendError(res: Response, error: unknown): Response {
   if (error instanceof z.ZodError) return res.status(400).json({ error: { code: "CUTOVER_CAPTURE_REQUEST_INVALID", message: "Invalid capture request." } });
   if (error instanceof InventoryCutoverOpeningError) return res.status(error.status).json({ error: { code: error.code, message: error.message } });
-  console.error(JSON.stringify({ event: "inventory_opening_capture_http_failed", code: "CUTOVER_CAPTURE_REQUEST_FAILED" }));
+  logger.error("inventory_opening_capture_http_failed", { event: "inventory_opening_capture_http_failed", code: "CUTOVER_CAPTURE_REQUEST_FAILED" });
   return res.status(503).json({ error: { code: "CUTOVER_CAPTURE_REQUEST_FAILED", message: "The capture service is unavailable. Retry the same request." } });
 }
 

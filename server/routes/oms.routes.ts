@@ -40,6 +40,12 @@ import {
   CHANNEL_FULFILLMENT_RECEIPT_RETRY,
   ChannelFulfillmentReceiptRetryError,
 } from "../modules/oms/channel-fulfillment-authority.api";
+import { pushShipmentThroughEngine } from "../modules/orders/shipment-rollup-and-context.api";
+import {
+  fromEngineRef,
+  type ShippingEngine,
+} from "../modules/shipping/engine-and-reconcile.api";
+import { logger } from "../platform/observability/logger";
 
 const AUDIT_USER_OPERATOR_PREFIX = "user:";
 const MAX_AUDIT_OPERATOR_LENGTH = 120;
@@ -57,6 +63,8 @@ function stableAuditUserId(rawUserId: unknown): string | null {
 
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
+  const getShippingEngine = (req: Request): ShippingEngine | null =>
+    (req.app.locals.services as any).shippingEngine || null;
   const getShipStation = (req: Request): ShipStationService | null =>
     (req.app.locals.services as any).shipStation || null;
   const getFlowReconciliationDependencies = (
@@ -104,7 +112,7 @@ export function registerOmsRoutes(app: Express) {
       const stats = await getOms(req).getStats();
       res.json(stats);
     } catch (err: any) {
-      console.error("[OMS Routes] Stats error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Stats error:", error: err });
       res.status(500).json({ error: err.message });
     }
   });
@@ -116,7 +124,7 @@ export function registerOmsRoutes(app: Express) {
     try {
       res.json(await getOmsOpsHealth(db));
     } catch (err: any) {
-      console.error("[OMS Routes] Ops health error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Ops health error:", error: err });
       res.status(500).json({ error: err.message });
     }
   });
@@ -133,7 +141,7 @@ export function registerOmsRoutes(app: Express) {
         res.setHeader("Cache-Control", "private, no-store");
         res.json(await getHistoricalIdentityRepair(req).preview(Number(req.params.omsOrderId)));
       } catch (error) {
-        console.error("[OMS Routes] Historical line identity repair preview failed", error);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] Historical line identity repair preview failed", error: error });
         sendHistoricalIdentityRepairError(res, error, "Failed to preview historical line identity repair");
       }
     },
@@ -159,7 +167,7 @@ export function registerOmsRoutes(app: Express) {
           { operator: `${AUDIT_USER_OPERATOR_PREFIX}${userId}`, userId },
         ));
       } catch (error) {
-        console.error("[OMS Routes] Historical line identity repair apply failed", error);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] Historical line identity repair apply failed", error: error });
         sendHistoricalIdentityRepairError(res, error, "Failed to apply historical line identity repair");
       }
     },
@@ -178,7 +186,7 @@ export function registerOmsRoutes(app: Express) {
           : undefined;
       res.json(await getFlowWaterfall(db, { windowDays }));
     } catch (err: any) {
-      console.error("[OMS Routes] Flow waterfall error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Flow waterfall error:", error: err });
       res.status(500).json({ error: err.message });
     }
   });
@@ -198,7 +206,7 @@ export function registerOmsRoutes(app: Express) {
       res.setHeader("Cache-Control", "private, no-store");
       res.json(await getFlowBucketSamples(db, code, { windowDays }));
     } catch (err: any) {
-      console.error("[OMS Routes] Flow bucket error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Flow bucket error:", error: err });
       res.status(500).json({ error: err.message });
     }
   });
@@ -219,7 +227,7 @@ export function registerOmsRoutes(app: Express) {
           shipmentId: req.query.shipmentId == null ? undefined : Number(req.query.shipmentId),
         }));
       } catch (err: any) {
-        console.error("[OMS Routes] ShipStation unmapped preview error:", err);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] ShipStation unmapped preview error:", error: err });
         const message = err?.message || "Failed to load ShipStation remediation evidence";
         const status = /positive integer|exactly one|required/i.test(message)
           ? 400
@@ -258,7 +266,7 @@ export function registerOmsRoutes(app: Express) {
           },
         ));
       } catch (err: any) {
-        console.error("[OMS Routes] ShipStation return-label resolution error:", err);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] ShipStation return-label resolution error:", error: err });
         const message = err?.message || "Failed to resolve ShipStation return label";
         const status = /positive integer|exactly one|required/i.test(message)
           ? 400
@@ -297,7 +305,7 @@ export function registerOmsRoutes(app: Express) {
           },
         ));
       } catch (err: any) {
-        console.error("[OMS Routes] ShipStation voided-label resolution error:", err);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] ShipStation voided-label resolution error:", error: err });
         const message = err?.message || "Failed to resolve ShipStation voided label";
         const status = /positive integer|exactly one|required|does not report/i.test(message)
           ? 400
@@ -336,7 +344,7 @@ export function registerOmsRoutes(app: Express) {
           },
         ));
       } catch (err: any) {
-        console.error("[OMS Routes] ShipStation provider-echo resolution error:", err);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] ShipStation provider-echo resolution error:", error: err });
         const message = err?.message || "Failed to link ShipStation provider evidence";
         const status = /positive integer|exactly one|required|not proven|provider record/i.test(message)
           ? 400
@@ -380,7 +388,7 @@ export function registerOmsRoutes(app: Express) {
           operator,
         }, getFlowReconciliationDependencies(req).fulfillmentAuthority));
       } catch (err: any) {
-        console.error("[OMS Routes] ShipStation reship adoption error:", err);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] ShipStation reship adoption error:", error: err });
         const message = err?.message || "Failed to adopt ShipStation reship";
         const status = /positive integer|exactly one|required|valid|must be|must equal|confirm at least one|operator-confirmed|actual contents|does not match/i.test(message)
           ? 400
@@ -407,7 +415,7 @@ export function registerOmsRoutes(app: Express) {
       }
       res.json(await getFlowTrace(db, ref));
     } catch (err: any) {
-      console.error("[OMS Routes] Flow trace error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Flow trace error:", error: err });
       res.status(500).json({ error: err.message });
     }
   });
@@ -425,7 +433,7 @@ export function registerOmsRoutes(app: Express) {
         const result = await enqueueWebhookInboxReplay(db, id, operator);
         res.json(result);
       } catch (err: any) {
-        console.error("[OMS Routes] Webhook inbox replay error:", err);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] Webhook inbox replay error:", error: err });
         const message = err?.message || "Failed to queue webhook replay";
         const status = /positive integer/i.test(message)
           ? 400
@@ -452,7 +460,7 @@ export function registerOmsRoutes(app: Express) {
         const result = await requeueDeadWebhookRetry(db, id, operator);
         res.json(result);
       } catch (err: any) {
-        console.error("[OMS Routes] Webhook retry requeue error:", err);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] Webhook retry requeue error:", error: err });
         const message = err?.message || "Failed to requeue webhook retry";
         const status = /positive integer/i.test(message)
           ? 400
@@ -508,7 +516,7 @@ export function registerOmsRoutes(app: Express) {
         }, getFlowReconciliationDependencies(req));
         res.json(result);
       } catch (err: any) {
-        console.error("[OMS Routes] Reconciliation remediation error:", err);
+        logger.error("routes.oms_routes", { message: "[OMS Routes] Reconciliation remediation error:", error: err });
         if (err instanceof ChannelFulfillmentReviewRetryError) {
           res.status(err.status).json({ error: err.message, code: err.code, context: err.context });
           return;
@@ -548,7 +556,7 @@ export function registerOmsRoutes(app: Express) {
 
       res.json(result);
     } catch (err: any) {
-      console.error("[OMS Routes] List orders error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] List orders error:", error: err });
       res.status(500).json({ error: err.message });
     }
   }));
@@ -569,11 +577,7 @@ export function registerOmsRoutes(app: Express) {
       }
       res.json({ flowHistory });
     } catch (err: any) {
-      console.error("[OMS Routes] Get order flow history error:", {
-        code: "OMS_FLOW_HISTORY_UNAVAILABLE",
-        orderId: id,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Get order flow history error:", code: "OMS_FLOW_HISTORY_UNAVAILABLE", orderId: id, error: err instanceof Error ? err.message : String(err) });
       res.status(500).json({ error: "Order activity history is temporarily unavailable" });
     }
   });
@@ -595,7 +599,7 @@ export function registerOmsRoutes(app: Express) {
 
       res.json(order);
     } catch (err: any) {
-      console.error("[OMS Routes] Get order error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Get order error:", error: err });
       res.status(500).json({ error: err.message });
     }
   });
@@ -613,7 +617,7 @@ export function registerOmsRoutes(app: Express) {
 
       res.json(order);
     } catch (err: any) {
-      console.error("[OMS Routes] Assign warehouse error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Assign warehouse error:", error: err });
       res.status(500).json({ error: err.message });
     }
   });
@@ -638,7 +642,7 @@ export function registerOmsRoutes(app: Express) {
       const result = await getOms(req).reserveInventory(id);
       res.json(result);
     } catch (err: any) {
-      console.error("[OMS Routes] Reserve error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Reserve error:", error: err });
       res.status(500).json({ error: err.message });
     }
   });
@@ -652,14 +656,27 @@ export function registerOmsRoutes(app: Express) {
       if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
         return res.status(400).json({ error: "Invalid shipment ID" });
       }
+      const engine = getShippingEngine(req);
       const ss = getShipStation(req);
+      if (engine && engine.isConfigured()) {
+        const pushed = await pushShipmentThroughEngine(db, engine, shipmentId);
+        return res.json({
+          success: true,
+          engineRef: pushed.engineRef,
+          shipstationOrderId:
+            pushed.engineRef.engine === "shipstation"
+              ? fromEngineRef(pushed.engineRef)
+              : null,
+          orderKey: pushed.engineRef.engineShipmentRef ?? null,
+        });
+      }
       if (!ss || !ss.isConfigured()) {
-        return res.status(503).json({ error: "ShipStation not configured" });
+        return res.status(503).json({ error: "Shipping engine not configured" });
       }
       const result = await ss.pushShipment(shipmentId);
       res.json({ success: true, ...result });
     } catch (err: any) {
-      console.error("[OMS Routes] Push shipment error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Push shipment error:", error: err });
       res.status(err.httpStatus || 500).json({ error: err.message, code: err.code });
     }
   });
@@ -680,10 +697,11 @@ export function registerOmsRoutes(app: Express) {
       if (!Number.isInteger(id) || id <= 0) {
         return res.status(400).json({ error: "Invalid order ID" });
       }
+      const engine = getShippingEngine(req);
       const ss = getShipStation(req);
 
-      if (!ss || !ss.isConfigured()) {
-        return res.status(503).json({ error: "ShipStation not configured" });
+      if ((!engine || !engine.isConfigured()) && (!ss || !ss.isConfigured())) {
+        return res.status(503).json({ error: "Shipping engine not configured" });
       }
 
       // overrideReview = an explicit operator "clear-review-and-push" (P2 of
@@ -723,7 +741,19 @@ export function registerOmsRoutes(app: Express) {
         });
       }
 
-      const result = await ss.pushShipment(shipmentId, { overrideReview });
+      const result =
+        engine && engine.isConfigured()
+          ? await pushShipmentThroughEngine(db, engine, shipmentId, { overrideReview }).then(
+              (pushed) => ({
+                engineRef: pushed.engineRef,
+                shipstationOrderId:
+                  pushed.engineRef.engine === "shipstation"
+                    ? fromEngineRef(pushed.engineRef)
+                    : null,
+                orderKey: pushed.engineRef.engineShipmentRef ?? null,
+              }),
+            )
+          : await ss!.pushShipment(shipmentId, { overrideReview });
       const updated = await getOms(req).getOrderById(id);
 
       res.json({
@@ -732,7 +762,7 @@ export function registerOmsRoutes(app: Express) {
         order: updated,
       });
     } catch (err: any) {
-      console.error("[OMS Routes] Push to ShipStation error:", err);
+      logger.error("routes.oms_routes", { message: "[OMS Routes] Push to ShipStation error:", error: err });
       res.status(err.httpStatus || 500).json({ error: err.message, code: err.code });
     }
   });

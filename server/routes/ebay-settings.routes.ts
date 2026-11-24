@@ -1,5 +1,5 @@
 import { EbayBusinessPolicyError, ebayPolicyWriteSchema } from "@shared/ebay-business-policies";
-import { ebayBusinessPolicies } from "../modules/channels/ebay-business-policies";
+import { ebayBusinessPolicies } from "../modules/channels/application/ebay-business-policies";
 import { ebayPolicyActor, sendEbayPolicyError } from "./ebay/ebay-business-policy-http";
 import { z } from "zod";
 
@@ -47,6 +47,7 @@ import {
   insertDefaultEbayChannelConnection,
   mergeEbayChannelConnectionMerchantLocation,
 } from "../modules/channels/ebay-route-admin.api";
+import { logger } from "../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -151,7 +152,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
             ebayUsername = userData.username || null;
           }
         } catch (err: any) {
-          console.warn("[eBay Settings] Failed to fetch user identity:", err.message);
+          logger.warn("routes.ebay_settings_routes", { message: "[eBay Settings] Failed to fetch user identity:", error: err.message });
         }
       }
 
@@ -179,7 +180,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
         syncStatus: conn?.syncStatus || "never",
       });
     } catch (err: any) {
-      console.error("[eBay Settings] Error fetching settings:", err.message);
+      logger.error("routes.ebay_settings_routes", { message: "[eBay Settings] Error fetching settings:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -286,7 +287,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
         message: `Merchant location "${name}" created on eBay`,
       });
     } catch (err: any) {
-      console.error("[eBay Settings] Error creating location:", err.message);
+      logger.error("routes.ebay_settings_routes", { message: "[eBay Settings] Error creating location:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -369,7 +370,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
 
       res.json({ previews });
     } catch (err: any) {
-      console.error("[eBay Settings] Error generating preview:", err.message);
+      logger.error("routes.ebay_settings_routes", { message: "[eBay Settings] Error generating preview:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -461,7 +462,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
       };
 
       // Build channel listing payload
-      const channelPayload: import("../modules/channels/channel-adapter.interface").ChannelListingPayload = {
+      const channelPayload: import("../modules/channels/domain/channel-adapter.interface").ChannelListingPayload = {
         productId: product.id,
         title: product.title || product.name,
         description: product.description || "",
@@ -522,7 +523,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
           const publishResult = await apiClient.publishOffer(offerId);
           listingId = publishResult?.listingId || null;
         } catch (pubErr: any) {
-          console.warn("[eBay Settings] Offer created but publish failed:", pubErr.message);
+          logger.warn("routes.ebay_settings_routes", { message: "[eBay Settings] Offer created but publish failed:", detail: pubErr.message });
           res.json({
             success: true,
             warning: `Offer created (${offerId}) but publish failed: ${pubErr.message}`,
@@ -545,7 +546,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
       });
     } catch (err: any) {
       if (err instanceof EbayBusinessPolicyError) { sendEbayPolicyError(res, err); return; }
-      console.error("[eBay Settings] Error creating test listing:", err.message);
+      logger.error("routes.ebay_settings_routes", { message: "[eBay Settings] Error creating test listing:", error: err.message });
       res.status(500).json({ error: err.message });
     }
     },
@@ -579,7 +580,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
           const ordersResp = await apiClient.getOrders({ limit: 1 });
           orderCount = ordersResp.total || 0;
         } catch (err: any) {
-          console.warn("[eBay Settings] Could not fetch order count:", err.message);
+          logger.warn("routes.ebay_settings_routes", { message: "[eBay Settings] Could not fetch order count:", error: err.message });
         }
       }
 
@@ -593,7 +594,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
         syncStatus: conn?.syncStatus || "never",
       });
     } catch (err: any) {
-      console.error("[eBay Settings] Error fetching stats:", err.message);
+      logger.error("routes.ebay_settings_routes", { message: "[eBay Settings] Error fetching stats:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

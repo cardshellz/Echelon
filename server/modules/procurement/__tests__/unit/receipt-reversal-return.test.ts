@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { readReceiptReturnCapabilities } from "../../receipt-reversal-return.repository";
+import { readReceiptReturnCapabilities } from "../../infrastructure/receipt-reversal-return.repository";
 import { receiptReversalCapabilitySchema } from "@shared/procurement/receipt-reversal-command";
 
 describe("canonical receipt return history capabilities", () => {

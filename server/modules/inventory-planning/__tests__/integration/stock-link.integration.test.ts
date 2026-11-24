@@ -19,7 +19,7 @@ import {
 } from "../../domain/stock-link";
 import type { StockLinkDestination, StockLinkStoreItem } from "@shared/types/stock-link";
 import { readPublicationStockSelection } from "../../infrastructure/inventory-publication-selection.reader";
-import { createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source";
+import { createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source.api";
 import { CHANNEL_VARIANT_OVERRIDE_LOCK_SQL, channelVariantOverrideLockKey } from "../../../channels/infrastructure/channel-variant-override-lock";
 import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";
@@ -48,10 +48,10 @@ import { applyStockIdentityChangeInsideTransaction, type ExactStockIdentityMembe
 import { retireStockLinkMappingsInsideTransaction } from "../../infrastructure/stock-link-retire";
 import {
   channelStockUpdateDeadLetterDestinationCountSql,
-} from "../../channel-stock-update-dead-letters";
+} from "../../channel-stock-update-dead-letters.api";
 import { StockLinkControlsService } from "../../application/stock-link-controls.service";
 import { PostgresStockLinkControlsStore } from "../../infrastructure/stock-link-controls.repository";
-import { STOCK_LINK_HEALTH_CHECKS, stockLinkHealthChecks } from "../../stock-link-health";
+import { STOCK_LINK_HEALTH_CHECKS, stockLinkHealthChecks } from "../../stock-link-health.api";
 import { beatStockLinkDestination, countStockLinkRetiresWithoutReplacement } from "../../infrastructure/stock-link-checks.repository";
 import { stockLinkRetireWindowStart } from "../../domain/stock-link";
 import { InventoryProductSyncService } from "../../application/inventory-product-sync.service";

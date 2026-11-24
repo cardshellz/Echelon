@@ -35,7 +35,7 @@ vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.invent
 vi.mock("../../../../modules/catalog", () => ({ catalogStorage: mocks.catalog }));
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: mocks.warehouse }));
 
-import { registerReplenishmentRoutes } from "../../replenishment.routes";
+import { registerReplenishmentRoutes } from "../../interfaces/http/replenishment.routes";
 import { replenishmentTaskPatchSchema } from "@shared/types/replenishment-task-command";
 
 function buildApp(services: Record<string, any> = {}): Express {

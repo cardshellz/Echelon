@@ -2,8 +2,8 @@ import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@shared/schema";
-import { InventoryLotService } from "../../lots.service";
-import { COGSService } from "../../cogs.service";
+import { InventoryLotService } from "../../application/lots.service";
+import { COGSService } from "../../application/cogs.service";
 import { InventoryUseCases } from "../../application/inventory.use-cases";
 import { createInventoryMethods } from "../../infrastructure/inventory.repository";
 import { createQuantityLedgerTestContext, prepareQuantityLotCreationMetadata,

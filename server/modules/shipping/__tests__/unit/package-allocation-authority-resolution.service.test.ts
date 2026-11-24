@@ -3,26 +3,26 @@ import { describe, expect, it } from "vitest";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 
-import { SHIPSTATION_LABEL_OBSERVATION_SOURCE } from "../../carrier-tracking.domain";
-import { adaptPersistedDeclaredPackageLifecycleEvidence, type PersistedDeclaredPackageEvidence } from "../../declared-package-lifecycle-shadow.domain";
+import { SHIPSTATION_LABEL_OBSERVATION_SOURCE } from "../../domain/carrier-tracking.domain";
+import { adaptPersistedDeclaredPackageLifecycleEvidence, type PersistedDeclaredPackageEvidence } from "../../domain/declared-package-lifecycle-shadow.domain";
 import {
   packageAllocationPackageKey,
   resolvePackageAllocationAuthority,
-} from "../../package-allocation-authority-resolution.domain";
+} from "../../domain/package-allocation-authority-resolution.domain";
 import {
   PackageAllocationAuthorityResolutionPreviewService,
   resolvePackageAllocationAuthorityEvidence,
   PackageAllocationAuthorityResolutionPreviewServiceError,
   type PackageAllocationAuthorityResolutionPreviewCommand,
-} from "../../package-allocation-authority-resolution.service";
+} from "../../application/package-allocation-authority-resolution.service";
 import type {
   LockedPackageAllocationAuthorityEvidence,
   LockedPackageAllocationGroup,
   PackageAllocationAuthorityPreviewRepository,
   PackageAllocationAuthorityPreviewTransaction,
-} from "../../package-allocation-ledger.repository";
-import type { PackageAllocationSourceFacts } from "../../package-allocation-source-identity.domain";
-import { packageAllocationGroupPreviousPlanSchema } from "../../package-allocation-group.domain";
+} from "../../infrastructure/package-allocation-ledger.repository";
+import type { PackageAllocationSourceFacts } from "../../domain/package-allocation-source-identity.domain";
+import { packageAllocationGroupPreviousPlanSchema } from "../../domain/package-allocation-group.domain";
 
 const groupKey = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const sourceId = 7_001;

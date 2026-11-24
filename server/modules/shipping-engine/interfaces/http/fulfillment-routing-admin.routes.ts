@@ -12,6 +12,7 @@ import { PostgresFulfillmentRoutingStore } from "../../infrastructure/fulfillmen
 import { AesGcmFulfillmentProviderCredentialCipher } from "../../infrastructure/fulfillment-provider-credential-cipher";
 import { PostgresFulfillmentProviderConnectionStore } from "../../infrastructure/fulfillment-provider-connections.repository";
 import { createFulfillmentProviderRegistry } from "../../infrastructure/fulfillment-provider-registry";
+import { logger } from "../../../../platform/observability/logger";
 
 const idSchema = z.coerce.number().int().positive();
 const replaceProfileSchema = z.object({
@@ -155,14 +156,7 @@ function sendRoutingError(
       },
     });
   }
-  console.error(JSON.stringify({
-    timestamp: new Date().toISOString(),
-    level: "error",
-    event: "shipping.fulfillment_routing.admin_failed",
-    action,
-    errorName: error instanceof Error ? error.name : "UnknownError",
-    errorMessage: error instanceof Error ? error.message : "Unknown error",
-  }));
+  logger.error("shipping.fulfillment_routing.admin_failed", { timestamp: new Date().toISOString(), event: "shipping.fulfillment_routing.admin_failed", errorName: error instanceof Error ? error.name : "UnknownError", errorMessage: error instanceof Error ? error.message : "Unknown error" });
   return res.status(500).json({
     error: {
       code: "SHIPPING_FULFILLMENT_ROUTING_INTERNAL_ERROR",

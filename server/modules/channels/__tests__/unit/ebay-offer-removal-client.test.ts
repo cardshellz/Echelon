@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EbayApiClient } from "../../adapters/ebay/ebay-api.client";
-import type { EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
 
 const admission: EbayQuantityRequestAdmission = {
   item: async (_sku, work) => work(null),

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createReservationService } from "../../reservation.service";
+import { createReservationService } from "../../application/reservation.service";
 
 function selectRows(rows: unknown[]) {
   return {

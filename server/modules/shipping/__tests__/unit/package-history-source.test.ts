@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createPackageHistoryShipStationRequester,
   createPackageHistorySource,
-} from "../../package-history.source";
-import { PackageHistoryError } from "../../package-history.domain";
-import type { ShipStationApiRequester } from "../../../oms/shipstation-api-request";
+} from "../../application/package-history.source";
+import { PackageHistoryError } from "../../domain/package-history.domain";
+import type { ShipStationApiRequester } from "../../../oms/application/shipstation-api-request";
 function fixtureRequester(
   read: (method: string, path: string) => Promise<unknown>,
 ): ShipStationApiRequester {

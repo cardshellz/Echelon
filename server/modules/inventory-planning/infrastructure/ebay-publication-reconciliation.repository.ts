@@ -10,7 +10,7 @@ import { ebayReconciliationCommandKey } from "../domain/ebay-automatic-publicati
 import { quantityPublicationScopeSchema } from "../domain/quantity-publication-admission";
 import { createTransactionScopedInventoryPublicationService, LATEST_PUBLICATION_ROW_SQL } from "./inventory-availability-runtime-publication.repository";
 import { reconciliationFailure, withReconciliationTransaction } from "./ebay-publication-reconciliation.persistence";
-import { readChannelStockSelection } from "../../channels/channel-stock-selection";
+import { readChannelStockSelection } from "../../channels/channel-stock-selection.api";
 
 // Only known archived catalog members suspend a saved watch. A missing catalog
 // identity remains actionable, and reactivation makes this same watch due again.

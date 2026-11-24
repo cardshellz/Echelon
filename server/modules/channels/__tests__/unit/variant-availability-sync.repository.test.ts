@@ -8,7 +8,7 @@ import {
   type ClaimedVariantAvailabilitySync,
   type SqlClient,
   type SqlPool,
-} from "../../variant-availability-sync.repository";
+} from "../../infrastructure/variant-availability-sync.repository";
 
 const CLAIM: ClaimedVariantAvailabilitySync = {
   channelId: 67,

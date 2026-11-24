@@ -17,6 +17,7 @@ import { createCustomerReturnLiveService } from "./customer-return-live.composit
 import { createCustomerReturnLabelServices } from "./customer-return-label.composition";
 import { PostgresCustomerReturnSettingsStore } from "./customer-return-label-settings.repository";
 import { CustomerReturnGuestOrdersService } from "../application/customer-return-guest-orders.service";
+import { logger } from "../../../platform/observability/logger";
 
 export async function createCustomerReturnGuestService(config: ReturnCustomerAuthConfig) {
   // Separate authentication key: the existing recovery-storage key must never
@@ -24,7 +25,7 @@ export async function createCustomerReturnGuestService(config: ReturnCustomerAut
   const secret = z.string().min(32).max(1024).safeParse(process.env.CUSTOMER_RETURN_GUEST_SECRET);
   if (!secret.success || secret.data === config.storageSecret || Object.values(config.shops).some(shop => shop.shopifySecret === secret.data))
     throw new CustomerReturnCustomerAccessError("RETURN_GUEST_CONFIGURATION_REQUIRED", "Guest returns are not available yet. Please sign in or contact us.", 503);
-  const [{ pool, db }, { ChannelIdentityService }] = await Promise.all([import("../../../db"), import("../../channels/channel-identity.service")]);
+  const [{ pool, db }, { ChannelIdentityService }] = await Promise.all([import("../../../db"), import("../../channels/channel-identity.service.api")]);
   const identity = new ChannelIdentityService(db);
   return new CustomerReturnGuestService({ secret: secret.data, store: new PostgresCustomerReturnGuestStore(pool, secret.data), now: () => new Date(), randomId: randomUUID,
     purchases: new ShopifyGuestReturnPurchaseGateway({ database: pool, connection: channel => identity.shopifyConnection(channel), request: fetch,
@@ -48,13 +49,13 @@ export async function createGuestReturnServices(purchase: GuestPurchase) {
   const settings = new PostgresCustomerReturnSettingsStore(db);
   const orders = new CustomerReturnCustomerOrdersService({ principal, access, live,
       choices: { read: async () => { throw new CustomerReturnCustomerAccessError("RETURN_GUEST_ORDER_ONLY", "Verify another order to view its items.", 403); } },
-      shippingVersion: () => settings.customerVersion(purchase.channelId), reportUnavailableOrder: context => console.warn(JSON.stringify({ event: "guest_return_order_unavailable", ...context })) });
+      shippingVersion: () => settings.customerVersion(purchase.channelId), reportUnavailableOrder: context => logger.warn("guest_return_order_unavailable", { event: "guest_return_order_unavailable", ...context }) });
   return {
     orders: new CustomerReturnGuestOrdersService({ omsOrderId: purchase.omsOrderId, access, orders }),
     operations: new CustomerReturnCustomerOperationsService({ principal: { ...principal, orderScope: { omsOrderId: purchase.omsOrderId, externalOrderId: purchase.externalOrderId } },
       orderAccess: access, ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool), submissions: internal.submissions, labels: internal.labels,
       historyProgress: new PostgresCustomerReturnProgressReader(pool),
-      reportHistoryUnavailable: () => console.warn(JSON.stringify({ event: "guest_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: purchase.channelId, omsOrderId: purchase.omsOrderId })),
+      reportHistoryUnavailable: () => logger.warn("guest_return_history_progress_unavailable", { event: "guest_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: purchase.channelId, omsOrderId: purchase.omsOrderId }),
       workflows: new PostgresCustomerReturnWorkflowStore(pool), now: () => new Date() }),
     download: internal.download,
   };

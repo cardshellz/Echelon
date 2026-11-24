@@ -1,11 +1,11 @@
 import { ebayPolicyScopeSchema } from "@shared/ebay-business-policies";
 import { z } from "zod";
-import { ebayBusinessPolicies } from "../../modules/channels/ebay-business-policies";
-import { ebayCategoryMappingPatchSchema } from "../../modules/channels/ebay-business-policies.service";
+import { ebayBusinessPolicies } from "../../modules/channels/application/ebay-business-policies";
+import { ebayCategoryMappingPatchSchema } from "../../modules/channels/application/ebay-business-policies.service";
 import { ebayPolicyActor, sendEbayPolicyError } from "./ebay-business-policy-http";
-import { readEbayConnectionHealth } from "../../modules/channels/ebay-connection-health";
-import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work";
-import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
+import { readEbayConnectionHealth } from "../../modules/channels/application/ebay-connection-health";
+import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work.api";
+import { syncActiveListings } from "../../modules/channels/ebay-listing-sync.api";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";
@@ -28,6 +28,7 @@ import {
 } from "./ebay-listing-state";
 import { updateCatalogProductEbayBrowseCategory } from "../../modules/catalog/ebay-product-metadata.api";
 import { upsertEbayCategoryTypeListingEnabled } from "../../modules/channels/ebay-route-admin.api";
+import { logger } from "../../platform/observability/logger";
 
 export const router = express.Router();
 
@@ -166,7 +167,7 @@ export const router = express.Router();
         syncStatus: conn?.syncStatus || conn?.sync_status || "never",
       });
     } catch (err: any) {
-      console.error("[eBay Channel Config] Error:", err.message);
+      logger.error("routes.ebay_config_routes", { message: "[eBay Channel Config] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -265,7 +266,7 @@ ${categoriesXml}
         categoriesRequested: productTypeNames,
       });
     } catch (err: any) {
-      console.error("[eBay Sync Store Categories] Error:", err.message);
+      logger.error("routes.ebay_config_routes", { message: "[eBay Sync Store Categories] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -293,7 +294,7 @@ ${categoriesXml}
       );
       res.json({ success: true, productId, ebayBrowseCategoryId: ebayBrowseCategoryId || null, ebayBrowseCategoryName: ebayBrowseCategoryName || null });
     } catch (err: any) {
-      console.error("[eBay Product Category Override] Error:", err.message);
+      logger.error("routes.ebay_config_routes", { message: "[eBay Product Category Override] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -340,7 +341,7 @@ ${categoriesXml}
         });
       }
     } catch (err: any) {
-      console.error("[eBay Variant Exclusion] Error:", err.message);
+      logger.error("routes.ebay_config_routes", { message: "[eBay Variant Exclusion] Error:", error: err.message });
       const busy = publicationSelectionBusyIssue(err);
       if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: err.message });
@@ -366,7 +367,7 @@ ${categoriesXml}
       await upsertEbayCategoryTypeListingEnabled(EBAY_CHANNEL_ID, productTypeSlug, listingEnabled, pool);
       res.json({ success: true, productTypeSlug, listingEnabled });
     } catch (err: any) {
-      console.error("[eBay Toggle Type Listing] Error:", err.message);
+      logger.error("routes.ebay_config_routes", { message: "[eBay Toggle Type Listing] Error:", error: err.message });
       const busy = publicationSelectionBusyIssue(err);
       if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: err.message });

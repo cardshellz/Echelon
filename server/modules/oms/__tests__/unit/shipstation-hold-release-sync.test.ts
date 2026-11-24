@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 const omsDir = resolve(__dirname, "../..");
 const subDir = resolve(omsDir, "shipstation");
 const SHIPSTATION_SERVICE_SRC = [
-  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"),
+  readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf8"),
   ...(existsSync(subDir)
     ? readdirSync(subDir)
         .filter((f) => f.endsWith(".ts"))
@@ -14,11 +14,11 @@ const SHIPSTATION_SERVICE_SRC = [
     : []),
 ].join("\n");
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
-  resolve(__dirname, "../../webhook-retry.worker.ts"),
+  resolve(__dirname, "../../application/webhook-retry.worker.ts"),
   "utf8",
 );
 const ORDER_STORAGE_SRC = readFileSync(
-  resolve(__dirname, "../../../orders/orders.storage.ts"),
+  resolve(__dirname, "../../../orders/infrastructure/orders.storage.ts"),
   "utf8",
 );
 const SERVER_INDEX_SRC = readFileSync(
@@ -65,7 +65,7 @@ describe("ShipStation WMS hold/release sync", () => {
 
   it("queues ShipStation sync after one-shot sort-rank recompute changes active WMS rows", () => {
     const oneShotRepairsSrc = readFileSync(
-      resolve(__dirname, "../../../orders/one-shot-repairs.ts"),
+      resolve(__dirname, "../../../orders/application/one-shot-repairs.ts"),
       "utf8",
     );
     expect(ORDER_STORAGE_SRC).toMatch(/export async function recomputeAllActiveSortRanksDetailed/);

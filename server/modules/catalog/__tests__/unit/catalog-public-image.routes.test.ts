@@ -2,7 +2,8 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerCatalogPublicImageRoutes } from "../../catalog-public-image.routes";
+import { registerCatalogPublicImageRoutes } from "../../interfaces/http/catalog-public-image.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const hash = "ab".repeat(32);
 const data = Buffer.from("89504e470d0a1a0a00000000", "hex");
@@ -73,14 +74,16 @@ describe("public catalog photo HTTP boundary", () => {
     expect(read).not.toHaveBeenCalled();
   });
   it("reports storage failure without leaking errors or caching the failure", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       read.mockRejectedValue(new Error("private database credentials"));
       const response = await fetch(`${base}/api/catalog/images/42/${hash}`);
       expect(response.status).toBe(503);
       expect(response.headers.get("cache-control")).toBe("no-store");
       expect(await response.json()).toEqual({ code: "CATALOG_IMAGE_READ_FAILED", error: "Image temporarily unavailable." });
-      expect(log).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ event: "catalog.public_image.read_failed", assetId: 42, code: "CATALOG_IMAGE_READ_FAILED" }));
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: "catalog.public_image.read_failed", assetId: 42, code: "CATALOG_IMAGE_READ_FAILED" });
+      expect(log.mock.calls[0][0]).not.toContain("private");
     } finally { log.mockRestore(); }
   });
 });

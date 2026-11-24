@@ -14,7 +14,7 @@ vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: 
   };
 } }));
 
-import { registerProductMergeRoutes } from "../../product-merge.routes";
+import { registerProductMergeRoutes } from "../../interfaces/http/product-merge.routes";
 import { ProductMergeError, type ProductMergeService } from "../../application/product-merge.service";
 
 const RUN = {

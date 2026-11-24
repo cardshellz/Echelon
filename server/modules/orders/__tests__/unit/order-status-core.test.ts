@@ -5,7 +5,7 @@ import {
   transitionOrderStatus,
   cancelOrder,
   markOrderShipped,
-} from "../../order-status-core";
+} from "../../application/order-status-core";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 
 function mockDb(currentStatus: WmsWarehouseStatus | null, updateSucceeds = true) {

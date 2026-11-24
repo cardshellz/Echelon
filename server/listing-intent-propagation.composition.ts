@@ -3,7 +3,7 @@ import { PostgresListingIntentLifecycleReader } from "./modules/marketplace-list
 import {
   ebayListingSyncService,
   syncActiveListings,
-} from "./modules/channels/ebay-listing-sync";
+} from "./modules/channels/ebay-listing-sync.api";
 import { EBAY_CHANNEL_ID } from "./modules/channels/infrastructure/ebay-api-runtime";
 import { randomUUID } from "node:crypto";
 import { pool } from "./db";

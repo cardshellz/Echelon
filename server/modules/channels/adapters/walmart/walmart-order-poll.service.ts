@@ -9,6 +9,7 @@ import { WalmartApiError } from "./walmart-client";
 import { WalmartChannelService } from "./walmart-channel.service";
 import { parseWalmartOrder } from "./walmart-us-api";
 import { mapWalmartOrder, mapWalmartOrderObservation, walmartOrderHash, validateWalmartOrderScope } from "./walmart-order.domain";
+import { logger } from "../../../../platform/observability/logger";
 
 const OVERLAP_MS = 24 * 60 * 60 * 1_000;
 const MAX_PAGES = 100;
@@ -113,7 +114,7 @@ export class WalmartOrderPollService {
                 const code = failureCode(error, "WALMART_ORDER_PROCESSING_FAILED");
                 failure = code;
                 await repository.recordReceipt(channelId, id, hash, "failed", orderId, code, now);
-                console.error(JSON.stringify({ code, channelId, purchaseOrderId: id, omsOrderId: orderId }));
+                logger.error("channels.walmart_order_poll_service", { code, channelId, purchaseOrderId: id, omsOrderId: orderId });
               }
             }
             if (!response.nextCursor) { query = null; continue; }
@@ -145,9 +146,9 @@ export function startWalmartOrderPolling(service: WalmartOrderPollService, chann
     try {
       for (const channelId of await channels.repository.enabledChannels()) {
         try { await observeRuntimeWork("channels.walmart_order_poll", () => service.poll(channelId)); }
-        catch (error) { console.error(JSON.stringify({ code: failureCode(error, "WALMART_POLL_FAILED"), channelId })); }
+        catch (error) { logger.error("channels.walmart_order_poll_service", { code: failureCode(error, "WALMART_POLL_FAILED"), channelId }); }
       }
-    } catch { console.error(JSON.stringify({ code: "WALMART_CHANNEL_SCAN_FAILED" })); }
+    } catch { logger.error("WALMART_CHANNEL_SCAN_FAILED", { code: "WALMART_CHANNEL_SCAN_FAILED" }); }
     finally { running = false; }
   };
   const timer = setInterval(() => { void tick(); }, 5 * 60 * 1_000);

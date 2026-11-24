@@ -10,12 +10,13 @@ import type {
   IntentDelivery,
   IntentHandoff,
 } from "../domain/listing-intent-propagation";
-import type { EbayListingSyncService } from "../../channels/ebay-listing-sync.service";
-import type { syncActiveListings } from "../../channels/ebay-listing-sync";
+import type { EbayListingSyncService } from "../../channels/ebay-listing-sync.service.api";
+import type { syncActiveListings } from "../../channels/ebay-listing-sync.api";
 import {
   PgDropshipListingPreviewRepository,
   type DropshipListingPreviewService,
 } from "../../dropship/listing-preview.api";
+import { logger } from "../../../platform/observability/logger";
 
 const ACTOR = "system:listing-intent-propagation";
 const blocked = (code: string, message: string): IntentHandoff => ({
@@ -95,13 +96,7 @@ export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
     } catch (error) {
       const refusal = admissionRefusal(error);
       if (!refusal) throw error;
-      console.error(
-        JSON.stringify({
-          event: "listing_intent_handoff_blocked",
-          deliveryId: delivery.id,
-          code: refusal.code,
-        }),
-      );
+      logger.error("listing_intent_handoff_blocked", { event: "listing_intent_handoff_blocked", deliveryId: delivery.id, code: refusal.code });
       return refusal;
     }
   }

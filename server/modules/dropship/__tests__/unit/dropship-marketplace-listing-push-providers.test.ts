@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { XMLBuilder, XMLParser } from "fast-xml-parser";
 import type { Pool } from "pg";
 import { DropshipEbayStockReadinessGate } from "../../infrastructure/dropship-ebay-stock-readiness.gate";
-import type { DropshipEbayStockReadinessResult } from "../../../inventory-planning/quantity-publication";
+import type { DropshipEbayStockReadinessResult } from "../../../inventory-planning/application/quantity-publication";
 import { QuantityPublicationAdmissionError } from "../../../inventory-planning/domain/quantity-publication-admission";
 import { PostgresDropshipEbayPushPublicationReader, type DropshipEbayPushPublicationReader } from "../../infrastructure/dropship-ebay-push-publication.reader";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";

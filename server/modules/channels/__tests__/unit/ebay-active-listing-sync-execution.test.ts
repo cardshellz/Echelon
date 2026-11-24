@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { EbayListingSyncExecution, EbayListingExecutionContext } from "../../ebay-listing-sync.service";
+import type { EbayListingSyncExecution, EbayListingExecutionContext } from "../../application/ebay-listing-sync.service";
 import type { EbayListingLifecycleClient, EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayInventoryItem, EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
 import type { EbayRegistrationReadTransport } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
-import { captureExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
+import { captureExistingEbayListingIdentity } from "../../application/ebay-existing-listing-identity";
 import { syncProviderFixture, publishedContentFixture } from "../fixtures/ebay-listing-sync.fixture";
 
 type BindProviderIdentity = NonNullable<Parameters<EbayListingSyncExecution["execute"]>[3]>;
@@ -44,7 +44,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
 vi.mock("../../infrastructure/ebay-listing-client", () => ({ createEbayRouteListingLifecycleClient: () => fixture.client, getExistingEbayListingPhotos: vi.fn() }));
 // Policy persistence/catalog validation has real PostgreSQL/provider coverage in
 // ebay-business-policies.integration and ebay-policy-publication.integration.
-vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: {
+vi.mock("../../application/ebay-business-policies", () => ({ ebayBusinessPolicies: {
   resolveProductPolicies: async (input: { variantIds: number[]; expectedScope: unknown }) => {
     const policies = { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" };
     return { scope: input.expectedScope, product: policies, byVariantId: new Map(input.variantIds.map(id => [id, { ...policies }])) };
@@ -62,7 +62,7 @@ vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () =>
   ) }) };
 });
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {} }));
-vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { reconcile: fixture.recovery },
+vi.mock("../../../inventory-planning/application/quantity-publication", () => ({ quantityProviderResponseRecovery: { reconcile: fixture.recovery },
   automaticEbayPublicationRecovery: { recover: fixture.automaticRecovery }, ebayPublicationReconciliationRepository: {},
   ebayPublicationRejectionReader: { read: vi.fn() },
   EbayPublicationContentRefreshRejectedError: class extends Error {
@@ -70,8 +70,8 @@ vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityPro
   },
   ensureEbayPublicationReady: fixture.inventoryReady,
 }));
-vi.mock("../../ebay-listing-sync.service", async importOriginal => ({
-  ...await importOriginal<typeof import("../../ebay-listing-sync.service")>(),
+vi.mock("../../application/ebay-listing-sync.service", async importOriginal => ({
+  ...await importOriginal<typeof import("../../application/ebay-listing-sync.service")>(),
   EbayListingSyncService: class { constructor(_repository: unknown, execution: EbayListingSyncExecution) { fixture.execution = execution; } },
 }));
 import { readExistingEbayListingIdentityForProduct, readExistingEbayListingMappingIdentity, readExistingEbayListingMappingSource } from "../../infrastructure/ebay-active-listing-sync";

@@ -1,0 +1,210 @@
+import { eq, and, sql, isNull, inArray } from "drizzle-orm";
+import {
+  orders,
+  warehouses,
+} from "@shared/schema";
+import { resolveSlaDueAt } from "../domain/sort-rank";
+import { getSlaCutoffConfig } from "../../warehouse/settings.api";
+import {
+  sweepWmsOrderSlaStatusesInWms,
+  updateWmsOrderByIdInWms,
+} from "../../wms/wms-order-mutations.api";
+
+type DrizzleDb = {
+  select: (...args: any[]) => any;
+  insert: (...args: any[]) => any;
+  update: (...args: any[]) => any;
+  delete: (...args: any[]) => any;
+  execute: <T = any>(query: any) => Promise<{ rows: T[] }>;
+};
+
+// ---------------------------------------------------------------------------
+// Interfaces
+// ---------------------------------------------------------------------------
+
+export interface SLAAlert {
+  orderId: number;
+  orderNumber: string;
+  channelName: string | null;
+  warehouseCode: string | null;
+  warehouseType: string | null;
+  slaDueAt: Date;
+  slaStatus: string;
+  orderPlacedAt: Date | null;
+  hoursRemaining: number;
+}
+
+export interface SLASummary {
+  onTime: number;
+  atRisk: number;
+  overdue: number;
+  met: number;
+  total: number;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+/**
+ * SLA monitoring service.
+ *
+ * Tracks fulfillment SLA compliance for orders, especially 3PL orders
+ * where the fulfillment timeline is less visible.
+ *
+ * SLA statuses:
+ *   - on_time:  order is within SLA window, more than 24h remaining
+ *   - at_risk:  within 24h of SLA due date
+ *   - overdue:  past SLA due date, not yet shipped
+ *   - met:      shipped before SLA due date
+ *
+ * `slaDueAt` is computed from platform ship-by date, channel SLA,
+ * partner-profile SLA, then the global default.
+ */
+class SLAMonitorService {
+  constructor(private readonly db: DrizzleDb) {}
+
+  /**
+   * Set SLA due date on an order based on the shared SLA resolution rules.
+   * Called when an order is routed to a warehouse.
+   */
+  async setSLAForOrder(orderId: number): Promise<void> {
+    const [order] = await this.db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, orderId))
+      .limit(1);
+
+    if (!order) return;
+
+    // Only set SLA for orders that don't already have one
+    if (order.slaDueAt) return;
+
+    // Priority order for the due date:
+    //   1. Platform-provided ship-by deadline (eBay shipByDate, etc.) — hardest
+    //      commitment, always wins when present.
+    //   2. channels.sla_days — per-channel SLA for ANY channel (Shopify, eBay,
+    //      dropship, ...). Configurable on the /pick-priority page.
+    //   3. partner_profiles.sla_days — back-compat for partner (dropship/
+    //      wholesale) channels that set SLA there before channels.sla_days existed.
+    //   4. priority.sla_default_days (admin global) → DEFAULT_SLA_DAYS hardcode.
+    const slaCutoffConfig = await getSlaCutoffConfig((order as any).warehouseId ?? null, this.db as any);
+    const dueAt = await resolveSlaDueAt({
+      channelId: order.channelId,
+      channelShipByDate: (order as any).channelShipByDate as Date | string | null,
+      explicitSlaDueAt: null,
+      orderPlacedAt: order.orderPlacedAt,
+      createdAt: order.createdAt,
+      timezone: slaCutoffConfig.timezone,
+      cutoffLocal: slaCutoffConfig.cutoffLocal,
+    }, this.db as any);
+
+    if (!dueAt) return;
+
+    await updateWmsOrderByIdInWms(this.db, orderId, {
+      slaDueAt: dueAt,
+      slaStatus: "on_time",
+    });
+  }
+
+  /**
+   * Update SLA statuses for all active orders.
+   * Should be called periodically (e.g., every 15 minutes).
+   */
+  async updateSLAStatuses(): Promise<{ updated: number }> {
+    const now = new Date();
+    const twentyFourHoursFromNow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const updated = 0;
+
+    await sweepWmsOrderSlaStatusesInWms(this.db, now, twentyFourHoursFromNow);
+
+    return { updated };
+  }
+
+  /**
+   * Get SLA alerts for active orders (at_risk + overdue).
+   */
+  async getSLAAlerts(): Promise<SLAAlert[]> {
+    const now = new Date();
+
+    const result = await this.db.execute<{
+      id: number;
+      order_number: string;
+      channel_name: string | null;
+      warehouse_code: string | null;
+      warehouse_type: string | null;
+      sla_due_at: Date;
+      sla_status: string;
+      order_placed_at: Date | null;
+    }>(sql`
+      SELECT
+        o.id,
+        o.order_number,
+        c.name as channel_name,
+        w.code as warehouse_code,
+        w.warehouse_type,
+        o.sla_due_at,
+        o.sla_status,
+        o.order_placed_at
+      FROM wms.orders o
+      LEFT JOIN channels c ON o.channel_id = c.id
+      LEFT JOIN warehouse.warehouses w ON o.warehouse_id = w.id
+      WHERE o.sla_due_at IS NOT NULL
+        AND o.sla_status IN ('at_risk', 'overdue')
+        AND o.warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
+      ORDER BY o.sla_due_at ASC
+    `);
+
+    return result.rows.map(row => ({
+      orderId: row.id,
+      orderNumber: row.order_number,
+      channelName: row.channel_name,
+      warehouseCode: row.warehouse_code,
+      warehouseType: row.warehouse_type,
+      slaDueAt: new Date(row.sla_due_at),
+      slaStatus: row.sla_status,
+      orderPlacedAt: row.order_placed_at ? new Date(row.order_placed_at) : null,
+      hoursRemaining: Math.round(
+        (new Date(row.sla_due_at).getTime() - now.getTime()) / (1000 * 60 * 60)
+      ),
+    }));
+  }
+
+  /**
+   * Get SLA summary counts for dashboard.
+   */
+  async getSLASummary(): Promise<SLASummary> {
+    const result = await this.db.execute<{
+      sla_status: string;
+      count: string;
+    }>(sql`
+      SELECT sla_status, COUNT(*)::text as count
+      FROM wms.orders
+      WHERE sla_due_at IS NOT NULL
+        AND warehouse_status NOT IN ('cancelled')
+      GROUP BY sla_status
+    `);
+
+    const counts: Record<string, number> = {};
+    for (const row of result.rows) {
+      counts[row.sla_status] = parseInt(row.count, 10);
+    }
+
+    return {
+      onTime: counts["on_time"] || 0,
+      atRisk: counts["at_risk"] || 0,
+      overdue: counts["overdue"] || 0,
+      met: counts["met"] || 0,
+      total: Object.values(counts).reduce((a, b) => a + b, 0),
+    };
+  }
+
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export function createSLAMonitorService(db: any) {
+  return new SLAMonitorService(db);
+}

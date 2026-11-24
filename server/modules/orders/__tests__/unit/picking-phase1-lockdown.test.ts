@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { PickingUseCases } from "../../picking.use-cases";
-import { createPickingAssignmentReleaseRepository } from "../../picking-assignment-release.repository";
+import { PickingUseCases } from "../../application/picking.use-cases";
+import { createPickingAssignmentReleaseRepository } from "../../infrastructure/picking-assignment-release.repository";
 import { warehouseLocations } from "@shared/schema";
 const progressOwner = vi.hoisted(() => vi.fn());
-vi.mock("../../../wms/picking-progress.repository", () => ({ reconcileWmsPickingProgress: progressOwner }));
+vi.mock("../../../wms/infrastructure/picking-progress.repository", () => ({ reconcileWmsPickingProgress: progressOwner }));
 
-vi.mock("../../picking-assignment-release.repository", () => ({ createPickingAssignmentReleaseRepository: vi.fn() }));
+vi.mock("../../infrastructure/picking-assignment-release.repository", () => ({ createPickingAssignmentReleaseRepository: vi.fn() }));
 
 function makeItem(overrides: Record<string, unknown> = {}) {
   return {

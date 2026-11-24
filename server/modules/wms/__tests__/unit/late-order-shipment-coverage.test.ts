@@ -2,11 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   appendUncoveredItemsToShipment,
   movePendingShipmentItemsToLateEditResidual,
-} from "../../late-order-shipment-coverage";
+} from "../../domain/late-order-shipment-coverage";
 import {
   PROVIDER_MEMBERSHIP_AUTHORITATIVE,
   PROVIDER_MEMBERSHIP_PENDING_APPEND,
-} from "../../create-shipment";
+} from "../../application/create-shipment";
 
 function scriptedDb(results: Array<{ rows: any[] }>) {
   const remaining = [...results];

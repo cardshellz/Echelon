@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { deriveRefundAuthority } from "../server/modules/oms/refund-line-disposition";
+import { deriveRefundAuthority } from "../server/modules/oms/application/refund-line-disposition";
 
 const id = z.string().regex(/^[1-9][0-9]*$/);
 const quantity = z.number().int().nonnegative().max(2_147_483_647);

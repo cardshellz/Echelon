@@ -16,7 +16,7 @@ vi.mock("../../../../routes/middleware", () => ({
         ? next()
         : res.status(403).json({ error: "Forbidden" }),
 }));
-import { registerReceiptShipmentQuantityCorrectionRoutes } from "../../receipt-shipment-quantity-correction.routes";
+import { registerReceiptShipmentQuantityCorrectionRoutes } from "../../interfaces/http/receipt-shipment-quantity-correction.routes";
 import { QuantityCorrectionError } from "../../domain/receipt-shipment-quantity-correction";
 import { correctionInput } from "../../../../../test/fixtures/quantity-correction";
 

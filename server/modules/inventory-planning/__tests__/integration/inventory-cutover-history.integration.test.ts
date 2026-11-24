@@ -15,8 +15,8 @@ import { loadLatestCutoverOpening } from "../../infrastructure/inventory-cutover
 import { readHistoryAuditRows, readRetiredCutoverHistory, validateHistoryAudit, type HistoryAuditRow } from "../../infrastructure/inventory-cutover-history-audit.reader";
 import { assertReceiptNotRetired, assertShipmentNotRetiredPg } from "../../infrastructure/inventory-cutover-retired-work";
 import { planCutoverReconstruction } from "../../domain/inventory-cutover-reconstruction";
-import { createChannelFulfillmentIngressRepository } from "../../../oms/channel-fulfillment-ingress.repository";
-import { normalizeChannelFulfillmentIngress } from "../../../oms/channel-fulfillment-ingress";
+import { createChannelFulfillmentIngressRepository } from "../../../oms/infrastructure/channel-fulfillment-ingress.repository";
+import { normalizeChannelFulfillmentIngress } from "../../../oms/application/channel-fulfillment-ingress";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;

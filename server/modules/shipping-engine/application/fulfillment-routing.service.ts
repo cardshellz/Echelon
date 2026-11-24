@@ -17,6 +17,7 @@ import {
   type FulfillmentRouteScope,
 } from "../domain/fulfillment-routing";
 import { shippingFulfillmentMethodIdentityKey } from "@shared/lib/shipping-fulfillment-method-identity";
+import { logger } from "../../../platform/observability/logger";
 
 const MAX_ROUTING_METHODS = 200;
 const PROVIDER_PATTERN = /^[a-z][a-z0-9_]{1,79}$/;
@@ -273,13 +274,7 @@ export class FulfillmentRoutingService {
 
     const audit = "audit" in result ? result.audit : undefined;
     if (!result.idempotentReplay && audit) {
-      console.log(JSON.stringify({
-        timestamp: now.toISOString(),
-        level: "AUDIT",
-        actor: actorUserId,
-        action: "shipping.fulfillment_routing.replaced",
-        target: `shipping.service_levels:${serviceLevelId}`,
-        changes: {
+      logger.info("shipping.fulfillment_routing.replaced", { timestamp: now.toISOString(), actor: actorUserId, target: `shipping.service_levels:${serviceLevelId}`, changes: {
           before: {
             revision: audit.beforeRevision,
             methods: audit.beforeMethods,
@@ -288,12 +283,10 @@ export class FulfillmentRoutingService {
             revision: result.commandRevision,
             methods: audit.afterMethods,
           },
-        },
-        context: {
+        }, context: {
           catalogHash: catalog.catalogHash,
           idempotencyKey: command.idempotencyKey,
-        },
-      }));
+        } });
     }
 
     return {

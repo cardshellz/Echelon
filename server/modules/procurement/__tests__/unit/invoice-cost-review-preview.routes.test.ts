@@ -7,11 +7,12 @@ vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) => {
   if (req.headers["x-test-permission"] !== `${resource}:${action}`) return res.status(403).json({ error: "Permission denied" }); next();
 } }));
-import { registerInvoiceCostReviewPreviewRoute } from "../../invoice-cost-review-preview.routes";
-import { ApLedgerError } from "../../ap-ledger.service";
+import { registerInvoiceCostReviewPreviewRoute } from "../../interfaces/http/invoice-cost-review-preview.routes";
+import { ApLedgerError } from "../../application/ap-ledger.service";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
-import { PoQuantityAmendmentError } from "../../po-quantity-amendment.policy";
+import { PoQuantityAmendmentError } from "../../domain/po-quantity-amendment.policy";
 import { MoneyInputError } from "@shared/money-read";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 describe("invoice cost preview HTTP boundary", () => {
   let server: http.Server, base: string;
@@ -44,7 +45,7 @@ describe("invoice cost preview HTTP boundary", () => {
     const stale = await call(); expect(stale.status).toBe(409); expect(await stale.json()).toMatchObject({ details: { code: "INVOICE_COST_REVIEW_STALE" } });
     preview.mockRejectedValueOnce(new CostEvidenceError("COST_RECONCILIATION_PARTIAL_HISTORY", "Complete the receipt history before replacing its historical cost."));
     expect((await call()).status).toBe(409);
-    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logged = spyLoggerJson("error");
     preview.mockRejectedValueOnce(new Error("private database connection"));
     const failure = await call(); expect(failure.status).toBe(503); expect(await failure.text()).not.toContain("private database");
     expect(logged).toHaveBeenCalledWith(expect.not.stringContaining("private database"));

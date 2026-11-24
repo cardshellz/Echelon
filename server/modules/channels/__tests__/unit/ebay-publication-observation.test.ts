@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertEbayPublicationObservation } from "../../ebay-publication-observation";
+import { assertEbayPublicationObservation } from "../../application/ebay-publication-observation";
 import { syncIdentity } from "../fixtures/ebay-listing-sync.fixture";
 
 function observation() {

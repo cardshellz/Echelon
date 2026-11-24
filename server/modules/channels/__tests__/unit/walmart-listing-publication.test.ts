@@ -1,4 +1,4 @@
-import { prepareChannelIntent } from "../../../marketplace-listings/prepared-channel-intent";
+import { prepareChannelIntent } from "../../../marketplace-listings/prepared-channel-intent.api";
 import { describe, expect, it, vi } from "vitest";
 import {
   listingDraftItemSchema,
@@ -34,7 +34,7 @@ import {
 import createSchema from "../fixtures/walmart-listing-sleeves.schema.json";
 import matchSchema from "../fixtures/walmart-listing-match.schema.json";
 import legacyCatalogMatch from "../fixtures/walmart-catalog-match-4.2.response.json";
-import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
+import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
 import { QuantityProviderEvidenceCollector } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 
 const account: ListingAccount = {

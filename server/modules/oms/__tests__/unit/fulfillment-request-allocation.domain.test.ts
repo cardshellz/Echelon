@@ -4,7 +4,7 @@ import {
   type FulfillmentRequestAllocationTarget,
   type FulfillmentRequestAllocationSnapshot,
   type FulfillmentRequestPhysicalSnapshot,
-} from "../../fulfillment-request-allocation.domain";
+} from "../../domain/fulfillment-request-allocation.domain";
 
 const target: FulfillmentRequestAllocationTarget = {
   fulfillmentPlanId: 10, fulfillmentPlanLineId: 11, wmsOrderId: 20, wmsOrderItemId: 21,

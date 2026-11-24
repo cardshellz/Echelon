@@ -7,7 +7,7 @@ import {
 import {
   generatePurchasingRecommendations,
   type PurchasingRecommendationRawRow,
-} from "../../purchasing-recommendation.engine";
+} from "../../application/purchasing-recommendation.engine";
 
 const unique: PurchaseReceiveSelection = {
   version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 101,

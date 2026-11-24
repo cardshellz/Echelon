@@ -3,7 +3,7 @@ import { costFingerprint } from "../../../inventory/domain/cost-fingerprint";
 import { resolvePurchaseCostSource } from "../../domain/purchase-cost-source";
 import { retainEquivalentPurchaseCostSource } from "../../domain/purchase-cost-source-identity";
 import type { CostSourceProposal } from "../../domain/cost-source-compatibility";
-import type { PurchaseCostSource } from "../../purchase-cost-source.repository";
+import type { PurchaseCostSource } from "../../infrastructure/purchase-cost-source.repository";
 
 function source(): PurchaseCostSource {
   return {

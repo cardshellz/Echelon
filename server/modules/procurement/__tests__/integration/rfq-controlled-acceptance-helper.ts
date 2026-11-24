@@ -4,12 +4,12 @@ import { rfqConversionResultSchema, type RfqQuoteEvidence } from "@shared/procur
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import { buildPurchaseRecommendationRunInput } from "../../purchase-recommendation-snapshot.service";
-import { generatePurchasingRecommendations, type AutoDraftRecommendationSettings, type PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
-import { attachSupplierSourcingCandidates } from "../../supplier-sourcing.repository";
-import { createRfqWorkflowCommands, rfqWorkflowCommandScope, RFQ_WORKFLOW_COMMAND_PRINCIPAL } from "../../rfq-workflow.commands";
-import { createRfqWorkflowService, type RfqWorkflowCommand } from "../../rfq-workflow.service";
-import type { createPurchasingService } from "../../purchasing.service";
+import { buildPurchaseRecommendationRunInput } from "../../application/purchase-recommendation-snapshot.service";
+import { generatePurchasingRecommendations, type AutoDraftRecommendationSettings, type PurchasingRecommendationRawRow } from "../../application/purchasing-recommendation.engine";
+import { attachSupplierSourcingCandidates } from "../../infrastructure/supplier-sourcing.repository";
+import { createRfqWorkflowCommands, rfqWorkflowCommandScope, RFQ_WORKFLOW_COMMAND_PRINCIPAL } from "../../application/rfq-workflow.commands";
+import { createRfqWorkflowService, type RfqWorkflowCommand } from "../../application/rfq-workflow.service";
+import type { createPurchasingService } from "../../application/purchasing.service";
 import { legacyRfqTestCommands } from "./rfq-authority.fixture";
 
 /** Actual migrations required by the planning snapshot and RFQ owners. */

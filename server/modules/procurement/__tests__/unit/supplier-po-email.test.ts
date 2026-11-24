@@ -1,14 +1,14 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { supplierDocumentSource } from "../fixtures/supplier-po-document.fixture";
-import { buildSupplierPoDocument } from "../../supplier-po-document";
-import { renderPoHtml } from "../../po-document";
+import { buildSupplierPoDocument } from "../../application/supplier-po-document";
+import { renderPoHtml } from "../../application/po-document";
 
 const dependencies = vi.hoisted(() => ({ loadSource: vi.fn(), sendMail: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {} }));
-vi.mock("../../supplier-po-document.repository", () => ({ loadSupplierPoDocumentSource: dependencies.loadSource }));
+vi.mock("../../infrastructure/supplier-po-document.repository", () => ({ loadSupplierPoDocumentSource: dependencies.loadSource }));
 vi.mock("nodemailer", () => ({ default: { createTransport: () => ({ sendMail: dependencies.sendMail }) } }));
-import { buildPurchaseOrderEmail } from "../../po-email-builder";
+import { buildPurchaseOrderEmail } from "../../application/po-email-builder";
 
 describe("supplier email uses the validated print document", () => {
   beforeEach(() => { vi.clearAllMocks(); });

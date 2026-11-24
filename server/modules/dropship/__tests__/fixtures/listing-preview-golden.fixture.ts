@@ -23,7 +23,7 @@ import type { EbayCategoryRulesProfile } from "../../../../../shared/dropship/eb
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import type { ListingSettingsPriceSource, ListingSettingsSettingKey, ListingSettingsValueSource } from "../../../../../shared/dropship/listing-settings";
 import type { PricingProfile } from "../../../../../shared/dropship/pricing-rules";
-import type { CatalogVariantPublicationPhotos } from "../../../catalog/catalog-publication-images.reader";
+import type { CatalogVariantPublicationPhotos } from "../../../catalog/infrastructure/catalog-publication-images.reader";
 import type { DropshipEbayFulfillmentPolicyPreflight } from "../../application/dropship-ebay-fulfillment-policy-guard";
 import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override";
 import { productCatalogHash } from "../../application/dropship-listing-content-resolver";

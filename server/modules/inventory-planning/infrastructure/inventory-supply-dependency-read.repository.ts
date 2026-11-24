@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { RecipeCapacityService } from "../../inventory/recipe-capacity.service";
+import { RecipeCapacityService } from "../../inventory/recipe-capacity.service.api";
 import type { InventorySupplyDependencyReader } from "../application/inventory-supply-dependency-read.port";
 import type { InventoryAvailabilityRuntimeAtpExecutor } from "../application/inventory-availability-runtime-atp.service";
 import {

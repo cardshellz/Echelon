@@ -1,8 +1,8 @@
 import { CHANNEL_SYNC_BATCH_LIMIT } from "@shared/types/channel-sync-batch";
 import { channelPreparedIntentSchema, type ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
-import { assertPreparedChannelIntent } from "../../marketplace-listings/prepared-channel-intent";
-import { ebayIntentAccount, EBAY_PREPARED_INTENT_CAPABILITY } from "../ebay-prepared-intent";
-import { pinCatalogPublicationMediaVersions } from "../../catalog/catalog-publication-media-versions";
+import { assertPreparedChannelIntent } from "../../marketplace-listings/prepared-channel-intent.api";
+import { ebayIntentAccount, EBAY_PREPARED_INTENT_CAPABILITY } from "../application/ebay-prepared-intent";
+import { pinCatalogPublicationMediaVersions } from "../../catalog/catalog-publication-media-versions.api";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -21,28 +21,28 @@ import {
   type EbayListingSyncIdentity,
   type StoredEbayListingSyncJob,
   type EbayPublicationRetryAuthorization,
-} from "../ebay-listing-sync.domain";
+} from "../domain/ebay-listing-sync.domain";
 import {
   ebaySyncAdmissionFailureSchema,
   type EbayListingSyncClaim,
   type EbayListingSyncStore,
   type EbaySyncAdmissionFailure,
-} from "../ebay-listing-sync.service";
-import { assertEbayListingSourceIdentityUnchanged, bindObservedEbayListingMembers } from "../ebay-existing-listing-identity";
-import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../ebay-listing-workflow-lock";
+} from "../application/ebay-listing-sync.service";
+import { assertEbayListingSourceIdentityUnchanged, bindObservedEbayListingMembers } from "../application/ebay-existing-listing-identity";
+import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../application/ebay-listing-workflow-lock";
 import { PgMarketplaceListingRegistrationRepository, type MarketplaceObservedListingPublication } from "../../marketplace-listings";
-import { assertEbayPublicationObservation } from "../ebay-publication-observation";
-import { assertEbayPublicationTargetUnchanged } from "../ebay-publication-completion.domain";
+import { assertEbayPublicationObservation } from "../application/ebay-publication-observation";
+import { assertEbayPublicationTargetUnchanged } from "../domain/ebay-publication-completion.domain";
 import { assertEbayMappingOwnership } from "./ebay-listing-mapping-ownership";
 import { withEbayListingJobProgress } from "./ebay-listing-job-progress.reader";
-import { ebayListingFailureDiagnosticSchema } from "../ebay-listing-failure-diagnostic";
-import type { EbayPublicationRejectionReader, EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
-import { ebayListingPublicationScopes } from "../ebay-listing-request-recovery";
-import { proveLegacyEbayPublicationPreflight, validateEbayPublicationStageContract, type EbayPublicationStageEvent } from "../ebay-publication-preflight-evidence";
-import { releaseListingWorkPermit, tryAcquireListingWorkPermit } from "../../marketplace-listings/listing-work-permits";
+import { ebayListingFailureDiagnosticSchema } from "../application/ebay-listing-failure-diagnostic";
+import type { EbayPublicationRejectionReader, EbayRequestJournalContract } from "../../inventory-planning/quantity-publication.api";
+import { ebayListingPublicationScopes } from "../application/ebay-listing-request-recovery";
+import { proveLegacyEbayPublicationPreflight, validateEbayPublicationStageContract, type EbayPublicationStageEvent } from "../application/ebay-publication-preflight-evidence";
+import { releaseListingWorkPermit, tryAcquireListingWorkPermit } from "../../marketplace-listings/listing-work-permits.api";
 
 const LOCK_NAMESPACE = 918427;
-import { canSettleUnsentListingFailure } from "../../marketplace-listings/domain/listing-work-obligation";
+import { canSettleUnsentListingFailure } from "../../marketplace-listings/listing-work-obligation.api";
 
 const PUBLICATION_EVIDENCE_RECHECK_MS = 30_000;
 // Terminal rejection/no-send evidence retires only the corresponding start.

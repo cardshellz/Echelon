@@ -8,7 +8,7 @@ vi.mock("@shared/schema", () => ({
   productLocations: { id: "pl.id", sku: "pl.sku" },
 }));
 
-import { retireDeletedShopifyProduct } from "../../shopify-product-retirement.service";
+import { retireDeletedShopifyProduct } from "../../application/shopify-product-retirement.service";
 
 /** Minimal drizzle-shaped tx recording what the service asked for. */
 function makeTx(opts: { owned: Array<{ id: number }>; skus: Array<{ sku: string | null }> }) {

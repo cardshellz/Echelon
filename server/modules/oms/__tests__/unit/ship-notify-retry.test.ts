@@ -29,6 +29,7 @@ import {
   beforeEach,
   afterEach,
 } from "vitest";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -53,11 +54,11 @@ vi.mock("../../../../db", () => ({
   },
 }));
 
-vi.mock("../../../wms/create-shipment", () => ({
+vi.mock("../../../wms/application/create-shipment", () => ({
   createShipmentForOrder: createShipmentForOrderMock,
 }));
 
-vi.mock("../../../wms/late-order-shipment-coverage", () => ({
+vi.mock("../../../wms/domain/late-order-shipment-coverage", () => ({
   movePendingShipmentItemsToLateEditResidual:
     movePendingShipmentItemsMock,
   createLateEditResidualShipment: createLateEditResidualShipmentMock,
@@ -91,11 +92,11 @@ import {
   dispatchShopifyFulfillmentRetry,
   dispatchDelayedTrackingPush,
   dispatchEbayWebhookRetry,
-} from "../../webhook-retry.worker";
-import { ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../shipstation.service";
+} from "../../application/webhook-retry.worker";
+import { ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../application/shipstation.service";
 
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
-  resolve(__dirname, "../../webhook-retry.worker.ts"),
+  resolve(__dirname, "../../application/webhook-retry.worker.ts"),
   "utf8",
 );
 
@@ -1900,7 +1901,7 @@ describe("recordRetryFailure :: MAX_ATTEMPTS boundary", () => {
   });
 
   it("emits CRITICAL: log on dead-letter for shopify_fulfillment_push topic", async () => {
-    const errSpy = vi.spyOn(console, "error");
+    const errSpy = spyLoggerJson("error");
     const { db } = makeDb();
     await recordRetryFailure(
       db,
@@ -1909,7 +1910,7 @@ describe("recordRetryFailure :: MAX_ATTEMPTS boundary", () => {
       { topic: "shopify_fulfillment_push", shipmentId: 501 },
     );
     const critical = errSpy.mock.calls.find((args) =>
-      String(args[0] ?? "").startsWith("CRITICAL:"),
+      String(args[0] ?? "").includes("CRITICAL:"),
     );
     expect(critical).toBeDefined();
     expect(String(critical![0])).toContain(
@@ -1922,7 +1923,7 @@ describe("recordRetryFailure :: MAX_ATTEMPTS boundary", () => {
   });
 
   it("does NOT emit CRITICAL on transient failures (status=pending)", async () => {
-    const errSpy = vi.spyOn(console, "error");
+    const errSpy = spyLoggerJson("error");
     const { db } = makeDb();
     await recordRetryFailure(
       db,
@@ -1931,7 +1932,7 @@ describe("recordRetryFailure :: MAX_ATTEMPTS boundary", () => {
       { topic: "shopify_fulfillment_push", shipmentId: 9 },
     );
     const critical = errSpy.mock.calls.find((args) =>
-      String(args[0] ?? "").startsWith("CRITICAL:"),
+      String(args[0] ?? "").includes("CRITICAL:"),
     );
     expect(critical).toBeUndefined();
   });
@@ -2239,7 +2240,7 @@ describe("dispatchShopifyFulfillmentRetry :: canonical adoption", () => {
 
   it("keeps the worker error-code literal aligned with the provider adapter", () => {
     const fulfillmentPushSource = readFileSync(
-      resolve(__dirname, "../../fulfillment-push.service.ts"),
+      resolve(__dirname, "../../application/fulfillment-push.service.ts"),
       "utf8",
     );
     const exported = fulfillmentPushSource.match(

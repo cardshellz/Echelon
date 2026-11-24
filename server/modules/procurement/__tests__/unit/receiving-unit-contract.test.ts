@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { convertReceiptCounts, planReceiptUnits, receivingUnitVersion } from "../../receiving-unit-contract";
+import { convertReceiptCounts, planReceiptUnits, receivingUnitVersion } from "../../application/receiving-unit-contract";
 
 const piece = { id: 1, productId: 9, unitsPerVariant: 1, isActive: true };
 const pack = { id: 2, productId: 9, unitsPerVariant: 50, isActive: true };

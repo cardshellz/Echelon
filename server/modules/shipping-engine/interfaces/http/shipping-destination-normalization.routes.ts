@@ -6,6 +6,7 @@ import type {
   ShippingDestinationInput,
   ShippingDestinationNormalizationResult,
 } from "../../domain/shipping-destination-normalization";
+import { logger } from "../../../../platform/observability/logger";
 
 const requestSchema = z.object({
   country: z.string().trim().min(1).max(100),
@@ -66,13 +67,9 @@ export function registerShippingDestinationNormalizationRoutes(
           destination: result.destination,
         }));
       } catch (error) {
-        console.error(JSON.stringify({
-          code: "SHIPPING_DESTINATION_NORMALIZATION_FAILED",
-          message: "The shipping destination could not be normalized.",
-          context: {
+        logger.error("SHIPPING_DESTINATION_NORMALIZATION_FAILED", { code: "SHIPPING_DESTINATION_NORMALIZATION_FAILED", message: "The shipping destination could not be normalized.", context: {
             error: error instanceof Error ? error.message : String(error),
-          },
-        }));
+          } });
         return res.status(500).json({
           error: {
             code: "SHIPPING_DESTINATION_NORMALIZATION_FAILED",

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { cutoverLegacyPromiseReleaseSchema, cutoverReconstructionCommitSchema } from "@shared/types/inventory-cutover-reconstruction";
-import type { InventoryCutoverLegacyPromisePort } from "../../inventory-planning/application/inventory-cutover-legacy-promise.port";
+import type { InventoryCutoverLegacyPromisePort } from "../../inventory-planning/inventory-cutover-legacy-promise.port.api";
 import { readInventoryCutoverReconstruction } from "./inventory-cutover-reconstruction.reader";
 
 export class InventoryCutoverLegacyPromiseError extends Error {

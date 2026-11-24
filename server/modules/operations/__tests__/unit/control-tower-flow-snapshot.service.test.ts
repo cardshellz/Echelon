@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { getFlowWaterfall } = vi.hoisted(() => ({ getFlowWaterfall: vi.fn() }));
 
-vi.mock("../../../oms/flow-waterfall.service", () => ({ getFlowWaterfall }));
+vi.mock("../../../oms/application/flow-waterfall.service", () => ({ getFlowWaterfall }));
 
 import {
   getControlTowerFlowOverview,

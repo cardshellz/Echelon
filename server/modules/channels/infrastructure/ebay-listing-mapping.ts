@@ -2,14 +2,15 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { pool } from "../../../db";
 import { PgMarketplaceListingRegistrationRepository } from "../../marketplace-listings";
-import { EbayListingMappingService } from "../ebay-listing-mapping.service";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
+import { EbayListingMappingService } from "../application/ebay-listing-mapping.service";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
 import { createEbayAuthConfig, EbayAuthService } from "../adapters/ebay/ebay-auth.service";
 import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay-marketplace-registration.factory";
 import { EBAY_CHANNEL_ID, getAuthService } from "./ebay-api-runtime";
 import { readExistingEbayListingMappingIdentity, readExistingEbayListingMappingSource } from "./ebay-active-listing-sync";
 import { PostgresEbayListingMappingRepairRepository } from "./ebay-listing-mapping.repository";
 import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibility";
+import { logger } from "../../../platform/observability/logger";
 
 const canonicalRegistration = new PgMarketplaceListingRegistrationRepository(pool);
 const store = new PostgresEbayListingMappingRepairRepository(pool, {
@@ -57,7 +58,7 @@ export const ebayListingMappingService = new EbayListingMappingService({
   },
   store,
   reportDiagnosticFailure: event => {
-    console.error(JSON.stringify({ event: "ebay_listing_mapping_check_failed", ...event }));
+    logger.error("ebay_listing_mapping_check_failed", { event: "ebay_listing_mapping_check_failed", ...event });
   },
   now: () => new Date(),
 });

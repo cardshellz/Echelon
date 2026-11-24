@@ -11,7 +11,7 @@
  */
 import { sql } from "drizzle-orm";
 import { db } from "../server/db";
-import { enqueueShippingGroupMetafields } from "../server/modules/catalog/shipping-group-sync";
+import { enqueueShippingGroupMetafields } from "../server/modules/catalog/application/shipping-group-sync";
 
 async function main() {
   const res = await db.execute(

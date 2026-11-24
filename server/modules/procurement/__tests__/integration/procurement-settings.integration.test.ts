@@ -12,8 +12,8 @@ import type { FinancialCommandDescriptor } from "../../../../platform/commands/t
 
 vi.mock("../../../../db", () => ({ db: {} }));
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
-import { createProcurementSettingsCommands, PROCUREMENT_SETTINGS_COMMAND_SCOPE } from "../../procurement-settings.commands";
-import { readProcurementSettings } from "../../procurement-settings.repository";
+import { createProcurementSettingsCommands, PROCUREMENT_SETTINGS_COMMAND_SCOPE } from "../../application/procurement-settings.commands";
+import { readProcurementSettings } from "../../infrastructure/procurement-settings.repository";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

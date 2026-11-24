@@ -4,8 +4,9 @@ import express, { type NextFunction, type Request, type Response } from "express
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { relationshipFixture } from "../../../../../test/fixtures/document-relationships";
-import { registerDocumentRelationshipRoutes } from "../../document-relationships.routes";
-import { createDocumentRelationshipService } from "../../document-relationships.service";
+import { registerDocumentRelationshipRoutes } from "../../interfaces/http/document-relationships.routes";
+import { createDocumentRelationshipService } from "../../application/document-relationships.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) =>
   (req: Request, res: Response, next: NextFunction) => req.headers["x-permission"] === `${resource}:${action}` ? next() : res.sendStatus(403) }));
@@ -34,14 +35,14 @@ describe("document relationship read boundary", () => {
   it("distinguishes missing records from failed reads without leaking internals", async () => {
     repository.read.mockResolvedValueOnce(null);
     expect((await requestLocalHttp(`${url}/shipment/42`, permitted)).status).toBe(404);
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     repository.read.mockRejectedValueOnce(new Error("secret database details"));
     const failure = await requestLocalHttp(`${url}/shipment/42`, permitted);
     expect(failure.status).toBe(500); expect(await failure.text()).not.toContain("secret");
     expect(log).toHaveBeenCalledWith(expect.stringContaining("procurement.relationships.read_failed"));
   });
   it("fails closed on a wrong root or duplicate monetary identity", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
     repository.read.mockResolvedValueOnce(relationshipFixture({ kind: "shipment", id: 43 }));
     expect((await requestLocalHttp(`${url}/shipment/42`, permitted)).status).toBe(500);
     const duplicate = relationshipFixture(); duplicate.allocations.push(duplicate.allocations[0]); repository.read.mockResolvedValueOnce(duplicate);

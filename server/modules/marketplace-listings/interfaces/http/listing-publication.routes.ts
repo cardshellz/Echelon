@@ -1,13 +1,14 @@
-import { ChannelPricingError } from "../../../channels/channel-pricing.domain";
-import { sendChannelPricingError } from "../../../channels/interfaces/http/channel-pricing.error";
+import { ChannelPricingError } from "../../../channels/channel-pricing.domain.api";
+import { sendChannelPricingError } from "../../../channels/channel-pricing.error.api";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import { ListingPublicationError } from "../../domain/listing-publication";
 import type { ListingPublicationService } from "../../application/listing-publication.service";
-import { ChannelProviderError } from "../../../channels/channel-provider.error";
+import { ChannelProviderError } from "../../../channels/channel-provider.error.api";
 import { ListingMemberLifecycleError } from "../../domain/listing-member-lifecycle";
-import { ChannelIdentityError } from "../../../channels/channel-identity.domain";
+import { ChannelIdentityError } from "../../../channels/channel-identity.domain.api";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerListingPublicationRoutes(app: Express): void {
   function route(
@@ -111,9 +112,7 @@ export function sendError(response: Response, error: unknown): void {
     : invalid
       ? "LISTING_INPUT_INVALID"
       : "LISTING_PUBLICATION_FAILED";
-  console.error(
-    JSON.stringify({ operation: "listing_publication_http", code }),
-  );
+  logger.error("marketplace-listings.listing_publication_routes", { operation: "listing_publication_http", code });
   response
     .status(
       error instanceof ListingPublicationError

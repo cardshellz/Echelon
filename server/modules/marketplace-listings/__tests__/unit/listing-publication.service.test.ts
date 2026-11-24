@@ -5,7 +5,7 @@ import {
 } from "../../application/listing-publication.service";
 import type { ListingPublicationProvider } from "../../application/listing-publication-provider.port";
 import { ListingSubmissionError } from "../../application/listing-publication-provider.port";
-import { ChannelProviderError } from "../../../channels/channel-provider.error";
+import { ChannelProviderError } from "../../../channels/domain/channel-provider.error";
 import type { ListingPublicationStore } from "../../application/listing-publication-store.port";
 import {
   ListingPublicationError,

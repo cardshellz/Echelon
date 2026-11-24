@@ -1,10 +1,11 @@
 // Packing/transaction tests isolate the source reader; real header/tax effects are covered by PostgreSQL flow tests.
-vi.mock("../../shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
-import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
-vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
+vi.mock("../../infrastructure/shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
+import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../application/shipment-cost-application.service";
+vi.mock("../../application/shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { describe, expect, it, vi } from "vitest";
-import { createShipmentTrackingService } from "../../shipment-tracking.service";
+import { createShipmentTrackingService } from "../../application/shipment-tracking.service";
 import { PgDialect } from "drizzle-orm/pg-core";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const commandTime = new Date("2026-09-06T12:00:00.000Z");
 
@@ -188,14 +189,14 @@ describe("shipment close transaction", () => {
 
   it("keeps the committed close and logs a classified warning when the separate lot push fails", async () => {
     const h = harness();
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const warning = spyLoggerJson("warn");
     vi.mocked(applyShipmentCostRevisions).mockRejectedValueOnce(new Error("Private DB diagnostic"));
     try {
       await expect(h.service.close(1, "operator-1")).resolves.toMatchObject({ status: "closed" });
       expect(h.state.shipment.status).toBe("closed");
       expect(h.state.snapshots).toHaveLength(1);
       expect(h.state.history).toHaveLength(1);
-      expect(JSON.parse(String(warning.mock.calls[0][0]))).toEqual({
+      expect(JSON.parse(String(warning.mock.calls[0][0]))).toMatchObject({
         event: "procurement.shipment.close_lot_cost_push_failed", shipmentId: 1, actorId: "operator-1",
         code: "SHIPMENT_LOT_COST_PUSH_FAILED", errorType: "Error",
       });

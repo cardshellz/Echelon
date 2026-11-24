@@ -1,9 +1,9 @@
 import { ChannelReadCoordinator } from "../../modules/marketplace-listings/application/channel-read-coordinator";
 import { channelListingInventorySchema } from "@shared/types/channel-listing-inventory";
 import { EbayListingFeedReader } from "../../modules/channels/infrastructure/ebay-listing-feed.reader";
-import { ebayListingPushRequestSchema, ebayListingPushService } from "../../modules/channels/ebay-listing-push";
+import { ebayListingPushRequestSchema, ebayListingPushService } from "../../modules/channels/ebay-listing-push.api";
 import { PostgresEbayListingRecoveryContinuation } from "../../modules/channels/infrastructure/ebay-listing-recovery-continuation";
-import { ebayListingSyncRepository, syncActiveListings } from "../../modules/channels/ebay-listing-sync";
+import { ebayListingSyncRepository, syncActiveListings } from "../../modules/channels/ebay-listing-sync.api";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -12,25 +12,25 @@ import { requireAuth, requireAuthOrInternalApiKey, requirePermission } from "../
 import { createStaffStreamObserver } from "../../modules/identity";
 import { getAuthService, getChannelConnection, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { resolveChannelPrice } from "../../modules/channels/infrastructure/ebay-listing-helpers";
-import { createCatalogPublicImageUrl } from "../../modules/catalog/catalog-public-image";
-import { readEbayListingPhotoReadiness } from "../../modules/channels/ebay-listing-photo-readiness";
+import { createCatalogPublicImageUrl } from "../../modules/catalog/domain/catalog-public-image";
+import { readEbayListingPhotoReadiness } from "../../modules/channels/application/ebay-listing-photo-readiness";
 import {
   EbayMarketplaceListingConnector,
 } from "../../modules/channels/listing-connectors/ebay-listing.connector";
-import { ebayListingSyncService } from '../../modules/channels/ebay-listing-sync';
-import { EbayListingRecoveryService } from '../../modules/channels/ebay-listing-sync';
-import { EbayPublicationRecoveryService, PostgresEbayPublicationRecoveryRepository } from '../../modules/inventory-planning/quantity-publication';
+import { ebayListingSyncService } from '../../modules/channels/ebay-listing-sync.api';
+import { EbayListingRecoveryService } from '../../modules/channels/ebay-listing-sync.api';
+import { EbayPublicationRecoveryService, PostgresEbayPublicationRecoveryRepository } from '../../modules/inventory-planning/quantity-publication.api';
 import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
-import { EbayListingFeedInventoryService } from '../../modules/channels/ebay-listing-feed-inventory';
+import { EbayListingFeedInventoryService } from '../../modules/channels/ebay-listing-feed-inventory.api';
 import { listingFailure, listingFailureStatus } from './ebay-listing-errors';
 import { registerEbayListingRecoveryRoutes } from './ebay-listing-recovery.routes';
 import { registerEbayListingMappingRoutes } from './ebay-listing-mapping.routes';
-import { ebayListingMappingService } from '../../modules/channels/ebay-listing-mapping';
+import { ebayListingMappingService } from '../../modules/channels/ebay-listing-mapping.api';
 import { registerEbayPublicationStockRoutes } from './ebay-publication-stock.routes';
-import { ebayPublicationStockService } from '../../modules/channels/ebay-publication-stock';
-import { readEbayPushRecoveryIdentity } from '../../modules/channels/ebay-listing-push';
+import { ebayPublicationStockService } from '../../modules/channels/ebay-publication-stock.api';
+import { readEbayPushRecoveryIdentity } from '../../modules/channels/ebay-listing-push.api';
 import { ebayListingSyncJobSchema } from '@shared/types/ebay-listing-sync';
-import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
+import { queueVariantAvailabilityRepair } from "../../modules/channels/application/variant-availability-sync.service";
 import {
   createEbayRouteListingClient,
 } from "./ebay-listing-connector-client";
@@ -38,6 +38,7 @@ import {
   markChannelListingReconcileDeleted,
   markChannelListingReconcileEnded,
 } from "../../modules/channels/ebay-route-admin.api";
+import { logger } from "../../platform/observability/logger";
 
 export const router = express.Router();
 const EBAY_LISTING_DEFAULT_MARKETPLACE_ID = "EBAY_US";
@@ -45,8 +46,7 @@ const publicationImageUrl = createCatalogPublicImageUrl(process.env);
 const ebayListingConnector = new EbayMarketplaceListingConnector();
 const feedInventory = new EbayListingFeedInventoryService(atpService, {
   createReference: randomUUID,
-  reportFailure: ({ error, ...context }) => console.error({ event: "ebay_listing_feed_inventory_failed", ...context,
-    error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" }),
+  reportFailure: ({ error, ...context }) => logger.error("ebay_listing_feed_inventory_failed", { event: "ebay_listing_feed_inventory_failed", ...context, error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" }),
 });
 const feedReader = new EbayListingFeedReader(pool, EBAY_CHANNEL_ID, {
   inventory: feedInventory,
@@ -74,16 +74,13 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
         } finally {
           // One measurement per coalesced load, including failed loads. This
           // distinguishes slow projection work from connection acquisition.
-          console.info({ event: "channel_listing_feed_read", channelId: EBAY_CHANNEL_ID,
-            elapsedMs: Math.round(performance.now() - startedAt), productCount, poolAtStart,
-            poolAtFinish: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount } });
+          logger.info("channel_listing_feed_read", { event: "channel_listing_feed_read", channelId: EBAY_CHANNEL_ID, elapsedMs: Math.round(performance.now() - startedAt), productCount, poolAtStart, poolAtFinish: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount } });
         }
       }));
     } catch (error) {
       const reference = randomUUID();
       const issue = resolveEbayListingIssue({ code: "EBAY_LISTING_FEED_UNAVAILABLE", jobId: reference });
-      console.error({ event: "ebay_listing_feed_failed", reference,
-        error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown listing feed read failure" });
+      logger.error("ebay_listing_feed_failed", { event: "ebay_listing_feed_failed", reference, error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown listing feed read failure" });
       res.status(500).json({ code: issue.code, error: issue.message, issue });
     }
   });
@@ -97,8 +94,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
     } catch (error) {
       const reference = randomUUID();
       const issue = resolveEbayListingIssue({ code: "EBAY_FEED_QUANTITY_UNAVAILABLE", productId: productId.data, jobId: reference });
-      console.error({ event: "ebay_listing_inventory_failed", reference, productId: productId.data,
-        error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" });
+      logger.error("ebay_listing_inventory_failed", { event: "ebay_listing_inventory_failed", reference, productId: productId.data, error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" });
       res.status(503).json({ code: issue.code, error: issue.message, issue });
     }
   });
@@ -308,7 +304,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
             changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "ended" });
           }
         } catch (err: any) {
-          console.error(`[eBay Reconcile] Error checking SKU ${sku}:`, err.message);
+          logger.error("routes.ebay_listings_routes", { message: `[eBay Reconcile] Error checking SKU ${sku}:`, error: err.message });
           errors++;
         }
 
@@ -317,13 +313,13 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
       }
 
       if (changes.length > 0) {
-        console.log(`[eBay Reconcile] Status changes:`, changes.map((c) => `${c.sku}: ${c.oldStatus} → ${c.newStatus}`).join(", "));
+        logger.info("routes.ebay_listings_routes", { message: `[eBay Reconcile] Status changes:`, detail: changes.map((c) => `${c.sku}: ${c.oldStatus} → ${c.newStatus}`).join(", ") });
       }
-      console.log(`[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} quantityDrift=${quantityDrift} errors=${errors}`);
+      logger.info("routes.ebay_listings_routes", { message: `[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} quantityDrift=${quantityDrift} errors=${errors}` });
 
       res.json({ checked: listings.length, active, ended, deleted, quantityDrift, errors, changes });
     } catch (err: any) {
-      console.error("[eBay Reconcile] Error:", err.message);
+      logger.error("routes.ebay_listings_routes", { message: "[eBay Reconcile] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

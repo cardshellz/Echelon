@@ -6,11 +6,11 @@ import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { appendUncoveredItemsToShipment } from "../../late-order-shipment-coverage";
+import { appendUncoveredItemsToShipment } from "../../domain/late-order-shipment-coverage";
 import {
   PROVIDER_MEMBERSHIP_AUTHORITATIVE,
   PROVIDER_MEMBERSHIP_PENDING_APPEND,
-} from "../../create-shipment";
+} from "../../application/create-shipment";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

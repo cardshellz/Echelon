@@ -23,10 +23,10 @@ const read = (p: string) =>
 
 const INDEX_SRC = read("../../../../index.ts");
 const OMS_WMS_RECONCILE_SRC = read(
-  "../../../orders/oms-wms-cancel-reconcile.scheduler.ts",
+  "../../../orders/application/oms-wms-cancel-reconcile.scheduler.ts",
 );
 const WMS_SHIPSTATION_RECONCILE_SRC = read(
-  "../../wms-shipstation-reconcile.scheduler.ts",
+  "../../application/wms-shipstation-reconcile.scheduler.ts",
 );
 const RECONCILERS_SRC = [
   INDEX_SRC,
@@ -36,7 +36,7 @@ const RECONCILERS_SRC = [
 const omsDir = fileURLToPath(new URL("../../../oms", import.meta.url));
 const shipStationSubDir = resolve(omsDir, "shipstation");
 const SS_SRC = [
-  read("../../../oms/shipstation.service.ts"),
+  read("../../../oms/application/shipstation.service.ts"),
   ...(existsSync(shipStationSubDir)
     ? readdirSync(shipStationSubDir)
         .filter((f) => f.endsWith(".ts"))
@@ -44,9 +44,9 @@ const SS_SRC = [
         .map((f) => readFileSync(resolve(shipStationSubDir, f), "utf8"))
     : []),
 ].join("\n");
-const FLOW_SRC = read("../../../oms/oms-flow-reconciliation.service.ts");
-const AUTHORITY_POLICY_SRC = read("../../../oms/channel-fulfillment-authority.policy.ts");
-const TYPES_SRC = read("../../types.ts");
+const FLOW_SRC = read("../../../oms/application/oms-flow-reconciliation.service.ts");
+const AUTHORITY_POLICY_SRC = read("../../../oms/domain/channel-fulfillment-authority.policy.ts");
+const TYPES_SRC = read("../../domain/types.ts");
 
 describe("P0.3 — engine-cancel discrimination", () => {
   it("the ShipStation cancel returns a discriminated state, not just a flag", () => {
@@ -72,7 +72,7 @@ describe("P0.3 — engine-cancel discrimination", () => {
       OMS_WMS_RECONCILE_SRC.indexOf("[OMS<->WMS Reconcile] Cancelled engine order"),
     );
     expect(cascade).toContain("cancelOutboundShipmentAfterEngineCascadeInWms(");
-    const wmsShipmentsRepoSrc = read("../../../wms/outbound-shipments-mutations.repository.ts");
+    const wmsShipmentsRepoSrc = read("../../../wms/infrastructure/outbound-shipments-mutations.repository.ts");
     const helperStart = wmsShipmentsRepoSrc.indexOf(
       "export async function cancelOutboundShipmentAfterEngineCascadeInWms(",
     );

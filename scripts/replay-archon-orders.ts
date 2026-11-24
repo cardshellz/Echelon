@@ -1,5 +1,5 @@
 import { pool } from "../server/db";
-import { queueHistoricalArchonOrders } from "../server/modules/oms/archon-order-replay";
+import { queueHistoricalArchonOrders } from "../server/modules/oms/application/archon-order-replay";
 const args = process.argv.slice(2);
 const value = (name: string) => args[args.indexOf(name) + 1];
 async function main() {

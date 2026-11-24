@@ -11,20 +11,20 @@ vi.mock("../../../middleware", () => ({ requireAuth: (_req: unknown, _res: unkno
 vi.mock("../../ebay-utils", () => ({ EBAY_CHANNEL_ID: 67, getAuthService: vi.fn(), getChannelConnection: vi.fn(),
   atpService: { getAtpPerVariant: fixture.getQuantities } }));
 vi.mock("../../../../modules/channels/infrastructure/ebay-listing-helpers", () => ({ resolveChannelPrice: fixture.price }));
-vi.mock("../../../../modules/channels/ebay-listing-push", () => ({ ebayListingPushRequestSchema: {}, ebayListingPushService: {}, readEbayPushRecoveryIdentity: vi.fn() }));
-vi.mock("../../../../modules/channels/ebay-listing-sync", () => ({ syncActiveListings: vi.fn(), ebayListingSyncRepository: {}, ebayListingSyncService: {}, EbayListingRecoveryService: class {} }));
-vi.mock("../../../../modules/inventory-planning/quantity-publication", () => ({ EbayPublicationRecoveryService: class {}, PostgresEbayPublicationRecoveryRepository: class {} }));
-vi.mock("../../../../modules/channels/variant-availability-sync.service", () => ({ queueVariantAvailabilityRepair: vi.fn() }));
+vi.mock("../../../../modules/channels/ebay-listing-push.api", () => ({ ebayListingPushRequestSchema: {}, ebayListingPushService: {}, readEbayPushRecoveryIdentity: vi.fn() }));
+vi.mock("../../../../modules/channels/ebay-listing-sync.api", () => ({ syncActiveListings: vi.fn(), ebayListingSyncRepository: {}, ebayListingSyncService: {}, EbayListingRecoveryService: class {} }));
+vi.mock("../../../../modules/inventory-planning/application/quantity-publication", () => ({ EbayPublicationRecoveryService: class {}, PostgresEbayPublicationRecoveryRepository: class {} }));
+vi.mock("../../../../modules/channels/application/variant-availability-sync.service", () => ({ queueVariantAvailabilityRepair: vi.fn() }));
 vi.mock("../../ebay-listing-connector-client", () => ({ createEbayRouteListingClient: vi.fn() }));
 vi.mock("../../ebay-listing-recovery.routes", () => ({ registerEbayListingRecoveryRoutes: vi.fn() }));
-vi.mock("../../../../modules/channels/ebay-listing-mapping", () => ({ ebayListingMappingService: {} }));
+vi.mock("../../../../modules/channels/ebay-listing-mapping.api", () => ({ ebayListingMappingService: {} }));
 vi.mock("../../ebay-listing-mapping.routes", () => ({ registerEbayListingMappingRoutes: vi.fn() }));
 import { router } from "../../ebay-listings.routes";
-import { ChannelPricingResolutionError } from "../../../../modules/channels/channel-pricing-resolver";
+import { ChannelPricingResolutionError } from "../../../../modules/channels/application/channel-pricing-resolver";
 import { InventoryChannelQuantityRuntimeError } from "../../../../modules/inventory-planning/application/inventory-channel-quantity-runtime.service";
 import { ebayListingIssueSchema } from "@shared/types/ebay-listing-issue";
 import { channelListingInventorySchema } from "@shared/types/channel-listing-inventory";
-import { resolveEbayFeedListingState } from "../../../../modules/channels/ebay-listing-feed-status";
+import { resolveEbayFeedListingState } from "../../../../modules/channels/application/ebay-listing-feed-status";
 
 describe("eBay listing feed current content intent", () => {
   let server: ReturnType<ReturnType<typeof express>["listen"]>;

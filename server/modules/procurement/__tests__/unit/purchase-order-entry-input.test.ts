@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("../../../../db", () => ({ db: {} }));
-import { mapPurchaseOrderWithLinesInput, parseNullableDateInput } from "../../purchase-order-entry-input";
+import { mapPurchaseOrderWithLinesInput, parseNullableDateInput } from "../../application/purchase-order-entry-input";
 
 describe("purchase order entry wire mapping", () => {
   it("preserves catalog directives, quote dates and purchase-unit pricing without inventing legacy costs", () => {

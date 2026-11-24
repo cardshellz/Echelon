@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { ebayPolicyWriteSchema } from "@shared/ebay-business-policies";
-import { ebayBusinessPolicies } from "../../modules/channels/ebay-business-policies";
+import { ebayBusinessPolicies } from "../../modules/channels/application/ebay-business-policies";
 import { ebayPolicyActor, sendEbayPolicyError } from "./ebay-business-policy-http";
-import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
+import { syncActiveListings } from "../../modules/channels/ebay-listing-sync.api";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";
@@ -24,10 +24,11 @@ import {
   createEbayRouteListingLifecycleClient,
   getExistingEbayInventoryImageUrls,
 } from "./ebay-listing-connector-client";
-import { ebayListingExclusionService } from "../../modules/channels/ebay-listing-exclusion";
+import { ebayListingExclusionService } from "../../modules/channels/ebay-listing-exclusion.api";
 import { registerEbayListingExclusionRoutes } from "./ebay-listing-exclusion.routes";
-import { createSharedProductPhotoImporter } from "../../modules/catalog/shared-product-photos.service";
+import { createSharedProductPhotoImporter } from "../../modules/catalog/application/shared-product-photos.service";
 import { ebayOriginalPhotoUrl } from "../../modules/channels/adapters/ebay/ebay-photo-requirements";
+import { logger } from "../../platform/observability/logger";
 
 export const router = express.Router();
 
@@ -146,7 +147,7 @@ for (const kind of ["product", "variant"] as const) {
         throw err;
       }
     } catch (err: any) {
-      console.error("[eBay Import Images] Error:", err.message);
+      logger.error("routes.ebay_policies_routes", { message: "[eBay Import Images] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

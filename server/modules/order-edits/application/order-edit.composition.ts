@@ -14,6 +14,7 @@ import { createMemberPlanPresentationReader } from "../../membership";
 import { ClubOrderEditCodeRedemptions } from "../infrastructure/club-order-edit-code-redemptions";
 import { PostgresOrderEditCodeHistory } from "../infrastructure/postgres-order-edit-code-history";
 import { OrderCancellationService } from "../../customer-account/order-cancellation-contracts.api";
+import { logger } from "../../../platform/observability/logger";
 
 export function createOrderEditService(
   pool: Pool,
@@ -31,18 +32,11 @@ export function createOrderEditService(
     codeHistory: new PostgresOrderEditCodeHistory(pool),
     memberPresentation: createMemberPlanPresentationReader(pool),
     report: (event) =>
-      console.error(
-        JSON.stringify({
-          event: "order_edit_quote_preflight_failure",
-          ...event,
-        }),
-      ),
+      logger.error("order_edit_quote_preflight_failure", { event: "order_edit_quote_preflight_failure", ...event }),
     credentials: createOrderEditCredentialStore(pool, clock),
     accountSummaries: new PostgresAccountNativeSummaries(pool),
     reportAccountSummaryFailure: (error) =>
-      console.error(
-        JSON.stringify({ event: "account_native_retain_failed", error }),
-      ),
+      logger.error("account_native_retain_failed", { event: "account_native_retain_failed", error }),
   });
   const paidProjection = new OrderEditPaidProjection(pool, clock);
   const synchronize = new OrderEditOmsSynchronizer(
@@ -74,9 +68,7 @@ export function createOrderEditService(
     clock,
     randomUUID,
     (event) =>
-      console.error(
-        JSON.stringify({ event: "order_edit_requires_attention", ...event }),
-      ),
+      logger.error("order_edit_requires_attention", { event: "order_edit_requires_attention", ...event }),
     new OrderEditPreviewService(store, provider, warehouse, clock),
     provider.catalog,
     codeRedemptions,
@@ -88,12 +80,7 @@ export function createOrderEditService(
       clock,
       uuid: randomUUID,
       report: (event) =>
-        console.error(
-          JSON.stringify({
-            event: "customer_order_cancellation_pending",
-            ...event,
-          }),
-        ),
+        logger.error("customer_order_cancellation_pending", { event: "customer_order_cancellation_pending", ...event }),
     }),
   );
 }

@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PurchaseLineCostStatus } from "@shared/procurement/purchase-cost-status";
-import { createSupplierCreditCostReadCache } from "../../supplier-credit-cost-read-cache";
+import { createSupplierCreditCostReadCache } from "../../application/supplier-credit-cost-read-cache";
 
 const readers = vi.hoisted(() => ({ purchase: vi.fn(), shipment: vi.fn() }));
-vi.mock("../../purchase-cost-status.repository", () => ({ readPurchaseCostStatus: readers.purchase }));
-vi.mock("../../po-shipment-cost-summary.repository", () => ({ readPoShipmentCosts: readers.shipment }));
+vi.mock("../../infrastructure/purchase-cost-status.repository", () => ({ readPurchaseCostStatus: readers.purchase }));
+vi.mock("../../infrastructure/po-shipment-cost-summary.repository", () => ({ readPoShipmentCosts: readers.shipment }));
 
 function line(id: number): PurchaseLineCostStatus {
   return { purchaseOrderId: 10, purchaseOrderLineId: id, sku: `SKU-${id}`, invoices: [], receipts: [], lots: [],

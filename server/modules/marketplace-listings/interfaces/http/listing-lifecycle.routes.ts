@@ -6,7 +6,7 @@ import type { ListingLifecycleService } from "../../application/listing-lifecycl
 import { ListingPublicationError } from "../../domain/listing-publication";
 import { sendError } from "./listing-publication.routes";
 
-import { requireDropshipAuth } from "../../../dropship/interfaces/http/dropship-auth.routes";
+import { requireDropshipAuth } from "../../../dropship/dropship-auth.routes.api";
 import { listingIntentPropagationRepository } from "../../../../listing-intent-propagation.composition";
 
 const lookupSchema = z

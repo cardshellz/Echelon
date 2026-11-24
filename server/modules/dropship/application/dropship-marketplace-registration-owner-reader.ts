@@ -1,7 +1,7 @@
-import type { MarketplaceListingRegistrationOwnerReader } from "../../marketplace-listings/application/registration-ports";
-import type { ListingRegistrationOwnerSnapshot } from "../../marketplace-listings/domain/listing-registration-plan";
-import { MarketplaceListingRegistrationError } from "../../marketplace-listings/domain/registration-errors";
-import type { ListingOwnerRef } from "../../marketplace-listings/domain/listing-replacement-plan";
+import type { MarketplaceListingRegistrationOwnerReader } from "../../marketplace-listings/registration-ports.api";
+import type { ListingRegistrationOwnerSnapshot } from "../../marketplace-listings/listing-registration-plan.api";
+import { MarketplaceListingRegistrationError } from "../../marketplace-listings/registration-errors.api";
+import type { ListingOwnerRef } from "../../marketplace-listings/listing-replacement-plan.api";
 import type { DropshipSupportedStorePlatform } from "../domain/store-connection";
 
 export interface DropshipRegistrationStoreConnectionRecord {

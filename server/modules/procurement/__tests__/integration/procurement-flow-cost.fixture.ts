@@ -144,12 +144,12 @@ export async function createFlowCostHarness(url: string) {
     const [receivingModule, purchasingModule, shipmentModule, procurementModule, catalogModule,
       inventoryModule, inventoryRepository, lotModule, cogsModule, ap, databaseModule,
       financialRepository, costCommandsModule, lineCommandsModule, warehouseRepository] = await Promise.all([
-      import("../../receiving.service"), import("../../purchasing.service"), import("../../shipment-tracking.service"),
-      import("../../procurement.storage"), import("../../../catalog/catalog.storage"),
+      import("../../application/receiving.service"), import("../../application/purchasing.service"), import("../../application/shipment-tracking.service"),
+      import("../../infrastructure/procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
       import("../../../inventory/application/inventory.use-cases"), import("../../../inventory/infrastructure/inventory.repository"),
-      import("../../../inventory/lots.service"), import("../../../inventory/cogs.service"), import("../../ap-ledger.service"),
+      import("../../../inventory/application/lots.service"), import("../../../inventory/application/cogs.service"), import("../../application/ap-ledger.service"),
       import("../../../../db"), import("../../../../platform/commands/command-results.repository"),
-      import("../../shipment-cost-commands"), import("../../shipment-line-commands"),
+      import("../../application/shipment-cost-commands"), import("../../application/shipment-line-commands"),
       import("../../../warehouse/infrastructure/warehouse.repository"),
     ]);
     const modulePool = databaseModule.pool;

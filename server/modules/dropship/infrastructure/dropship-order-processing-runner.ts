@@ -13,6 +13,7 @@ import type { DropshipOrderCancellationService } from "../application/dropship-o
 import type { DropshipOrderProcessingResult } from "../application/dropship-order-processing-service";
 import type { DropshipMarketplaceOrderCancelService } from "../application/dropship-marketplace-order-cancel-service";
 import { createDropshipMarketplaceOrderCancelServiceFromEnv } from "./dropship-marketplace-order-cancel.factory";
+import { logger } from "../../../platform/observability/logger";
 
 export interface DropshipOrderProcessingQueueRepository {
   recoverStaleProcessingIntakes(input: {
@@ -264,14 +265,10 @@ export async function runDropshipOrderProcessingSweep(input: {
       }
     } catch (error) {
       failed += 1;
-      console.error(JSON.stringify({
-        code: "DROPSHIP_ORDER_PROCESSING_SWEEP_INTAKE_FAILED",
-        message: "Dropship order processing sweep failed to process an intake.",
-        context: {
+      logger.error("DROPSHIP_ORDER_PROCESSING_SWEEP_INTAKE_FAILED", { code: "DROPSHIP_ORDER_PROCESSING_SWEEP_INTAKE_FAILED", message: "Dropship order processing sweep failed to process an intake.", context: {
           intakeId,
           error: error instanceof Error ? error.message : String(error),
-        },
-      }));
+        } });
     }
   }
 
@@ -319,19 +316,11 @@ export function startDropshipOrderProcessingWorker(): void {
           || result.marketplaceCancelRetrying > 0
           || result.staleProcessingRecovered > 0
         ) {
-          console.info(JSON.stringify({
-            code: "DROPSHIP_ORDER_PROCESSING_SWEEP_COMPLETED",
-            message: "Dropship order processing sweep completed.",
-            context: result,
-          }));
+          logger.info("DROPSHIP_ORDER_PROCESSING_SWEEP_COMPLETED", { code: "DROPSHIP_ORDER_PROCESSING_SWEEP_COMPLETED", message: "Dropship order processing sweep completed.", context: result });
         }
       });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "DROPSHIP_ORDER_PROCESSING_SWEEP_FAILED",
-        message: "Dropship order processing sweep failed.",
-        context: buildSchedulerFailureContext(error),
-      }));
+      logger.error("DROPSHIP_ORDER_PROCESSING_SWEEP_FAILED", { code: "DROPSHIP_ORDER_PROCESSING_SWEEP_FAILED", message: "Dropship order processing sweep failed.", context: buildSchedulerFailureContext(error) });
     }
   };
 
@@ -340,11 +329,7 @@ export function startDropshipOrderProcessingWorker(): void {
     intervalMs,
     run: runLockedSweep,
   });
-  console.info(JSON.stringify({
-    code: "DROPSHIP_ORDER_PROCESSING_WORKER_STARTED",
-    message: "Dropship order processing worker started.",
-    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
-  }));
+  logger.info("DROPSHIP_ORDER_PROCESSING_WORKER_STARTED", { code: "DROPSHIP_ORDER_PROCESSING_WORKER_STARTED", message: "Dropship order processing worker started.", context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" } });
 }
 
 function defaultWorkerId(): string {

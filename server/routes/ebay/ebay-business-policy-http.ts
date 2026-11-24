@@ -1,7 +1,8 @@
 import type { Request, Response } from "express";
 import { ZodError } from "zod";
 import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
-import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work.api";
+import { logger } from "../../platform/observability/logger";
 
 export function ebayPolicyActor(req: Request): string {
   const request = req as Request & {
@@ -53,7 +54,7 @@ export function sendEbayPolicyError(res: Response, error: unknown): void {
     res.status(409).json({ ...busy, error: busy.message });
     return;
   }
-  console.error("[eBay business policies]", error);
+  logger.error("routes.ebay_business_policy_http", { message: "[eBay business policies]", error: error });
   res
     .status(500)
     .json({

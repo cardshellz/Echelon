@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildChannelLineDisplayName,
   chooseBestLineDisplayName,
-} from "../../line-display-name";
+} from "../../application/line-display-name";
 
 describe("line display names", () => {
   it("prefers the channel-provided name because it is the buyer-facing line string", () => {

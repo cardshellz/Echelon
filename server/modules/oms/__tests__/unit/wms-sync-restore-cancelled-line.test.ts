@@ -30,17 +30,17 @@ const h = vi.hoisted(() => {
 
 vi.mock("../../../../db", () => ({ db: h.db }));
 
-vi.mock("../../../wms/order-item-commands", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../wms/order-item-commands")>()),
+vi.mock("../../../wms/application/order-item-commands", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../wms/application/order-item-commands")>()),
   reconcileWmsOrderItemAuthority: vi.fn(async () => ({ status: "pending" })),
 }));
 
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import { wmsOrders, wmsOrderItems } from "@shared/schema";
 import { logger } from "../../../../platform/observability/logger";
-import { reconcileWmsOrderItemAuthority } from "../../../wms/order-item-commands";
-import { deriveOmsLineAuthority } from "../../oms-line-authority";
-import { WmsSyncService } from "../../wms-sync.service";
+import { reconcileWmsOrderItemAuthority } from "../../../wms/application/order-item-commands";
+import { deriveOmsLineAuthority } from "../../application/oms-line-authority";
+import { WmsSyncService } from "../../application/wms-sync.service";
 
 interface CancelledItem {
   id: number;

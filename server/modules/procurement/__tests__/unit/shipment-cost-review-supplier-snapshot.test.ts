@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PurchaseCostStatus } from "@shared/procurement/purchase-cost-status";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import { createPurchaseCostStatusSnapshotReader } from "../../purchase-cost-status-snapshot.repository";
-import { readShipmentCostReviewInTransaction } from "../../shipment-cost-review.repository";
-import { readShipmentCostPostingEvidence } from "../../shipment-cost-posting-read.repository";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import { createPurchaseCostStatusSnapshotReader } from "../../infrastructure/purchase-cost-status-snapshot.repository";
+import { readShipmentCostReviewInTransaction } from "../../infrastructure/shipment-cost-review.repository";
+import { readShipmentCostPostingEvidence } from "../../infrastructure/shipment-cost-posting-read.repository";
 
-vi.mock("../../purchase-cost-status.repository", async importOriginal => ({
-  ...await importOriginal<typeof import("../../purchase-cost-status.repository")>(),
+vi.mock("../../infrastructure/purchase-cost-status.repository", async importOriginal => ({
+  ...await importOriginal<typeof import("../../infrastructure/purchase-cost-status.repository")>(),
   readPurchaseCostStatus: vi.fn(),
 }));
-vi.mock("../../shipment-cost-posting-read.repository", () => ({ readShipmentCostPostingEvidence: vi.fn() }));
+vi.mock("../../infrastructure/shipment-cost-posting-read.repository", () => ({ readShipmentCostPostingEvidence: vi.fn() }));
 
 function supplier(): PurchaseCostStatus {
   return { lines: [{ purchaseOrderId: 10, purchaseOrderLineId: 101, sku: "SUPPLIER",

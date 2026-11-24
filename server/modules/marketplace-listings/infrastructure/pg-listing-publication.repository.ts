@@ -1,4 +1,4 @@
-import { pinCatalogPublicationMediaVersions } from "../../catalog/catalog-publication-media-versions";
+import { pinCatalogPublicationMediaVersions } from "../../catalog/catalog-publication-media-versions.api";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import {
   listingDraftSchema,

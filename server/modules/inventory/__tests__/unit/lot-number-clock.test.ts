@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
-import { InventoryLotService } from "../../lots.service";
-import { COGSService } from "../../cogs.service";
+import { InventoryLotService } from "../../application/lots.service";
+import { COGSService } from "../../application/cogs.service";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 

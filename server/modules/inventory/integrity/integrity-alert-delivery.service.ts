@@ -5,6 +5,7 @@ import {
   markIntegrityAlertFailed,
   markIntegrityAlertSent,
 } from "./integrity-monitor.repository";
+import { logger } from "../../../platform/observability/logger";
 
 type QueryClient = Pick<PoolClient, "query">;
 
@@ -92,10 +93,8 @@ export async function deliverPendingIntegrityAlerts(input: {
       });
       summary.failed += 1;
       if (status === "dead") summary.dead += 1;
-      console.error(
-        `[WMS inventory integrity alert] delivery failed alertId=${alert.id} `
-          + `attempt=${alert.attemptCount}/${maxAttempts}: ${boundedIntegrityError(error)}`,
-      );
+      logger.error("inventory.integrity_alert_delivery_service", { error: `[WMS inventory integrity alert] delivery failed alertId=${alert.id} `
+          + `attempt=${alert.attemptCount}/${maxAttempts}: ${boundedIntegrityError(error)}` });
       break;
     }
   }

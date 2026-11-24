@@ -17,11 +17,11 @@ import {
   updateWarehouseLocation,
 } from "../../infrastructure/warehouse.repository";
 import { BinAssignmentService } from "../../application/bin-assignment.service";
-import { backfillOpenOrderItemBinAssignment } from "../../../orders/bin-location-backfill";
+import { backfillOpenOrderItemBinAssignment } from "../../../orders/application/bin-location-backfill";
 import {
   backfillUnassignedWmsOrderItemBin,
   setWmsOrderItemLocation,
-} from "../../../wms/order-item-commands";
+} from "../../../wms/application/order-item-commands";
 
 function sqlTextOf(query: any): string {
   const chunks: unknown[] = query?.queryChunks ?? [];

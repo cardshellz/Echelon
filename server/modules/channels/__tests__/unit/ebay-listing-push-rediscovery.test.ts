@@ -22,7 +22,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
 }));
 // This suite exercises provider identity rediscovery. Real inventory admission
 // and enrollment are covered in the disposable PostgreSQL composition suite.
-vi.mock("../../../inventory-planning/quantity-publication", async () => ({ ensureEbayPublicationReady: state.ensureStock,
+vi.mock("../../../inventory-planning/application/quantity-publication", async () => ({ ensureEbayPublicationReady: state.ensureStock,
   InventoryPublicationMembershipError: (await import("../../../inventory-planning/application/inventory-publication-membership.service")).InventoryPublicationMembershipError,
   InventoryPublicationSelectionError: (await import("../../../inventory-planning/infrastructure/inventory-publication-selection.reader")).InventoryPublicationSelectionError,
 }));
@@ -40,7 +40,7 @@ vi.mock("../../infrastructure/ebay-listing-client", () => ({ createEbayRouteList
   createEbayRouteListingLifecycleClient: () => state.client, getExistingEbayListingPhotos: vi.fn() }));
 // This identity-rediscovery suite consumes the policy owner's validated result.
 // Real catalog lookup, persistence and publication gating have PG composition coverage.
-vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: {
+vi.mock("../../application/ebay-business-policies", () => ({ ebayBusinessPolicies: {
   resolveProductPolicies: async (input: { variantIds: number[]; expectedScope: unknown }) => {
     const policies = { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" };
     return { scope: input.expectedScope, product: policies, byVariantId: new Map(input.variantIds.map(id => [id, { ...policies }])) };
@@ -52,7 +52,7 @@ vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
     priceCents: 1000, basePriceCents: 1000, source: "catalog_variant", provenance: { kind:"catalog_variant", variantId }, appliedRule:null,
   }),
 }));
-vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn() }));
+vi.mock("../../ebay-listing-sync.api", () => ({ readExistingEbayListingIdentityForProduct: vi.fn() }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () => {
   const { EbayMarketplaceRegistrationObserver } = await import("../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer");
   return { createEbayMarketplaceRegistrationAdapters: () => { const observer = new EbayMarketplaceRegistrationObserver(
@@ -61,11 +61,11 @@ vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () =>
   ); return { observer, inspector: observer }; } };
 });
 import { prepareEbayPublicationCompletion, readEbayPublicationSource } from "../../infrastructure/ebay-listing-push";
-import { EbayPublicationCompletionExecution } from "../../ebay-publication-completion.service";
+import { EbayPublicationCompletionExecution } from "../../application/ebay-publication-completion.service";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
-import type { EbayListingExecutionContext } from "../../ebay-listing-sync.service";
-import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
-import { EbayListingSyncError, syncFailure } from "../../ebay-listing-sync.domain";
+import type { EbayListingExecutionContext } from "../../application/ebay-listing-sync.service";
+import type { EbayListingSyncIdentity } from "../../domain/ebay-listing-sync.domain";
+import { EbayListingSyncError, syncFailure } from "../../domain/ebay-listing-sync.domain";
 import { InventoryPublicationMembershipError } from "../../../inventory-planning/application/inventory-publication-membership.service";
 import { InventoryPublicationSelectionError } from "../../../inventory-planning/infrastructure/inventory-publication-selection.reader";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";

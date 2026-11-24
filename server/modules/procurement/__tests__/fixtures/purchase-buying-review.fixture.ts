@@ -1,4 +1,4 @@
-import type { PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
+import type { PurchasingRecommendationRawRow } from "../../application/purchasing-recommendation.engine";
 
 export const PURCHASE_BUYING_AS_OF = "2026-09-10T12:00:00.000Z";
 

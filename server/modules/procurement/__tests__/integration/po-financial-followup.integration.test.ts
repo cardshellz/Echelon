@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { fetchAutoDraftPoAgingRows } from "../../auto-draft-po-aging.repository";
-import { buildStaleAutoDraftPoDiagnostics } from "../../auto-draft-po-aging.service";
+import { fetchAutoDraftPoAgingRows } from "../../infrastructure/auto-draft-po-aging.repository";
+import { buildStaleAutoDraftPoDiagnostics } from "../../application/auto-draft-po-aging.service";
 import {
   PoFinancialRefreshFixture,
   REFRESH_ACTOR,

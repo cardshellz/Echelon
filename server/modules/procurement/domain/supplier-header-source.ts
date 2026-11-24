@@ -1,7 +1,7 @@
 import type { SupplierHeaderSource, SupplierHeaderTarget } from "@shared/procurement/supplier-header-costs";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
 import { readIntegerMills } from "@shared/money-read";
-import { costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { costInteger, CostEvidenceError } from "../../inventory/cost-evidence-values.api";
 type Raw = Record<string, unknown>;
 
 export function buildPurchaseOrderHeaderSource(target: SupplierHeaderTarget, rows: Raw[], types: SupplierHeaderSource["types"]): SupplierHeaderSource {

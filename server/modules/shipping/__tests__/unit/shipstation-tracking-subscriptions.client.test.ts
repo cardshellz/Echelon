@@ -4,7 +4,7 @@ import {
   createShipStationTrackingSubscriptionsClient,
   isRetryableTrackingSubscriptionError,
   ShipStationTrackingSubscriptionError,
-} from "../../shipstation-tracking-subscriptions.client";
+} from "../../infrastructure/shipstation-tracking-subscriptions.client";
 
 describe("ShipStation tracking subscriptions client", () => {
   it("subscribes one carrier tuple using the documented API-Key contract", async () => {

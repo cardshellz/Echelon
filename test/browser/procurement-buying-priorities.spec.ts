@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { generatePurchasingRecommendations } from "../../server/modules/procurement/purchasing-recommendation.engine";
+import { generatePurchasingRecommendations } from "../../server/modules/procurement/application/purchasing-recommendation.engine";
 import { installFixtures } from "./procurement-fixtures";
 
 test("daily queue counts purchase needs, keeps supplier and arrival work, and explains no-buy rows", async ({ page }, testInfo) => {

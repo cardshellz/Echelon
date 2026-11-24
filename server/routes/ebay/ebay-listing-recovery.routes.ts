@@ -1,7 +1,7 @@
 import type { Router, Request, Response } from 'express';
 import { requireAuth, requirePermission } from '../middleware';
 import { hasPermission } from '../../modules/identity';
-import type { EbayListingRecoveryService } from '../../modules/channels/ebay-listing-sync';
+import type { EbayListingRecoveryService } from '../../modules/channels/ebay-listing-sync.api';
 import { listingFailure, listingFailureStatus } from './ebay-listing-errors';
 
 export function registerEbayListingRecoveryRoutes(router: Router,

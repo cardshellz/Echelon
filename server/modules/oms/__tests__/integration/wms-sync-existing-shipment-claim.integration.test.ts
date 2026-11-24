@@ -15,10 +15,10 @@ import { PostgresInventoryAvailabilityClaimRepository } from "../../../inventory
 import { PostgresInventoryAvailabilityRuntimeClaimExecutor } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../../inventory-planning/infrastructure/inventory-cutover-admission-fence.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "../../../inventory-planning/infrastructure/inventory-cutover-definitions.repository";
-import type { ReservationServiceContract } from "../../../channels/reservation.service";
+import type { ReservationServiceContract } from "../../../channels/application/reservation.service";
 import { OrderEditOmsSynchronizer } from "../../../order-edits/infrastructure/order-edit-oms-synchronizer";
 import { baseline } from "../../../order-edits/__tests__/fixtures/order-edit-service.fixture";
-import { WmsSyncService } from "../../wms-sync.service";
+import { WmsSyncService } from "../../application/wms-sync.service";
 import { settledRefundEditFixture } from "../../../order-edits/__tests__/fixtures/settled-refund-edit.fixture";
 
 const database = vi.hoisted(() => ({

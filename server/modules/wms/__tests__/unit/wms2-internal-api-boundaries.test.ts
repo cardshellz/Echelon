@@ -103,8 +103,8 @@ describe("WMS-2: Orders, WMS, and Cartonization internal API boundaries (CI-03) 
             }
             // Dedicated single-caller private participant enforced by shipment-context-boundary.test.ts
             if (
-              relImporter === "server/modules/shipping/outbound-shipment-access.query.ts" &&
-              resolved === "server/modules/orders/shipment-order-context.query"
+              relImporter === "server/modules/shipping/infrastructure/outbound-shipment-access.query.ts" &&
+              resolved === "server/modules/orders/infrastructure/shipment-order-context.query"
             ) {
               continue;
             }

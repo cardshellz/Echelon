@@ -13,6 +13,7 @@ import {
   LISTING_SETUP_WRITES_PER_MINUTE,
   registerDropshipEbayListingSetupRoutes,
 } from "../../interfaces/http/dropship-ebay-listing-setup.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 vi.mock("../../infrastructure/dropship-ebay-listing-setup.factory", () => ({
@@ -621,7 +622,7 @@ describe("dropship eBay listing setup routes", () => {
     });
 
     it("hides an unexpected failure behind a generic 500", async () => {
-      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const consoleError = spyLoggerJson("error");
       service.replaceError = new Error("connection string postgres://secret");
       server = await startServer(buildApp(service, true));
 

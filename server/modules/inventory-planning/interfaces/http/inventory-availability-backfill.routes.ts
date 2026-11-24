@@ -17,6 +17,7 @@ import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-ava
 import { PostgresInventoryAvailabilityBackfillRepository } from "../../infrastructure/inventory-availability-backfill.repository";
 import { PostgresInventoryAvailabilityChannelPreviewRepository } from "../../infrastructure/inventory-availability-channel-preview.repository";
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const positiveIdSchema = z.coerce.number().pipe(
   z.number().int().positive().max(2_147_483_647),
@@ -204,11 +205,7 @@ function sendBackfillError(res: Response, error: unknown, action: string): Respo
       },
     });
   }
-  console.error(JSON.stringify({
-    code: "INVENTORY_AVAILABILITY_BACKFILL_FAILED",
-    action,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  logger.error("INVENTORY_AVAILABILITY_BACKFILL_FAILED", { code: "INVENTORY_AVAILABILITY_BACKFILL_FAILED", error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({
     error: {
       code: "INVENTORY_AVAILABILITY_BACKFILL_FAILED",

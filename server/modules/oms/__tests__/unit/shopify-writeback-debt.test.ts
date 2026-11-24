@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateShopifyWritebackDebt,
   type ShopifyWritebackDebtShipment,
-} from "../../shopify-writeback-debt";
+} from "../../application/shopify-writeback-debt";
 
 function shipment(
   overrides: Partial<ShopifyWritebackDebtShipment> = {},

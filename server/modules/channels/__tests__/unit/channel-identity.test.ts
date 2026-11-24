@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { insertChannelFeedSchema } from "@shared/schema";
-import { indexInventoryIdentities } from "../../channel-identity.domain";
+import { indexInventoryIdentities } from "../../domain/channel-identity.domain";
 import { ShopifyIdentityReader, type ShopifyIdentityConnection } from "../../adapters/shopify-identity.reader";
 
 const connection: ShopifyIdentityConnection = {

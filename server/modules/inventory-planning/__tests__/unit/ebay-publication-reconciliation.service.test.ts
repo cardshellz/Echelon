@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EbayPublicationContentRefreshRejectedError, EbayPublicationReconciliationService,
   type EbayReconciliationClaim, type EbayReconciliationTarget } from "../../application/ebay-publication-reconciliation.service";
 import { QuantityPublicationAdmissionError } from "../../domain/quantity-publication-admission";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const NOW = new Date("2026-10-15T18:00:00Z");
 const TOKEN = "00000000-0000-4000-8000-000000000001";
@@ -40,7 +41,7 @@ describe("durable eBay stock and content reconciliation", () => {
   it("falls back to durable Sync when the effect evidence cannot be read", async () => {
     const f = fixture();
     f.store.readContentEffects.mockRejectedValue(new Error("synthetic database failure"));
-    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = spyLoggerJson("warn");
     try {
       expect(await f.service.processDue()).toEqual({ checked: 1, repaired: 0, blocked: 0 });
       expect(f.content).toHaveBeenCalledWith(expect.objectContaining({ forceSync: true, effects: [] }));
@@ -96,7 +97,7 @@ describe("durable eBay stock and content reconciliation", () => {
     f.store.claimDue.mockReset().mockResolvedValueOnce([claim]).mockResolvedValueOnce([{ ...claim, watchId: "2" }]).mockResolvedValue([]);
     f.store.plan.mockRejectedValueOnce(new Error("temporary failure"));
     f.store.fail.mockRejectedValueOnce(new Error("database unavailable"));
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = spyLoggerJson("error");
     try {
       expect(await f.service.processDue()).toEqual({ checked: 1, repaired: 0, blocked: 1 });
       expect(log).toHaveBeenCalledWith(expect.stringContaining('"watchId":"1"'));

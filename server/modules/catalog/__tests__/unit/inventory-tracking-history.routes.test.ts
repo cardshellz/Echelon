@@ -2,7 +2,7 @@ import http, { type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerInventoryTrackingHistoryRoutes } from "../../inventory-tracking-history.routes";
+import { registerInventoryTrackingHistoryRoutes } from "../../interfaces/http/inventory-tracking-history.routes";
 
 const mocks = vi.hoisted(() => ({ list: vi.fn(), export: vi.fn(), permitted: true }));
 vi.mock("../../../../db", () => ({ db: {} }));

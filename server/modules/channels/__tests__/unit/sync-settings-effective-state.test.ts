@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createSyncSettingsService } from "../../sync-settings.service";
+import { createSyncSettingsService } from "../../application/sync-settings.service";
 
 function settings(globalEnabled: boolean) {
   return {

@@ -37,8 +37,8 @@ import { readDropshipListingStockSelection } from "./dropship-stock-publication-
 import {
   readDropshipEbayStockDestination,
   type DropshipEbayStockDestination,
-} from "../../inventory-planning/quantity-publication";
-import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/domain/listing-registration-plan";
+} from "../../inventory-planning/quantity-publication.api";
+import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/listing-registration-plan.api";
 import {
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE,
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE,

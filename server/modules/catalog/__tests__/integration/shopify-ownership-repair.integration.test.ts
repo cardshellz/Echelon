@@ -8,10 +8,10 @@ import {
   buildShopifyOwnershipGroups,
   shopifyOwnershipRepairRequestHash,
   type ShopifyRemoteProductSnapshot,
-} from "../../shopify-product-mapping-reconciliation.domain";
+} from "../../domain/shopify-product-mapping-reconciliation.domain";
 import {
   createShopifyProductMappingReconciliationRepository,
-} from "../../shopify-product-mapping-reconciliation.repository";
+} from "../../infrastructure/shopify-product-mapping-reconciliation.repository";
 import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,

@@ -8,7 +8,7 @@ vi.mock("../../../../routes/middleware", () => ({
   requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) =>
     req.headers["x-permission"] === `${resource}:${action}` ? next() : res.status(403).json({ error: "Forbidden" }),
 }));
-import { registerShipmentCostReconciliationRoutes } from "../../shipment-cost-reconciliation.routes";
+import { registerShipmentCostReconciliationRoutes } from "../../interfaces/http/shipment-cost-reconciliation.routes";
 const input = {
   sourceVersion: "a".repeat(64),
   destination: "inventory_variance",

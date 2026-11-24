@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { PostgresChannelSyncBatchRepository } from "../../marketplace-listings/channel-sync-batch.api";
-import { saveChannelSyncSelection, assertSyncSelection } from "../../marketplace-listings/application/save-channel-sync-selection";
-import type { SyncDestination } from "../../marketplace-listings/domain/channel-sync-batch";
+import { saveChannelSyncSelection, assertSyncSelection } from "../../marketplace-listings/save-channel-sync-selection.api";
+import type { SyncDestination } from "../../marketplace-listings/domain-channel-sync-batch.api";
 import { EbaySyncSelectionReader } from "./ebay-sync-selection.reader";
 
 export interface InclusionSyncCommand { productId: number; commandKey: string; actor: string; now: Date }

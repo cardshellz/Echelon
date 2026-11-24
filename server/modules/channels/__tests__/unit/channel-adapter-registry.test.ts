@@ -20,7 +20,7 @@ import {
   type FulfillmentPushResult,
   type CancellationPayload,
   type CancellationPushResult,
-} from "../../channel-adapter.interface";
+} from "../../domain/channel-adapter.interface";
 
 // ---------------------------------------------------------------------------
 // Stub adapters for testing

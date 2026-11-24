@@ -1,15 +1,15 @@
 import { EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies";
 import { eq } from "drizzle-orm";
 import { EbayApiRequestError } from "../adapters/ebay/ebay-api-error";
-import { ChannelEbayListingPhotoResolver } from "../ebay-listing-photos.service";
-import { createCatalogPublicImageUrl } from "../../catalog/catalog-public-image";
+import { ChannelEbayListingPhotoResolver } from "../application/ebay-listing-photos.service";
+import { createCatalogPublicImageUrl } from "../../catalog/catalog-public-image.api";
 import https from "https";
 import {
   createProviderRequestDeadline,
   boundedProviderRetryAfterSeconds,
-} from "../provider-request-limits";
+} from "../application/provider-request-limits";
 import { executeEbayQuantityHttp } from "../adapters/ebay/ebay-quantity-http";
-import { ebayQuantityMutationIdentity } from "../quantity-publication-request";
+import { ebayQuantityMutationIdentity } from "../application/quantity-publication-request";
 import { db, pool } from "../../../db";
 import { createEbayChannelQuantityReader } from "../adapters/ebay/ebay-channel-quantity.reader";
 import { channelConnections } from "@shared/schema";
@@ -17,6 +17,7 @@ import {
   EbayAuthService,
   createEbayAuthConfig,
 } from "../adapters/ebay/ebay-auth.service";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -161,9 +162,7 @@ export function ebayApiRequest(
             15,
           );
           const waitMs = retryAfter * 1000;
-          console.log(
-            `[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${retryCount + 1}/3...`,
-          );
+          logger.info("channels.ebay_api_runtime", { message: `[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${retryCount + 1}/3...` });
           setTimeout(() => {
             ebayApiRequest(method, path, accessToken, body, retryCount + 1)
               .then(resolve)
@@ -251,9 +250,7 @@ export async function ebayApiRequestWithRateNotify(
                 res.headers["retry-after"],
                 15,
               );
-              console.log(
-                `[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${attempt + 1}/3...`,
-              );
+              logger.info("channels.ebay_api_runtime", { message: `[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${attempt + 1}/3...` });
               if (onRateLimit) onRateLimit(retryAfter);
               setTimeout(() => makeRequest(attempt + 1), retryAfter * 1000);
               return;

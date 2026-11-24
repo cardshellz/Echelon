@@ -5,7 +5,7 @@ import { AppError, IntegrityError } from "@shared/errors";
 import type { Order } from "@shared/schema";
 import { requireAuth, requirePermission } from "../../../../routes/middleware";
 import { broadcastOrdersUpdated } from "../../../../websocket";
-import { registerPickingAssignmentReleaseRoutes } from "../../picking-assignment-release.routes";
+import { registerPickingAssignmentReleaseRoutes } from "../../interfaces/http/picking-assignment-release.routes";
 
 vi.mock("../../../../routes/middleware", () => ({ requireAuth: vi.fn(), requirePermission: vi.fn(() => vi.fn()) }));
 vi.mock("../../../../websocket", () => ({ broadcastOrdersUpdated: vi.fn() }));
@@ -77,7 +77,7 @@ describe("picking assignment HTTP boundary", () => {
   });
   it("retires the old diagnostic writers and removes the storage-layer alternate release", () => {
     const diagnostics = readFileSync("server/routes/diagnostics.ts", "utf8");
-    const storage = readFileSync("server/modules/orders/orders.storage.ts", "utf8");
+    const storage = readFileSync("server/modules/orders/infrastructure/orders.storage.ts", "utf8");
     expect(diagnostics.includes('"PICKING_RELEASE_ENDPOINT_RETIRED"')).toBe(true);
     expect(diagnostics.includes('"DIAGNOSTIC_DUPLICATE_DELETE_RETIRED"')).toBe(true);
     expect(diagnostics.includes("DELETE FROM wms.orders")).toBe(false);
@@ -85,7 +85,7 @@ describe("picking assignment HTTP boundary", () => {
     expect(diagnostics.includes("SET\n          warehouse_status = 'ready'")).toBe(false);
     expect(storage.includes("async forceReleaseOrder(")).toBe(false);
     expect(storage.includes("async releaseOrder(")).toBe(false);
-    const pickingRoutes = readFileSync("server/modules/orders/picking.routes.ts", "utf8");
+    const pickingRoutes = readFileSync("server/modules/orders/interfaces/http/picking.routes.ts", "utf8");
     for (const path of ["hold", "release-hold"]) {
       expect(pickingRoutes.includes(`app.post("/api/orders/:id/${path}", requireAuth, requirePermission("orders", "hold")`)).toBe(true);
     }

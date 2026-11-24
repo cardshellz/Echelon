@@ -1,5 +1,5 @@
 import type { ChannelCatalogQuery } from "@shared/types/channel-catalog";
-import type { ChannelCatalogAccount, ChannelCatalogProvider } from "../../channel-catalog.service";
+import type { ChannelCatalogAccount, ChannelCatalogProvider } from "../../application/channel-catalog.service";
 import type { WalmartChannelService } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";
 

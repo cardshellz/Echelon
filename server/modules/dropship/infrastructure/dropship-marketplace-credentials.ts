@@ -16,7 +16,7 @@ import {
   makeDropshipStoreConnectionLogger,
 } from "../application/dropship-store-connection-service";
 import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
-import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/domain/listing-registration-plan";
+import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/listing-registration-plan.api";
 import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 /**

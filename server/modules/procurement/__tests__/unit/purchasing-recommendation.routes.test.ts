@@ -8,9 +8,9 @@ import { AddressInfo } from "net";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { defaultPurchasePlanningPolicy, type PurchasePlanningPolicy } from "@shared/procurement/purchase-planning-policy";
-import type { AutoDraftRecommendationSettings, PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
-import type { CreatePurchaseRecommendationRunInput } from "../../purchase-recommendation-snapshot.service";
-import { normalizePurchasingForecastPolicy } from "../../purchasing-forecast-policy";
+import type { AutoDraftRecommendationSettings, PurchasingRecommendationRawRow } from "../../application/purchasing-recommendation.engine";
+import type { CreatePurchaseRecommendationRunInput } from "../../application/purchase-recommendation-snapshot.service";
+import { normalizePurchasingForecastPolicy } from "../../application/purchasing-forecast-policy";
 import type { ServiceRegistry } from "../../../../services";
 import { logger } from "../../../../platform/observability/logger";
 import { forwardDemandBuyingRow, PURCHASE_BUYING_AS_OF } from "../fixtures/purchase-buying-review.fixture";
@@ -87,7 +87,7 @@ vi.mock("../../../../routes/middleware", async importOriginal => {
 vi.mock("../..", () => ({ procurementStorage: mocks.procurement }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.inventory }));
 vi.mock("../../../../db", () => ({ db: mocks.db }));
-vi.mock("../../purchase-planning-policy.runtime", () => ({ getPurchasePlanningPolicyService: () => ({ read: vi.fn(), history: vi.fn(), update: vi.fn(), describeProducts: vi.fn(), searchProducts: vi.fn() }) }));
+vi.mock("../../application/purchase-planning-policy.runtime", () => ({ getPurchasePlanningPolicyService: () => ({ read: vi.fn(), history: vi.fn(), update: vi.fn(), describeProducts: vi.fn(), searchProducts: vi.fn() }) }));
 vi.mock("../../../../storage/base", async () => ({
   ...await import("@shared/schema"),
   ...await import("drizzle-orm"),
@@ -101,7 +101,8 @@ vi.mock("../../../../jobs/auto-draft.job", () => ({
 import {
   registerPurchasingRecommendationAdminRoutes,
   registerPurchasingRecommendationRoutes,
-} from "../../purchasing-recommendation.routes";
+} from "../../interfaces/http/purchasing-recommendation.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 function buildApp(): Express {
   const app = express();
@@ -365,7 +366,7 @@ describe("purchasing recommendation routes", () => {
 
     // Exercise the actual dashboard calculation as well as both HTTP engine
     // paths. Only persistence reads are mocked; no expected counts are injected.
-    const { procurementMethods } = await import("../../procurement.storage");
+    const { procurementMethods } = await import("../../infrastructure/procurement.storage");
     const dashboardReader = {
       ...procurementMethods,
       getReorderAnalysisData: mocks.procurement.getReorderAnalysisData,
@@ -570,7 +571,7 @@ describe("purchasing recommendation routes", () => {
       planningPolicy: { ...defaultPurchasePlanningPolicy(), growthPercent: "50" },
       planningPolicyRevision: 7,
     });
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const errorLog = spyLoggerJson("error");
     try {
       server = await startServer(buildApp());
       const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");

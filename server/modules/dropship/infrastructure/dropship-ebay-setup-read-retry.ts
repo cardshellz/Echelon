@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DropshipError } from "../domain/errors";
 import type { DropshipLogger } from "../application/dropship-ports";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 // Each resource/page gets at most 15 seconds of provider IO plus two bounded
 // delays. Paginated discovery can read multiple pages. Writes never use this helper.
@@ -21,9 +22,9 @@ export const defaultEbaySetupReadRuntime: EbaySetupReadRuntime = {
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   reference: randomUUID,
   logger: {
-    info: (event) => console.info(JSON.stringify({ level: "info", ...event })),
-    warn: (event) => console.warn(JSON.stringify({ level: "warn", ...event })),
-    error: (event) => console.error(JSON.stringify({ level: "error", ...event })),
+    info: (event) => platformLogger.info("dropship.ebay_setup_read_retry", { ...event }),
+    warn: (event) => platformLogger.warn("dropship.ebay_setup_read_retry", { ...event }),
+    error: (event) => platformLogger.error("dropship.ebay_setup_read_retry", { ...event }),
   },
 };
 

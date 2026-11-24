@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractEbayShipByDate } from "../../ebay-shipby";
+import { extractEbayShipByDate } from "../../application/ebay-shipby";
 
 describe("extractEbayShipByDate", () => {
   it("extracts eBay line-item fulfillment ship-by dates", () => {

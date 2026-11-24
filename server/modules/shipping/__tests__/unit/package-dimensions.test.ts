@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { normalizeShipStationPackageDimensions } from "../../shipstation-package-dimensions.domain";
-import { retainShippingPackageDimensionsMetadata } from "../../package-dimensions.domain";
-import { normalizeShipStationLabelObservation } from "../../carrier-tracking.domain";
+import { normalizeShipStationPackageDimensions } from "../../domain/shipstation-package-dimensions.domain";
+import { retainShippingPackageDimensionsMetadata } from "../../domain/package-dimensions.domain";
+import { normalizeShipStationLabelObservation } from "../../domain/carrier-tracking.domain";
 
 const dimensions = { units: "inches", length: 10, width: 8, height: 4 };
 const now = new Date("2026-10-01T12:00:00.000Z");

@@ -4,8 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import type { InventoryAvailabilityRuntimeClaimContext } from "../../../inventory-planning/application/inventory-availability-runtime-claim.service";
-import { PickingUseCases } from "../../picking.use-cases";
-import { isPermanentOrderReservationDataError, reservationErrorCode } from "../../../oms/reservation-error-classification";
+import { PickingUseCases } from "../../application/picking.use-cases";
+import { isPermanentOrderReservationDataError, reservationErrorCode } from "../../../oms/application/reservation-error-classification";
 
 // 2026-10-02: an order with an unmapped graded card (SKU "UNKNOWN") had no
 // claim at all, so every line failed "The order has no active canonical

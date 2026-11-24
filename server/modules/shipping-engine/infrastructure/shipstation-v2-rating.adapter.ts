@@ -16,6 +16,7 @@
  */
 
 import { parseRoundedDecimalCents, sumCents } from "@shared/money-read";
+import { logger } from "../../../platform/observability/logger";
 
 export const SHIPSTATION_V2_BASE_URL = "https://api.shipstation.com/v2";
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -484,9 +485,7 @@ export function createShipStationV2RatingAdapter(
           await response.body?.cancel().catch(() => {});
           clearTimeout(timer);
           const waitSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
-          console.warn(
-            `[ShipStationV2] 429 on ${method} ${path}; waiting ${waitSeconds}s before the single retry`,
-          );
+          logger.warn("shipping-engine.shipstation_v2_rating_adapter", { message: `[ShipStationV2] 429 on ${method} ${path}; waiting ${waitSeconds}s before the single retry` });
           await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
           continue;
         }

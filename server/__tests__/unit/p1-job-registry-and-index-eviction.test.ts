@@ -223,7 +223,7 @@ describe("P1.5 & P1.7 — Canonical Job Registry & server/index.ts Reconciler Ev
       expect(serverIndexSrc).toContain("services.inventoryAlerts.warnNegativeInventoryBalances()");
 
       const syncControlRoutesSrc = readRepoFile(
-        "server/modules/channels/sync-control.routes.ts",
+        "server/modules/channels/interfaces/http/sync-control.routes.ts",
       );
       expect(syncControlRoutesSrc).toContain("getRegisteredJobsStatusSnapshot(");
       expect(syncControlRoutesSrc).toContain("registeredJobs,");

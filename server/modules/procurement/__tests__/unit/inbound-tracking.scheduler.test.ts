@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { InboundTrackingService } from "../../inbound-tracking.service";
+import type { InboundTrackingService } from "../../application/inbound-tracking.service";
 vi.mock("../../../../db",()=>({pool:{}}));
-import { inboundTrackingPollingEnabled, startInboundTrackingScheduler } from "../../inbound-tracking.runtime";
+import { inboundTrackingPollingEnabled, startInboundTrackingScheduler } from "../../application/inbound-tracking.runtime";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 afterEach(()=>vi.useRealTimers());
 describe("inbound tracking scheduler",()=>{
   it.each([
@@ -24,7 +25,7 @@ describe("inbound tracking scheduler",()=>{
   });
   it("logs a failed sweep safely and retries on the next interval",async()=>{
     vi.useFakeTimers(); const poll=vi.fn().mockRejectedValueOnce(new Error("sensitive-driver-details")).mockResolvedValue({claimed:0,failed:0});
-    const error=vi.spyOn(console,"error").mockImplementation(()=>{}); const scheduler=startInboundTrackingScheduler({poll} as unknown as InboundTrackingService);
+    const error=spyLoggerJson("error"); const scheduler=startInboundTrackingScheduler({poll} as unknown as InboundTrackingService);
     try{await vi.advanceTimersByTimeAsync(30_000);expect(error).toHaveBeenCalledWith(expect.stringContaining("TRACKING_SWEEP_FAILED"));expect(JSON.stringify(error.mock.calls)).not.toContain("sensitive-driver-details");await vi.advanceTimersByTimeAsync(30_000);expect(poll).toHaveBeenCalledTimes(2);}finally{scheduler.stop();error.mockRestore();}
   });
 });

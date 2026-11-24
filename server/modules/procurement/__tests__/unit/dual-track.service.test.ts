@@ -4,19 +4,19 @@ import { PgDialect } from "drizzle-orm/pg-core";
 const mockDetectQtyVariance = vi.hoisted(() => vi.fn());
 const mockRecomputePoFinancialAggregates = vi.hoisted(() => vi.fn());
 
-vi.mock("../../po-exceptions.service", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../po-exceptions.service")>();
+vi.mock("../../application/po-exceptions.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../application/po-exceptions.service")>();
   return {
     ...actual,
     detectQtyVariance: (...args: any[]) => mockDetectQtyVariance(...args),
   };
 });
 
-vi.mock("../../ap-ledger.service", () => ({
+vi.mock("../../application/ap-ledger.service", () => ({
   recomputePoFinancialAggregates: (...args: any[]) => mockRecomputePoFinancialAggregates(...args),
 }));
 
-import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+import { createPurchasingService, PurchasingError } from "../../application/purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dual-track PO lifecycle tests (migration 0565).

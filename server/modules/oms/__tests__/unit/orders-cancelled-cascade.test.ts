@@ -17,6 +17,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // `oms-webhooks.ts` transitively imports `server/db`; stub it so import
 // time doesn't try to construct a real Postgres client. Same pattern as
@@ -35,7 +36,7 @@ vi.mock("../../../../db", () => ({
 }));
 
 // Pull in the cascade helper after the db mock is registered.
-import { __test__ } from "../../oms-webhooks";
+import { __test__ } from "../../application/oms-webhooks";
 
 const { cascadeShopifyCancelToShipments, deriveOmsUpdateFinality } = __test__;
 
@@ -213,7 +214,7 @@ describe("cascadeShopifyCancelToShipments (C28)", () => {
     const recomputeOrderStatusFromShipments = vi
       .fn()
       .mockResolvedValueOnce({ warehouseStatus: "ready", changed: false });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errSpy = spyLoggerJson("error");
 
     const result = await cascadeShopifyCancelToShipments(
       mock.db,
@@ -242,7 +243,7 @@ describe("cascadeShopifyCancelToShipments (C28)", () => {
     const recomputeOrderStatusFromShipments = vi
       .fn()
       .mockRejectedValueOnce(new Error("rollup failed"));
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errSpy = spyLoggerJson("error");
 
     const result = await cascadeShopifyCancelToShipments(
       mock.db,
@@ -296,7 +297,7 @@ describe("cascadeShopifyCancelToShipments (C28)", () => {
     const recomputeOrderStatusFromShipments = vi
       .fn()
       .mockResolvedValueOnce({ warehouseStatus: "ready", changed: false });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errSpy = spyLoggerJson("error");
 
     await cascadeShopifyCancelToShipments(
       mock.db,

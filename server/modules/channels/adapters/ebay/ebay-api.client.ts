@@ -12,13 +12,13 @@
 import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "./ebay-api-error";
 import { readEbayNativePackage, type EbayNativePackageSnapshot } from "./ebay-native-package.reader";
 import { readEbayPublishedContent } from "./ebay-published-content.reader";
-import type { ChannelPublishedContent } from "../../../marketplace-listings/domain/channel-publication-content";
+import type { ChannelPublishedContent } from "../../../marketplace-listings/channel-publication-content.api";
 import { normalizeEbayObservedOffers } from "./ebay-offer-observation";
 import type { EbayAuthService } from "./ebay-auth.service";
-import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
+import { ChannelFulfillmentProviderError } from "../../domain/channel-fulfillment-provider.error";
 import { replaceEbayPackageTracking, type EbayTrackingReplacementBatch } from "./ebay-package-tracking-replacement";
-import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../quantity-publication-request";
-import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../provider-request-limits";
+import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
+import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../application/provider-request-limits";
 import { executeEbayQuantityHttp } from "./ebay-quantity-http";
 import { ebayInventoryOffersPath } from "./ebay-inventory-quantity";
 import type {
@@ -42,6 +42,7 @@ import {
   readSingleOmittedQuantityFulfillment,
   sameWholeOrderFulfillmentSnapshot,
 } from "./ebay-fulfillment-quantity-evidence";
+import { logger } from "../../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -466,10 +467,7 @@ export class EbayApiClient {
 
     // DRY_RUN: log but don't call
     if (this.isDryRun) {
-      console.log(
-        `[EbayApi] DRY_RUN: POST ${path}`,
-        JSON.stringify(fulfillment).substring(0, 500),
-      );
+      logger.info("channels.ebay_api_client", { message: `[EbayApi] DRY_RUN: POST ${path}`, detail: JSON.stringify(fulfillment).substring(0, 500) });
       return { fulfillmentId: "DRY_RUN_FULFILLMENT_ID" };
     }
 
@@ -482,10 +480,8 @@ export class EbayApiClient {
       fulfillment,
     );
     if (existing) {
-      console.log(
-        `[EbayApi] Shipping fulfillment already exists for order ${orderId} ` +
-          `and tracking ${fulfillment.trackingNumber}; skipping POST`,
-      );
+      logger.info("channels.ebay_api_client", { detail: `[EbayApi] Shipping fulfillment already exists for order ${orderId} ` +
+          `and tracking ${fulfillment.trackingNumber}; skipping POST` });
       return { fulfillmentId: existing.fulfillmentId,
         ...(existing.quantityEvidenceSource ? { quantityEvidenceSource: existing.quantityEvidenceSource } : {}) };
     }
@@ -646,9 +642,7 @@ export class EbayApiClient {
 
         if (response.status === 429 && attempt < MAX_RETRIES) {
           const retryAfter = parseInt(response.headers.get("Retry-After") || "5", 10);
-          console.warn(
-            `[EbayApi] Rate limited on POST ${path}, retrying in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})`,
-          );
+          logger.warn("channels.ebay_api_client", { message: `[EbayApi] Rate limited on POST ${path}, retrying in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})` });
           await this.delay(retryAfter * 1000);
           continue;
         }
@@ -676,10 +670,8 @@ export class EbayApiClient {
           err.code === "ENOTFOUND" ||
           err.message?.includes("fetch failed")
         ) {
-          console.warn(
-            `[EbayApi] Ambiguous network error on POST ${path}: ${err.message}; ` +
-              "deferring retry so the next attempt verifies existing fulfillments first",
-          );
+          logger.warn("channels.ebay_api_client", { detail: `[EbayApi] Ambiguous network error on POST ${path}: ${err.message}; ` +
+              "deferring retry so the next attempt verifies existing fulfillments first" });
         }
         throw err;
       }
@@ -879,9 +871,7 @@ export class EbayApiClient {
     );
     if (identityMatches.length === 1 && exactMatches.length === 1) {
       if (recoveredLines) {
-        console.info(JSON.stringify({ code: "EBAY_FULFILLMENT_QUANTITY_EVIDENCE_VERIFIED",
-          orderId, fulfillmentId: exactMatches[0].fulfillmentId,
-          quantityEvidenceSource: "provider_fulfilled_whole_order" }));
+        logger.info("EBAY_FULFILLMENT_QUANTITY_EVIDENCE_VERIFIED", { code: "EBAY_FULFILLMENT_QUANTITY_EVIDENCE_VERIFIED", orderId, fulfillmentId: exactMatches[0].fulfillmentId, quantityEvidenceSource: "provider_fulfilled_whole_order" });
       }
       return {
         fulfillmentId: exactMatches[0].fulfillmentId,
@@ -898,9 +888,7 @@ export class EbayApiClient {
     // which was thrown away with the error. Name the failing condition per
     // candidate, and include eBay's raw lineItems, so the next occurrence is
     // diagnosable from the log instead of by inference.
-    console.warn(
-      "[eBay] fulfillment idempotency conflict",
-      JSON.stringify({
+    logger.warn("channels.ebay_api_client", { message: "[eBay] fulfillment idempotency conflict", detail: JSON.stringify({
         orderId,
         expectedFulfillmentId: expectedFulfillmentId ?? null,
         expectedTracking,
@@ -923,8 +911,7 @@ export class EbayApiClient {
               : null,
           ].filter(Boolean),
         })),
-      }),
-    );
+      }) });
 
     throw new EbayFulfillmentIdempotencyConflictError(
       `eBay fulfillment identity for order ${orderId} conflicts with the expected physical package`,
@@ -992,10 +979,7 @@ export class EbayApiClient {
 
     // DRY_RUN: log but don't execute writes
     if (this.isDryRun && method !== "GET") {
-      console.log(
-        `[EbayApi] DRY_RUN: ${method} ${path}`,
-        body ? JSON.stringify(body).substring(0, 500) : "",
-      );
+      logger.info("channels.ebay_api_client", { message: `[EbayApi] DRY_RUN: ${method} ${path}`, detail: body ? JSON.stringify(body).substring(0, 500) : "" });
       // Return plausible mock response
       if (expectNoContent) return undefined as T;
       return { offerId: "DRY_RUN_OFFER_ID", listingId: "DRY_RUN_LISTING_ID" } as T;
@@ -1034,10 +1018,8 @@ export class EbayApiClient {
         // Rate limit handling
         if (response.status === 429) {
           const retryAfter = boundedProviderRetryAfterSeconds(response.headers.get("Retry-After"), 5);
-          console.warn(
-            `[EbayApi] Rate limited on ${method} ${path}, ` +
-            `retrying in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})`,
-          );
+          logger.warn("channels.ebay_api_client", { detail: `[EbayApi] Rate limited on ${method} ${path}, ` +
+            `retrying in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})` });
           await this.delay(retryAfter * 1000);
           continue;
         }
@@ -1075,10 +1057,8 @@ export class EbayApiClient {
           const errorBody = await response.text();
           if (attempt < MAX_RETRIES) {
             const delay = this.getRetryDelay(attempt);
-            console.warn(
-              `[EbayApi] Server error ${response.status} on ${method} ${path}, ` +
-              `retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
-            );
+            logger.warn("channels.ebay_api_client", { detail: `[EbayApi] Server error ${response.status} on ${method} ${path}, ` +
+              `retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})` });
             await this.delay(delay);
             continue;
           }
@@ -1097,10 +1077,8 @@ export class EbayApiClient {
             err.message?.includes("fetch failed"))
         ) {
           const delay = this.getRetryDelay(attempt);
-          console.warn(
-            `[EbayApi] Network error on ${method} ${path}: ${err.message}, ` +
-            `retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
-          );
+          logger.warn("channels.ebay_api_client", { detail: `[EbayApi] Network error on ${method} ${path}: ${err.message}, ` +
+            `retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})` });
           await this.delay(delay);
           continue;
         }

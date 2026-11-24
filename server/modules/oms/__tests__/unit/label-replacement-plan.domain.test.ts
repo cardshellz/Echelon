@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planLabelReplacement, type LabelReplacementPlanInput } from "../../label-replacement-plan.domain";
+import { planLabelReplacement, type LabelReplacementPlanInput } from "../../domain/label-replacement-plan.domain";
 
 const prior = (id: number, quantity: number, order = String(id), source = 1) => ({ physicalItemId: id,
   physicalShipmentId: id, sourceItemId: source, quantity, providerOrderId: order,

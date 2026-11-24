@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { readShipmentCostRevisionEvidence, shipmentCostReadBatches } from "../../shipment-cost-revision-read.repository";
-import { readShipmentSupplierCreditCostRows } from "../../supplier-credit-source.repository";
+import { readShipmentCostRevisionEvidence, shipmentCostReadBatches } from "../../infrastructure/shipment-cost-revision-read.repository";
+import { readShipmentSupplierCreditCostRows } from "../../infrastructure/supplier-credit-source.repository";
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
 
 function fixture() {

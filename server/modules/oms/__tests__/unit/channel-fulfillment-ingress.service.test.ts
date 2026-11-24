@@ -5,15 +5,15 @@ import { resolve } from "node:path";
 import type {
   ChannelFulfillmentIngressRepository,
   PreparedChannelFulfillmentReceipt,
-} from "../../channel-fulfillment-ingress.repository";
+} from "../../infrastructure/channel-fulfillment-ingress.repository";
 import {
   ChannelFulfillmentIngressError,
   normalizeChannelFulfillmentIngress,
   type ChannelFulfillmentIngressInput,
-} from "../../channel-fulfillment-ingress";
+} from "../../application/channel-fulfillment-ingress";
 import {
   createChannelFulfillmentIngressService,
-} from "../../channel-fulfillment-ingress.service";
+} from "../../application/channel-fulfillment-ingress.service";
 
 const NOW = new Date("2026-07-22T15:00:00.000Z");
 
@@ -191,7 +191,7 @@ function dependencies(repository: ChannelFulfillmentIngressRepository) {
 describe("channel fulfillment ingress", () => {
   it("resolves WMS lineage through the exact OMS-line foreign key", () => {
     const repositorySource = readFileSync(
-      resolve(__dirname, "../../channel-fulfillment-ingress.repository.ts"),
+      resolve(__dirname, "../../infrastructure/channel-fulfillment-ingress.repository.ts"),
       "utf8",
     );
 

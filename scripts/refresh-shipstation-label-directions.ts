@@ -100,10 +100,10 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
     unmappedModule,
   ] = await Promise.all([
     import("../server/db"),
-    import("../server/modules/oms/shipstation.service"),
+    import("../server/modules/oms/application/shipstation.service"),
     import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
     import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
-    import("../server/modules/oms/shipstation-unmapped-physical"),
+    import("../server/modules/oms/application/shipstation-unmapped-physical"),
   ]);
 
   const { db, pool } = databaseModule;

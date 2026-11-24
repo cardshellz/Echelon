@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { generatePurchasingRecommendations, type PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
+import { generatePurchasingRecommendations, type PurchasingRecommendationRawRow } from "../../application/purchasing-recommendation.engine";
 import { defaultPurchasePlanningPolicy } from "@shared/procurement/purchase-planning-policy";
 import { purchaseBuyingDisposition } from "@shared/procurement/purchase-buying-review";
 import { forwardDemandBuyingRow, PURCHASE_BUYING_AS_OF } from "../fixtures/purchase-buying-review.fixture";

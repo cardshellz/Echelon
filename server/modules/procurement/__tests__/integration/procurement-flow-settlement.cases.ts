@@ -7,7 +7,7 @@ import { supplierReturnCommandResultSchema } from "@shared/procurement/supplier-
 import { supplierReturnCreditReviewCommandResultSchema } from "@shared/procurement/supplier-return-credit";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor, FinancialCommandResult } from "../../../../platform/commands/transactional-command.service";
-import type { RecordApPaymentInput } from "../../ap-ledger.service";
+import type { RecordApPaymentInput } from "../../application/ap-ledger.service";
 import { FLOW_ACTOR, FLOW_AT, FLOW_IDS, type FlowCostHarness } from "./procurement-flow-cost.fixture";
 import { installFlowLifecycleWrites } from "./procurement-lifecycle-write.fixture";
 
@@ -37,11 +37,11 @@ export async function verifyFlowSettlementAndReturn(harness: FlowCostHarness, sc
   // to its exclusively leased local pool. Never initialize an external DB here.
   const [commandModule, paymentModule, creditModule, creditRepository, returnModule,
     returnCommandsModule, reviewModule, reviewRepository, financialModule, receiptModule, creditService] = await Promise.all([
-    import("../../../../platform/commands/command-results.repository"), import("../../ap-payment-commands"),
-    import("../../supplier-credit.commands"), import("../../supplier-credit.repository"),
-    import("../../supplier-return.service"), import("../../supplier-return.commands"),
-    import("../../supplier-return-difference.commands"), import("../../supplier-return-credit-review.service"),
-    import("../../po-financial-evidence.service"), import("../../receipt-invoice-costs.service"), import("../../supplier-credit.service"),
+    import("../../../../platform/commands/command-results.repository"), import("../../application/ap-payment-commands"),
+    import("../../application/supplier-credit.commands"), import("../../infrastructure/supplier-credit.repository"),
+    import("../../application/supplier-return.service"), import("../../application/supplier-return.commands"),
+    import("../../application/supplier-return-difference.commands"), import("../../application/supplier-return-credit-review.service"),
+    import("../../application/po-financial-evidence.service"), import("../../application/receipt-invoice-costs.service"), import("../../application/supplier-credit.service"),
   ]);
   const repository = commandModule.createDrizzleFinancialCommandRepository(harness.database);
   const payments = paymentModule.createApPaymentCommands(repository, () => FLOW_AT);
@@ -280,7 +280,7 @@ export async function verifyFlowSettlementAndReturn(harness: FlowCostHarness, sc
         unappliedAmountCents: 0, issue: null });
       expect(await harness.ap.getPaymentById(payment.id)).toMatchObject({ id: payment.id, paymentBalance: payment.paymentBalance });
     }
-    const { createSupplierCreditReader } = await import("../../supplier-credit.service");
+    const { createSupplierCreditReader } = await import("../../application/supplier-credit.service");
     const creditPage = await createSupplierCreditReader(() => FLOW_AT).list({ invoiceId: source.invoice_id }, FLOW_ACTOR);
     expect(creditPage).toMatchObject({ total: 2, nextOffset: null });
     expect(creditPage.items.find(item => item.id === approved.id)).toMatchObject({ status: "voided", appliedAmountCents: 0,

@@ -1,0 +1,620 @@
+import type { EbayLabelReplacementResult, LabelReplacementOperation } from "../infrastructure/ebay-label-replacement.repository";
+import type { ShopifyLabelLifecycleService } from "./shopify-label-lifecycle.service";
+import { randomUUID } from "node:crypto";
+
+import { z } from "zod";
+import { ChannelFulfillmentProviderError } from "../../channels/channel-fulfillment-provider.error.api";
+import {
+  ChannelFulfillmentNotificationPolicyError,
+  ChannelFulfillmentRepairNotificationError,
+  CHANNEL_FULFILLMENT_REPAIR_SOURCES,
+  resolveReviewedChannelFulfillmentNotifyCustomer,
+} from "../domain/channel-fulfillment-notification.policy";
+
+import { EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT } from "../../channels/ebay-connector.api";
+import { DROPSHIP_WRITEBACK_PROVIDER } from "../domain/channel-fulfillment-authority.policy";
+import { isEbayTrackingConflictError } from "./channel-fulfillment-conflict";
+import {
+  FulfillmentAuthorityError,
+  type ChannelFulfillmentAuthorityRepository,
+  type ClaimedChannelFulfillmentCommand,
+  type ActivatePackageAllocationCommercialFulfillmentResult,
+  type MaterializePackageAllocationCommercialFulfillmentInput,
+  type MaterializePackageAllocationCommercialFulfillmentResult,
+  type MaterializePhysicalPackageInput,
+  type MaterializePhysicalPackageResult,
+} from "../infrastructure/channel-fulfillment-authority.repository";
+import {
+  ChannelFulfillmentProviderInputError,
+  SHOPIFY_PUSH_INVALID_INPUT,
+  SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT,
+  type ChannelFulfillmentProviderCommandInput,
+} from "./fulfillment-push.service";
+import type {
+  ChannelFulfillmentProjector,
+} from "../infrastructure/channel-fulfillment-projection.repository";
+import { logger as platformLogger } from "../../../platform/observability/logger";
+
+const DEFAULT_BATCH_SIZE = 25;
+const DEFAULT_LEASE_DURATION_MS = 120_000;
+const BASE_RETRY_DELAY_MS = 60_000;
+const MAX_RETRY_DELAY_MS = 6 * 60 * 60 * 1_000;
+
+const legacyShipmentIdsSchema = z.array(z.number().int().positive()).min(1);
+
+export interface ChannelFulfillmentAuthorityClock {
+  now(): Date;
+}
+
+export interface ChannelFulfillmentAuthorityLogger {
+  info(event: Readonly<Record<string, unknown>>): void;
+  warn(event: Readonly<Record<string, unknown>>): void;
+  error(event: Readonly<Record<string, unknown>>): void;
+}
+
+export interface ChannelFulfillmentProviderExecutionResult {
+  readonly outcome: "success" | "ignored";
+  readonly providerResponseId: string | null;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface ChannelFulfillmentProviderExecutor {
+  execute(
+    command: ClaimedChannelFulfillmentCommand,
+  ): Promise<ChannelFulfillmentProviderExecutionResult>;
+}
+
+export interface ChannelFulfillmentBatchResult {
+  readonly claimed: number;
+  readonly succeeded: number;
+  readonly ignored: number;
+  readonly retryScheduled: number;
+  readonly reviewRequired: number;
+  readonly deadLettered: number;
+}
+
+export interface MaterializeAndDispatchResult {
+  readonly materialized: MaterializePhysicalPackageResult;
+  readonly dispatch: ChannelFulfillmentBatchResult;
+}
+
+export interface MaterializeAndActivatePackageAllocationCommercialFulfillmentInput
+  extends MaterializePackageAllocationCommercialFulfillmentInput {
+  readonly activatedBy: string;
+  readonly activationReason: string;
+}
+
+export interface MaterializeAndActivatePackageAllocationCommercialFulfillmentResult {
+  readonly materialized: MaterializePackageAllocationCommercialFulfillmentResult;
+  readonly activation: ActivatePackageAllocationCommercialFulfillmentResult;
+}
+
+export interface ChannelFulfillmentAuthorityService {
+  runLabelLifecycleBatch?(): Promise<void>;
+  reconcileEbayLabelReplacement?(labelId: number): Promise<EbayLabelReplacementResult | null>;
+  recordPhysicalPackage(
+    input: MaterializePhysicalPackageInput,
+    options?: { executeImmediately?: boolean },
+  ): Promise<MaterializeAndDispatchResult>;
+  ensureLegacyShipment(
+    legacyWmsShipmentId: number,
+    options?: {
+      executeImmediately?: boolean;
+      source?: string;
+      suppressChannelWriteback?: boolean;
+      suppressChannelProviders?: readonly string[];
+    },
+  ): Promise<MaterializeAndDispatchResult>;
+  materializeAndActivatePackageAllocationCommercialFulfillment(
+    input: MaterializeAndActivatePackageAllocationCommercialFulfillmentInput,
+  ): Promise<MaterializeAndActivatePackageAllocationCommercialFulfillmentResult>;
+  projectPhysicalPackage(physicalShipmentId: number): Promise<void>;
+  runDueBatch(options?: {
+    commandIds?: readonly number[];
+    limit?: number;
+  }): Promise<ChannelFulfillmentBatchResult>;
+}
+
+class UnsupportedChannelProviderError extends Error {
+  readonly code = "UNSUPPORTED_CHANNEL_PROVIDER";
+
+  constructor(provider: string) {
+    super(`No channel fulfillment provider executor is registered for ${provider}`);
+    this.name = "UnsupportedChannelProviderError";
+  }
+}
+
+function defaultLogger(): ChannelFulfillmentAuthorityLogger {
+  return {
+    info: (event) => platformLogger.info("oms.channel_fulfillment_authority_service", { detail: JSON.stringify(event) }),
+    warn: (event) => platformLogger.warn("oms.channel_fulfillment_authority_service", { detail: JSON.stringify(event) }),
+    error: (event) => platformLogger.error("oms.channel_fulfillment_authority_service", { error: JSON.stringify(event) }),
+  };
+}
+
+function errorCode(error: unknown): string {
+  if (error instanceof UnsupportedChannelProviderError) return error.code;
+  if (error instanceof FulfillmentAuthorityError) return error.code;
+  if (typeof (error as any)?.context?.code === "string") {
+    return String((error as any).context.code);
+  }
+  if (typeof (error as any)?.code === "string") return String((error as any).code);
+  return "CHANNEL_FULFILLMENT_PROVIDER_ERROR";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isReviewRequired(error: unknown): boolean {
+  return (error instanceof ChannelFulfillmentProviderError && error.failureClass === "permanent")
+    || error instanceof UnsupportedChannelProviderError
+    || error instanceof FulfillmentAuthorityError
+    || error instanceof ChannelFulfillmentNotificationPolicyError
+    || error instanceof ChannelFulfillmentRepairNotificationError
+    || error instanceof ChannelFulfillmentProviderInputError
+    || errorCode(error) === SHOPIFY_PUSH_INVALID_INPUT
+    || errorCode(error) === SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT
+    || errorCode(error) === EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT;
+}
+
+/** After this attempt the worker gives up: a retryable failure is dead-lettered. */
+export function isFinalChannelFulfillmentAttempt(
+  command: Pick<ClaimedChannelFulfillmentCommand, "attemptNumber" | "maxAttempts">,
+): boolean {
+  return command.attemptNumber >= command.maxAttempts;
+}
+
+export function calculateChannelFulfillmentRetryAt(
+  completedAt: Date,
+  attemptNumber: number,
+): Date {
+  const exponent = Math.max(0, Math.min(20, attemptNumber - 1));
+  const delayMs = Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * (2 ** exponent));
+  return new Date(completedAt.getTime() + delayMs);
+}
+
+function legacyShipmentIdsFromCommand(
+  command: ClaimedChannelFulfillmentCommand,
+): readonly number[] {
+  const parsed = legacyShipmentIdsSchema.safeParse(command.metadata.legacyWmsShipmentIds);
+  if (!parsed.success) {
+    throw new FulfillmentAuthorityError(
+      "INVALID_INPUT",
+      `Channel command ${command.id} has no exact legacy WMS shipment lineage`,
+      { commandId: command.id, issues: parsed.error.issues },
+    );
+  }
+  return Object.freeze([...new Set(parsed.data)].sort((left, right) => left - right));
+}
+
+export function providerCommandInput(
+  command: ClaimedChannelFulfillmentCommand,
+): ChannelFulfillmentProviderCommandInput {
+  const savedShipmentIds = legacyShipmentIdsFromCommand(command);
+  // Allocation grants identify immutable source items, not their mutable WMS
+  // parent headers. A split may move those same items after this command was
+  // saved. The provider adapter revalidates the complete persisted grant and
+  // exact OMS/channel lineage before it can send any quantities.
+  const hasCompleteAllocationLineage = command.items.length > 0 && command.items.every((item) =>
+    Number.isSafeInteger(item.packageAllocationEntryId) && Number(item.packageAllocationEntryId) > 0
+    && Number.isSafeInteger(item.packageAllocationEffectIntentId) && Number(item.packageAllocationEffectIntentId) > 0,
+  );
+  const packageShipmentIds = new Set(hasCompleteAllocationLineage
+    ? legacyShipmentIdsSchema.parse(command.items.map((item) => item.legacyWmsShipmentId))
+    : savedShipmentIds);
+  for (const item of command.items) {
+    if (!packageShipmentIds.has(item.legacyWmsShipmentId)) {
+      throw new ChannelFulfillmentProviderInputError(
+        "channel_fulfillment_lineage_mismatch",
+        `Command ${command.id} item references a shipment outside its physical package`,
+        {
+          commandId: command.id,
+          legacyWmsShipmentId: item.legacyWmsShipmentId,
+          packageLegacyWmsShipmentIds: [...packageShipmentIds],
+        },
+      );
+    }
+  }
+  if (command.items.length === 0) {
+    throw new ChannelFulfillmentProviderInputError(
+      "channel_fulfillment_lineage_mismatch",
+      `Command ${command.id} has no exact legacy shipment items`,
+      { commandId: command.id },
+    );
+  }
+
+  return Object.freeze({
+    commandId: command.id,
+    ...(command.metadata.trackingReplacement === true ? { trackingReplacement: true } : {}),
+    physicalShipmentId: command.physicalShipmentId,
+    omsOrderId: command.omsOrderId,
+    legacyWmsShipmentIds: Object.freeze([...packageShipmentIds].sort((left, right) => left - right)),
+    trackingNumber: command.trackingNumber,
+    carrier: command.carrier,
+    trackingUrl: command.trackingUrl,
+    shippedAt: command.shippedAt,
+    notifyCustomer: resolveReviewedChannelFulfillmentNotifyCustomer({
+      provider: command.channelProvider, source: command.metadata.source,
+      notifyCustomer: command.metadata.notifyCustomer, requestHash: command.requestHash,
+      suppression: command.notificationSuppression,
+    }),
+    items: Object.freeze(command.items
+      .slice()
+      .sort((left, right) => left.legacyWmsShipmentItemId - right.legacyWmsShipmentItemId)
+      .map((item) => Object.freeze({
+        legacyWmsShipmentId: item.legacyWmsShipmentId,
+        legacyWmsShipmentItemId: item.legacyWmsShipmentItemId,
+        omsOrderLineId: item.omsOrderLineId,
+        channelOrderLineId: item.channelOrderLineId,
+        quantity: item.quantity,
+        packageAllocationEntryId: item.packageAllocationEntryId ?? null,
+        packageAllocationEffectIntentId: item.packageAllocationEffectIntentId ?? null,
+      }))),
+  });
+}
+
+/**
+ * Transitional provider adapter. Canonical commands own orchestration and
+ * retries; the existing channel clients remain the protocol adapters until
+ * their request builders are moved behind a provider-neutral port.
+ */
+export function createCompatibilityChannelFulfillmentProviderExecutor(
+  fulfillmentPush: any,
+): ChannelFulfillmentProviderExecutor {
+  return {
+    async execute(command) {
+      const providerInput = providerCommandInput(command);
+      const shipmentIds = providerInput.legacyWmsShipmentIds;
+      if (providerInput.notifyCustomer === false && command.channelProvider !== "shopify") {
+        throw new ChannelFulfillmentProviderError(
+          "UNSUPPORTED_SILENT_FULFILLMENT",
+          "Silent fulfillment is supported only by the Shopify adapter",
+          "permanent",
+        );
+      }
+
+      if (command.channelProvider === "shopify") {
+        if (typeof fulfillmentPush?.pushShopifyFulfillmentForCommand !== "function") {
+          throw Object.assign(new Error("Shopify fulfillment provider is not initialized"), {
+            code: "CHANNEL_PROVIDER_NOT_READY",
+          });
+        }
+        const result = await fulfillmentPush.pushShopifyFulfillmentForCommand(providerInput);
+        if (result?.writebackComplete !== true) {
+          throw Object.assign(
+            new Error(`Shopify writeback is incomplete for physical shipment ${command.physicalShipmentId}`),
+            { code: "SHOPIFY_WRITEBACK_INCOMPLETE" },
+          );
+        }
+        const fulfillmentIds = typeof result.shopifyFulfillmentId === "string"
+          && result.shopifyFulfillmentId.length > 0
+          ? [result.shopifyFulfillmentId]
+          : [];
+        const alreadySatisfied = result.alreadySatisfied === true || result.alreadyPushed === true;
+        return {
+          outcome: alreadySatisfied ? "ignored" : "success",
+          providerResponseId: fulfillmentIds[0] ?? null,
+          metadata: Object.freeze({
+            legacyWmsShipmentIds: shipmentIds,
+            fulfillmentIds: Object.freeze([...new Set(fulfillmentIds)]),
+            alreadySatisfied,
+            notifyCustomer: providerInput.notifyCustomer,
+            ...(command.notificationSuppression ? { notificationSuppression: command.notificationSuppression } : {}),
+          }),
+        };
+      }
+
+      if (command.channelProvider === "ebay") {
+        if (typeof fulfillmentPush?.pushTrackingForShipmentCommand !== "function") {
+          throw Object.assign(new Error("eBay fulfillment provider is not initialized"), {
+            code: "CHANNEL_PROVIDER_NOT_READY",
+          });
+        }
+        let responseId: string | null = null;
+        try {
+          const pushed = await fulfillmentPush.pushTrackingForShipmentCommand(providerInput);
+          if (pushed !== true && !(pushed?.writebackComplete === true && typeof pushed.fulfillmentId === "string" && pushed.fulfillmentId)) {
+            throw Object.assign(
+              new Error(`eBay writeback returned false for physical shipment ${command.physicalShipmentId}`),
+              { code: "EBAY_WRITEBACK_INCOMPLETE" },
+            );
+          }
+          responseId = pushed?.fulfillmentId ?? null;
+        } catch (error) {
+          if (isEbayTrackingConflictError(error)) {
+            return {
+              outcome: "ignored",
+              providerResponseId: null,
+              metadata: Object.freeze({
+                legacyWmsShipmentIds: shipmentIds,
+                reconciliationRequired: true,
+              }),
+            };
+          }
+          throw error;
+        }
+        return {
+          outcome: "success",
+          providerResponseId: responseId,
+          metadata: Object.freeze({ legacyWmsShipmentIds: shipmentIds }),
+        };
+      }
+
+      if (command.channelProvider === DROPSHIP_WRITEBACK_PROVIDER) {
+        if (typeof fulfillmentPush?.pushDropshipTrackingForShipmentCommand !== "function") {
+          throw Object.assign(new Error("Dropship tracking provider is not initialized"), {
+            code: "CHANNEL_PROVIDER_NOT_READY",
+          });
+        }
+        // The vendor is told about a failure only the first time and the last
+        // time, so the push needs to know when the worker will stop retrying.
+        const pushed = await fulfillmentPush.pushDropshipTrackingForShipmentCommand(providerInput, {
+          lastAttempt: isFinalChannelFulfillmentAttempt(command),
+        });
+        if (
+          (pushed?.outcome !== "success" && pushed?.outcome !== "ignored")
+          || !Number.isSafeInteger(pushed.dropshipTrackingPushId)
+          || pushed.dropshipTrackingPushId <= 0
+        ) {
+          throw Object.assign(
+            new Error(`Dropship tracking writeback is incomplete for physical shipment ${command.physicalShipmentId}`),
+            { code: "DROPSHIP_WRITEBACK_INCOMPLETE" },
+          );
+        }
+        return {
+          outcome: pushed.outcome,
+          providerResponseId: typeof pushed.externalFulfillmentId === "string" && pushed.externalFulfillmentId
+            ? pushed.externalFulfillmentId
+            : null,
+          metadata: Object.freeze({
+            legacyWmsShipmentIds: shipmentIds,
+            dropshipTrackingPushId: pushed.dropshipTrackingPushId,
+            alreadySatisfied: pushed.alreadySatisfied === true,
+          }),
+        };
+      }
+
+      throw new UnsupportedChannelProviderError(command.channelProvider);
+    },
+  };
+}
+
+export function createChannelFulfillmentAuthorityService(dependencies: {
+  repository: ChannelFulfillmentAuthorityRepository;
+  projector: ChannelFulfillmentProjector;
+  providerExecutor: ChannelFulfillmentProviderExecutor;
+  clock?: ChannelFulfillmentAuthorityClock;
+  logger?: ChannelFulfillmentAuthorityLogger;
+  createLeaseToken?: () => string;
+  leaseDurationMs?: number;
+  labelReplacementEnabled?: boolean;
+  shopifyLabelLifecycle?: Pick<ShopifyLabelLifecycleService, "runDueBatch">;
+  packageReconciliation?: { resumeDue(limit?: number): Promise<unknown> };
+}): ChannelFulfillmentAuthorityService {
+  const clock = dependencies.clock ?? { now: () => new Date() };
+  const logger = dependencies.logger ?? defaultLogger();
+  const createLeaseToken = dependencies.createLeaseToken ?? randomUUID;
+  const leaseDurationMs = dependencies.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
+
+  async function reconcileEbayLabelReplacement(labelId: number, operation: LabelReplacementOperation = "label_observation"): Promise<EbayLabelReplacementResult | null> {
+    if (dependencies.labelReplacementEnabled === false) return null;
+    const result = await dependencies.repository.reconcileEbayLabelReplacement?.(labelId, clock.now(), operation) ?? null;
+    if (result?.outcome === "applied") {
+      if (dependencies.projector.projectReconciledPhysicalShipment) {
+        await dependencies.projector.projectReconciledPhysicalShipment(result.materialized.physicalShipmentId);
+      } else {
+        await dependencies.projector.projectPhysicalShipment(result.materialized.physicalShipmentId);
+      }
+      await dependencies.repository.markEbayLabelReplacementProjected?.(labelId, clock.now());
+    }
+    if (result) logger.info({ code: "EBAY_LABEL_REPLACEMENT", labelId, outcome: result.outcome,
+      ...(result.outcome === "applied" ? { physicalShipmentId: result.materialized.physicalShipmentId } : { reason: result.reason }) });
+    return result;
+  }
+
+  async function runDueBatch(options: {
+    commandIds?: readonly number[];
+    limit?: number;
+  } = {}): Promise<ChannelFulfillmentBatchResult> {
+    const limit = options.limit ?? DEFAULT_BATCH_SIZE;
+    if (!options.commandIds && dependencies.packageReconciliation) {
+      try { await dependencies.packageReconciliation.resumeDue(Math.min(limit,5)); }
+      catch (error) { logger.error({code:"PACKAGE_RECONCILIATION_RECOVERY_FAILED",error:errorMessage(error)}); }
+    }
+    if (dependencies.labelReplacementEnabled !== false && !options.commandIds && dependencies.repository.findWaitingEbayLabelReplacements) {
+      try {
+        for (const labelId of await dependencies.repository.findWaitingEbayLabelReplacements(Math.min(limit, 25), clock.now())) {
+          try { await reconcileEbayLabelReplacement(labelId, "repair"); } catch (error) {
+            logger.error({ code: "EBAY_LABEL_REPLACEMENT_RETRY", labelId, error: errorMessage(error) });
+          }
+        }
+      } catch (error) {
+        // Correction discovery has its own durable work. A failed scan must
+        // not prevent fresh, already-authorized commands from being claimed.
+        logger.error({ code: "LABEL_REPLACEMENT_RECOVERY_DISCOVERY_FAILED", error: errorMessage(error) });
+      }
+    }
+    const claimed = await dependencies.repository.claimCommands({
+      now: clock.now(),
+      leaseToken: createLeaseToken(),
+      leaseDurationMs,
+      limit,
+      commandIds: options.commandIds,
+    });
+    const result = {
+      claimed: claimed.length,
+      succeeded: 0,
+      ignored: 0,
+      retryScheduled: 0,
+      reviewRequired: 0,
+      deadLettered: 0,
+    };
+
+    for (const command of claimed) {
+      const startedAt = clock.now();
+      const notificationAudit = command.notificationSuppression
+        ? { notificationSuppression: command.notificationSuppression, notifyCustomer: false }
+        : undefined;
+      try {
+        const providerResult = await dependencies.providerExecutor.execute(command);
+        const completedAt = clock.now();
+        await dependencies.repository.completeAttempt({
+          commandId: command.id,
+          leaseToken: command.leaseToken,
+          outcome: providerResult.outcome,
+          providerResponseId: providerResult.providerResponseId,
+          startedAt,
+          completedAt,
+          metadata: notificationAudit ? { ...providerResult.metadata, ...notificationAudit } : providerResult.metadata,
+        });
+        if (providerResult.outcome === "success") result.succeeded += 1;
+        else result.ignored += 1;
+        logger.info({
+          code: "CHANNEL_FULFILLMENT_COMMAND_COMPLETED",
+          commandId: command.id,
+          commandKey: command.commandKey,
+          provider: command.channelProvider,
+          outcome: providerResult.outcome,
+          attemptNumber: command.attemptNumber,
+        });
+      } catch (error) {
+        const completedAt = clock.now();
+        const code = errorCode(error);
+        const message = errorMessage(error);
+        if (isReviewRequired(error)) {
+          await dependencies.repository.completeAttempt({
+            commandId: command.id,
+            leaseToken: command.leaseToken,
+            outcome: "review_required",
+            ...(notificationAudit ? { metadata: notificationAudit } : {}),
+            startedAt,
+            completedAt,
+            errorCode: code,
+            errorMessage: message,
+          });
+          result.reviewRequired += 1;
+          logger.error({
+            code: "CHANNEL_FULFILLMENT_COMMAND_REVIEW_REQUIRED",
+            commandId: command.id,
+            commandKey: command.commandKey,
+            provider: command.channelProvider,
+            errorCode: code,
+            errorMessage: message,
+          });
+          continue;
+        }
+
+        const exhausted = isFinalChannelFulfillmentAttempt(command);
+        await dependencies.repository.completeAttempt({
+          commandId: command.id,
+          leaseToken: command.leaseToken,
+          outcome: exhausted ? "dead_lettered" : "retry_scheduled",
+          ...(notificationAudit ? { metadata: notificationAudit } : {}),
+          startedAt,
+          completedAt,
+          nextAttemptAt: exhausted
+            ? null
+            : calculateChannelFulfillmentRetryAt(completedAt, command.attemptNumber),
+          errorCode: code,
+          errorMessage: message,
+        });
+        if (exhausted) result.deadLettered += 1;
+        else result.retryScheduled += 1;
+        logger.warn({
+          code: exhausted
+            ? "CHANNEL_FULFILLMENT_COMMAND_DEAD_LETTERED"
+            : "CHANNEL_FULFILLMENT_COMMAND_RETRY_SCHEDULED",
+          commandId: command.id,
+          commandKey: command.commandKey,
+          provider: command.channelProvider,
+          attemptNumber: command.attemptNumber,
+          maxAttempts: command.maxAttempts,
+          errorCode: code,
+          errorMessage: message,
+        });
+      }
+    }
+
+    return Object.freeze(result);
+  }
+
+  async function recordPhysicalPackage(
+    input: MaterializePhysicalPackageInput,
+    options: { executeImmediately?: boolean } = {},
+  ): Promise<MaterializeAndDispatchResult> {
+    const materialized = await dependencies.repository.materializePhysicalPackage(input);
+    await dependencies.projector.projectPhysicalShipment(materialized.physicalShipmentId);
+    const commandIds = materialized.channelCommands.map((command) => command.id);
+    const dispatch = options.executeImmediately !== true || commandIds.length === 0
+      ? Object.freeze({ claimed: 0, succeeded: 0, ignored: 0, retryScheduled: 0, reviewRequired: 0, deadLettered: 0 })
+      : await runDueBatch({ commandIds, limit: commandIds.length });
+    return Object.freeze({ materialized, dispatch });
+  }
+
+  async function materializeAndActivatePackageAllocationCommercialFulfillment(
+    input: MaterializeAndActivatePackageAllocationCommercialFulfillmentInput,
+  ): Promise<MaterializeAndActivatePackageAllocationCommercialFulfillmentResult> {
+    const materialized = await dependencies.repository
+      .materializePackageAllocationCommercialFulfillment({
+        packageAllocationPlanId: input.packageAllocationPlanId,
+        source: input.source,
+        correlationId: input.correlationId,
+        causationId: input.causationId,
+      });
+    for (const physicalShipmentId of materialized.physicalShipmentIds) {
+      await dependencies.projector.projectPhysicalShipment(physicalShipmentId);
+    }
+    const activation = await dependencies.repository
+      .activatePackageAllocationCommercialFulfillment({
+        packageAllocationPlanId: input.packageAllocationPlanId,
+        activatedBy: input.activatedBy,
+        reason: input.activationReason,
+        activatedAt: clock.now(),
+        correlationId: input.correlationId,
+        causationId: input.causationId,
+      });
+    logger.info({
+      code: "PACKAGE_ALLOCATION_COMMERCIAL_FULFILLMENT_ACTIVATED",
+      packageAllocationPlanId: input.packageAllocationPlanId,
+      commandIds: activation.commandIds,
+      replayed: activation.replayed,
+    });
+    return Object.freeze({ materialized, activation });
+  }
+
+  async function projectPhysicalPackage(physicalShipmentId: number): Promise<void> {
+    await dependencies.projector.projectPhysicalShipment(physicalShipmentId);
+  }
+
+  async function ensureLegacyShipment(
+    legacyWmsShipmentId: number,
+    options: {
+      executeImmediately?: boolean;
+      source?: string;
+      suppressChannelWriteback?: boolean;
+      suppressChannelProviders?: readonly string[];
+    } = {},
+  ): Promise<MaterializeAndDispatchResult> {
+    const resolved = await dependencies.repository.resolveLegacyPhysicalPackage(legacyWmsShipmentId);
+    return recordPhysicalPackage({
+      ...resolved,
+      legacyWmsShipmentIds: [...resolved.legacyWmsShipmentIds],
+      source: options.source ?? CHANNEL_FULFILLMENT_REPAIR_SOURCES.legacyReconciliation,
+      suppressChannelWriteback: options.suppressChannelWriteback ?? false,
+      suppressChannelProviders: options.suppressChannelProviders == null
+        ? undefined
+        : [...options.suppressChannelProviders],
+    }, options);
+  }
+
+  return {
+    runLabelLifecycleBatch: async () => { await dependencies.shopifyLabelLifecycle?.runDueBatch(); },
+    reconcileEbayLabelReplacement,
+    recordPhysicalPackage,
+    ensureLegacyShipment,
+    materializeAndActivatePackageAllocationCommercialFulfillment,
+    projectPhysicalPackage,
+    runDueBatch,
+  };
+}

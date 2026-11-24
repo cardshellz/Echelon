@@ -29,9 +29,9 @@ integration.sequential("invoice component review transaction and replay", () => 
   let modulePool: pg.Pool | undefined;
   let lease: pg.PoolClient | undefined;
   let ownsProcurement = false, ownsAudit = false, ownsCommands = false, ownsRecoveries = false;
-  let commands: ReturnType<typeof import("../../invoice-cost-review.service").createInvoiceCostReviewCommands>;
-  let versionOf: typeof import("../../ap-ledger.service").invoiceCostReviewVersion;
-  let preview: ReturnType<typeof import("../../invoice-cost-review-preview.service").createInvoiceCostReviewPreviewService>;
+  let commands: ReturnType<typeof import("../../application/invoice-cost-review.service").createInvoiceCostReviewCommands>;
+  let versionOf: typeof import("../../application/ap-ledger.service").invoiceCostReviewVersion;
+  let preview: ReturnType<typeof import("../../application/invoice-cost-review-preview.service").createInvoiceCostReviewPreviewService>;
   let ownsIdentity = false;
 
   let ownsSupplierReturnInventory = false;
@@ -61,14 +61,14 @@ integration.sequential("invoice component review transaction and replay", () => 
     delete process.env.DATABASE_URL; delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [dbModule, commandModule, repository, ap] = await Promise.all([
-        import("../../../../db"), import("../../invoice-cost-review.service"),
-        import("../../../../platform/commands/command-results.repository"), import("../../ap-ledger.service"),
+        import("../../../../db"), import("../../application/invoice-cost-review.service"),
+        import("../../../../platform/commands/command-results.repository"), import("../../application/ap-ledger.service"),
       ]);
       modulePool = dbModule.pool;
       modulePool.query = pool.query.bind(pool) as typeof modulePool.query;
       modulePool.connect = pool.connect.bind(pool) as typeof modulePool.connect;
       commands = commandModule.createInvoiceCostReviewCommands(repository.createDrizzleFinancialCommandRepository(drizzle(pool, { schema })), () => NOW);
-      const previewModule = await import("../../invoice-cost-review-preview.service");
+      const previewModule = await import("../../application/invoice-cost-review-preview.service");
       preview = previewModule.createInvoiceCostReviewPreviewService(drizzle(pool, { schema }), () => NOW);
       versionOf = ap.invoiceCostReviewVersion;
     } finally {

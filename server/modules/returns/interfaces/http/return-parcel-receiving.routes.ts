@@ -5,6 +5,7 @@ import { returnParcelReceiptInputSchema } from "@shared/returns/return-parcel-re
 import { ReturnCaseOperationError } from "../../application/return-case-operations.service";
 import { ReturnParcelReceivingService } from "../../application/return-parcel-receiving.service";
 import { PostgresReturnParcelReceivingStore } from "../../infrastructure/return-parcel-receiving.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerReturnParcelReceivingRoutes(
   app: Express,
@@ -74,25 +75,13 @@ export function registerReturnParcelReceivingRoutes(
 }
 function sendError(res: Response, error: unknown): Response {
   if (error instanceof ReturnCaseOperationError) {
-    console.warn(
-      JSON.stringify({
-        event: "return_parcel_receipt_rejected",
-        code: error.code,
-        status: error.status,
-      }),
-    );
+    logger.warn("return_parcel_receipt_rejected", { event: "return_parcel_receipt_rejected", code: error.code, status: error.status });
     return res
       .status(error.status)
       .json({ error: { code: error.code, message: error.message } });
   }
   if (error instanceof z.ZodError) {
-    console.warn(
-      JSON.stringify({
-        event: "return_parcel_receipt_rejected",
-        code: "RETURN_PARCEL_INPUT_INVALID",
-        status: 400,
-      }),
-    );
+    logger.warn("return_parcel_receipt_rejected", { event: "return_parcel_receipt_rejected", code: "RETURN_PARCEL_INPUT_INVALID", status: 400 });
     return res.status(400).json({
       error: {
         code: "RETURN_PARCEL_INPUT_INVALID",
@@ -100,12 +89,7 @@ function sendError(res: Response, error: unknown): Response {
       },
     });
   }
-  console.error(
-    JSON.stringify({
-      event: "return_parcel_receipt_failed",
-      code: "RETURN_PARCEL_RECEIPT_UNAVAILABLE",
-    }),
-  );
+  logger.error("return_parcel_receipt_failed", { event: "return_parcel_receipt_failed", code: "RETURN_PARCEL_RECEIPT_UNAVAILABLE" });
   return res.status(503).json({
     error: {
       code: "RETURN_PARCEL_RECEIPT_UNAVAILABLE",

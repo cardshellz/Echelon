@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createScheduledSyncService, type ScheduledSyncService } from "../../scheduled-sync.service";
+import { createScheduledSyncService, type ScheduledSyncService } from "../../application/scheduled-sync.service";
 
 // ---------------------------------------------------------------------------
 // Mock Orchestrator

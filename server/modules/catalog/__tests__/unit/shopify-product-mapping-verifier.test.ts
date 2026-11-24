@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createShopifyProductMappingVerifier,
-} from "../../shopify-product-mapping-verifier";
+} from "../../infrastructure/shopify-product-mapping-verifier";
 
 const credentials = {
   shopDomain: "cardshellz.myshopify.com",

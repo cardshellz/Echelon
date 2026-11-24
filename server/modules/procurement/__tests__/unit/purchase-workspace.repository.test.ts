@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
-import { createPurchaseWorkspaceRepository, PURCHASE_WORKSPACE_RECORD_LIMIT } from "../../purchase-workspace.repository";
+import { createPurchaseWorkspaceRepository, PURCHASE_WORKSPACE_RECORD_LIMIT } from "../../infrastructure/purchase-workspace.repository";
 
 const dialect = new PgDialect();
 const purchase = {

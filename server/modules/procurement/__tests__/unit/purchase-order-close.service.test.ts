@@ -3,11 +3,11 @@ import {
   buildPoCloseChange,
   buildPoCloseShortChange,
   buildPoCloseShortLinePatch,
-} from "../../purchase-order-close.service";
+} from "../../application/purchase-order-close.service";
 import {
   buildPoLifecycleSummary,
   PoLifecycleError,
-} from "../../purchase-order-lifecycle.service";
+} from "../../application/purchase-order-lifecycle.service";
 
 const NOW = new Date("2026-05-16T12:00:00.000Z");
 const RECEIVED_PO = { id: 1, status: "received", physicalStatus: "received" };

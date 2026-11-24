@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
-import { ReceivingService } from "../../receiving.service";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
+import { ReceivingService } from "../../application/receiving.service";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
 
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 const RECORDED_AT = new Date("2026-09-05T12:00:00.000Z");

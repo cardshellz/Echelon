@@ -5,12 +5,12 @@ import { AssemblyPackingRepository } from "../../work/infrastructure/assembly-pa
 import { AssemblyWorkRepository } from "../../work/infrastructure/assembly-work.repository";
 import { WorkConfigurationRepository } from "../../work/infrastructure/work-configuration.repository";
 import { AssemblyWorkOwner } from "../../work/application/assembly-work-owner";
-import { lockPackingReadiness, recordAssemblyPackingReady } from "../../../wms/assembly-packing-readiness";
+import { lockPackingReadiness, recordAssemblyPackingReady } from "../../../wms/domain/assembly-packing-readiness";
 import { lockPackingReplenishmentBlockers } from "../../../inventory/application/packing-replenishment-reader";
 import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
 import { lockAssemblyPackingPickEvidence } from "../../../inventory-planning/application/assembly-packing-claim-reader";
 import { config, task, locations, TIME, COMMAND } from "../assembly-work.fixture";
-vi.mock("../../../wms/assembly-packing-readiness", async (original) => ({ ...await original<object>(), lockPackingReadiness: vi.fn(), recordAssemblyPackingReady: vi.fn() }));
+vi.mock("../../../wms/domain/assembly-packing-readiness", async (original) => ({ ...await original<object>(), lockPackingReadiness: vi.fn(), recordAssemblyPackingReady: vi.fn() }));
 vi.mock("../../../inventory/application/packing-replenishment-reader", () => ({ lockPackingReplenishmentBlockers: vi.fn() }));
 vi.mock("../../../inventory-planning/application/assembly-work-claim-access", () => ({ lockAssemblyClaimForWork: vi.fn() }));
 vi.mock("../../../inventory-planning/application/assembly-packing-claim-reader", () => ({ lockAssemblyPackingPickEvidence: vi.fn() }));

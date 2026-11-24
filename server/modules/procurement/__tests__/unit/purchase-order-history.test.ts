@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { retainedPurchaseOrderHistoryKinds } from "../../purchase-order-history.policy";
-import { isPurchaseOrderHistoryConstraintViolation, readPurchaseOrderHistoryPresence } from "../../purchase-order-history.repository";
+import { retainedPurchaseOrderHistoryKinds } from "../../domain/purchase-order-history.policy";
+import { isPurchaseOrderHistoryConstraintViolation, readPurchaseOrderHistoryPresence } from "../../infrastructure/purchase-order-history.repository";
 
 describe("purchase order retained history boundary", () => {
   it("names all retained history kinds without mutating the record", () => {

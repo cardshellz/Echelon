@@ -4,8 +4,8 @@ import { readFile } from "node:fs/promises";
 import {
   loadArchonSnapshot,
   createArchonOrderDelivery,
-} from "../../archon-order-delivery";
-import { queueHistoricalArchonOrders } from "../../archon-order-replay";
+} from "../../application/archon-order-delivery";
+import { queueHistoricalArchonOrders } from "../../application/archon-order-replay";
 const url =
   process.env.ECHELON_TEST_DATABASE_URL ?? process.env.ARCHON_TEST_DATABASE_URL;
 test(

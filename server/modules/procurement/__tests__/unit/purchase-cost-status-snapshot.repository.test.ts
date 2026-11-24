@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PurchaseCostStatus } from "@shared/procurement/purchase-cost-status";
 import type { CostEvidenceTransaction } from "../../../inventory/infrastructure/cost-evidence.repository";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import { createPurchaseCostStatusSnapshotReader } from "../../purchase-cost-status-snapshot.repository";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import { createPurchaseCostStatusSnapshotReader } from "../../infrastructure/purchase-cost-status-snapshot.repository";
 
-vi.mock("../../purchase-cost-status.repository", async importOriginal => ({
-  ...await importOriginal<typeof import("../../purchase-cost-status.repository")>(),
+vi.mock("../../infrastructure/purchase-cost-status.repository", async importOriginal => ({
+  ...await importOriginal<typeof import("../../infrastructure/purchase-cost-status.repository")>(),
   readPurchaseCostStatus: vi.fn(),
 }));
 

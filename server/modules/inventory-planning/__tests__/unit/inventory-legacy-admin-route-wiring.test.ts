@@ -21,7 +21,7 @@ describe("legacy inventory admin route authority wiring", () => {
     ["delete", "/api/channel-allocation-rules/:id", "channelAllocation"],
   ] as const)("gates %s %s before its legacy write", (method, path, control) => {
     const handler = routeHandler(
-      source("server/modules/channels/channels.routes.ts"),
+      source("server/modules/channels/interfaces/http/channels.routes.ts"),
       method,
       path,
     );
@@ -35,7 +35,7 @@ describe("legacy inventory admin route authority wiring", () => {
     ["put", "/api/sync/warehouses/:warehouseId/feed", "channelWarehouseAssignment"],
   ] as const)("gates %s %s before its legacy configuration write", (method, path, control) => {
     const handler = routeHandler(
-      source("server/modules/channels/sync-control.routes.ts"),
+      source("server/modules/channels/interfaces/http/sync-control.routes.ts"),
       method,
       path,
     );
@@ -46,7 +46,7 @@ describe("legacy inventory admin route authority wiring", () => {
 
   it("gates the legacy channel allocation writer exposed by Inventory routes", () => {
     const handler = routeHandler(
-      source("server/modules/inventory/inventory.routes.ts"),
+      source("server/modules/inventory/interfaces/http/inventory.routes.ts"),
       "put",
       "/api/channels/:id/allocation",
     );
@@ -57,7 +57,7 @@ describe("legacy inventory admin route authority wiring", () => {
 
   it("gates explicit inventoryStrategy when creating a product", () => {
     const handler = routeHandler(
-      source("server/modules/catalog/catalog.routes.ts"),
+      source("server/modules/catalog/interfaces/http/catalog.routes.ts"),
       "post",
       "/api/products",
     );
@@ -69,7 +69,7 @@ describe("legacy inventory admin route authority wiring", () => {
 
   it("pins authority and rejects only a changed inventoryStrategy when updating a product", () => {
     const handler = routeHandler(
-      source("server/modules/catalog/catalog.routes.ts"),
+      source("server/modules/catalog/interfaces/http/catalog.routes.ts"),
       "put",
       "/api/products/:id",
     );
@@ -87,7 +87,7 @@ describe("legacy inventory admin route authority wiring", () => {
     ["post", "/api/inventory/items"],
   ] as const)("gates the legacy inventoryStrategy alias writer at %s %s", (method, path) => {
     const handler = routeHandler(
-      source("server/modules/inventory/inventory.routes.ts"),
+      source("server/modules/inventory/interfaces/http/inventory.routes.ts"),
       method,
       path,
     );
@@ -99,7 +99,7 @@ describe("legacy inventory admin route authority wiring", () => {
 
   it("pins authority and rejects only a changed inventoryStrategy in the catalog alias updater", () => {
     const handler = routeHandler(
-      source("server/modules/inventory/inventory.routes.ts"),
+      source("server/modules/inventory/interfaces/http/inventory.routes.ts"),
       "patch",
       "/api/catalog/products/:id",
     );
@@ -117,7 +117,7 @@ describe("legacy inventory admin route authority wiring", () => {
     ["/api/channel-allocation/grid", "getBulkAtp"],
   ] as const)("retires %s before its legacy-only ATP reader runs", (path, legacyReader) => {
     const handler = routeHandler(
-      source("server/modules/channels/channels.routes.ts"),
+      source("server/modules/channels/interfaces/http/channels.routes.ts"),
       "get",
       path,
     );
@@ -129,7 +129,7 @@ describe("legacy inventory admin route authority wiring", () => {
 
   it("routes the backorder read to scalar ATP only in legacy and exact-SKU ATP in canonical", () => {
     const handler = routeHandler(
-      source("server/modules/inventory/inventory.routes.ts"),
+      source("server/modules/inventory/interfaces/http/inventory.routes.ts"),
       "get",
       "/api/inventory/backorder-status/:itemId",
     );
@@ -145,7 +145,7 @@ describe("legacy inventory admin route authority wiring", () => {
 
   it("routes warehouse summaries through the authority-aware projection boundary", () => {
     const handler = routeHandler(
-      source("server/modules/inventory/inventory.routes.ts"),
+      source("server/modules/inventory/interfaces/http/inventory.routes.ts"),
       "get",
       "/api/inventory/summary",
     );
@@ -170,7 +170,7 @@ describe("legacy inventory admin route authority wiring", () => {
 
   it("retires legacy channel-feed divergence instead of comparing it to canonical ATP", () => {
     const handler = routeHandler(
-      source("server/modules/inventory/inventory.routes.ts"),
+      source("server/modules/inventory/interfaces/http/inventory.routes.ts"),
       "get",
       "/api/channel-sync/divergence",
     );

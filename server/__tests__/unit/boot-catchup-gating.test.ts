@@ -91,9 +91,9 @@ describe("runBootCatchUpIfBehind", () => {
  * gate silently stops gating.
  */
 const GATED = [
-  { name: "fulfillment sweeper (outbound + inbound)", file: "server/modules/oms/fulfillment-sweeper.scheduler.ts", boots: 2, records: 2 },
-  { name: "cycle-count freeze guard", file: "server/modules/inventory/cycle-count-freeze-guard.scheduler.ts", boots: 1, records: 1 },
-  { name: "OMS flow reconciliation", file: "server/modules/oms/oms-flow-reconciliation.service.ts", boots: 1, records: 1 },
+  { name: "fulfillment sweeper (outbound + inbound)", file: "server/modules/oms/application/fulfillment-sweeper.scheduler.ts", boots: 2, records: 2 },
+  { name: "cycle-count freeze guard", file: "server/modules/inventory/application/cycle-count-freeze-guard.scheduler.ts", boots: 1, records: 1 },
+  { name: "OMS flow reconciliation", file: "server/modules/oms/application/oms-flow-reconciliation.service.ts", boots: 1, records: 1 },
   { name: "financial command retention", file: "server/platform/commands/financial-command-retention.worker.ts", boots: 1, records: 1 },
   { name: "sync recovery", file: "server/modules/sync/application/sync-recovery.service.ts", boots: 1, records: 1 },
 ];
@@ -125,12 +125,12 @@ describe("gated boot catch-ups", () => {
  * or alerting. Encoded here so the next person does not "finish the job".
  */
 const UNGATED = [
-  { name: "variant availability worker (15s queue drain)", file: "server/modules/channels/variant-availability-sync.worker.ts" },
-  { name: "PO email outbox worker (15s queue drain)", file: "server/modules/procurement/po-email-outbox.worker.ts" },
+  { name: "variant availability worker (15s queue drain)", file: "server/modules/channels/application/variant-availability-sync.worker.ts" },
+  { name: "PO email outbox worker (15s queue drain)", file: "server/modules/procurement/application/po-email-outbox.worker.ts" },
   { name: "control tower projector (60s)", file: "server/modules/operations/application/control-tower-v2.scheduler.ts" },
-  { name: "eBay order polling (5m, cadence marked non-negotiable)", file: "server/modules/oms/ebay-order-ingestion.ts" },
-  { name: "OMS ops alerting (5m, alert latency)", file: "server/modules/oms/oms-ops-alert.service.ts" },
-  { name: "carrier tracking reconciliation (5m)", file: "server/modules/shipping/carrier-tracking-reconciliation.scheduler.ts" },
+  { name: "eBay order polling (5m, cadence marked non-negotiable)", file: "server/modules/oms/application/ebay-order-ingestion.ts" },
+  { name: "OMS ops alerting (5m, alert latency)", file: "server/modules/oms/application/oms-ops-alert.service.ts" },
+  { name: "carrier tracking reconciliation (5m)", file: "server/modules/shipping/application/carrier-tracking-reconciliation.scheduler.ts" },
 ];
 
 describe("short-interval schedulers stay ungated", () => {

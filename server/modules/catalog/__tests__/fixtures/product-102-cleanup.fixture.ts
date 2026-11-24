@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { PRODUCT_102_COUNT_IDS } from "../../domain/product-102-cleanup";
-import { buildPurchasingForecastPolicyCohort } from "../../../procurement/purchasing-forecast-policy";
+import { buildPurchasingForecastPolicyCohort } from "../../../procurement/application/purchasing-forecast-policy";
 
 export const cleanupMigrationFile =
   "0695_catalog_forecast_identity_history.sql";

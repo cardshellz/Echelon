@@ -4,12 +4,12 @@ import {
   workEvidenceIdSchema, type AssemblyTask, type AssemblyTaskResult,
   createAssemblyHandoffSchema, completeAssemblyTaskSchema,
 } from "@shared/warehouse-assembly-work";
-import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
+import { lockAssemblyClaimForWork } from "../../../inventory-planning/assembly-work-claim-access.api";
 import { lockAssemblyOrderForWork } from "../../../orders/assembly-order-authority.api";
 import { requireAssemblyScope, transitionAssemblyTask } from "../domain/assembly-work";
 import { requireWorkPermission, WarehouseWorkError } from "../domain/work-configuration";
 import { AssemblyWorkOwner } from "./assembly-work-owner";
-import type { InventoryAvailabilityClaimService } from "../../../inventory-planning/application/inventory-availability-claim.service";
+import type { InventoryAvailabilityClaimService } from "../../../inventory-planning/inventory-availability-claim.service.api";
 
 export class AssemblyWorkService {
   constructor(

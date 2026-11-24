@@ -9,7 +9,7 @@ import { shipmentQuantityEvidenceProjection } from "../../infrastructure/shipmen
 import { operationalShipmentQuantityFixtureSql } from "../fixtures/operational-shipment-quantity";
 import { PostgresCanonicalClaimInventoryRepository } from "../../infrastructure/canonical-claim-inventory.repository";
 import { PostgresCanonicalClaimDispatchRepository } from "../../../inventory-planning/infrastructure/inventory-availability-dispatch.repository";
-import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/canonical-claim-dispatch-source";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/infrastructure/canonical-claim-dispatch-source";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../fixtures/inventory-cutover-database";
 import { DISPATCH_TIME, dispatchPlan } from "../fixtures/canonical-claim-dispatch";
 import {

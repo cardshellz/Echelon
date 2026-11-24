@@ -5,13 +5,13 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type pg from "pg";
 import { apInvoiceTransitionPreviewSchema, type ApInvoiceTransitionAction } from "@shared/procurement/ap-invoice-transition";
-import { createInvoiceTransitionPreview, createInvoiceTransitionHistory } from "../../ap-invoice-transition.service";
-import { createApInvoiceCommands } from "../../ap-invoice-commands";
+import { createInvoiceTransitionPreview, createInvoiceTransitionHistory } from "../../application/ap-invoice-transition.service";
+import { createApInvoiceCommands } from "../../application/ap-invoice-commands";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
-import { createReceiptInvoiceCostService, receiptInvoiceCommandScope } from "../../receipt-invoice-costs.service";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
+import { createReceiptInvoiceCostService, receiptInvoiceCommandScope } from "../../application/receipt-invoice-costs.service";
 
 export function registerApInvoiceTransitionCases(fixture: {
   pool: () => pg.Pool; database: () => AmendmentDatabase; actorId: string; at: Date;
@@ -171,7 +171,7 @@ export function registerApInvoiceTransitionCases(fixture: {
     });
     it("keeps paid invoice approval idempotent and blocks paid dispute/void without changing settlement", async () => {
       await prepare(); await approve();
-      const { recordPayment } = await import("../../ap-ledger.service");
+      const { recordPayment } = await import("../../application/ap-ledger.service");
       await recordPayment({ vendorId: 5, currency: "USD", status: "completed", totalAmountCents: 13000, paymentDate: fixture.at,
         paymentMethod: "wire", createdBy: fixture.actorId, allocations: [{ vendorInvoiceId: 71, appliedAmountCents: 13000 }] }, { now: fixture.at });
       const before = await physical(), original = (await query("SELECT approved_by,approved_at FROM procurement.vendor_invoices WHERE id=71")).rows[0];
@@ -184,7 +184,7 @@ export function registerApInvoiceTransitionCases(fixture: {
     });
     it("restores a partially paid disputed invoice without erasing settlement status or original approval", async () => {
       await prepare(); await approve();
-      const { recordPayment } = await import("../../ap-ledger.service");
+      const { recordPayment } = await import("../../application/ap-ledger.service");
       await recordPayment({ vendorId: 5, currency: "USD", status: "completed", totalAmountCents: 1000, paymentDate: fixture.at,
         paymentMethod: "wire", createdBy: fixture.actorId, allocations: [{ vendorInvoiceId: 71, appliedAmountCents: 1000 }] }, { now: fixture.at });
       const original = (await query("SELECT approved_by,approved_at FROM procurement.vendor_invoices WHERE id=71")).rows[0];
@@ -237,7 +237,7 @@ export function registerApInvoiceTransitionCases(fixture: {
     describe("actual AP HTTP routes", () => {
       let server: Server, endpoint: string;
       beforeAll(async () => {
-        const { registerApLedgerRoutes } = await import("../../ap-ledger.routes");
+        const { registerApLedgerRoutes } = await import("../../interfaces/http/ap-ledger.routes");
         const app = express(); app.use(express.json());
         app.use((req, _res, next) => { (req as unknown as { session: unknown }).session = { user: { id: fixture.actorId } }; next(); });
         registerApLedgerRoutes(app); server = createServer(app); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { planReceiptUnits } from "../../../procurement/receiving-unit-contract";
+import { planReceiptUnits } from "../../../procurement/application/receiving-unit-contract";
 import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
@@ -8,7 +8,7 @@ import {
 import {
   applyPieceVariantBackfill,
   previewPieceVariantBackfill,
-} from "../../piece-variant-backfill.service";
+} from "../../application/piece-variant-backfill.service";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

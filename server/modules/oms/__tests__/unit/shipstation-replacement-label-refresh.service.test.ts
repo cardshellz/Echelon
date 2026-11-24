@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createShipStationReplacementLabelRefresh, type ShipStationLabelRefreshSource } from "../../shipstation-replacement-label-refresh.service";
-import type { ShipStationRelatedLabelReader } from "../../../shipping/shipstation-related-labels.reader";
-import type { ShipStationLabelSnapshot } from "../../shipstation-label-reconciliation.service";
-import { createShipStationService } from "../../shipstation.service";
+import { createShipStationReplacementLabelRefresh, type ShipStationLabelRefreshSource } from "../../application/shipstation-replacement-label-refresh.service";
+import type { ShipStationRelatedLabelReader } from "../../../shipping/infrastructure/shipstation-related-labels.reader";
+import type { ShipStationLabelSnapshot } from "../../application/shipstation-label-reconciliation.service";
+import { createShipStationService } from "../../application/shipstation.service";
 
 const original: ShipStationLabelSnapshot = { shipmentId: 101, orderId: 201, trackingNumber: "TRACK101",
   isReturnLabel: false, voidDate: "2026-09-21T17:00:00Z", voided: true,

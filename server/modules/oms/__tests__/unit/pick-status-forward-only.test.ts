@@ -18,7 +18,7 @@ const read = (p: string) =>
 
 describe("pick status is forward-only under shipment projection", () => {
   it("the projection preserves actual picks without fabricating picks from a label", () => {
-    const src = read("../../../wms/channel-fulfillment-projection.repository.ts");
+    const src = read("../../../wms/infrastructure/channel-fulfillment-projection.repository.ts");
     expect(src).toContain("COALESCE(order_item.picked_quantity, 0) >= order_item.quantity");
     expect(src).not.toContain("picked_quantity =");
     expect(src).toContain("await observeMissingPick(");
@@ -27,7 +27,7 @@ describe("pick status is forward-only under shipment projection", () => {
   });
 
   it("pick-queue predicates treat picked_quantity >= quantity as done", () => {
-    const storage = read("../../../orders/orders.storage.ts");
+    const storage = read("../../../orders/infrastructure/orders.storage.ts");
     const sqlGuards = storage.match(
       /AND COALESCE\((?:oi|open_items)\.picked_quantity, 0\) < COALESCE\((?:oi|open_items)\.quantity, 0\)/g,
     ) ?? [];
@@ -35,7 +35,7 @@ describe("pick status is forward-only under shipment projection", () => {
     // Queue reads no longer run a second in-memory progress/self-heal policy.
     expect(storage).toContain("return db.transaction(tx => reconcileWmsPickingProgress(tx, orderId,");
     // The startup zombie repair SQL moved out of index.ts.
-    const zombieRepair = read("../../../orders/zombie-order-repair.ts");
+    const zombieRepair = read("../../../orders/application/zombie-order-repair.ts");
     expect(zombieRepair).toContain("AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)");
   });
 });

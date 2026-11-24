@@ -3,11 +3,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const EBAY_INGESTION_SRC = readFileSync(
-  resolve(__dirname, "../../ebay-order-ingestion.ts"),
+  resolve(__dirname, "../../application/ebay-order-ingestion.ts"),
   "utf-8",
 );
 const INGEST_AND_ROUTE_SRC = readFileSync(
-  resolve(__dirname, "../../channel-order-ingest-and-route.ts"),
+  resolve(__dirname, "../../application/channel-order-ingest-and-route.ts"),
   "utf-8",
 );
 

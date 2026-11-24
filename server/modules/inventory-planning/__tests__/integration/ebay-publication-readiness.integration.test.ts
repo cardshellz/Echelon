@@ -16,7 +16,7 @@ import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey }
 import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
 import { PostgresInventoryAvailabilityRuntimePublicationExecutor } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";
-import { EbayExistingListingSyncExecution, type EbayListingExecutionContext, type PreparedEbayListingSync } from "../../../channels/ebay-listing-sync.service";
+import { EbayExistingListingSyncExecution, type EbayListingExecutionContext, type PreparedEbayListingSync } from "../../../channels/application/ebay-listing-sync.service";
 import { EbayMarketplaceListingConnector, type EbayObservedOffer } from "../../../channels/listing-connectors/ebay-listing.connector";
 import { ensureEbayListingInventoryReady } from "../../../channels/infrastructure/ebay-listing-inventory-readiness";
 import { readEbayStockLinkGaps } from "../../infrastructure/ebay-publication-readiness.repository";

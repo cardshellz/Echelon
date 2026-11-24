@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planConfirmedPickShipment } from "../../confirmed-pick-shipment";
+import { planConfirmedPickShipment } from "../../application/confirmed-pick-shipment";
 
 const shipment = Object.freeze({ id: 75376, order_id: 208936, product_variant_id: 66,
   from_location_id: 1331, variant_qty_delta: -2, variant_qty_before: 0, variant_qty_after: 0,

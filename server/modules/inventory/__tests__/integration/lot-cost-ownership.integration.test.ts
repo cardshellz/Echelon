@@ -11,11 +11,11 @@ import * as schema from "@shared/schema";
 import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import { applyReturnRestock } from "../../application/return-restock.use-case";
 import { applyCostRevision } from "../../application/apply-cost-revision";
-import { COGSService } from "../../cogs.service";
-import { InventoryLotService } from "../../lots.service";
+import { COGSService } from "../../application/cogs.service";
+import { InventoryLotService } from "../../application/lots.service";
 import { costFingerprint, lockInventoryCostGraph, recordReceiptCostOrigin } from "../../infrastructure/cost-evidence.repository";
 import { readLotCostFollowUps } from "../../infrastructure/lot-cost-follow-up.repository";
-import { createReturnsService } from "../../../orders/returns.service";
+import { createReturnsService } from "../../../orders/application/returns.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "../../../procurement/__tests__/integration/shipment-line-fixture";
 import { installPreOpeningQuantityAuthorityFixture } from "../fixtures/pre-opening-quantity-authority.fixture";
 import { returnCommandResultFor } from "@shared/inventory/return-command";
@@ -37,7 +37,7 @@ vi.mock("../../../../routes/middleware", () => {
   const pass: RequestHandler = (_req, _res, next) => next();
   return { requirePermission: () => pass, requireAuth: pass, requireAssignedSystemRole: () => pass, upload: { single: () => pass } };
 });
-import { registerInventoryRoutes } from "../../inventory.routes";
+import { registerInventoryRoutes } from "../../interfaces/http/inventory.routes";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

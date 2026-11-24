@@ -2,10 +2,10 @@ import { registerSupplierHeaderCostCases } from "./supplier-header-costs.cases";
 import { registerReceiptInvoiceCostCases } from "./receipt-invoice-costs.cases";
 import { registerFreightInvoiceCostCases } from "./freight-invoice-costs.cases";
 import { randomUUID } from "node:crypto";
-import { createReceiptCostRecoveryRepository } from "../../receipt-cost-recovery.repository";
-import { runReceiptCostRecoveryBatch } from "../../receipt-cost-recovery.worker";
-import { receiptCostRecoveryOutcome, recoveryRetryOutcome } from "../../receipt-cost-recovery.domain";
-import { processReceiptCostRequests, type ReceiptCostQueueResult } from "../../receipt-cost-queue.service";
+import { createReceiptCostRecoveryRepository } from "../../infrastructure/receipt-cost-recovery.repository";
+import { runReceiptCostRecoveryBatch } from "../../application/receipt-cost-recovery.worker";
+import { receiptCostRecoveryOutcome, recoveryRetryOutcome } from "../../domain/receipt-cost-recovery.domain";
+import { processReceiptCostRequests, type ReceiptCostQueueResult } from "../../application/receipt-cost-queue.service";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { config } from "dotenv";
@@ -17,13 +17,13 @@ import * as schema from "@shared/schema";
 import { lockInventoryCostGraph } from "../../../inventory/infrastructure/cost-evidence.repository";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { projectPoLineLandedCosts } from "@shared/procurement/po-line-landed-cost";
-import { readPoShipmentCostSummary, readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
+import { readPoShipmentCostSummary, readPoShipmentCosts } from "../../infrastructure/po-shipment-cost-summary.repository";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
-import { shipmentLineVersion } from "../../shipment-line-version";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
+import { shipmentLineVersion } from "../../application/shipment-line-version";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { resetFixtureWithEmptyReceivingCustody } from "./receiving-custody-fixture";
-import { createShipmentCostExceptionService, shipmentExceptionScope } from "../../shipment-cost-exception.service";
+import { createShipmentCostExceptionService, shipmentExceptionScope } from "../../application/shipment-cost-exception.service";
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
 import type { ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
 import { registerShipmentReconciliationCases } from "./shipment-cost-reconciliation.cases";
@@ -37,9 +37,9 @@ import { registerQuantityCorrectionCases } from "./receipt-shipment-quantity-cor
 import { registerShipmentMeasurementCorrectionCases } from "./shipment-measurement-correction.cases";
 import { registerInvoiceCostTaskReviewCases } from "./invoice-cost-task-review.cases";
 import { registerPoAmendmentDependencyCases } from "./po-amendment-dependencies.cases";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
-import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import { readReceiptCostQueue } from "../../infrastructure/receipt-cost-queue-read.repository";
+import { projectReceiptCostQueue } from "../../application/receipt-cost-queue-read.service";
 import { registerHistoricalCostTimestampCases } from "./historical-cost-timestamps.cases";
 import { registerPurchaseCostStatusBatchCases } from "./purchase-cost-status-batch.cases";
 import { registerReceiptConfigurationAuthorityCases } from "./receipt-configuration-authority.cases";
@@ -47,7 +47,7 @@ import { registerCostSourceCompatibilityCases } from "./cost-source-compatibilit
 import { registerInvoiceCorrectionCostCases } from "./invoice-correction-costs.cases";
 import { registerPurchaseTaxCases } from "./purchase-tax.cases";
 import { registerApInvoiceTransitionCases } from "./ap-invoice-transition.cases";
-import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
+import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../application/receiving.service";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -83,15 +83,15 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   let defaultModulePool: pg.Pool | undefined;
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let storage: any;
-  let receiving: import("../../receiving.service").ReceivingService;
-  let receivingWithWarnings: (evaluator: ReceiveWarningEvaluator, reporter: ReceiveWarningReporter) => import("../../receiving.service").ReceivingService;
-  let purchasing: ReturnType<typeof import("../../purchasing.service").createPurchasingService>;
-  let shipment: ReturnType<typeof import("../../shipment-tracking.service").createShipmentTrackingService>;
-  let createShipment: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
-  let costUpdateCommands: ReturnType<typeof import("../../shipment-cost-update.commands").createShipmentCostUpdateCommands>;
+  let receiving: import("../../application/receiving.service").ReceivingService;
+  let receivingWithWarnings: (evaluator: ReceiveWarningEvaluator, reporter: ReceiveWarningReporter) => import("../../application/receiving.service").ReceivingService;
+  let purchasing: ReturnType<typeof import("../../application/purchasing.service").createPurchasingService>;
+  let shipment: ReturnType<typeof import("../../application/shipment-tracking.service").createShipmentTrackingService>;
+  let createShipment: typeof import("../../application/shipment-tracking.service").createShipmentTrackingService;
+  let costUpdateCommands: ReturnType<typeof import("../../application/shipment-cost-update.commands").createShipmentCostUpdateCommands>;
   let inventory: import("../../../inventory/application/inventory.use-cases").InventoryUseCases;
-  let cogs: import("../../../inventory/cogs.service").COGSService;
-  let reconcile: typeof import("../../ap-ledger.service").reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
+  let cogs: import("../../../inventory/application/cogs.service").COGSService;
+  let reconcile: typeof import("../../application/ap-ledger.service").reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
 
   beforeAll(async () => {
     const parsed = new URL(url!);
@@ -155,11 +155,11 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     try {
       const [receivingModule, purchasingModule, shipmentModule, procurementModule, catalogModule,
         inventoryModule, repositoryModule, lotModule, cogsModule, apModule, dbModule] = await Promise.all([
-        import("../../receiving.service"), import("../../purchasing.service"), import("../../shipment-tracking.service"),
-        import("../../procurement.storage"), import("../../../catalog/catalog.storage"),
+        import("../../application/receiving.service"), import("../../application/purchasing.service"), import("../../application/shipment-tracking.service"),
+        import("../../infrastructure/procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
         import("../../../inventory/application/inventory.use-cases"), import("../../../inventory/infrastructure/inventory.repository"),
-        import("../../../inventory/lots.service"), import("../../../inventory/cogs.service"),
-        import("../../ap-ledger.service"), import("../../../../db"),
+        import("../../../inventory/application/lots.service"), import("../../../inventory/application/cogs.service"),
+        import("../../application/ap-ledger.service"), import("../../../../db"),
       ]);
       defaultModulePool = dbModule.pool;
       // Redirect legacy module-global database calls to the SAME disposable SQL pool. This never
@@ -203,7 +203,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       createShipment = shipmentModule.createShipmentTrackingService;
       shipment = createShipment(database, storage, cogs, () => NOW);
       const [{ createShipmentCostUpdateCommands }, { createDrizzleFinancialCommandRepository }] = await Promise.all([
-        import("../../shipment-cost-update.commands"), import("../../../../platform/commands/command-results.repository"),
+        import("../../application/shipment-cost-update.commands"), import("../../../../platform/commands/command-results.repository"),
       ]);
       costUpdateCommands = createShipmentCostUpdateCommands(shipment, createDrizzleFinancialCommandRepository(database), () => NOW);
       receiving = new receivingModule.ReceivingService(database, inventory,
@@ -435,7 +435,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       FROM inventory.inventory_lots ORDER BY id`)).rows[0];
   }
   async function seedConsumedCost() {
-    const { InventoryLotService }=await import("../../../inventory/lots.service");
+    const { InventoryLotService }=await import("../../../inventory/application/lots.service");
     const source=(await pool.query("SELECT product_variant_id,warehouse_location_id FROM inventory.inventory_lots ORDER BY id LIMIT 1")).rows[0];
     await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
       productVariantId:Number(source.product_variant_id),warehouseLocationId:Number(source.warehouse_location_id),qty:1,orderId:1,orderItemId:1,
@@ -561,7 +561,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     // shipment, charge, quantity and finalized allocation untouched.
     await storage.updatePurchaseOrderLine(21, { unitCostCents: 150, unitCostMills: 15000, totalProductCostCents: 30000, lineTotalCents: 32000 });
     expect((await shipment.getAllocationStatus(1)).issues).toEqual(expect.arrayContaining([expect.objectContaining({ code: "stale_allocation_basis" })]));
-    const { recordShipmentCostRevisions } = await import("../../shipment-cost-application.service");
+    const { recordShipmentCostRevisions } = await import("../../application/shipment-cost-application.service");
     const check = await database.transaction((tx) => recordShipmentCostRevisions(tx, 1, actorId, NOW));
     expect(check.revisions[0].contract).toMatchObject({ evidence: "review_required", issue: { code: "LANDED_ALLOCATION_STALE" } });
     await receive();
@@ -578,7 +578,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=0.5,dimension_basis='carton',total_weight_kg=1,chargeable_weight_kg=1 WHERE id=11");
     await shipment.finalizeAllocations(1, actorId);
     await pool.query("UPDATE procurement.inbound_shipments SET allocation_method_default='by_weight' WHERE id=1");
-    const { recordShipmentCostRevisions } = await import("../../shipment-cost-application.service");
+    const { recordShipmentCostRevisions } = await import("../../application/shipment-cost-application.service");
     const stale = await database.transaction((tx) => recordShipmentCostRevisions(tx, 1, actorId, NOW));
     expect(stale.revisions[0].contract.issue?.code).toBe("LANDED_ALLOCATION_STALE");
     // Reading again must not replace the last valid finalization baseline with
@@ -844,7 +844,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   it("conserves a 7-mill input across three one-unit converted output intervals and sold COGS", async () => {
     await receive();
     const root = await lot();
-    const { recordCostRevision } = await import("../../cost-source-revision.repository");
+    const { recordCostRevision } = await import("../../infrastructure/cost-source-revision.repository");
     const { recordLotCostContribution } = await import("../../../inventory/infrastructure/cost-evidence.repository");
     const { applyCostRevision } = await import("../../../inventory/application/apply-cost-revision");
     await pool.query(`INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,qty_received,qty_on_hand,
@@ -909,7 +909,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   }
 
   async function updateShipmentCosts(key = randomUUID()) {
-    const { shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } = await import("../../shipment-cost-update.commands");
+    const { shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } = await import("../../application/shipment-cost-update.commands");
     return costUpdateCommands.execute(1, {}, actorId, {
       ...shipmentCostUpdateScope(1), actorType: "service", actorId: SHIPMENT_COST_UPDATE_PRINCIPAL,
       contractVersion: 1, idempotencyKey: key, requestHash: "b".repeat(64),
@@ -1041,7 +1041,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     transferAndSell: async () => {
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'AMENDMENT-PICK')");
       await inventory.transfer({ productVariantId: 200, fromLocationId: 99, toLocationId: 100, qty: 1, userId: actorId });
-      const { InventoryLotService } = await import("../../../inventory/lots.service");
+      const { InventoryLotService } = await import("../../../inventory/application/lots.service");
       await database.transaction(tx => new InventoryLotService(tx, () => NOW).pickFromLots({ productVariantId: 200,
         warehouseLocationId: 100, qty: 1, orderId: 1, orderItemId: 1 }));
     } });
@@ -1049,7 +1049,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     transferAndSell:async()=>{
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'CORRECTION-PICK')");
       await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
-      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      const {InventoryLotService}=await import("../../../inventory/application/lots.service");
       await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,
         warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
     }});
@@ -1297,7 +1297,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await receive();
     await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'AUDIT-PICK')");
     await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,
       warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
     await approveEvidence(); await shipment.finalizeAllocations(1,actorId); await shipment.pushLandedCostsToLots(1);
@@ -1312,7 +1312,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'AUDIT-PICK')");
     const [{ InventoryUseCases }, { createInventoryMethods }, { InventoryLotService }] = await Promise.all([
       import("../../../inventory/application/inventory.use-cases"),
-      import("../../../inventory/infrastructure/inventory.repository"), import("../../../inventory/lots.service"),
+      import("../../../inventory/infrastructure/inventory.repository"), import("../../../inventory/application/lots.service"),
     ]);
     let signalHeld!: () => void, releaseHeld!: () => void, signalWaitingPid!: (pid: number) => void;
     const held = new Promise<void>((resolveHeld) => { signalHeld = resolveHeld; });
@@ -1366,7 +1366,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect(result.costApplications[0].status).toBe("applied");
     // 100 mills across 200 base pieces allocates 50 to the 2-case receipt;
     // each case can represent 25 mills exactly. A sub-mill source is reviewed below.
-    const { recordCostRevision } = await import("../../cost-source-revision.repository");
+    const { recordCostRevision } = await import("../../infrastructure/cost-source-revision.repository");
     const { applyCostRevision } = await import("../../../inventory/application/apply-cost-revision");
     const beforeReview = await lot();
     await database.transaction(async (tx) => {
@@ -1478,7 +1478,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   });
 
   async function exactPieceLot() {
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     const created=await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).createLot({
       productVariantId:201,warehouseLocationId:99,qty:80_000,unitCostCents:5,unitCostMills:500,costSource:"po",receivedAt:NOW,
     }));
@@ -1488,7 +1488,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   it("preserves a 1,190.72 shipment charge across large partial picks",async()=>{
     const lotId=await exactPieceLot();
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
       productVariantId:201,warehouseLocationId:99,qty:30_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
     }));
@@ -1508,7 +1508,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   it("restores exact cost after a partial unpick and conserves value on repick",async()=>{
     const lotId=await exactPieceLot();
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
       productVariantId:201,warehouseLocationId:99,qty:30_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
     }));
@@ -1526,7 +1526,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   it("serializes competing picks without overlapping exact cost quantities",async()=>{
     const lotId=await exactPieceLot();
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     const pick=()=>database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
       productVariantId:201,warehouseLocationId:99,qty:60_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
     }));
@@ -1560,7 +1560,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   it.each(["shipment","cycle_count"] as const)("conserves exact remaining value after an on-hand %s loss",async(kind)=>{
     const lotId=await exactPieceLot();
     if (kind==="shipment") {
-      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      const {InventoryLotService}=await import("../../../inventory/application/lots.service");
       await database.transaction(async tx=>{
         await lockInventoryCostGraph(tx);
         await new InventoryLotService(tx,()=>NOW).shipFromLots({
@@ -1608,7 +1608,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     transferFirstAndSell: async()=>{
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'RECEIPT-COST-PICK')");
       await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
-      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      const {InventoryLotService}=await import("../../../inventory/application/lots.service");
       await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
     },
     breakFirst: async()=>{
@@ -1651,7 +1651,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     transferAndSell: async () => {
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'CREDIT-PICK')");
       await inventory.transfer({ productVariantId: 200, fromLocationId: 99, toLocationId: 100, qty: 1, userId: actorId });
-      const { InventoryLotService } = await import("../../../inventory/lots.service");
+      const { InventoryLotService } = await import("../../../inventory/application/lots.service");
       await database.transaction(tx => new InventoryLotService(tx, () => NOW).pickFromLots({ productVariantId: 200,
         warehouseLocationId: 100, qty: 1, orderId: 1, orderItemId: 1 }));
     } });

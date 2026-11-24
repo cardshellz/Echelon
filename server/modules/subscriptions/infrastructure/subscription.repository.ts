@@ -17,6 +17,7 @@ import type {
   SubscriptionEvent,
   SubscriptionDashboardStats,
 } from "../domain/subscription.types";
+import { logger } from "../../../platform/observability/logger";
 
 export type SubscriptionDbExecutor = Pick<
   typeof db,
@@ -48,9 +49,7 @@ async function currentMembershipWritesSupported(
 
   const writable = currentMembershipRelationKind === "r" || currentMembershipRelationKind === "p";
   if (!writable && !warnedCurrentMembershipReadonly) {
-    console.warn(
-      `[Membership] member_current_membership writes skipped: relation kind ${currentMembershipRelationKind ?? "missing"} is not a writable table`,
-    );
+    logger.warn("subscriptions.subscription_repository", { message: `[Membership] member_current_membership writes skipped: relation kind ${currentMembershipRelationKind ?? "missing"} is not a writable table` });
     warnedCurrentMembershipReadonly = true;
   }
   return writable;

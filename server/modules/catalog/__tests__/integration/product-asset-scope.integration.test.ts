@@ -9,10 +9,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import { type FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import { createProductAssetScopeService } from "../../product-asset-scope.service";
-import { createCatalogPublicImageUrl } from "../../catalog-public-image";
-import { PgCatalogVariantPublicationPhotoReader } from "../../catalog-publication-images.reader";
-import { ChannelEbayListingPhotoResolver } from "../../../channels/ebay-listing-photos.service";
+import { createProductAssetScopeService } from "../../application/product-asset-scope.service";
+import { createCatalogPublicImageUrl } from "../../domain/catalog-public-image";
+import { PgCatalogVariantPublicationPhotoReader } from "../../infrastructure/catalog-publication-images.reader";
+import { ChannelEbayListingPhotoResolver } from "../../../channels/application/ebay-listing-photos.service";
 import { executeMigrationWithRetry } from "../../../../../migrations/migration-executor";
 
 // Never connect the application singleton to a production DATABASE_URL.

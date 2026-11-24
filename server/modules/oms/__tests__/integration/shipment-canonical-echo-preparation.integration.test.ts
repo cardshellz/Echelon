@@ -1,8 +1,8 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { normalizeChannelFulfillmentIngress } from "../../channel-fulfillment-ingress";
-import type { ChannelFulfillmentIngressRepository } from "../../channel-fulfillment-ingress.repository";
+import { normalizeChannelFulfillmentIngress } from "../../application/channel-fulfillment-ingress";
+import type { ChannelFulfillmentIngressRepository } from "../../infrastructure/channel-fulfillment-ingress.repository";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { channelShipmentRuntimeFixtureSql, channelShipmentRuntimeSeedSql } from "../fixtures/channel-shipment-runtime";
 
@@ -25,7 +25,7 @@ describeDatabase.sequential("canonical shipment echo exact-source PostgreSQL pre
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, channelShipmentRuntimeFixtureSql + `
       ALTER TABLE wms.outbound_shipments ADD COLUMN shipstation_order_key text, ADD COLUMN service_code text;`);
     pool = database.pool;
-    const { createChannelFulfillmentIngressRepository } = await import("../../channel-fulfillment-ingress.repository");
+    const { createChannelFulfillmentIngressRepository } = await import("../../infrastructure/channel-fulfillment-ingress.repository");
     repository = createChannelFulfillmentIngressRepository(drizzle(pool));
   });
   beforeEach(async () => {

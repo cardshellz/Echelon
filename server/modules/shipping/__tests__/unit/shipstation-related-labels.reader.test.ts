@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { createShipStationRelatedLabelReader } from "../../shipstation-related-labels.reader";
+import { createShipStationRelatedLabelReader } from "../../infrastructure/shipstation-related-labels.reader";
 
 const selection = { providerLabelId: "102", providerOrderId: "201", sourceWmsShipmentItemIds: [301] };
 const identity = { providerLabelId: "101", providerOrderId: "201", trackingNumber: "TRACK101" };

@@ -51,6 +51,7 @@ import {
   loadPackingInputs,
   resolveVariantIdsBySku,
 } from "../infrastructure/packing-input.repository";
+import { logger } from "../../../platform/observability/logger";
 
 /** Hard cap so ShipStation internalNotes never balloons past readability. */
 export const PACK_INSTRUCTION_MAX_LENGTH = 200;
@@ -251,23 +252,19 @@ export async function ensurePackPlan(
   try {
     const wmsOrderId = request.wmsOrderId;
     if (!Number.isInteger(wmsOrderId) || wmsOrderId <= 0) {
-      console.warn(
-        `[PackPlan] invalid wmsOrderId ${String(wmsOrderId)}; no plan`,
-      );
+      logger.warn("cartonization.wms_pack_plan_service", { message: `[PackPlan] invalid wmsOrderId ${String(wmsOrderId)}; no plan` });
       return null;
     }
 
     const order = await deps.loadOrder(wmsOrderId);
     if (!order) {
-      console.warn(`[PackPlan] wms order ${wmsOrderId} not found; no plan`);
+      logger.warn("cartonization.wms_pack_plan_service", { message: `[PackPlan] wms order ${wmsOrderId} not found; no plan` });
       return null;
     }
 
     const lines = await deps.loadOrderItems(wmsOrderId);
     if (lines.length === 0) {
-      console.warn(
-        `[PackPlan] wms order ${wmsOrderId} has no shippable items; no plan`,
-      );
+      logger.warn("cartonization.wms_pack_plan_service", { message: `[PackPlan] wms order ${wmsOrderId} has no shippable items; no plan` });
       return null;
     }
 
@@ -284,9 +281,7 @@ export async function ensurePackPlan(
     );
 
     if (order.warehouseId == null) {
-      console.warn(
-        `[PackPlan] order ${wmsOrderId}: fulfillment warehouse is missing; no packaging authority can be resolved`,
-      );
+      logger.warn("cartonization.wms_pack_plan_service", { message: `[PackPlan] order ${wmsOrderId}: fulfillment warehouse is missing; no packaging authority can be resolved` });
       return null;
     }
     const originWarehouseId = order.warehouseId;
@@ -321,10 +316,8 @@ export async function ensurePackPlan(
       // carry synthetic variant ids and zero weights that violate the
       // pack_plan_parcels FK/CHECK constraints, and a guessed plan must never
       // reach pricing or the pack station anyway.
-      console.warn(
-        `[PackPlan] order ${wmsOrderId}: packing incomplete (` +
-          `${[...itemWarnings, ...candidate.warnings].slice(0, 3).join("; ") || "no parcels"}); no plan persisted`,
-      );
+      logger.warn("cartonization.wms_pack_plan_service", { detail: `[PackPlan] order ${wmsOrderId}: packing incomplete (` +
+          `${[...itemWarnings, ...candidate.warnings].slice(0, 3).join("; ") || "no parcels"}); no plan persisted` });
       return null;
     }
 
@@ -361,10 +354,7 @@ export async function ensurePackPlan(
 
     return { plan, parcels, instruction, complete };
   } catch (error) {
-    console.warn(
-      `[PackPlan] ensurePackPlan failed for order ${request.wmsOrderId}:`,
-      error instanceof Error ? error.message : error,
-    );
+    logger.warn("cartonization.wms_pack_plan_service", { message: `[PackPlan] ensurePackPlan failed for order ${request.wmsOrderId}:`, error: error instanceof Error ? error.message : error });
     return null;
   }
 }
@@ -396,11 +386,8 @@ export async function maybeGetPackInstruction(
     return result?.instruction ?? null;
   } catch (error) {
     // ensurePackPlan already never-throws; this is belt-and-suspenders.
-    console.warn(
-      `[PackPlan] pack instruction unavailable for order ${wmsOrderId}` +
-        `${shipmentId != null ? ` (shipment ${shipmentId})` : ""}:`,
-      error instanceof Error ? error.message : error,
-    );
+    logger.warn("cartonization.wms_pack_plan_service", { details: [`[PackPlan] pack instruction unavailable for order ${wmsOrderId}` +
+        `${shipmentId != null ? ` (shipment ${shipmentId})` : ""}:`, error instanceof Error ? error.message : error] });
     return null;
   }
 }

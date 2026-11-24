@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { POSTGRES_TEST_FILES } from "../../../../../scripts/ci/postgres-test-manifest";
-import { createReservationService } from "../../../channels/reservation.service";
+import { createReservationService } from "../../../channels/application/reservation.service";
 import { InventoryUseCases } from "../../../inventory/application/inventory.use-cases";
 import {
   SHORT_CLAIM_CANDIDATE_WINDOW,
@@ -10,7 +10,7 @@ import {
   getShortClaimRefreshDiagnostics,
   refreshShortClaims,
   resetShortClaimRefreshStateForTests,
-} from "../../../oms/oms-flow-reconciliation.service";
+} from "../../../oms/application/oms-flow-reconciliation.service";
 
 function createLedgerBackedInventoryUseCases(initialVariantQty = 20) {
   const level = {
@@ -376,7 +376,7 @@ describe("PLAN-1 — Allocation, Reservation Replacement, Short-Claim Fairness &
 
     it("excludes receiving, staging, and quarantine bins in the short-claim candidate SQL query", () => {
       const source = readFileSync(
-        resolve(process.cwd(), "server/modules/oms/oms-flow-reconciliation.service.ts"),
+        resolve(process.cwd(), "server/modules/oms/application/oms-flow-reconciliation.service.ts"),
         "utf8",
       );
       expect(SHORT_CLAIM_REFRESH_LIMIT).toBe(25);

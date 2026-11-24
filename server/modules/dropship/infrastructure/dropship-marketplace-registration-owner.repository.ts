@@ -8,7 +8,7 @@ import type {
   DropshipRegistrationStoreConnectionRecord,
   DropshipRegistrationVariantRecord,
 } from "../application/dropship-marketplace-registration-owner-reader";
-import { MarketplaceListingRegistrationError } from "../../marketplace-listings/domain/registration-errors";
+import { MarketplaceListingRegistrationError } from "../../marketplace-listings/registration-errors.api";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 
 interface StoreConnectionRow {

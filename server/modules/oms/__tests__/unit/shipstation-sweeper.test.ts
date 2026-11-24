@@ -24,7 +24,7 @@ vi.mock("../../../../db", () => ({
   db: mockDb,
 }));
 
-import { sweepShipStationQueue } from "../../shipstation-sweeper";
+import { sweepShipStationQueue } from "../../application/shipstation-sweeper";
 
 function sqlText(query: any): string {
   const chunks: unknown[] = query?.queryChunks ?? [];
@@ -296,5 +296,126 @@ describe("sweepShipStationQueue", () => {
     expect(allSql).not.toMatch(/SET requires_review = true/);
     expect(allSql).toMatch(/review_reason = 'shipstation_queue_review_required'/);
     expect(allSql).toMatch(/requires_review = false/);
+  });
+});
+
+// #65805: a fraud cancel landed while the push was in flight, so the shipment
+// is cancelled in Echelon with no saved ShipStation id while ShipStation still
+// shows the order awaiting shipment under the shipment's own key.
+describe("sweepShipStationQueue: open orders of cancelled shipments", () => {
+  const orphan = {
+    orderId: 818595428,
+    orderNumber: "#65805",
+    orderKey: "echelon-wms-shp-21186",
+    orderStatus: "awaiting_shipment",
+  };
+
+  function queueFetch(orders: unknown[]) {
+    return vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ page: 1, pages: 1, orders }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ page: 1, pages: 1, orders: [] }) });
+  }
+
+  beforeEach(() => {
+    mockDb.execute.mockReset();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete (globalThis as any).fetch;
+  });
+
+  it("cancels the unlinked order through the shipment instead of re-queuing a doomed push", async () => {
+    mockDb.execute
+      .mockResolvedValueOnce({ rows: [{ shipment_status: "cancelled", warehouse_status: "cancelled", shipstation_order_id: null }] })
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+      .mockResolvedValue({ rows: [] });
+    globalThis.fetch = queueFetch([orphan]) as any;
+    const cancelOrderForShipment = vi.fn(async () => ({ state: "cancelled" }));
+
+    await sweepShipStationQueue("api-key", "api-secret", { cancelOrderForShipment });
+
+    expect(cancelOrderForShipment).toHaveBeenCalledWith(21186);
+    const allSql = mockDb.execute.mock.calls.map(([q]) => sqlText(q)).join("\n");
+    expect(allSql).not.toMatch(/webhook_retry_queue/);
+    expect(allSql).toMatch(/review_reason = 'shipstation_cancel_unverified'/);
+    expect(allSql).not.toMatch(/SET requires_review = true/);
+  });
+
+  it("also cancels when the cancelled shipment's saved id is this order", async () => {
+    mockDb.execute
+      .mockResolvedValueOnce({ rows: [{ shipment_status: "cancelled", warehouse_status: "cancelled", shipstation_order_id: 818595428 }] })
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+      .mockResolvedValue({ rows: [] });
+    globalThis.fetch = queueFetch([orphan]) as any;
+    const cancelOrderForShipment = vi.fn(async () => ({ state: "already_cancelled" }));
+
+    await sweepShipStationQueue("api-key", "api-secret", { cancelOrderForShipment });
+
+    expect(cancelOrderForShipment).toHaveBeenCalledWith(21186);
+  });
+
+  it("never cancels an order another open shipment shares; flags it instead", async () => {
+    mockDb.execute
+      .mockResolvedValueOnce({ rows: [{ shipment_status: "cancelled", warehouse_status: "ready", shipstation_order_id: 818595428 }] })
+      .mockResolvedValueOnce({ rows: [{ n: 1 }] })
+      .mockResolvedValue({ rows: [] });
+    globalThis.fetch = queueFetch([orphan]) as any;
+    const cancelOrderForShipment = vi.fn(async () => ({ state: "cancelled" }));
+
+    await sweepShipStationQueue("api-key", "api-secret", { cancelOrderForShipment });
+
+    expect(cancelOrderForShipment).not.toHaveBeenCalled();
+    const flagSql = sqlText(mockDb.execute.mock.calls[2]![0]);
+    expect(flagSql).toMatch(/requires_review = true/);
+  });
+
+  it("flags for review when ShipStation reports the order already shipped", async () => {
+    mockDb.execute
+      .mockResolvedValueOnce({ rows: [{ shipment_status: "cancelled", warehouse_status: "cancelled", shipstation_order_id: null }] })
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+      .mockResolvedValue({ rows: [] });
+    globalThis.fetch = queueFetch([orphan]) as any;
+
+    await sweepShipStationQueue("api-key", "api-secret", {
+      cancelOrderForShipment: async () => ({ state: "already_shipped" }),
+    });
+
+    const flagSql = sqlText(mockDb.execute.mock.calls[2]![0]);
+    expect(flagSql).toMatch(/requires_review = true/);
+  });
+
+  it("flags for review when the provider cancel throws, and keeps sweeping", async () => {
+    mockDb.execute
+      .mockResolvedValueOnce({ rows: [{ shipment_status: "cancelled", warehouse_status: "cancelled", shipstation_order_id: null }] })
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+      .mockResolvedValue({ rows: [] });
+    const fetchMock = queueFetch([orphan]);
+    globalThis.fetch = fetchMock as any;
+
+    await sweepShipStationQueue("api-key", "api-secret", {
+      cancelOrderForShipment: async () => {
+        throw new Error("ShipStation 503");
+      },
+    });
+
+    expect(sqlText(mockDb.execute.mock.calls[2]![0])).toMatch(/requires_review = true/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves an extra same-key order alone when a different id is saved (possible operator reship)", async () => {
+    mockDb.execute
+      .mockResolvedValueOnce({ rows: [{ shipment_status: "cancelled", warehouse_status: "cancelled", shipstation_order_id: 700000001 }] })
+      .mockResolvedValue({ rows: [] });
+    globalThis.fetch = queueFetch([orphan]) as any;
+    const cancelOrderForShipment = vi.fn(async () => ({ state: "cancelled" }));
+
+    await sweepShipStationQueue("api-key", "api-secret", { cancelOrderForShipment });
+
+    expect(cancelOrderForShipment).not.toHaveBeenCalled();
   });
 });

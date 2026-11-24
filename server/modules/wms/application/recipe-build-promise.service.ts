@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { sql } from "drizzle-orm";
 
-import { setWmsOrderItemHoldState } from "../order-item-commands";
+import { setWmsOrderItemHoldState } from "./order-item-commands";
 import {
   RecipeCapacityError,
   type BuildOrderCompletedContext,
@@ -10,6 +10,7 @@ import {
   type RecipeCapacityService,
   type RecipeDemandPlan,
 } from "../../inventory/work-execution.api";
+import { logger } from "../../../platform/observability/logger";
 
 // Shared with physical reservations so a component cannot be promised to a
 // direct order while the same stock is being committed to a recipe build.
@@ -413,17 +414,7 @@ export class RecipeBuildPromiseService {
         tx as any,
       );
     }
-    console.info(JSON.stringify({
-      event: "recipe_build_demand_created",
-      demandId: Number(demand.id),
-      orderId: input.orderId,
-      orderItemId: input.orderItemId,
-      targetVariantId: input.variantId,
-      directReservedQty: directQty,
-      promisedQty,
-      rootBuildOrderId,
-      buildOrderCount: plan.nodes.length,
-    }));
+    logger.info("recipe_build_demand_created", { event: "recipe_build_demand_created", demandId: Number(demand.id), orderId: input.orderId, orderItemId: input.orderItemId, targetVariantId: input.variantId, directReservedQty: directQty, promisedQty, rootBuildOrderId, buildOrderCount: plan.nodes.length });
     return { reserved: directQty, promised: promisedQty, shortfall: 0 };
   }
 
@@ -505,14 +496,7 @@ export class RecipeBuildPromiseService {
         onHold: false,
       });
     }
-    console.info(JSON.stringify({
-      event: "recipe_build_demand_fulfilled",
-      demandId: Number(demand.id),
-      orderId: Number(demand.order_id),
-      orderItemId: Number(demand.order_item_id),
-      buildOrderId: context.buildOrderId,
-      reservedQty: promisedQty,
-    }));
+    logger.info("recipe_build_demand_fulfilled", { event: "recipe_build_demand_fulfilled", demandId: Number(demand.id), orderId: Number(demand.order_id), orderItemId: Number(demand.order_item_id), buildOrderId: context.buildOrderId, reservedQty: promisedQty });
   }
 
   async cancelOrderDemands(
@@ -614,11 +598,7 @@ export class RecipeBuildPromiseService {
       }
     }
     if (result.failures.length > 0) {
-      console.error(JSON.stringify({
-        event: "recipe_build_cancellation_incomplete",
-        orderId,
-        failures: result.failures,
-      }));
+      logger.error("recipe_build_cancellation_incomplete", { event: "recipe_build_cancellation_incomplete", orderId, failures: result.failures });
     }
     return result;
   }

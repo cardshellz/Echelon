@@ -27,7 +27,7 @@ vi.mock("@shared/schema", () => ({
   vendorInvoices: {},
   vendors: {},
 }));
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
   detectFinancialExceptions: vi.fn(),
 }));
@@ -38,14 +38,14 @@ describe("AP invoice editing boundary validation", () => {
   });
 
   it.each(["scheduled", "returned", "voided", "unknown", null])("rejects record-payment status %s before opening a transaction", async (status) => {
-    const { recordPayment } = await import("../../ap-ledger.service");
+    const { recordPayment } = await import("../../application/ap-ledger.service");
     await expect(recordPayment({ vendorId: 4, paymentDate: new Date("2026-10-13T12:00:00Z"), paymentMethod: "ach", totalAmountCents: 1000, allocations: [], status } as any))
       .rejects.toMatchObject({ statusCode: 400, details: { code: "AP_PAYMENT_STATUS_INVALID" } });
     expect(mocks.db.transaction).not.toHaveBeenCalled();
   });
 
   it("rejects unsupported invoice-create fields before opening a transaction", async () => {
-    const { createInvoice } = await import("../../ap-ledger.service");
+    const { createInvoice } = await import("../../application/ap-ledger.service");
 
     await expect(createInvoice({
       invoiceNumber: "INV-100",
@@ -63,7 +63,7 @@ describe("AP invoice editing boundary validation", () => {
   });
 
   it("rejects fractional invoice money before opening a transaction", async () => {
-    const { createInvoice } = await import("../../ap-ledger.service");
+    const { createInvoice } = await import("../../application/ap-ledger.service");
 
     await expect(createInvoice({
       invoiceNumber: "INV-100",
@@ -78,7 +78,7 @@ describe("AP invoice editing boundary validation", () => {
   });
 
   it("rejects non-USD invoices until an FX authority exists", async () => {
-    const { createInvoice } = await import("../../ap-ledger.service");
+    const { createInvoice } = await import("../../application/ap-ledger.service");
 
     await expect(createInvoice({
       invoiceNumber: "INV-EUR-100",
@@ -97,7 +97,7 @@ describe("AP invoice editing boundary validation", () => {
   });
 
   it("rejects non-USD payments before opening a transaction", async () => {
-    const { recordPayment } = await import("../../ap-ledger.service");
+    const { recordPayment } = await import("../../application/ap-ledger.service");
 
     await expect(recordPayment({
       vendorId: 4,
@@ -119,7 +119,7 @@ describe("AP invoice editing boundary validation", () => {
   });
 
   it("rejects conflicting cent and mill line costs before opening a transaction", async () => {
-    const { addInvoiceLine } = await import("../../ap-ledger.service");
+    const { addInvoiceLine } = await import("../../application/ap-ledger.service");
 
     await expect(addInvoiceLine(12, {
       qtyInvoiced: 5,
@@ -134,7 +134,7 @@ describe("AP invoice editing boundary validation", () => {
   });
 
   it("rejects arbitrary invoice-line patch fields before opening a transaction", async () => {
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
 
     await expect(updateInvoiceLine(33, {
       qtyInvoiced: 5,
@@ -151,7 +151,7 @@ describe("AP invoice editing boundary validation", () => {
   });
 
   it("rejects negative PO allocation money before opening a transaction", async () => {
-    const { linkPoToInvoice } = await import("../../ap-ledger.service");
+    const { linkPoToInvoice } = await import("../../application/ap-ledger.service");
 
     await expect(linkPoToInvoice(12, 55, -1)).rejects.toMatchObject({
       name: "ApLedgerError",

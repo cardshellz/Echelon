@@ -1,10 +1,10 @@
 import { z } from "zod";
 import Decimal from "decimal.js";
 import type { ChannelPackageFacts, ChannelPackageRequirements } from "@shared/catalog/shipping-package";
-import { prepareChannelPackage, type ChannelPackagePlan, type ListingPackageValues } from "../../../marketplace-listings/domain/channel-package";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { prepareChannelPackage, type ChannelPackagePlan, type ListingPackageValues } from "../../../marketplace-listings/channel-package.api";
+import { EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { prepareChannelPublicationWeight } from "../../../marketplace-listings/domain/channel-package-weight";
+import { prepareChannelPublicationWeight } from "../../../marketplace-listings/channel-package-weight.api";
 import type { BuiltInventoryItem } from "./ebay-listing-builder";
 import type { EbayInventoryItem, EbayPackageWeightAndSize } from "./ebay-types";
 import type { EbayNativePackageReader } from "./ebay-native-package.reader";

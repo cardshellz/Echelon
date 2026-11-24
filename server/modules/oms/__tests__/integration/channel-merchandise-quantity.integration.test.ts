@@ -10,7 +10,7 @@ import {
 } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { omsWarehouseCancellationSql, omsWarehouseFinancialStopSql } from "../../order-merchandise-state.sql";
+import { omsWarehouseCancellationSql, omsWarehouseFinancialStopSql } from "../../infrastructure/order-merchandise-state.sql";
 import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,

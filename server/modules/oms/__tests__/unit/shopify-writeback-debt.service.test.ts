@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { resolveShopifyWritebackDebtForOrder } from "../../shopify-writeback-debt.service";
+import { resolveShopifyWritebackDebtForOrder } from "../../application/shopify-writeback-debt.service";
 
 function queryText(query: any): string {
   return (query?.queryChunks ?? [])

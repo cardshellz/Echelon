@@ -2,14 +2,14 @@ import type { Pool } from "pg";
 import { DropshipError } from "../domain/errors";
 import type { DropshipMarketplaceListingPushRequest } from "../application/dropship-marketplace-listing-push-provider";
 import type { DropshipMarketplaceStoreCredentials } from "./dropship-marketplace-credentials";
-import type { EbayDiscoveredPublishedListing } from "../../channels/listing-connectors/ebay-listing.connector";
-import { observeExistingEbayPublication } from "../../channels/ebay-existing-listing-identity";
-import type { MarketplaceListingRegistrationObserver } from "../../marketplace-listings/application/registration-ports";
+import type { EbayDiscoveredPublishedListing } from "../../channels/ebay-listing.connector.api";
+import { observeExistingEbayPublication } from "../../channels/ebay-existing-listing-identity.api";
+import type { MarketplaceListingRegistrationObserver } from "../../marketplace-listings/registration-ports.api";
 import {
   MARKETPLACE_PROVIDER_IDENTITY_SCHEME,
   type MarketplaceObservedListingPublication,
-} from "../../marketplace-listings/domain/listing-registration-plan";
-import type { EbayListingConnectorDraft } from "../../channels/listing-connectors/ebay-listing.connector";
+} from "../../marketplace-listings/listing-registration-plan.api";
+import type { EbayListingConnectorDraft } from "../../channels/ebay-listing.connector.api";
 import { resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-token-owner";
 import { ebayProviderAccountNamespace } from "../../marketplace-listings/ebay-registration.api";
 import {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 
-import { planChannelFulfillmentCommands } from "../../channel-fulfillment-command";
+import { planChannelFulfillmentCommands } from "../../application/channel-fulfillment-command";
 
 type ChannelProvider = "shopify" | "ebay";
 type ShippingProvider = "shipstation" | "internal_shipping_engine";
@@ -420,16 +420,16 @@ describe("shipment and fulfillment hardening target runtime behavior", () => {
     const orchestrationFiles = [
       "server/index.ts",
       "server/routes/oms.routes.ts",
-      "server/modules/oms/shipstation.service.ts",
+      "server/modules/oms/application/shipstation.service.ts",
       ...shipStationSubmodules,
-      "server/modules/oms/webhook-retry.worker.ts",
-      "server/modules/oms/fulfillment-sweeper.scheduler.ts",
-      "server/modules/oms/oms-flow-reconciliation.service.ts",
+      "server/modules/oms/application/webhook-retry.worker.ts",
+      "server/modules/oms/application/fulfillment-sweeper.scheduler.ts",
+      "server/modules/oms/application/oms-flow-reconciliation.service.ts",
       "server/modules/oms/reconcilers/shopify.reconciler.ts",
       "server/modules/oms/reconcilers/ebay.reconciler.ts",
       "server/modules/oms/reconcilers/ebay-fulfillment-stuck-order.scheduler.ts",
-      "server/modules/orders/oms-wms-cancel-reconcile.scheduler.ts",
-      "server/modules/shipping/wms-shipstation-reconcile.scheduler.ts",
+      "server/modules/orders/application/oms-wms-cancel-reconcile.scheduler.ts",
+      "server/modules/shipping/application/wms-shipstation-reconcile.scheduler.ts",
     ];
     const forbiddenCalls = [
       /\.pushShopifyFulfillment\s*\(/,
@@ -451,11 +451,11 @@ describe("shipment and fulfillment hardening target runtime behavior", () => {
     const productionFiles = [
       "server/index.ts",
       "server/services/index.ts",
-      "server/modules/oms/shipstation.service.ts",
+      "server/modules/oms/application/shipstation.service.ts",
       ...shipStationSubmodules,
-      "server/modules/oms/webhook-retry.worker.ts",
-      "server/modules/oms/fulfillment-sweeper.scheduler.ts",
-      "server/modules/oms/oms-flow-reconciliation.service.ts",
+      "server/modules/oms/application/webhook-retry.worker.ts",
+      "server/modules/oms/application/fulfillment-sweeper.scheduler.ts",
+      "server/modules/oms/application/oms-flow-reconciliation.service.ts",
     ];
     const forbiddenServiceLocators = [
       "__channelFulfillmentAuthority",

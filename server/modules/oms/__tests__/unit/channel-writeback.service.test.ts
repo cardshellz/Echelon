@@ -7,7 +7,7 @@ import {
   findChannelWritebackCandidates,
   findDropshipWritebackCandidates,
   getChannelWritebackHealth,
-} from "../../channel-writeback.service";
+} from "../../application/channel-writeback.service";
 
 const dialect = new PgDialect();
 

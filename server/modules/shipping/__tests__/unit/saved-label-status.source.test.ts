@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSavedLabelStatusSource } from "../../saved-label-status.source";
+import { createSavedLabelStatusSource } from "../../application/saved-label-status.source";
 
 const now = new Date("2026-10-30T12:00:00Z");
 const source = {

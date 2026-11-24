@@ -1,7 +1,7 @@
 /**
  * Public runtime service factories, domain helpers, and storage contracts for `server/modules/procurement`.
  */
-import { type IProcurementStorage, procurementMethods } from "./procurement.storage";
+import { type IProcurementStorage, procurementMethods } from "./infrastructure/procurement.storage";
 
 export { type IProcurementStorage, procurementMethods };
 export const procurementStorage: IProcurementStorage = procurementMethods;
@@ -10,7 +10,7 @@ export {
   createPurchasingService,
   type PurchasingError,
   type PurchasingService,
-} from "./purchasing.service";
+} from "./application/purchasing.service";
 export {
   PoLifecycleError,
   buildFinancialTransitionChange,
@@ -18,52 +18,52 @@ export {
   getAllowedFinancialTransitions,
   getAllowedLegacyTransitions,
   getAllowedPhysicalTransitions,
-} from "./purchase-order-lifecycle.service";
+} from "./application/purchase-order-lifecycle.service";
 export {
   findOpenPoLineByProduct,
   reconcilePurchaseOrderReceipt,
   type ReceiptReconciliationResult,
   type ReceivingReconciliationLine,
-} from "./purchase-order-receipt-reconciliation.service";
+} from "./application/purchase-order-receipt-reconciliation.service";
 export {
   buildPoCloseChange,
   buildPoCloseShortChange,
   buildPoCloseShortLinePatch,
-} from "./purchase-order-close.service";
+} from "./application/purchase-order-close.service";
 export {
   buildPoReconciliationLines,
   reconcileLinkedPurchaseOrder,
   type ReceivingOrchestrationPurchasing,
-} from "./receiving-orchestration.service";
+} from "./application/receiving-orchestration.service";
 export {
   ReceivingError,
   ReceivingService,
   createReceivingService,
-} from "./receiving.service";
+} from "./application/receiving.service";
 export {
   ReceiptReversalService,
   createReceiptReversalService,
-} from "./receipt-reversal.service";
+} from "./application/receipt-reversal.service";
 export {
   ReceiveValidationService,
   createReceiveValidationService,
   evaluateReceiveWarnings,
-} from "./receive-validation.service";
-export { CostReportingRepository } from "./cost-reporting.repository";
-export { createCostReportingService } from "./cost-reporting.service";
+} from "./application/receive-validation.service";
+export { CostReportingRepository } from "./infrastructure/cost-reporting.repository";
+export { createCostReportingService } from "./application/cost-reporting.service";
 export {
   VendorService,
   VendorServiceError,
   createVendorService,
-} from "./vendor.service";
+} from "./application/vendor.service";
 export {
   createShipmentTrackingService,
   type ShipmentTrackingError,
   type ShipmentTrackingService,
-} from "./shipment-tracking.service";
+} from "./application/shipment-tracking.service";
 export {
   recordReceivingReconciliationFailure,
   recordReceiveValidationWarnings,
-} from "./po-exceptions.service";
-export { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "./ap-ledger.service";
-export { renderPoHtml } from "./po-document";
+} from "./application/po-exceptions.service";
+export { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "./application/ap-ledger.service";
+export { renderPoHtml } from "./application/po-document";

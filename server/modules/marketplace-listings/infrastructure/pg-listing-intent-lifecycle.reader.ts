@@ -5,12 +5,12 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   readChannelStockSelection,
   readOutstandingEbayListingWork,
-} from "../../channels/channel-stock-selection";
-import { readDropshipListingStockSelection } from "../../dropship/stock-publication-selection";
+} from "../../channels/channel-stock-selection.api";
+import { readDropshipListingStockSelection } from "../../dropship/stock-publication-selection.api";
 import {
   readStockClearingEvidence,
   fenceStockClearingEvidence,
-} from "../../inventory-planning/stock-clearing-evidence";
+} from "../../inventory-planning/stock-clearing-evidence.api";
 import { readListingMemberRetirements } from "./pg-listing-member-lifecycle.repository";
 import { managedTargets } from "./pg-listing-intent-propagation.repository";
 import type { ListingIntentLifecycleReader } from "../application/listing-intent-lifecycle.service";

@@ -5,14 +5,14 @@ import * as schema from "@shared/schema";
 import { claimPlanSchema } from "@shared/types/inventory-availability-planner";
 
 import { pool as defaultPool } from "../../../db";
-import { createReservationService } from "../../channels/reservation.service";
+import { createReservationService } from "../../channels/reservation.service.api";
 import type {
   ChannelSync,
   DrizzleDb,
   RecipeBuildPromise,
   ReservationServiceContract,
 } from "../reservation-authority.api";
-import { createLegacyInventoryAtpService } from "../../inventory/atp.service";
+import { createLegacyInventoryAtpService } from "../../inventory/atp.service.api";
 import { InventoryAvailabilityClaimService } from "../application/inventory-availability-claim.service";
 import {
   AuthorityAwareReservationService,
@@ -394,7 +394,7 @@ function routingConcurrency(connectionPool: ClientPool): number {
 export function createAuthorityAwareReservationService(
   dependencies: {
     db: DrizzleDb;
-    inventoryCore: import("../../channels/reservation.service").ReservationInventoryCore;
+    inventoryCore: import("../../channels/reservation.service.api").ReservationInventoryCore;
     channelSync: ChannelSync;
     recipeBuildPromise?: RecipeBuildPromise;
     canonical: InventoryAvailabilityClaimService;
@@ -407,7 +407,7 @@ export function createAuthorityAwareReservationService(
 export function createAuthorityAwareReservationRuntime(
   dependencies: {
     db: DrizzleDb;
-    inventoryCore: import("../../channels/reservation.service").ReservationInventoryCore;
+    inventoryCore: import("../../channels/reservation.service.api").ReservationInventoryCore;
     channelSync: ChannelSync;
     recipeBuildPromise?: RecipeBuildPromise;
     canonical: InventoryAvailabilityClaimService;

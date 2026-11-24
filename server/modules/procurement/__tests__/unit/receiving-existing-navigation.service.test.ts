@@ -1,6 +1,6 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
-import { createPurchasingService } from "../../purchasing.service";
+import { createPurchasingService } from "../../application/purchasing.service";
 
 type Existing = "none" | "active" | "empty" | "zero" | "closed";
 const dialect = new PgDialect();

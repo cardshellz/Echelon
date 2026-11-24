@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
 import type { QuantityPublicationAdmission } from "../../../inventory-planning/application/quantity-publication-admission.port";
 
 /** Explicit admitted legacy authority for HTTP-only tests. Never used by a

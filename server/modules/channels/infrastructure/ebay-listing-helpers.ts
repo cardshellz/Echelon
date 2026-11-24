@@ -1,6 +1,6 @@
 import { db } from "../../../db";
-import { resolveChannelListingPrice } from "../channel-pricing-resolver";
-export { applyPricingRule } from "../channel-pricing-resolver";
+import { resolveChannelListingPrice } from "../application/channel-pricing-resolver";
+export { applyPricingRule } from "../application/channel-pricing-resolver";
 type EchelonDb = typeof db;
 
 // ---------------------------------------------------------------------------

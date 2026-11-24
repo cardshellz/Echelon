@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { planShopifyLabelCancellation, type ShopifyLabelPackage } from "../../shopify-label-lifecycle.domain";
-import { cancelExactShopifyLabelPackage, readShopifyLabelPackages } from "../../shopify-label-lifecycle.client";
-import { createShopifyLabelLifecycleService } from "../../shopify-label-lifecycle.service";
-import type { ShopifyLabelVoidWork } from "../../shopify-label-lifecycle.repository";
-import { ChannelFulfillmentProviderError } from "../../../channels/channel-fulfillment-provider.error";
-import { shopifyOrderFulfillmentLockId } from "../../shopify-fulfillment-lock";
+import { planShopifyLabelCancellation, type ShopifyLabelPackage } from "../../domain/shopify-label-lifecycle.domain";
+import { cancelExactShopifyLabelPackage, readShopifyLabelPackages } from "../../infrastructure/shopify-label-lifecycle.client";
+import { createShopifyLabelLifecycleService } from "../../application/shopify-label-lifecycle.service";
+import type { ShopifyLabelVoidWork } from "../../infrastructure/shopify-label-lifecycle.repository";
+import { ChannelFulfillmentProviderError } from "../../../channels/domain/channel-fulfillment-provider.error";
+import { shopifyOrderFulfillmentLockId } from "../../application/shopify-fulfillment-lock";
 
 const lineId = 'gid://shopify/LineItem/1';
 const fulfillmentId = 'gid://shopify/Fulfillment/5';

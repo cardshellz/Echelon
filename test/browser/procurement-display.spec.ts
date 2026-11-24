@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { generatePurchasingRecommendations } from "../../server/modules/procurement/purchasing-recommendation.engine";
+import { generatePurchasingRecommendations } from "../../server/modules/procurement/application/purchasing-recommendation.engine";
 import type { PurchaseWorkspace } from "../../shared/procurement/purchase-workspace";
 import { installFixtures, po } from "./procurement-fixtures";
 

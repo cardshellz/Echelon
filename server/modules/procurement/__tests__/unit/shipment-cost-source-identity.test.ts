@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
-import { retainEquivalentShipmentCostSource, type ShipmentCostProposal } from "../../shipment-cost-source-identity";
+import { retainEquivalentShipmentCostSource, type ShipmentCostProposal } from "../../application/shipment-cost-source-identity";
 
 function proposal(withNullLinks = false): ShipmentCostProposal {
   const invoice = { id: 8, vendor_invoice_id: 9, freight_cost_id: 7, line_total_cents: 5000,

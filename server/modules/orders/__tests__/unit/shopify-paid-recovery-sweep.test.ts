@@ -4,12 +4,13 @@ import { paidReplayFixture } from "../../../oms/__tests__/fixtures/shopify-paid-
 
 const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), readiness: vi.fn(), replay: vi.fn(), sync: vi.fn(), gap: vi.fn(), wmsRetry: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: ports }));
-vi.mock("../../../oms/shopify-bridge", () => ({ bridgeShopifyOrderToOms: vi.fn() }));
-vi.mock("../../../oms/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
-vi.mock("../../../oms/shopify-paid-event-replay", () => ({ queueOmsPaidEventReplay: ports.replay }));
+vi.mock("../../../oms/application/shopify-bridge", () => ({ bridgeShopifyOrderToOms: vi.fn() }));
+vi.mock("../../../oms/application/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
+vi.mock("../../../oms/application/shopify-paid-event-replay", () => ({ queueOmsPaidEventReplay: ports.replay }));
 vi.mock("../../../oms/infrastructure/channel-authority-gap.repository", () => ({ recordChannelAuthorityGap: ports.gap }));
 vi.mock("../../../oms/webhook-retry.api", () => ({ enqueueOmsWmsSyncRetry: ports.wmsRetry }));
-import { initReconciliation, runReconciliationNow } from "../../shopify-order-reconciliation";
+import { initReconciliation, runReconciliationNow } from "../../application/shopify-order-reconciliation";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 const dialect = new PgDialect();
 let providerOrder: Record<string, unknown>;
@@ -43,9 +44,9 @@ beforeEach(() => {
     json: async () => String(url).includes("/orders.json") ? { orders: [] } : { order: providerOrder },
   })));
   initReconciliation({} as never, { syncOmsOrderToWms: ports.sync } as never);
-  vi.spyOn(console, "log").mockImplementation(() => { });
-  vi.spyOn(console, "warn").mockImplementation(() => { });
-  vi.spyOn(console, "error").mockImplementation(() => { });
+  spyLoggerJson("log");
+  spyLoggerJson("warn");
+  spyLoggerJson("error");
 });
 afterEach(() => { initReconciliation(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -114,6 +115,6 @@ describe("bounded Shopify paid recovery sweep", () => {
   it("reports review cases without granting synthetic payment authority", async () => {
     ports.replay.mockResolvedValueOnce({ changed: false, reason: "line_identity_mismatch" });
     expect(await runReconciliationNow()).toMatchObject({ paidReplaysQueued: 0, failed: 0 });
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("line_identity_mismatch"));
+    expect(getLoggerJsonSpy("warn")).toHaveBeenCalledWith(expect.stringContaining("line_identity_mismatch"));
   });
 });

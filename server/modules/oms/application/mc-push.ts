@@ -1,0 +1,218 @@
+/**
+ * Push order events from Echelon OMS to Mission Control.
+ * Fire-and-forget — non-blocking, non-fatal if MC is down.
+ */
+
+import { eq } from "drizzle-orm";
+import { db } from "../../../db";
+import { omsOrders, omsOrderLines } from "@shared/schema";
+import { channels } from "@shared/schema";
+import { extractMarketingConsent } from "./marketing-consent";
+import { readStorefrontAcquisition } from "./archon-acquisition-contract";
+import { logger } from "../../../platform/observability/logger";
+import { extractShopifyDiscountEvidence } from "./archon-discount-evidence";
+
+const MC_URL = process.env.MC_WEBHOOK_URL || "https://archon-os-20aa790cd70d.herokuapp.com";
+
+/**
+ * Shared secret Archon checks on every order event (x-webhook-secret header).
+ *
+ * MC_WEBHOOK_SECRET is required and has deliberately no built-in default: a
+ * value written in the source protects nothing. Read on each use; an empty
+ * result means "not configured", and then nothing is sent.
+ */
+function missionControlSecret(): string {
+  const value = process.env.MC_WEBHOOK_SECRET;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+const LOG_PREFIX = "[MC Push]";
+
+export interface ChannelDiscountCode {
+  code: string;
+  amount: string;
+  type: string;
+}
+
+/**
+ * Discount codes live only in the original channel payload (Shopify format:
+ * [{code, amount, type}] with amount as a dollar string — MC consumes it
+ * as-is). Exported so the backfill script can decide which historical orders
+ * are worth re-pushing without duplicating the shape knowledge.
+ *
+ * Pure: no IO, no mutation of the input.
+ */
+export function extractDiscountCodes(rawPayload: unknown): ChannelDiscountCode[] {
+  const raw = (rawPayload as any)?.discount_codes;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((dc: any) => dc && typeof dc.code === "string" && dc.code.trim() !== "")
+    .map((dc: any) => ({ code: dc.code, amount: dc.amount, type: dc.type }));
+}
+
+export async function pushToMissionControl(orderId: number, eventType: string): Promise<void> {
+  try {
+    const secret = missionControlSecret();
+    if (!secret) {
+      // Fail closed: Archon refuses an event without the secret, so nothing
+      // is read or sent. Logged at ERROR because this sender does not retry.
+      logger.error("oms.archon_push", {
+        outcome: "not_sent",
+        error_code: "ARCHON_SECRET_MISSING",
+        error_class: "fatal",
+        oms_order_id: orderId,
+        event_type: eventType,
+      });
+      return;
+    }
+
+    // 1. Read the oms_orders row
+    const [order] = await db
+      .select()
+      .from(omsOrders)
+      .where(eq(omsOrders.id, orderId))
+      .limit(1);
+
+    if (!order) {
+      logger.warn("oms.mc_push", { message: `${LOG_PREFIX} Order ${orderId} not found, skipping push` });
+      return;
+    }
+
+    // 2. Look up channel name
+    let channelName = "Unknown";
+    let channelProvider: string | undefined;
+    try {
+      const [channel] = await db
+        .select({ name: channels.name, provider: channels.provider })
+        .from(channels)
+        .where(eq(channels.id, order.channelId))
+        .limit(1);
+      if (channel) {
+        channelName = channel.name;
+        channelProvider = channel.provider;
+      }
+    } catch (e: any) {
+      logger.warn("oms.mc_push", { message: `${LOG_PREFIX} Could not look up channel ${order.channelId}: ${e.message}` });
+    }
+
+    // 3. Read line items
+    const lines = await db
+      .select()
+      .from(omsOrderLines)
+      .where(eq(omsOrderLines.orderId, orderId));
+
+    // product_id must be the CHANNEL's product id (externalProductId), not our
+    // internal variant id — MC's recommendations mining joins on Shopify product ids.
+    // price_cents is the pre-discount unit price (mirrors Shopify line_items[].price).
+    const lineItems = lines.map((l) => ({
+      sku: l.sku || null,
+      title: l.title || null,
+      variant_title: l.variantTitle || null,
+      quantity: l.quantity,
+      price_cents: l.retailPriceCents || 0,
+      discount_cents: l.totalDiscountCents || 0,
+      gift_card: l.giftCard ?? false,
+      requires_shipping: l.requiresShipping ?? true,
+      fulfillment_status: l.fulfillmentStatus || null,
+      product_id: l.externalProductId ? Number(l.externalProductId) || null : null,
+    }));
+
+    // tags column holds a JSON array string; MC stores Shopify's comma-separated form
+    let tags: string | null = null;
+    if (order.tags) {
+      try {
+        const parsed = JSON.parse(order.tags);
+        tags = Array.isArray(parsed) ? parsed.join(", ") : String(order.tags);
+      } catch {
+        tags = String(order.tags);
+      }
+    }
+
+    const codes = extractDiscountCodes(order.rawPayload);
+    const discountCodes = codes.length > 0 ? codes : null;
+
+    // Marketing consent lives only in the raw checkout payload — no
+    // oms_orders column carries it. MC needs it to decide whether a
+    // purchaser is mailable; without it every buyer lands in the CRM as an
+    // unmailable profile. Pass-through only: we extract, MC decides.
+    const marketingConsent = extractMarketingConsent(order.rawPayload);
+    // Attribution is optional evidence, not a prerequisite for delivering financial orders.
+    // Preserve original interaction timestamps; Archon owns classification and deduplication.
+    const acquisition = readStorefrontAcquisition(order.rawPayload ?? {});
+    if (acquisition.status === "invalid") {
+      logger.error("oms.archon_acquisition.forward", {
+        outcome: "tracking_requires_review",
+        error_code: acquisition.code,
+        error_class: "permanent",
+        oms_order_id: orderId,
+        before: null,
+        after: { forwarded_interactions: 0 },
+      });
+    }
+
+    // 4. Build payload
+    const payload = {
+      event: eventType,
+      order: {
+        external_order_id: order.externalOrderId,
+        order_number: order.externalOrderNumber || null,
+        channel_id: order.channelId,
+        channel_name: channelName,
+        customer_name: order.customerName || null,
+        customer_email: order.customerEmail || null,
+        customer_phone: order.customerPhone || null,
+        // Channel-scoped customer id (Shopify customer id for Shopify orders)
+        // — MC uses it as a CRM identity so a buyer who changes email still
+        // resolves to one profile.
+        external_customer_id: order.externalCustomerId || null,
+        marketing_consent: marketingConsent,
+        marketing_attribution: acquisition.touches,
+        total_cents: order.totalCents,
+        subtotal_cents: order.subtotalCents,
+        shipping_cents: order.shippingCents,
+        tax_cents: order.taxCents,
+        discount_cents: order.discountCents,
+        discount_evidence:
+          channelProvider === "shopify"
+            ? extractShopifyDiscountEvidence(order.rawPayload, order.currency)
+            : undefined,
+        refund_cents: order.refundAmountCents || 0,
+        discount_codes: discountCodes,
+        tags,
+        currency: order.currency || "USD",
+        financial_status: order.financialStatus || "paid",
+        fulfillment_status: order.fulfillmentStatus || "unfulfilled",
+        status: order.status,
+        ordered_at: order.orderedAt?.toISOString() || null,
+        line_items: lineItems,
+        tracking_number: order.trackingNumber || null,
+        tracking_carrier: order.trackingCarrier || null,
+      },
+    };
+
+    // 5. POST to MC — fire-and-forget
+    const resp = await fetch(`${MC_URL}/api/orders/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-webhook-secret": secret,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      logger.info("oms.mc_push", { message: `${LOG_PREFIX} ✅ Pushed ${eventType} for order ${orderId} to MC (action: ${(body as any).action || "ok"})` });
+    } else {
+      logger.warn("oms.mc_push", { message: `${LOG_PREFIX} ⚠️ MC returned ${resp.status} for ${eventType} order ${orderId}` });
+    }
+  } catch (err: any) {
+    logger.error("oms.mc_push", { message: `${LOG_PREFIX} ❌ Failed to push ${eventType} for order ${orderId}: ${err.message}` });
+    // Never throw — fire-and-forget
+  }
+}
+
+/** Shared by the durable projection worker and the existing webhook sender. */
+export function missionControlConnection() {
+  return { url: MC_URL, secret: missionControlSecret() };
+}

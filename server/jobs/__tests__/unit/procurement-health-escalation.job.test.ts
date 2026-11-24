@@ -34,11 +34,11 @@ vi.mock("../../../modules/procurement", () => ({
   createShipmentTrackingService: () => mocks.shipmentTracking,
 }));
 
-vi.mock("../../../modules/procurement/procurement-health-summary.service", () => ({
+vi.mock("../../../modules/procurement/application/procurement-health-summary.service", () => ({
   loadProcurementHealthSummary: mocks.loadProcurementHealthSummary,
 }));
 
-vi.mock("../../../modules/procurement/procurement-health-escalation.service", () => ({
+vi.mock("../../../modules/procurement/application/procurement-health-escalation.service", () => ({
   sendProcurementHealthCriticalEscalation: mocks.sendProcurementHealthCriticalEscalation,
 }));
 

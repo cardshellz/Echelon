@@ -41,8 +41,9 @@ import {
   SHOPIFY_CANCEL_USER_ERRORS,
   SHOPIFY_CANCEL_NETWORK_ERROR,
   SHOPIFY_PUSH_CLIENT_NOT_SET,
-} from "../../fulfillment-push.service";
+} from "../../application/fulfillment-push.service";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // ─── Fixtures ────────────────────────────────────────────────────────
 
@@ -145,7 +146,7 @@ describe("cancelShopifyFulfillment :: happy path", () => {
   });
 
   it("logs a success line that includes the returned fulfillment status", async () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const logSpy = spyLoggerJson("log");
     const svc = createFulfillmentPushService(db as any, null);
     svc.setShopifyClient(client);
 

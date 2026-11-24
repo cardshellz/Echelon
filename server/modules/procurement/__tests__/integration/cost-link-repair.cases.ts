@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
 import type pg from "pg";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
 import {
   createReceiptShipmentQuantityCorrectionService,
   quantityCorrectionScope,
-} from "../../receipt-shipment-quantity-correction.service";
+} from "../../application/receipt-shipment-quantity-correction.service";
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
 import {
   readUnresolvedCostQuantities,
@@ -15,7 +15,7 @@ import {
 } from "../../../inventory/infrastructure/cost-quantity.repository";
 import { sql } from "drizzle-orm";
 import { costForQuantityIntervals } from "../../../inventory/domain/cost-quantity-intervals";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
 
 export function registerCostLinkRepairCases(fixture: {
   pool: () => pg.Pool;

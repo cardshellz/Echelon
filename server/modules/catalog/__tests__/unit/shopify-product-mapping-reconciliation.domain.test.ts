@@ -12,7 +12,7 @@ import {
   shopifyOwnershipRepairRequestHash,
   type ShopifyMappingLocalProduct,
   type ShopifyRemoteProductSnapshot,
-} from "../../shopify-product-mapping-reconciliation.domain";
+} from "../../domain/shopify-product-mapping-reconciliation.domain";
 
 describe("normalizeShopifyProductReference", () => {
   it("accepts numeric IDs and exact Product GIDs", () => {

@@ -4,7 +4,8 @@ import {
   providerHttpReadFailureKind,
   type ChannelProviderReadDiagnostic,
 } from "@shared/channel-provider-read";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
+import { logger } from "../../../../platform/observability/logger";
 
 const MAX_NATIVE_RESPONSE_BYTES = 256_000;
 export interface EbayNativeListingRead {
@@ -119,12 +120,7 @@ export async function readEbayNativeListing(
     try {
       await reader.cancel();
     } catch {
-      console.warn(
-        JSON.stringify({
-          event: "ebay_native_read_cleanup_failed",
-          resource: input.resource,
-        }),
-      );
+      logger.warn("ebay_native_read_cleanup_failed", { event: "ebay_native_read_cleanup_failed", resource: input.resource });
     } finally {
       reader.releaseLock();
     }

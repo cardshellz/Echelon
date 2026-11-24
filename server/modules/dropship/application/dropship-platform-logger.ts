@@ -1,6 +1,4 @@
 import {
-  formatStructuredLogLine,
-  isStructuredConsoleBridgeInstalled,
   logger as platformLogger,
   type LogLevel,
 } from "../../../platform/observability";
@@ -12,32 +10,14 @@ function emitDropshipPlatformEvent(
   outcome: string,
   event: DropshipLogEvent,
 ): void {
-  const payload = {
+  platformLogger[level](action, {
     outcome,
     code: event.code,
     event_code: event.code,
     ...(level === "error" ? { error_code: event.code } : {}),
     message: event.message,
     context: event.context ?? {},
-  };
-
-  if (isStructuredConsoleBridgeInstalled()) {
-    platformLogger[level](action, payload);
-    return;
-  }
-
-  const json = formatStructuredLogLine({
-    level,
-    action,
-    ...payload,
   });
-  if (level === "error") {
-    console.error(json);
-  } else if (level === "warn") {
-    console.warn(json);
-  } else {
-    console.info(json);
-  }
 }
 
 /**

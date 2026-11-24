@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { proveEbayStockOnlyEffects } from "../../adapters/ebay/ebay-recovery-effects";
-import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
+import type { EbayListingSyncIdentity } from "../../domain/ebay-listing-sync.domain";
 import type { RetainedPublicationEffectEvidence } from "../../../inventory-planning/application/ebay-publication-reconciliation.service";
 
 const identity: EbayListingSyncIdentity = { channelId: 67, connectionId: 9, productId: 20, accountId: "seller", marketplaceId: "EBAY_US",

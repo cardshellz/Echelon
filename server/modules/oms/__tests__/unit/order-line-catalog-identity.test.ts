@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeShopifyLineItems } from "../../shopify-line-item-normalizer";
+import { normalizeShopifyLineItems } from "../../application/shopify-line-item-normalizer";
 import {
   selectOrderLineCatalogIdentity, selectWmsCatalogSku, normalizeShopifyLineVariantId,
   type CatalogIdentityCandidate,

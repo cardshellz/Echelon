@@ -5,10 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vendorInvoiceAttachments } from "@shared/schema";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import { createApInvoiceReplacementCommands } from "../../ap-invoice-replacement.commands";
-import { readInvoiceReplacementDetail } from "../../ap-invoice-replacement.service";
-import { recordShipmentCostRevisions } from "../../shipment-cost-application.service";
-import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
+import { createApInvoiceReplacementCommands } from "../../application/ap-invoice-replacement.commands";
+import { readInvoiceReplacementDetail } from "../../application/ap-invoice-replacement.service";
+import { recordShipmentCostRevisions } from "../../application/shipment-cost-application.service";
+import { readPoShipmentCosts } from "../../infrastructure/po-shipment-cost-summary.repository";
 import { fixtureTable } from "./shipment-line-fixture";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_ACTOR, FLOW_AT, type FlowCostHarness } from "./procurement-flow-cost.fixture";
 

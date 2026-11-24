@@ -25,7 +25,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createFulfillmentPushService, __test__ } from "../../fulfillment-push.service";
+import { createFulfillmentPushService, __test__ } from "../../application/fulfillment-push.service";
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 

@@ -3,29 +3,29 @@ export {
   recordOmsReconcileReviewEvent,
   type OmsService,
   type OrderData,
-} from "./oms.service";
-export { WmsSyncService, resolveAssignedBinLocation } from "./wms-sync.service";
+} from "./application/oms.service";
+export { WmsSyncService, resolveAssignedBinLocation } from "./application/wms-sync.service";
 export {
   reassignOrderLineVariant,
   OrderLineVariantReassignmentError,
-} from "./order-line-variant-reassignment";
+} from "./application/order-line-variant-reassignment";
 export {
   ChannelOrderObservationError,
   channelOrderObservationSchema,
   type ChannelOrderObservation,
   type ChannelOrderObservationWriter,
-} from "./channel-order-observation";
-export { PostgresChannelOrderObservationWriter } from "./channel-order-observation.repository";
+} from "./application/channel-order-observation";
+export { PostgresChannelOrderObservationWriter } from "./infrastructure/channel-order-observation.repository";
 export {
   startEbayOrderPolling,
   setWmsServices,
   setWmsSyncService,
   createEbayOrderWebhookHandler,
   reingestEbayOrder,
-} from "./ebay-order-ingestion";
-export { backfillMemberTiers } from "./member-tier-enrichment";
-export { registerFinanceAnalyticsRoutes } from "./finance-analytics.routes";
-export { readOmsCutoverReconstruction } from "./inventory-cutover-reconstruction.reader";
+} from "./application/ebay-order-ingestion";
+export { backfillMemberTiers } from "./application/member-tier-enrichment";
+export { registerFinanceAnalyticsRoutes } from "./interfaces/http/finance-analytics.routes";
+export { readOmsCutoverReconstruction } from "./infrastructure/inventory-cutover-reconstruction.reader";
 export {
   EBAY_FULFILLMENT_RECONCILE_LOCK_ID,
   startEbayFulfillmentStuckOrderScheduler,
@@ -40,7 +40,7 @@ export {
   type IngestAndRouteInput,
   type IngestAndRouteResult,
   type WmsOrderSyncPort,
-} from "./channel-order-ingest-and-route";
+} from "./application/channel-order-ingest-and-route";
 export {
   createShopifyOrderIntakeAdapter,
   extractShopifyRisk,

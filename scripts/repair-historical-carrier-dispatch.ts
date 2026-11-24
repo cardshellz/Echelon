@@ -48,7 +48,8 @@ export function usage(): string {
     "aggregate_package_identity_conflict, immutable_command_request_conflict,",
     "legacy_outbound_shipment_identity_conflict,",
     "confirmed_historical_inventory_gap, publication_revision_order,",
-    "label_time_package_replay, split_sibling_relabel_misread.",
+    "label_time_package_replay, split_sibling_relabel_misread,",
+    "transient_lock_not_available.",
     "Historical inventory-gap repair always requires --command-id.",
     "Unresolved package-resolution reviews are intentionally excluded.",
     "",
@@ -162,6 +163,7 @@ const REPAIR_COHORTS = new Set<HistoricalCarrierDispatchRepairCohort>([
   "publication_revision_order",
   "label_time_package_replay",
   "split_sibling_relabel_misread",
+  "transient_lock_not_available",
 ]);
 
 function cohortFlag(argv: string[]): HistoricalCarrierDispatchRepairCohort | null {

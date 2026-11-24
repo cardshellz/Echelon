@@ -10,14 +10,14 @@
  */
 
 // Storage
-export { ChannelIdentityService } from "./channel-identity.service";
-export { ChannelIdentityError } from "./channel-identity.domain";
-export type { ChannelItemIdentity } from "./channel-identity.domain";
-export { type IChannelStorage, channelMethods } from "./channels.storage";
-export { type IChannelCatalogStorage } from "./channel-catalog.storage";
+export { ChannelIdentityService } from "./application/channel-identity.service";
+export { ChannelIdentityError } from "./domain/channel-identity.domain";
+export type { ChannelItemIdentity } from "./domain/channel-identity.domain";
+export { type IChannelStorage, channelMethods } from "./infrastructure/channels.storage";
+export { type IChannelCatalogStorage } from "./infrastructure/channel-catalog.storage";
 
-import { type IChannelStorage, channelMethods } from "./channels.storage";
-import { type IChannelCatalogStorage, channelCatalogMethods } from "./channel-catalog.storage";
+import { type IChannelStorage, channelMethods } from "./infrastructure/channels.storage";
+import { type IChannelCatalogStorage, channelCatalogMethods } from "./infrastructure/channel-catalog.storage";
 
 export type ChannelsModuleStorage = IChannelStorage & IChannelCatalogStorage;
 export const channelsStorage: ChannelsModuleStorage = {
@@ -32,16 +32,16 @@ export * from "./shopify-identity.api";
 export * from "./ebay-connector.api";
 
 // Service types
-export type { SyncResult, ChannelSyncServiceContract } from "./sync.service";
-export type { ReservationResult, ReservationInventoryCore } from "./reservation.service";
-export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "./product-push.service";
+export type { SyncResult, ChannelSyncServiceContract } from "./application/sync.service";
+export type { ReservationResult, ReservationInventoryCore } from "./application/reservation.service";
+export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "./application/product-push.service";
 
 export interface ChannelsApi {
-  readonly channelSync: import("./sync.service").ChannelSyncServiceContract;
-  readonly channelProductPush: import("./product-push.service").ChannelProductPushService;
-  readonly syncSettings: import("./sync-settings.service").SyncSettingsService;
-  readonly allocationEngine: import("./allocation-engine.service").AllocationEngine;
-  readonly sourceLockService: import("./source-lock.service").SourceLockService;
+  readonly channelSync: import("./application/sync.service").ChannelSyncServiceContract;
+  readonly channelProductPush: import("./application/product-push.service").ChannelProductPushService;
+  readonly syncSettings: import("./application/sync-settings.service").SyncSettingsService;
+  readonly allocationEngine: import("./application/allocation-engine.service").AllocationEngine;
+  readonly sourceLockService: import("./application/source-lock.service").SourceLockService;
 }
 
 // Channel Adapter Interface (Phase 1)
@@ -68,7 +68,7 @@ export type {
   ValidatedChannelOrder,
   ValidatedChannelOrderLine,
   ValidatedChannelRefundEvent,
-} from "./channel-adapter.interface";
+} from "./domain/channel-adapter.interface";
 export {
   ChannelAdapterRegistry,
   ChannelOrderAdapterRegistry,
@@ -80,40 +80,40 @@ export {
   parseValidatedChannelCancel,
   parseValidatedChannelOrder,
   parseValidatedChannelRefund,
-} from "./channel-adapter.interface";
+} from "./domain/channel-adapter.interface";
 
 // Source Lock System (Phase 1)
-export { createSourceLockService } from "./source-lock.service";
-export type { SourceLockService } from "./source-lock.service";
+export { createSourceLockService } from "./application/source-lock.service";
+export type { SourceLockService } from "./application/source-lock.service";
 
 // Allocation Engine (Phase 1)
-export { createAllocationEngine } from "./allocation-engine.service";
-export type { AllocationEngine, AllocationVelocity, ProductAllocationResult, VariantChannelAllocation } from "./allocation-engine.service";
+export { createAllocationEngine } from "./application/allocation-engine.service";
+export type { AllocationEngine, AllocationVelocity, ProductAllocationResult, VariantChannelAllocation } from "./application/allocation-engine.service";
 export {
   ALLOCATION_ERROR_CODES,
   AllocationEngineError,
   describeAllocationFailure,
   isAllocationEngineError,
-} from "./allocation-engine.errors";
-export type { AllocationEngineErrorClassification, AllocationErrorCode } from "./allocation-engine.errors";
+} from "./domain/allocation-engine.errors";
+export type { AllocationEngineErrorClassification, AllocationErrorCode } from "./domain/allocation-engine.errors";
 
 // Shopify Adapter (Phase 1)
 export { ShopifyAdapter, createShopifyAdapter } from "./adapters/shopify.adapter";
 
 // Phase 2: Source-of-Truth Wiring
-export { createCatalogBackfillService } from "./catalog-backfill.service";
-export type { CatalogBackfillService, BackfillOptions, BackfillResult } from "./catalog-backfill.service";
+export { createCatalogBackfillService } from "./application/catalog-backfill.service";
+export type { CatalogBackfillService, BackfillOptions, BackfillResult } from "./application/catalog-backfill.service";
 
-export { runShopifyWeightBackfill, createShopifyWeightBackfillDeps, toGrams } from "./shopify-weight-backfill.service";
+export { runShopifyWeightBackfill, createShopifyWeightBackfillDeps, toGrams } from "./application/shopify-weight-backfill.service";
 export type {
   ShopifyWeightBackfillOptions,
   ShopifyWeightBackfillReport,
   ShopifyWeightBackfillDeps,
   WeightBackfillCandidate,
   ShopifyWeightMeasurement,
-} from "./shopify-weight-backfill.service";
+} from "./application/shopify-weight-backfill.service";
 
-export { createEchelonSyncOrchestrator } from "./echelon-sync-orchestrator.service";
+export { createEchelonSyncOrchestrator } from "./application/echelon-sync-orchestrator.service";
 export type {
   EchelonSyncOrchestrator,
   SyncOrchestratorConfig,
@@ -121,9 +121,9 @@ export type {
   PricingSyncResult,
   ListingSyncResult,
   FullSyncResult,
-} from "./echelon-sync-orchestrator.service";
+} from "./application/echelon-sync-orchestrator.service";
 
-export { createScheduledSyncService } from "./scheduled-sync.service";
-export type { ScheduledSyncService, ScheduledSyncConfig, ScheduledSyncStatus } from "./scheduled-sync.service";
+export { createScheduledSyncService } from "./application/scheduled-sync.service";
+export type { ScheduledSyncService, ScheduledSyncConfig, ScheduledSyncStatus } from "./application/scheduled-sync.service";
 
-export { initializeSourceLockDefaults, initializeAllChannelDefaults } from "./source-lock-init";
+export { initializeSourceLockDefaults, initializeAllChannelDefaults } from "./application/source-lock-init";

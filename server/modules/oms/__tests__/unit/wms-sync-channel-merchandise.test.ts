@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { WmsSyncService } from "../../wms-sync.service";
+import { WmsSyncService } from "../../application/wms-sync.service";
 import type { ShopifyMerchandiseSnapshot } from "../../infrastructure/shopify-merchandise-snapshot";
 
 const rows = vi.hoisted(() => ({

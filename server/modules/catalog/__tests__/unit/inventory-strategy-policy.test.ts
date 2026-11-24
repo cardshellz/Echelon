@@ -3,7 +3,7 @@ import {
   ProductInventoryStrategyError,
   assertProductInventoryStrategyTransition,
   parseProductInventoryStrategy,
-} from "../../inventory-strategy-policy";
+} from "../../domain/inventory-strategy-policy";
 
 describe("product inventory strategy policy", () => {
   it("defaults missing create values without defaulting omitted updates", () => {

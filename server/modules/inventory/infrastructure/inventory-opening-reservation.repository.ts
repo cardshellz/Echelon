@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { cutoverReconstructionCommitSchema, openingReservationRebaseSchema } from "@shared/types/inventory-cutover-reconstruction";
-import type { InventoryOpeningReservationPort } from "../../inventory-planning/application/inventory-opening-reservation.port";
+import type { InventoryOpeningReservationPort } from "../../inventory-planning/inventory-opening-reservation.port.api";
 
 const translationSchema = z.object({
   command: cutoverReconstructionCommitSchema,

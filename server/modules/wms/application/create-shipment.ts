@@ -1,0 +1,617 @@
+/**
+ * WMS outbound-shipment creation helper.
+ *
+ * Owner: Group B / §6 Commit 8 of shipstation-flow-refactor-plan.md.
+ *
+ * Purpose:
+ *   At OMS→WMS sync time (after wms.orders + wms.order_items have been
+ *   inserted), create one `wms.outbound_shipments` row with
+ *   status='planned' plus one `wms.outbound_shipment_items` row per
+ *   just-inserted order item. The shipment is the unit ShipStation
+ *   and Shopify fulfillment ops hang off of — creating it at sync time
+ *   means Group C (SS push) and Group E (Shopify fulfillment push)
+ *   always have a target row to update.
+ *
+ * Idempotency (coding-standards rule #6):
+ *   The helper checks for any existing active (non-voided/cancelled)
+ *   shipment on the same `order_id`. If one exists, it returns that id
+ *   with created=false and performs no writes. Safe to retry.
+ *
+ * Determinism (rule #2):
+ *   The helper takes `db` via argument — no hidden clocks, no global
+ *   state beyond the DB client. Caller owns the db handle.
+ *
+ * Data integrity (rule #3):
+ *   - No floats touched; only integer ids and quantities.
+ *   - Input `orderItems` is iterated but never mutated.
+ *
+ * NOTE: this file does NOT touch the feature flag. Flag-gating lives
+ * in the caller (oms/wms-sync.service.ts). If the helper is imported
+ * and run, it will attempt the writes unconditionally — that's
+ * intentional so other callers (reconcile sweep, backfill) can reuse
+ * it without replicating flag logic.
+ */
+
+import { sql } from "drizzle-orm";
+import {
+  outboundShipments,
+  type InsertOutboundShipment,
+  type InsertOutboundShipmentItem,
+} from "@shared/schema";
+import {
+  getDefaultSessionAdvisoryLockRunner,
+  type SessionAdvisoryLockRunner,
+} from "../../../infrastructure/session-advisory-lock";
+import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "../domain/shipment-lock-namespaces";
+
+/**
+ * Minimal structural type for the db handle the helper needs. We keep
+ * it loose to match existing wms-sync patterns (`any`-ish db) while
+ * still documenting the methods actually called.
+ */
+export type DbLike = {
+  execute: (query: any) => Promise<{ rows: any[] }>;
+  insert: (table: any) => any;
+};
+
+/**
+ * Source value stamped on shipments created by the OMS→WMS sync path.
+ *
+ * Existing values on this column (per schema comment on
+ * `outbound_shipments.source`): 'shopify_webhook', 'manual', 'api'.
+ * We introduce 'echelon_sync' so ops can distinguish shipments that
+ * were planned by the sync service at order intake from those created
+ * by legacy paths. No DB enum change needed — the column is a plain
+ * varchar(30) with a string default.
+ */
+export const ECHELON_SYNC_SHIPMENT_SOURCE = "echelon_sync";
+
+/**
+ * Source value stamped on shipments created by the combined-orders
+ * child-link path (plan §6 Commit 14). A child order in a combined
+ * group gets its own `wms.outbound_shipments` row (so per-order
+ * finance / Shopify-fulfillment tracking stays correct) but that row
+ * shares the parent's `shipstation_order_id` — only the parent's
+ * shipment is pushed to SS. The marker lets Group C push code, the
+ * reconcile sweep (Group H / C15), and ops dashboards distinguish
+ * these synthetic child rows from standalone shipments.
+ */
+export const ECHELON_COMBINED_CHILD_SHIPMENT_SOURCE = "echelon_combined_child";
+
+/**
+ * Residual customer-fulfillment package created only after the shipping
+ * provider positively reports that the original package is no longer
+ * editable. Excluding this source from the primary active-shipment unique
+ * index allows the residual package to coexist with the locked original.
+ */
+export const LATE_ORDER_EDIT_SHIPMENT_SOURCE = "late_order_edit";
+
+export const PROVIDER_MEMBERSHIP_AUTHORITATIVE = "authoritative";
+export const PROVIDER_MEMBERSHIP_PENDING_APPEND = "pending_append";
+
+export type ProviderMembershipState =
+  | typeof PROVIDER_MEMBERSHIP_AUTHORITATIVE
+  | typeof PROVIDER_MEMBERSHIP_PENDING_APPEND;
+
+/**
+ * Status marker the helper checks for idempotency. Only a pre-existing
+ * 'planned' shipment blocks a new one; shipments that have already
+ * advanced to 'queued'/'labeled'/etc. mean the order is past the sync
+ * stage and no new planned row should be made.
+ */
+const PLANNED_STATUS = "planned";
+
+export async function resolveShipmentItemDefaults(
+  db: DbLike,
+  orderItemId: number,
+): Promise<{ productVariantId: number | null; fromLocationId: number | null }> {
+  const result = await db.execute(sql`
+    SELECT
+      oi.product_id AS product_variant_id,
+      COALESCE(wl.id, wl_by_code.id) AS from_location_id
+    FROM wms.order_items oi
+    LEFT JOIN warehouse.product_locations pl
+      ON pl.product_variant_id = oi.product_id
+     AND pl.location = oi.location
+     AND pl.is_primary = 1
+    LEFT JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+    LEFT JOIN warehouse.warehouse_locations wl_by_code ON wl_by_code.code = oi.location
+    WHERE oi.id = ${orderItemId}
+    LIMIT 1
+  `);
+  const row = result.rows[0] as any;
+  const productVariantId = Number(row?.product_variant_id);
+  const fromLocationId = Number(row?.from_location_id);
+  return {
+    productVariantId:
+      Number.isInteger(productVariantId) && productVariantId > 0
+        ? productVariantId
+        : null,
+    fromLocationId:
+      Number.isInteger(fromLocationId) && fromLocationId > 0
+        ? fromLocationId
+        : null,
+  };
+}
+
+/**
+ * Raised by `linkChildToParentShipment` when the combined-group parent
+ * has not yet had a `wms.outbound_shipments` row created. The caller
+ * (wms-sync) treats this as a race — the child arrived before the
+ * parent finished sync — and relies on the reconcile sweep (Group H /
+ * C15) to retry the link once the parent catches up.
+ *
+ * The error is surfaced loud (named class, structured fields) rather
+ * than silently swallowed so ops / logs can distinguish it from real
+ * DB failures.
+ */
+export class ChildWithoutParentShipmentError extends Error {
+  constructor(
+    public readonly childWmsOrderId: number,
+    public readonly parentWmsOrderId: number,
+  ) {
+    super(
+      `linkChildToParentShipment: parent order ${parentWmsOrderId} has no shipment (child ${childWmsOrderId} cannot link)`,
+    );
+    this.name = "ChildWithoutParentShipmentError";
+  }
+}
+
+export interface CreateShipmentInput {
+  /** wms.outbound_shipment_items.order_item_id */
+  id: number;
+  /** wms.outbound_shipment_items.qty (full quantity — split happens later) */
+  quantity: number;
+  /** wms.outbound_shipment_items.product_variant_id */
+  productVariantId?: number | null;
+  /** wms.outbound_shipment_items.from_location_id, when pick/bin data is known */
+  fromLocationId?: number | null;
+}
+
+export interface CreateShipmentResult {
+  /** id of the wms.outbound_shipments row (new or existing). */
+  shipmentId: number;
+  /** true = inserted a new row; false = reused an existing planned row. */
+  created: boolean;
+}
+
+async function insertShipmentItemIfMissing(
+  db: DbLike,
+  values: InsertOutboundShipmentItem,
+): Promise<boolean> {
+  const result = await db.execute(sql`
+    INSERT INTO wms.outbound_shipment_items (
+      shipment_id,
+      order_item_id,
+      product_variant_id,
+      from_location_id,
+      qty
+    )
+    SELECT
+      ${values.shipmentId},
+      ${values.orderItemId},
+      ${values.productVariantId ?? null},
+      ${values.fromLocationId ?? null},
+      ${values.qty}
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM wms.outbound_shipment_items
+      WHERE shipment_id = ${values.shipmentId}
+        AND order_item_id = ${values.orderItemId}
+    )
+    RETURNING id
+  `);
+  return (result.rows?.length ?? 0) > 0;
+}
+
+/**
+ * Create a planned outbound shipment for a just-synced WMS order.
+ *
+ * Contract:
+ *   - Returns { shipmentId, created:true } on insert.
+ *   - Returns { shipmentId, created:false } if a planned shipment
+ *     already exists for `wmsOrderId` (no writes performed).
+ *   - Throws on DB errors — caller wraps in try/catch and decides
+ *     whether to abort the sync (the wms-sync caller treats it as
+ *     non-fatal; see §6 Commit 8 in the plan).
+ */
+export async function createShipmentForOrder(
+  db: DbLike,
+  wmsOrderId: number,
+  channelId: number | null,
+  orderItems: ReadonlyArray<CreateShipmentInput>,
+  options?: {
+    useXactLock?: boolean;
+    /** Pinned-client session lock runner; defaults to the application pool. */
+    sessionLock?: SessionAdvisoryLockRunner;
+  },
+): Promise<CreateShipmentResult> {
+  if (!Number.isInteger(wmsOrderId) || wmsOrderId <= 0) {
+    throw new Error(
+      `createShipmentForOrder: wmsOrderId must be a positive integer, got ${wmsOrderId}`,
+    );
+  }
+
+  // ── 1. Idempotency probe ────────────────────────────────────────
+  // One planned shipment per (order_id) is the invariant. Raw SQL
+  // keeps the probe trivial and avoids a Drizzle query-builder chain
+  // for the test mock layer.
+  const normalizedOrderItems: CreateShipmentInput[] = [];
+  const seenOrderItemIds = new Set<number>();
+  for (const it of orderItems) {
+    if (!Number.isInteger(it.id) || it.id <= 0) {
+      throw new Error(
+        `createShipmentForOrder: orderItem.id must be a positive integer, got ${it.id}`,
+      );
+    }
+    if (seenOrderItemIds.has(it.id)) {
+      continue;
+    }
+    seenOrderItemIds.add(it.id);
+    if (!Number.isInteger(it.quantity) || it.quantity < 0) {
+      throw new Error(
+        `createShipmentForOrder: orderItem.quantity must be a non-negative integer, got ${it.quantity}`,
+      );
+    }
+    if (
+      it.productVariantId != null &&
+      (!Number.isInteger(it.productVariantId) || it.productVariantId <= 0)
+    ) {
+      throw new Error(
+        `createShipmentForOrder: orderItem.productVariantId must be a positive integer when provided, got ${it.productVariantId}`,
+      );
+    }
+    if (
+      it.fromLocationId != null &&
+      (!Number.isInteger(it.fromLocationId) || it.fromLocationId <= 0)
+    ) {
+      throw new Error(
+        `createShipmentForOrder: orderItem.fromLocationId must be a positive integer when provided, got ${it.fromLocationId}`,
+      );
+    }
+    normalizedOrderItems.push(it);
+  }
+
+  // Advisory lock keyed on order_id prevents two concurrent callers
+  // from both passing the probe and both inserting.
+  // Key space: WMS_ORDER_SHIPMENT_LOCK_NAMESPACE (918406) + order_id.
+  //
+  // When running inside a caller-provided transaction (useXactLock),
+  // use pg_advisory_xact_lock which auto-releases on commit/rollback.
+  // Otherwise take a session-level lock on a PINNED connection: issuing
+  // pg_advisory_lock through the pooled db handle serialized nothing, because
+  // each statement ran on an arbitrary connection (see
+  // server/infrastructure/session-advisory-lock.ts).
+  if (options?.useXactLock) {
+    await db.execute(
+      sql`SELECT pg_advisory_xact_lock(${WMS_ORDER_SHIPMENT_LOCK_NAMESPACE}, ${wmsOrderId})`,
+    );
+    return createShipmentForOrderLocked(db, wmsOrderId, channelId, normalizedOrderItems);
+  }
+
+  const sessionLock = options?.sessionLock ?? getDefaultSessionAdvisoryLockRunner();
+  return sessionLock(
+    { namespace: WMS_ORDER_SHIPMENT_LOCK_NAMESPACE, key: wmsOrderId, label: "wms.create_shipment" },
+    () => createShipmentForOrderLocked(db, wmsOrderId, channelId, normalizedOrderItems),
+  );
+}
+
+async function createShipmentForOrderLocked(
+  db: DbLike,
+  wmsOrderId: number,
+  channelId: number | null,
+  normalizedOrderItems: CreateShipmentInput[],
+): Promise<CreateShipmentResult> {
+  const existing = await db.execute(sql`
+    SELECT id
+      FROM wms.outbound_shipments
+     WHERE order_id = ${wmsOrderId}
+       AND status NOT IN ('voided', 'cancelled')
+     ORDER BY CASE status
+       WHEN 'planned' THEN 0
+       WHEN 'queued'  THEN 1
+       ELSE 2
+     END
+     LIMIT 1
+  `);
+
+  if (existing.rows.length > 0) {
+    const existingId = Number(existing.rows[0].id);
+    if (!Number.isInteger(existingId) || existingId <= 0) {
+      throw new Error(
+        `createShipmentForOrder: existing shipment id is not a positive integer: ${existing.rows[0].id}`,
+      );
+    }
+    return { shipmentId: existingId, created: false };
+  }
+
+  // ── 2. Insert the shipment row ──────────────────────────────────
+  // All lifecycle columns (voided_at, shopify_fulfillment_id,
+  // requires_review, etc.) are left unset so the schema defaults
+  // (NULL / false / 0) apply. That keeps the row shape aligned with
+  // the state-machine definition in §2.4 of the plan.
+  if (normalizedOrderItems.length > 0) {
+    const orderItemIds = normalizedOrderItems.map((item) => item.id);
+    const activeCoverage = await db.execute(sql`
+      SELECT
+        os.id AS shipment_id,
+        osi.order_item_id,
+        COALESCE(SUM(osi.qty), 0)::int AS qty
+      FROM wms.outbound_shipments os
+      JOIN wms.outbound_shipment_items osi
+        ON osi.shipment_id = os.id
+      WHERE os.order_id = ${wmsOrderId}
+        AND os.status NOT IN ('voided', 'cancelled')
+        AND osi.order_item_id = ANY(ARRAY[${sql.join(orderItemIds.map((id) => sql`${id}`), sql`, `)}]::int[])
+      GROUP BY os.id, osi.order_item_id
+      ORDER BY os.id
+    `);
+    const coveredQtyByItemId = new Map<number, number>();
+    let representativeShipmentId: number | null = null;
+    for (const row of activeCoverage.rows ?? []) {
+      const shipmentId = Number((row as any).shipment_id);
+      const orderItemId = Number((row as any).order_item_id);
+      const qty = Number((row as any).qty ?? 0);
+      if (representativeShipmentId === null && Number.isInteger(shipmentId) && shipmentId > 0) {
+        representativeShipmentId = shipmentId;
+      }
+      if (Number.isInteger(orderItemId) && orderItemId > 0 && Number.isInteger(qty) && qty > 0) {
+        coveredQtyByItemId.set(
+          orderItemId,
+          (coveredQtyByItemId.get(orderItemId) ?? 0) + qty,
+        );
+      }
+    }
+
+    const fullyCovered = normalizedOrderItems.every((item) => {
+      const coveredQty = coveredQtyByItemId.get(item.id) ?? 0;
+      return coveredQty >= item.quantity;
+    });
+    if (fullyCovered && representativeShipmentId !== null) {
+      return { shipmentId: representativeShipmentId, created: false };
+    }
+  }
+
+  const shipmentValues: InsertOutboundShipment = {
+    orderId: wmsOrderId,
+    channelId,
+    status: PLANNED_STATUS,
+    source: ECHELON_SYNC_SHIPMENT_SOURCE,
+  };
+
+  const inserted = await db
+    .insert(outboundShipments)
+    .values(shipmentValues)
+    .returning({ id: outboundShipments.id });
+
+  if (!Array.isArray(inserted) || inserted.length === 0 || inserted[0]?.id == null) {
+    throw new Error(
+      `createShipmentForOrder: insert on wms.outbound_shipments returned no rows for wmsOrderId=${wmsOrderId}`,
+    );
+  }
+
+  const shipmentId = Number(inserted[0].id);
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+    throw new Error(
+      `createShipmentForOrder: new shipment id is not a positive integer: ${inserted[0].id}`,
+    );
+  }
+
+  // ── 3. Insert the per-item rows ────────────────────────────────
+  // Empty `orderItems` is valid: gift-card or pure-membership orders
+  // produce zero shippable items. The shipment row is still useful
+  // (ops dashboards, SS parity checks) even when it carries no
+  // inventory.
+  if (normalizedOrderItems.length > 0) {
+    for (const it of normalizedOrderItems) {
+      const defaults = await resolveShipmentItemDefaults(db, it.id);
+      await insertShipmentItemIfMissing(db, {
+        shipmentId,
+        orderItemId: it.id,
+        productVariantId: it.productVariantId ?? defaults.productVariantId,
+        fromLocationId: it.fromLocationId ?? defaults.fromLocationId,
+        qty: it.quantity,
+      });
+    }
+  }
+
+  return { shipmentId, created: true };
+}
+
+/**
+ * For a child order in a combined group, create a `wms.outbound_shipments`
+ * row that SHARES the parent's physical-shipment identity.
+ *
+ * Owner: Group C / §6 Commit 14 of shipstation-flow-refactor-plan.md.
+ *
+ * Unlike {@link createShipmentForOrder}, this helper:
+ *   - Does NOT represent a separate SS-facing shipment — the parent's
+ *     shipment is the one pushed to ShipStation and the one that
+ *     carries the physical label / tracking number.
+ *   - Creates a WMS row whose `shipstation_order_id` /
+ *     `shipstation_order_key` are inherited from the parent's row.
+ *     Those values may legitimately be NULL at link time (if the
+ *     parent hasn't been pushed to SS yet); the reconcile sweep
+ *     (Group H / C15) backfills them once the parent lands in SS.
+ *   - Stamps `source='echelon_combined_child'` so downstream code
+ *     (Group C push, Group H reconcile, ops dashboards) can tell
+ *     these apart from standalone shipments.
+ *   - Uses the CHILD's own `wms.order_items` (so per-order finance
+ *     snapshots and Shopify fulfillment-per-order semantics are
+ *     preserved — each child still emits its own Shopify fulfillment
+ *     in Group E, sharing only the tracking number with the parent).
+ *
+ * Idempotency (Rule #6): if a shipment already exists for the child
+ * order, returns that row's id with `created:false` and performs no
+ * writes. Status is NOT part of the probe (unlike createShipmentForOrder
+ * which gates on 'planned') because a child's shipment can advance
+ * past 'planned' via the parent's lifecycle reconcile — re-running
+ * the link must not duplicate it.
+ *
+ * Determinism (Rule #2): db handle injected; no clocks, no globals.
+ *
+ * Data integrity (Rule #3): inputs validated (positive-integer ids,
+ * non-negative integer quantities); `childOrderItems` iterated but
+ * never mutated.
+ *
+ * Error surface (Rule #5):
+ *   - {@link ChildWithoutParentShipmentError} — parent has no
+ *     shipment row yet. Caller decides whether to retry via reconcile.
+ *   - Plain `Error` — invalid inputs / DB failures. Caller wraps.
+ */
+export async function linkChildToParentShipment(
+  db: DbLike,
+  childWmsOrderId: number,
+  parentWmsOrderId: number,
+  channelId: number | null,
+  childOrderItems: ReadonlyArray<CreateShipmentInput>,
+): Promise<CreateShipmentResult> {
+  // ── 0. Input validation ────────────────────────────────────────
+  if (!Number.isInteger(childWmsOrderId) || childWmsOrderId <= 0) {
+    throw new Error(
+      `linkChildToParentShipment: childWmsOrderId must be a positive integer, got ${childWmsOrderId}`,
+    );
+  }
+  if (!Number.isInteger(parentWmsOrderId) || parentWmsOrderId <= 0) {
+    throw new Error(
+      `linkChildToParentShipment: parentWmsOrderId must be a positive integer, got ${parentWmsOrderId}`,
+    );
+  }
+  if (childWmsOrderId === parentWmsOrderId) {
+    throw new Error(
+      `linkChildToParentShipment: childWmsOrderId must differ from parentWmsOrderId (got ${childWmsOrderId})`,
+    );
+  }
+
+  // ── 1. Idempotency probe — ANY status on the child's order ─────
+  // Unlike createShipmentForOrder's planned-only gate, we match any
+  // status: the child's shipment may have been advanced past planned
+  // by a prior reconcile run that inherited the parent's shipped
+  // state. Re-running the link must not duplicate the row.
+  const existing = await db.execute(sql`
+    SELECT id
+      FROM wms.outbound_shipments
+     WHERE order_id = ${childWmsOrderId}
+     LIMIT 1
+  `);
+
+  if (existing.rows.length > 0) {
+    const existingId = Number(existing.rows[0].id);
+    if (!Number.isInteger(existingId) || existingId <= 0) {
+      throw new Error(
+        `linkChildToParentShipment: existing shipment id is not a positive integer: ${existing.rows[0].id}`,
+      );
+    }
+    return { shipmentId: existingId, created: false };
+  }
+
+  // ── 2. Fetch parent's shipment identity ────────────────────────
+  // We need the parent's SS linkage columns so the child inherits
+  // them. `shipstation_order_id` / `shipstation_order_key` may be
+  // NULL (parent hasn't been pushed yet); that's legal — reconcile
+  // backfills later. But the parent's shipment ROW must exist,
+  // otherwise we have a race and surface it loud.
+  const parent = await db.execute(sql`
+    SELECT id, shipstation_order_id, shipstation_order_key
+      FROM wms.outbound_shipments
+     WHERE order_id = ${parentWmsOrderId}
+     LIMIT 1
+  `);
+
+  if (parent.rows.length === 0) {
+    throw new ChildWithoutParentShipmentError(
+      childWmsOrderId,
+      parentWmsOrderId,
+    );
+  }
+
+  // Parent's SS linkage columns are nullable in schema; normalize
+  // `undefined` (missing key) to `null` so the insert payload is
+  // explicit and audit-readable (Rule #8).
+  const parentRow: any = parent.rows[0];
+  const parentShipstationOrderId: number | null =
+    parentRow.shipstation_order_id ?? parentRow.shipstationOrderId ?? null;
+  const parentShipstationOrderKey: string | null =
+    parentRow.shipstation_order_key ?? parentRow.shipstationOrderKey ?? null;
+
+  // ── 3. Insert the child shipment row ───────────────────────────
+  // Status stays 'planned' until the parent ships; C15 reconcile
+  // advances the child in lockstep with the parent.
+  const shipmentValues: InsertOutboundShipment = {
+    orderId: childWmsOrderId,
+    channelId,
+    status: PLANNED_STATUS,
+    source: ECHELON_COMBINED_CHILD_SHIPMENT_SOURCE,
+    shipstationOrderId: parentShipstationOrderId,
+    shipstationOrderKey: parentShipstationOrderKey,
+  };
+
+  const inserted = await db
+    .insert(outboundShipments)
+    .values(shipmentValues)
+    .returning({ id: outboundShipments.id });
+
+  if (!Array.isArray(inserted) || inserted.length === 0 || inserted[0]?.id == null) {
+    throw new Error(
+      `linkChildToParentShipment: insert on wms.outbound_shipments returned no rows for childWmsOrderId=${childWmsOrderId}`,
+    );
+  }
+
+  const shipmentId = Number(inserted[0].id);
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+    throw new Error(
+      `linkChildToParentShipment: new shipment id is not a positive integer: ${inserted[0].id}`,
+    );
+  }
+
+  // ── 4. Insert the child's own item rows ────────────────────────
+  // Uses the CHILD's wms.order_items (not the parent's) so
+  // per-order Shopify fulfillment push in Group E carries the right
+  // line items. Empty items is valid (gift-card / pure-membership
+  // children) — shipment row is still useful for reconcile.
+  if (childOrderItems.length > 0) {
+    const seenOrderItemIds = new Set<number>();
+    for (const it of childOrderItems) {
+      if (!Number.isInteger(it.id) || it.id <= 0) {
+        throw new Error(
+          `linkChildToParentShipment: orderItem.id must be a positive integer, got ${it.id}`,
+        );
+      }
+      if (seenOrderItemIds.has(it.id)) {
+        continue;
+      }
+      seenOrderItemIds.add(it.id);
+      if (!Number.isInteger(it.quantity) || it.quantity < 0) {
+        throw new Error(
+          `linkChildToParentShipment: orderItem.quantity must be a non-negative integer, got ${it.quantity}`,
+        );
+      }
+      if (
+        it.productVariantId != null &&
+        (!Number.isInteger(it.productVariantId) || it.productVariantId <= 0)
+      ) {
+        throw new Error(
+          `linkChildToParentShipment: orderItem.productVariantId must be a positive integer when provided, got ${it.productVariantId}`,
+        );
+      }
+      if (
+        it.fromLocationId != null &&
+        (!Number.isInteger(it.fromLocationId) || it.fromLocationId <= 0)
+      ) {
+        throw new Error(
+          `linkChildToParentShipment: orderItem.fromLocationId must be a positive integer when provided, got ${it.fromLocationId}`,
+        );
+      }
+      const defaults = await resolveShipmentItemDefaults(db, it.id);
+      await insertShipmentItemIfMissing(db, {
+        shipmentId,
+        orderItemId: it.id,
+        productVariantId: it.productVariantId ?? defaults.productVariantId,
+        fromLocationId: it.fromLocationId ?? defaults.fromLocationId,
+        qty: it.quantity,
+      });
+    }
+  }
+
+  return { shipmentId, created: true };
+}

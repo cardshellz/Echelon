@@ -1,13 +1,13 @@
 import { costGraphAndPoInvoiceHistoryExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectQtyVariance: vi.fn(),
   detectPastDue: vi.fn(),
   detectMatchMismatch: vi.fn(),
 }));
 
-import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+import { createPurchasingService, PurchasingError } from "../../application/purchasing.service";
 
 const FIXED_NOW = new Date("2026-07-11T00:30:00.000Z");
 

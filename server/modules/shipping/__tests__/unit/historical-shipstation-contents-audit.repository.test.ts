@@ -10,7 +10,7 @@ import {
   HistoricalShipStationContentsAuditRepositoryError,
   loadHistoricalShipStationContentsCandidates,
   normalizeHistoricalShipStationContentsAuditRepositoryOptions,
-} from "../../historical-shipstation-contents-audit.repository";
+} from "../../infrastructure/historical-shipstation-contents-audit.repository";
 
 function readOnlyRoleRow() {
   return {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Channel } from "@shared/schema";
-import { ChannelIdentityService } from "../../channel-identity.service";
-import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../../channel-fulfillment-provider-clients.service";
+import { ChannelIdentityService } from "../../application/channel-identity.service";
+import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../../application/channel-fulfillment-provider-clients.service";
 import type { ShopifyIdentityConnection } from "../../adapters/shopify-identity.reader";
 import { EbayFulfillmentIdempotencyConflictError } from "../../adapters/ebay/ebay-api.client";
 import { EbayAuthError, EbayProviderAccountIdentityConflictError, type EbayObservedProviderAccount } from "../../adapters/ebay/ebay-auth.service";

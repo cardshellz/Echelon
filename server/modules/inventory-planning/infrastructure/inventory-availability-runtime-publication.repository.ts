@@ -30,6 +30,7 @@ import type { SupplySnapshotDto } from "@shared/types/inventory-availability-pla
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { InventoryChannelQuantityRuntimeService } from "../application/inventory-channel-quantity-runtime.service";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 type ClientPool = Pick<Pool, "connect"> & { options?: { max?: number } };
 type PublicationVariantScope = { publicationTargetId: number; productVariantId: number };
@@ -262,10 +263,10 @@ export function createTransactionScopedInventoryPublicationService(
   const logger: InventoryAvailabilityRuntimePublicationLogger = {
     info: (event) => options.logger
       ? options.logger.info({ ...event, transactionState: "pending_commit" })
-      : console.info(JSON.stringify({ ...event, transactionState: "pending_commit" })),
+      : platformLogger.info("inventory-planning.inventory_availability_runtime_publication_repository", { ...event, transactionState: "pending_commit" }),
     warn: (event) => options.logger
       ? options.logger.warn({ ...event, transactionState: "pending_commit" })
-      : console.warn(JSON.stringify({ ...event, transactionState: "pending_commit" })),
+      : platformLogger.warn("inventory-planning.inventory_availability_runtime_publication_repository", { ...event, transactionState: "pending_commit" }),
   };
   return new AuthorityAwareInventoryPublicationService(
     new PostgresTransactionScopedInventoryPublicationExecutor(client, logger, options.replacementListings, options.reconciliationObservationIds,

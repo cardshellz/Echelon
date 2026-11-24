@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { shipmentMeasurementReviewRequestSchema, shipmentMeasurementApprovalSchema } from "@shared/procurement/shipment-measurement-correction";
 import { shipmentCostUpdateInputSchema } from "@shared/procurement/shipment-cost-workflow";
-import { ShipmentMeasurementCorrectionError } from "../../shipment-measurement-correction.repository";
-import { classifyShipmentCostUpdateFailure } from "../../shipment-cost-update.commands";
+import { ShipmentMeasurementCorrectionError } from "../../infrastructure/shipment-measurement-correction.repository";
+import { classifyShipmentCostUpdateFailure } from "../../application/shipment-cost-update.commands";
 
 const request = () => ({ sourceVersion: "a".repeat(64), reason: "Confirmed packing document measurements",
   lines: [{ lineId: 11, measurements: { cartonCount: 2, dimensionBasis: "carton", weightKg: "5.125", lengthCm: "30.25", widthCm: "10", heightCm: "10" } }] });

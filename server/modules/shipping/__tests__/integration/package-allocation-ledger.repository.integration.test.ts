@@ -25,58 +25,58 @@ import {
   runMigrations,
   truncateTestData,
 } from "../../../../../test/setup-integration";
-import { createChannelFulfillmentAuthorityRepository } from "../../../oms/channel-fulfillment-authority.repository";
-import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../../../oms/channel-fulfillment-notification.policy";
-import { planChannelFulfillmentCommands } from "../../../oms/channel-fulfillment-command";
-import { createChannelFulfillmentReviewRetryRepository } from "../../../oms/channel-fulfillment-review-retry.repository";
+import { createChannelFulfillmentAuthorityRepository } from "../../../oms/infrastructure/channel-fulfillment-authority.repository";
+import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../../../oms/domain/channel-fulfillment-notification.policy";
+import { planChannelFulfillmentCommands } from "../../../oms/application/channel-fulfillment-command";
+import { createChannelFulfillmentReviewRetryRepository } from "../../../oms/infrastructure/channel-fulfillment-review-retry.repository";
 import {
   createChannelFulfillmentAuthorityService,
   createCompatibilityChannelFulfillmentProviderExecutor,
-} from "../../../oms/channel-fulfillment-authority.service";
-import { createFulfillmentPushService } from "../../../oms/fulfillment-push.service";
-import { createShopifyLabelLifecycleRepository } from "../../../oms/shopify-label-lifecycle.repository";
-import { createShopifyLabelLifecycleService } from "../../../oms/shopify-label-lifecycle.service";
-import { findChannelWritebackCandidates } from "../../../oms/channel-writeback.service";
+} from "../../../oms/application/channel-fulfillment-authority.service";
+import { createFulfillmentPushService } from "../../../oms/application/fulfillment-push.service";
+import { createShopifyLabelLifecycleRepository } from "../../../oms/infrastructure/shopify-label-lifecycle.repository";
+import { createShopifyLabelLifecycleService } from "../../../oms/application/shopify-label-lifecycle.service";
+import { findChannelWritebackCandidates } from "../../../oms/application/channel-writeback.service";
 import { sql } from "drizzle-orm";
-import { currentPushedShipmentItemQuantitySql } from "../../../oms/channel-fulfillment-package-coverage.sql";
-import { createChannelFulfillmentProjector } from "../../../oms/channel-fulfillment-projection.repository";
-import { createShipStationService } from "../../../oms/shipstation.service";
-import { createShipStationLabelReconciliationRepository } from "../../../oms/shipstation-label-reconciliation.repository";
+import { currentPushedShipmentItemQuantitySql } from "../../../oms/infrastructure/channel-fulfillment-package-coverage.sql";
+import { createChannelFulfillmentProjector } from "../../../oms/infrastructure/channel-fulfillment-projection.repository";
+import { createShipStationService } from "../../../oms/application/shipstation.service";
+import { createShipStationLabelReconciliationRepository } from "../../../oms/infrastructure/shipstation-label-reconciliation.repository";
 import type { EbayShippingFulfillmentRequest } from "../../../channels/adapters/ebay/ebay-types";
-import { createShipStationLabelReconciliationService, planLabelScanWindow, type ShipStationLabelSnapshot } from "../../../oms/shipstation-label-reconciliation.service";
-import { CarrierTrackingService } from "../../carrier-tracking.service";
-import { createDrizzleCarrierTrackingRepository } from "../../carrier-tracking.repository";
-import { createShipStationRelatedLabelReader } from "../../shipstation-related-labels.reader";
+import { createShipStationLabelReconciliationService, planLabelScanWindow, type ShipStationLabelSnapshot } from "../../../oms/application/shipstation-label-reconciliation.service";
+import { CarrierTrackingService } from "../../application/carrier-tracking.service";
+import { createDrizzleCarrierTrackingRepository } from "../../infrastructure/carrier-tracking.repository";
+import { createShipStationRelatedLabelReader } from "../../infrastructure/shipstation-related-labels.reader";
 import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
-import { PackageAllocationLabelCommercialFulfillmentService } from "../../package-allocation-label-commercial-fulfillment.service";
+import { PackageAllocationLabelCommercialFulfillmentService } from "../../application/package-allocation-label-commercial-fulfillment.service";
 import type {
   PackageAllocationEffectIntentV1,
   PackageAllocationEntryV1,
-} from "../../package-allocation-group.domain";
+} from "../../domain/package-allocation-group.domain";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_INDEX_CONTRACTS,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
-} from "../../package-allocation-authority-discovery.query";
+} from "../../infrastructure/package-allocation-authority-discovery.query";
 import {
   PACKAGE_ALLOCATION_DISCOVERY_EXPLAIN_SQL,
   PACKAGE_ALLOCATION_DISCOVERY_INDEX_CATALOG_SQL,
   PACKAGE_ALLOCATION_DISCOVERY_RELATION_ASSERTION_SQL,
-} from "../../package-allocation-authority-discovery-plan-audit.repository";
+} from "../../infrastructure/package-allocation-authority-discovery-plan-audit.repository";
 import {
   auditPackageAllocationAuthorityDiscoveryExecution,
   type PackageAllocationDiscoveryExecutionAuditReport,
-} from "../../package-allocation-authority-discovery-execution-audit.repository";
-import { packageAllocationPackageKey } from "../../package-allocation-authority-resolution.domain";
-import { resolvePackageAllocationAuthorityEvidence } from "../../package-allocation-authority-resolution.service";
-import { assessVoidedLabelExclusion } from "../../package-allocation-voided-label.domain";
-import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
-import { PackageAllocationAuthorityResolutionPreviewService } from "../../package-allocation-authority-resolution.service";
+} from "../../infrastructure/package-allocation-authority-discovery-execution-audit.repository";
+import { packageAllocationPackageKey } from "../../domain/package-allocation-authority-resolution.domain";
+import { resolvePackageAllocationAuthorityEvidence } from "../../application/package-allocation-authority-resolution.service";
+import { assessVoidedLabelExclusion } from "../../domain/package-allocation-voided-label.domain";
+import { PackageAllocationAuthorityReadinessService } from "../../application/package-allocation-authority-readiness.service";
+import { PackageAllocationAuthorityResolutionPreviewService } from "../../application/package-allocation-authority-resolution.service";
 import {
   derivePackageAllocationBootstrapGroupKey,
   PackageAllocationBootstrapPersistenceService,
-} from "../../package-allocation-bootstrap.service";
+} from "../../application/package-allocation-bootstrap.service";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
   PgPackageAllocationLedgerRepository,
@@ -85,7 +85,7 @@ import {
   type PersistedPackageAllocationEffectOutboxEntry,
   type PersistedPackageAllocationEntry,
   type PersistedPackageAllocationIntent,
-} from "../../package-allocation-ledger.repository";
+} from "../../infrastructure/package-allocation-ledger.repository";
 import {
   PACKAGE_ALLOCATION_PLANNER_VERSION,
   packageAllocationPlanAuthoritySnapshotSchema,
@@ -93,11 +93,11 @@ import {
   persistPackageAllocationPlanCommandSchema,
   type PersistPackageAllocationPlanCommand,
   type PersistPackageAllocationPlanResult,
-} from "../../package-allocation-planning.service";
-import { loadHistoricalShipStationContentsCandidates } from "../../historical-shipstation-contents-audit.repository";
-import type { HistoricalShipStationContentsClient } from "../../historical-shipstation-contents-audit.client";
-import { PgHistoricalShipStationContentsAttestationRepository } from "../../historical-shipstation-contents-attestation.repository";
-import { HistoricalShipStationContentsAttestationService } from "../../historical-shipstation-contents-attestation.service";
+} from "../../application/package-allocation-planning.service";
+import { loadHistoricalShipStationContentsCandidates } from "../../infrastructure/historical-shipstation-contents-audit.repository";
+import type { HistoricalShipStationContentsClient } from "../../infrastructure/historical-shipstation-contents-audit.client";
+import { PgHistoricalShipStationContentsAttestationRepository } from "../../infrastructure/historical-shipstation-contents-attestation.repository";
+import { HistoricalShipStationContentsAttestationService } from "../../application/historical-shipstation-contents-attestation.service";
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
   buildHistoricalShipStationContentsSystemRecoveryEvent,
@@ -105,14 +105,14 @@ import {
   historicalShipStationProviderObservationHash,
   historicalShipStationRecoverableCaseEvidenceHash,
   normalizedHistoricalShipStationProviderLines,
-} from "../../historical-shipstation-contents-recovery.domain";
-import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../historical-shipstation-contents-system-recovery.repository";
-import { HistoricalShipStationContentsSystemRecoveryService } from "../../historical-shipstation-contents-system-recovery.service";
-import { PgHistoricalShipStationContentsReviewRepository } from "../../historical-shipstation-contents-review.repository";
-import { HistoricalShipStationContentsReviewService } from "../../historical-shipstation-contents-review.service";
-import { PgHistoricalShipStationContentsCorrectionRepository } from "../../historical-shipstation-contents-correction.repository";
-import { HistoricalShipStationContentsCorrectionService } from "../../historical-shipstation-contents-correction.service";
-import { projectPersistedDeclaredPackageLifecycleShadow } from "../../declared-package-lifecycle-shadow.domain";
+} from "../../domain/historical-shipstation-contents-recovery.domain";
+import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../infrastructure/historical-shipstation-contents-system-recovery.repository";
+import { HistoricalShipStationContentsSystemRecoveryService } from "../../application/historical-shipstation-contents-system-recovery.service";
+import { PgHistoricalShipStationContentsReviewRepository } from "../../infrastructure/historical-shipstation-contents-review.repository";
+import { HistoricalShipStationContentsReviewService } from "../../application/historical-shipstation-contents-review.service";
+import { PgHistoricalShipStationContentsCorrectionRepository } from "../../infrastructure/historical-shipstation-contents-correction.repository";
+import { HistoricalShipStationContentsCorrectionService } from "../../application/historical-shipstation-contents-correction.service";
+import { projectPersistedDeclaredPackageLifecycleShadow } from "../../domain/declared-package-lifecycle-shadow.domain";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
@@ -1818,7 +1818,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     await expect(repository.renewOrder(retry, expired)).rejects.toMatchObject({ code: 'SHIPSTATION_LABEL_SCAN_LEASE_LOST' });
     await repository.finishOrder(successor, { state: 'review', code: 'SHIPSTATION_ORDER_LABEL_LIMIT', nextAttemptAt: null }, expired);
     expect(await repository.claimOrder(expired)).toBeNull();
-    const { getFlowBucketSamples } = await import('../../../oms/flow-waterfall.service');
+    const { getFlowBucketSamples } = await import('../../../oms/application/flow-waterfall.service');
     expect((await getFlowBucketSamples(getTestDb(), 'SHIPSTATION_LABEL_RECOVERY_BLOCKED')).rows)
       .toMatchObject([{ shipstation_order_id: '101', shipstation_shipment_id: '1', tracking_number: 'TRACK1', state: 'review', last_error_code: 'SHIPSTATION_ORDER_LABEL_LIMIT' }]);
     expect((await pool.query('SELECT provider_label_id::int, attempt_number, outcome FROM oms.shipstation_label_recovery_attempts ORDER BY provider_label_id, attempt_number')).rows)
@@ -7087,7 +7087,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       dropshipTrackingNotSentCountSql,
       dropshipTrackingNotSentSampleSql,
       findDropshipWritebackCandidates,
-    } = await import("../../../oms/channel-writeback.service");
+    } = await import("../../../oms/application/channel-writeback.service");
     const { sql } = await import("drizzle-orm");
     const catchUpCandidates = () => findDropshipWritebackCandidates(getTestDb(), {
       minAgeMinutes: 1, maxAgeDays: 30, limit: 10,

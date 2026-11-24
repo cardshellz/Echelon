@@ -4,30 +4,30 @@ import type pg from "pg";
 import type {
   AmendmentDatabase,
   AmendmentTransaction,
-} from "../../po-quantity-amendment.repository";
+} from "../../infrastructure/po-quantity-amendment.repository";
 import {
   createCostOriginRepairService,
   originRepairScope,
-} from "../../cost-origin-repair.service";
+} from "../../application/cost-origin-repair.service";
 import {
   createShipmentCostReconciliationService,
   shipmentReconciliationScope,
-} from "../../shipment-cost-reconciliation.service";
+} from "../../application/shipment-cost-reconciliation.service";
 import {
   costFingerprint,
   recordReceiptCostOrigin,
 } from "../../../inventory/infrastructure/cost-evidence.repository";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import { readPoShipmentCosts } from "../../infrastructure/po-shipment-cost-summary.repository";
 import { readCostReconciliationReport } from "../../../inventory/infrastructure/cost-reconciliation-report.repository";
 import { inventoryCostReportEventSchema } from "@shared/procurement/cost-report-delivery";
 import { originRepairContextSchema } from "@shared/procurement/cost-origin-repair";
-import { readPurchaseCostApplications } from "../../purchase-cost-application-read.repository";
-import { projectPurchaseCostApplications } from "../../purchase-cost-application-read.service";
-import { reconcilePurchaseCostEvidence } from "../../purchase-cost-application.service";
-import { COGSService } from "../../../inventory/cogs.service";
-import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
-import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
+import { readPurchaseCostApplications } from "../../infrastructure/purchase-cost-application-read.repository";
+import { projectPurchaseCostApplications } from "../../application/purchase-cost-application-read.service";
+import { reconcilePurchaseCostEvidence } from "../../application/purchase-cost-application.service";
+import { COGSService } from "../../../inventory/application/cogs.service";
+import { readReceiptCostQueue } from "../../infrastructure/receipt-cost-queue-read.repository";
+import { projectReceiptCostQueue } from "../../application/receipt-cost-queue-read.service";
 
 export function registerOriginRepairCases(fixture: {
   pool: () => pg.Pool;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeShopifyOrderGid } from "../../shopify-order-id";
+import { normalizeShopifyOrderGid } from "../../domain/shopify-order-id";
 
 describe("normalizeShopifyOrderGid", () => {
   it("converts REST numeric IDs to the canonical database GID", () => {

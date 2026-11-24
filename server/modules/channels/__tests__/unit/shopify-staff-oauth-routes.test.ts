@@ -15,7 +15,7 @@ vi.mock("../../../../db", () => { throw new Error("Route-chain tests must not in
 
 import { registerShopifyOAuthRoutes } from "../../../../routes/shopify-oauth.routes";
 import type { ShopifyStaffOAuthService } from "../../application/shopify-staff-oauth.service";
-import { ShopifyStaffOAuthError, type ShopifyStaffOAuthResult } from "../../shopify-staff-oauth.types";
+import { ShopifyStaffOAuthError, type ShopifyStaffOAuthResult } from "../../domain/shopify-staff-oauth.types";
 
 const INSTALL = "/api/shopify/oauth/install";
 const CALLBACK = "/api/shopify/oauth/callback";

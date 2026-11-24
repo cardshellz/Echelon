@@ -6,12 +6,12 @@ import {
   type EbayListingConnectorDraft,
   type EbayListingLifecycleClient,
 } from "../../listing-connectors/ebay-listing.connector";
-import { ebayListingPushFailure } from "../../ebay-listing-push.service";
+import { ebayListingPushFailure } from "../../application/ebay-listing-push.service";
 import { ShopifyMarketplaceListingConnector } from "../../listing-connectors/shopify-listing.connector";
 import type { BuiltInventoryItem, BuiltItemGroup, BuiltOffer } from "../../adapters/ebay/ebay-listing-builder";
 import type { EbayInventoryItem, EbayInventoryItemGroup, EbayOffer } from "../../adapters/ebay/ebay-types";
-import { ebayIntentAccount, prepareEbayChannelIntent } from "../../ebay-prepared-intent";
-import { ebayPreparedContentHash } from "../../ebay-listing-sync-content";
+import { ebayIntentAccount, prepareEbayChannelIntent } from "../../application/ebay-prepared-intent";
+import { ebayPreparedContentHash } from "../../application/ebay-listing-sync-content";
 import { prepareEbayListingPackages } from "../../adapters/ebay/ebay-listing-package";
 
 describe("marketplace listing connectors", () => {

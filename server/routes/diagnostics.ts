@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import { backfillMemberTiers, WmsSyncService } from "../modules/oms/channel-order-intake.api";
 import { createDropshipOmsChannelResolver } from "../modules/dropship/oms-channel-resolver.api";
 import { requireAuth, requireInternalApiKey, requirePermission } from "./middleware";
+import { logger } from "../platform/observability/logger";
 
 export function registerDiagnosticsRoutes(app: Express) {
   app.use("/api/_internal/diagnostics", requireInternalApiKey);
@@ -25,21 +26,21 @@ export function registerDiagnosticsRoutes(app: Express) {
   app.get("/api/_internal/diagnostics/duplicate-orders", requireAuth, requirePermission("orders", "view"), async (_req, res) => {
     try {
       const pickQueueDupes = await db.execute(sql`
-        SELECT 
-          order_number, 
+        SELECT
+          order_number,
           COUNT(*) as count,
           array_agg(id ORDER BY created_at) as order_ids,
           array_agg(warehouse_status) as statuses
-        FROM wms.orders 
+        FROM wms.orders
         WHERE warehouse_status IN ('ready', 'in_progress')
-        GROUP BY order_number 
+        GROUP BY order_number
         HAVING COUNT(*) > 1
         ORDER BY count DESC
         LIMIT 50
       `);
 
       const allShopifyDupes = await db.execute(sql`
-        SELECT 
+        SELECT
           order_number,
           COUNT(*) as count
         FROM wms.orders
@@ -51,8 +52,8 @@ export function registerDiagnosticsRoutes(app: Express) {
       res.json({
         pickQueueDuplicates: pickQueueDupes.rows.length,
         totalShopifyDuplicates: allShopifyDupes.rows.length,
-        diagnosis: pickQueueDupes.rows.length > 0 
-          ? "DATABASE_DUPLICATES" 
+        diagnosis: pickQueueDupes.rows.length > 0
+          ? "DATABASE_DUPLICATES"
           : "NO_DUPLICATES_OR_UI_ISSUE",
         details: pickQueueDupes.rows,
       });
@@ -66,13 +67,13 @@ export function registerDiagnosticsRoutes(app: Express) {
     try {
       const { limit = 100 } = req.body;
       const enriched = await backfillMemberTiers(limit);
-      res.json({ 
+      res.json({
         success: true,
         enriched,
         message: `Enriched ${enriched} orders with member tiers`
       });
     } catch (error: any) {
-      console.error("Member tier backfill error:", error);
+      logger.error("routes.diagnostics", { message: "Member tier backfill error:", error: error });
       res.status(500).json({ error: error.message });
     }
   });

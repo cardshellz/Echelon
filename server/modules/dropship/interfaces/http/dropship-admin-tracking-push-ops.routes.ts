@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipTrackingPushOpsService } from "../../application/dropship-tracking-push-ops-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipTrackingPushOpsServiceFromEnv } from "../../infrastructure/dropship-tracking-push-ops.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -63,7 +64,7 @@ function sendDropshipTrackingPushOpsError(res: Response, error: unknown): Respon
     });
   }
 
-  console.error("[DropshipAdminTrackingPushOpsRoutes] Unexpected tracking push ops error:", error);
+  logger.error("dropship.admin_tracking_push_ops_routes", { message: "[DropshipAdminTrackingPushOpsRoutes] Unexpected tracking push ops error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_TRACKING_PUSH_OPS_INTERNAL_ERROR",

@@ -11,12 +11,12 @@ import { pathToFileURL } from "node:url";
 import {
   ShopifyFulfillmentSnapshotReader,
   type ShopifyFulfillmentSnapshot,
-} from "../server/modules/oms/shopify-fulfillment-snapshot";
+} from "../server/modules/oms/application/shopify-fulfillment-snapshot";
 import {
   findShopifyWritebackDebtOrders,
   resolveShopifyWritebackDebtForOrder,
   type ShopifyWritebackDebtOrder,
-} from "../server/modules/oms/shopify-writeback-debt.service";
+} from "../server/modules/oms/application/shopify-writeback-debt.service";
 
 type Mode = "dry-run" | "execute";
 

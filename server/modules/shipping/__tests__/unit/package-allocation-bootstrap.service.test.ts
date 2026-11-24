@@ -3,25 +3,25 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { describe, expect, it, vi } from "vitest";
 
-import { SHIPSTATION_LABEL_OBSERVATION_SOURCE } from "../../carrier-tracking.domain";
-import { packageAllocationPackageKey } from "../../package-allocation-authority-resolution.domain";
+import { SHIPSTATION_LABEL_OBSERVATION_SOURCE } from "../../domain/carrier-tracking.domain";
+import { packageAllocationPackageKey } from "../../domain/package-allocation-authority-resolution.domain";
 import {
   derivePackageAllocationBootstrapGroupKey,
   PackageAllocationBootstrapPersistenceError,
   PackageAllocationBootstrapPersistenceService,
-} from "../../package-allocation-bootstrap.service";
+} from "../../application/package-allocation-bootstrap.service";
 import {
   PackageAllocationLedgerRepositoryError,
   type LockedPackageAllocationAuthorityEvidence,
   type PackageAllocationLedgerRepository,
   type PackageAllocationLedgerTransaction,
   type PersistedPackageAllocationPlan,
-} from "../../package-allocation-ledger.repository";
+} from "../../infrastructure/package-allocation-ledger.repository";
 import type {
   PackageAllocationPlanAuthoritySnapshotV1,
   PersistPackageAllocationPlanCommand,
-} from "../../package-allocation-planning.service";
-import type { PackageAllocationSourceFacts } from "../../package-allocation-source-identity.domain";
+} from "../../application/package-allocation-planning.service";
+import type { PackageAllocationSourceFacts } from "../../domain/package-allocation-source-identity.domain";
 
 const sourceId = 7_001;
 

@@ -17,7 +17,7 @@ import {
   closeTestDb,
   describeWithDisposableDb,
 } from "../../../../../test/setup-integration";
-import { createAllocationEngine } from "../../allocation-engine.service";
+import { createAllocationEngine } from "../../application/allocation-engine.service";
 import {
   channels,
   products,

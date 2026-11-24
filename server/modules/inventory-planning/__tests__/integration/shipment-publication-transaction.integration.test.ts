@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { dispatchPlan, DISPATCH_TIME } from "../../../inventory/__tests__/fixtures/canonical-claim-dispatch";
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
-import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/canonical-claim-dispatch-source";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/infrastructure/canonical-claim-dispatch-source";
 import type { CanonicalClaimDispatchBeforeCommit } from "../../application/inventory-availability-dispatch.port";
 import { PostgresCanonicalClaimDispatchRepository } from "../../infrastructure/inventory-availability-dispatch.repository";
 import {
@@ -16,7 +16,7 @@ import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructu
 import { dispatchRuntimeFixtureSql, dispatchRuntimeSeedSql } from "../fixtures/inventory-availability-dispatch-runtime-fixture";
 import { shipmentPublicationFixtureSql, shipmentPublicationIntent } from "../fixtures/shipment-publication.fixture";
 import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
-import { readChannelStockSelection } from "../../../channels/channel-stock-selection";
+import { readChannelStockSelection } from "../../../channels/channel-stock-selection.api";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

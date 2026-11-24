@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
-import { createShipStationLabelReconciliationClient } from "../shipstation-label-reconciliation.client";
-import type { ShipStationLabelSnapshot } from "../shipstation-label-reconciliation.service";
-import { createShipStationReplacementLabelRefresh } from "../shipstation-replacement-label-refresh.service";
-import { resolveRecoveredShipNotifyNoMatchExceptions } from "../ship-notify-reconciliation.service";
-import { resolveShipStationUnmappedPhysicalExceptionForReturnLabel } from "../shipstation-unmapped-physical";
+import { createShipStationLabelReconciliationClient } from "../infrastructure/shipstation-label-reconciliation.client";
+import type { ShipStationLabelSnapshot } from "../application/shipstation-label-reconciliation.service";
+import { createShipStationReplacementLabelRefresh } from "../application/shipstation-replacement-label-refresh.service";
+import { resolveRecoveredShipNotifyNoMatchExceptions } from "../application/ship-notify-reconciliation.service";
+import { resolveShipStationUnmappedPhysicalExceptionForReturnLabel } from "../application/shipstation-unmapped-physical";
 import {
   CarrierDispatchAuthorityError,
   normalizeTrackingNumber,
@@ -13,6 +13,7 @@ import {
   type StoredShippingProviderLabelObservation,
 } from "../../shipping/carrier-tracking-and-dispatch.api";
 import { isPositivePostgresInteger } from "../../shipping/shipstation-provider-reconciliation.api";
+import { normalizeShipStationWebhookPayload } from "../../shipping/engine-and-reconcile.api";
 import {
   ShipStationUnmappedItemsError,
   ShipStationWebhookProcessingError,
@@ -31,6 +32,7 @@ import {
 } from "./shipstation-contracts";
 import type { ShipStationNotifyPackageResolution } from "./shipstation-notify-package-resolution";
 import type { ShipStationNotifyV2Execution } from "./shipstation-notify-v2-execution";
+import { logger } from "../../../platform/observability/logger";
 
 export function createShipStationNotifyWebhookDispatch(
   ctx: ShipStationRuntimeContext,
@@ -167,11 +169,7 @@ export function createShipStationNotifyWebhookDispatch(
       FROM oms.oms_orders
       WHERE id = ${omsOrderId}
     `);
-    console.error(JSON.stringify({
-      code: "SHIP_NOTIFY_LEGACY_AUTHORITY_REVIEW_REQUIRED",
-      omsOrderId,
-      ...details,
-    }));
+    logger.error("SHIP_NOTIFY_LEGACY_AUTHORITY_REVIEW_REQUIRED", { code: "SHIP_NOTIFY_LEGACY_AUTHORITY_REVIEW_REQUIRED", omsOrderId, ...details });
   }
 
   /**
@@ -348,28 +346,13 @@ export function createShipStationNotifyWebhookDispatch(
         resolvedBy: "system:shipstation_webhook",
       });
       if (recovery.resolvedCount > 0) {
-        console.log(JSON.stringify({
-          level: "info",
-          action: "ship_notify_no_match_resolved",
-          outcome: "recovered",
-          ss_shipment_id: shipment.shipmentId,
-          ss_order_id: shipment.orderId ?? null,
-          resolved_count: recovery.resolvedCount,
-          exception_ids: recovery.recovered.map((row) => row.exceptionId),
-        }));
+        logger.info("ship_notify_no_match_resolved", { outcome: "recovered", ss_shipment_id: shipment.shipmentId, ss_order_id: shipment.orderId ?? null, resolved_count: recovery.resolvedCount, exception_ids: recovery.recovered.map((row) => row.exceptionId) });
       }
     } catch (error: any) {
       // The fulfillment event already committed. Exception housekeeping must
       // remain retryable without turning a successful provider callback into a
       // failed webhook delivery.
-      console.error(JSON.stringify({
-        level: "error",
-        action: "ship_notify_no_match_resolve_failed",
-        outcome: "error",
-        ss_shipment_id: shipment.shipmentId,
-        ss_order_id: shipment.orderId ?? null,
-        error: error?.message ?? String(error),
-      }));
+      logger.error("ship_notify_no_match_resolve_failed", { outcome: "error", ss_shipment_id: shipment.shipmentId, ss_order_id: shipment.orderId ?? null, error: error?.message ?? String(error) });
     }
   }
   async function processShipmentNotification(
@@ -432,26 +415,12 @@ export function createShipStationNotifyWebhookDispatch(
     // shipment. Log a structured warning so ops can investigate.
     // Previously this was silent — the webhook returned 200 and
     // ShipStation would not retry, stranding the shipment.
-    console.error(
-      JSON.stringify({
-        level: "error",
-        action: "ship_notify_no_match",
-        outcome: "unmatched",
-        ss_shipment_id: shipment.shipmentId ?? null,
-        ss_order_id: shipment.orderId ?? null,
-        ss_order_key: shipment.orderKey ?? null,
-        tracking: shipment.trackingNumber ?? null,
-        carrier: shipment.carrierCode ?? null,
-        v2_fallback: v2Result.fallback,
-      }),
-    );
+    logger.error("ship_notify_no_match", { outcome: "unmatched", ss_shipment_id: shipment.shipmentId ?? null, ss_order_id: shipment.orderId ?? null, ss_order_key: shipment.orderKey ?? null, tracking: shipment.trackingNumber ?? null, carrier: shipment.carrierCode ?? null, v2_fallback: v2Result.fallback });
 
     try {
       await recordShipNotifyNoMatchException(shipment, v2Result.fallback);
     } catch (exceptionErr: any) {
-      console.error(
-        `[ShipStation Webhook] Failed to persist no-match reconciliation exception for SS shipment ${shipment.shipmentId}: ${exceptionErr?.message}`,
-      );
+      logger.error("oms.shipstation_notify_webhook_dispatch", { message: `[ShipStation Webhook] Failed to persist no-match reconciliation exception for SS shipment ${shipment.shipmentId}: ${exceptionErr?.message}` });
     }
 
     return { processed: false };
@@ -541,6 +510,10 @@ export function createShipStationNotifyWebhookDispatch(
     );
 
     const shipments = data.shipments || [];
+    // Normalize incoming provider shipment payloads through the canonical
+    // ShippingEngine webhook normalizer (`P3.3`) while keeping label observation
+    // decoupled from carrier-possession dispatch.
+    normalizeShipStationWebhookPayload({ shipments });
     if (dependencies.labelCommercialFulfillment && !dependencies.relatedLabelReader) {
       throw Object.assign(new Error("Related-label refresh is not initialized"),
         { code: "SHIPSTATION_LABEL_REFRESH_UNAVAILABLE" });
@@ -584,9 +557,7 @@ export function createShipStationNotifyWebhookDispatch(
           shipmentId: Number.isInteger(shipment.shipmentId) ? shipment.shipmentId : null,
           message: err?.message || String(err),
         });
-        console.error(
-          `[ShipStation Webhook] Error processing shipment ${shipment.shipmentId}: ${err?.message || String(err)}`,
-        );
+        logger.error("oms.shipstation_notify_webhook_dispatch", { message: `[ShipStation Webhook] Error processing shipment ${shipment.shipmentId}: ${err?.message || String(err)}` });
       }
     }
 
@@ -870,11 +841,16 @@ export function createShipStationNotifyWebhookDispatch(
       : typeof source.message === "string"
         ? source.message
         : String(error);
+    // 55P03 (lock_not_available) is contention on a row another writer holds,
+    // usually inventory.cutover_admission_fence. It is transient. Treated as
+    // permanent, one occurrence ended the durable PICK_CORRECTION_REQUIRED wait
+    // for 113 shipments (prod, 2026-10-09..2026-11-23): their dispatch went to
+    // review_required and their inventory and reservations never posted.
     const retryableDatabaseCode =
       sourceCode !== null
       && (
         sourceCode.startsWith("08")
-        || ["40001", "40P01", "53300", "57P01", "57P02", "57P03"].includes(
+        || ["40001", "40P01", "53300", "55P03", "57P01", "57P02", "57P03"].includes(
           sourceCode,
         )
       );

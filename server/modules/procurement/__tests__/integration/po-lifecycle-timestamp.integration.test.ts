@@ -8,7 +8,7 @@ import { purchaseOrders } from "@shared/schema";
 import {
   nextPurchaseOrderUpdatedAt,
   purchaseOrderUpdatedAtMatchesApplicationVersion,
-} from "../../purchase-order-lifecycle-version";
+} from "../../application/purchase-order-lifecycle-version";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 

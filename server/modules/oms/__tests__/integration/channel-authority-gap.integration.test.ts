@@ -14,6 +14,7 @@ import {
   OMS_LINE_AWAITING_CHANNEL_PAYMENT,
   OMS_PAID_QUANTITY_BELOW_CHANNEL,
 } from "../../domain/channel-payment-settlement";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -91,8 +92,8 @@ function executorFor(pool: pg.Pool): Executor {
     await database?.close();
   });
   beforeEach(async () => {
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("log");
+    spyLoggerJson("error");
     await database.pool.query("TRUNCATE oms.oms_order_events, oms.oms_order_lines, oms.oms_orders, wms.orders RESTART IDENTITY CASCADE");
     // #65696 as it stood after the Shopify-admin edit.
     await database.pool.query(`INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,fulfillment_status,
@@ -129,7 +130,7 @@ function executorFor(pool: pg.Pool): Executor {
       sourceEventId: "webhook_inbox:234867",
       lines: [{ orderLineId: 127120, sku: "GLV-MAG-35PT-P50", channelQuantity: 10, paidQuantity: 8, unauthorizedQuantity: 2 }],
     });
-    expect(console.error).toHaveBeenCalledTimes(3);
+    expect(getLoggerJsonSpy("error")).toHaveBeenCalledTimes(3);
   });
 
   it("appends only once under concurrent observations", async () => {

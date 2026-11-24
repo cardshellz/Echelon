@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { WalmartAdapter } from "../../adapters/walmart/walmart.adapter";
 import { WalmartChannelService } from "../../adapters/walmart/walmart-channel.service";
-import { ChannelInventoryPublicationTransportAdapter } from "../../channel-inventory-publication-transport.adapter";
+import { ChannelInventoryPublicationTransportAdapter } from "../../infrastructure/channel-inventory-publication-transport.adapter";
 import { deriveChannelDestinations } from "../../../inventory-planning/domain/inventory-channel-exposure";
 import type { InventoryPublicationSourceWarehouse } from "../../../inventory-planning/application/inventory-publication-supply-read.port";
 import { WalmartApiError } from "../../adapters/walmart/walmart-client";

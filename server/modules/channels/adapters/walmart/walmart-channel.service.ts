@@ -6,10 +6,10 @@ import { WalmartUsApi, type WalmartShipNode, type WalmartUsApiPort } from "./wal
 import { WalmartConnectionRepository, type WalmartConnectionRecord } from "./walmart-connection.repository";
 import { WalmartListingApi } from "./walmart-listing-api";
 import { listingAccountSchema, type ListingAccount } from "@shared/types/channel-listing-publication";
-import type { ListingWriteGuard } from "../../../marketplace-listings/application/listing-lifecycle-ports";
-import { ListingPublicationError } from "../../../marketplace-listings/domain/listing-publication";
+import type { ListingWriteGuard } from "../../../marketplace-listings/listing-lifecycle-ports.api";
+import { ListingPublicationError } from "../../../marketplace-listings/listing-publication.api";
 import { channelCatalogItemSchema } from "@shared/types/channel-catalog";
-import type { ListingSetupIntent } from "../../../inventory-planning/application/listing-setup-intent";
+import type { ListingSetupIntent } from "../../../inventory-planning/listing-setup-intent.api";
 
 function listingControlError(error: unknown): unknown {
   return error instanceof ListingPublicationError

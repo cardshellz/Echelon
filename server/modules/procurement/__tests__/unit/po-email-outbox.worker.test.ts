@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { poEmailDocumentHash } from "../../po-email-document-contract";
-import type { PoEmailOutboxDbPool } from "../../po-email-outbox.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
+import { poEmailDocumentHash } from "../../application/po-email-document-contract";
+import type { PoEmailOutboxDbPool } from "../../application/po-email-outbox.service";
 import {
   claimDeliveries,
   classifyDeliveryError,
   computeNextAttemptAt,
   processPoEmailOutboxBatch,
-} from "../../po-email-outbox.worker";
+} from "../../application/po-email-outbox.worker";
 
 function makePool(query: PoEmailOutboxDbPool["query"]): PoEmailOutboxDbPool {
   return { query, connect: vi.fn() };
@@ -309,7 +310,7 @@ describe("PO email document hold audit logging", () => {
   };
 
   it("logs only new sweep holds, using one minimal JSON event per affected delivery", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warning = spyLoggerJson("warn");
     try {
       const query = vi.fn()
         .mockResolvedValueOnce({ rows: [returnedHold, { ...returnedHold, deliveryId: 43, poId: 8 }], rowCount: 2 })
@@ -317,7 +318,7 @@ describe("PO email document hold audit logging", () => {
       const input = { batchSize: 10, leaseSeconds: 120, now };
       await claimDeliveries(makePool(query), input);
       await claimDeliveries(makePool(query), input); // Already held rows are not returned or logged again.
-      expect(warning.mock.calls.map(([entry]) => JSON.parse(entry))).toEqual([
+      expect(warning.mock.calls.map(([entry]) => JSON.parse(entry))).toMatchObject([
         expectedAudit, { ...expectedAudit, deliveryId: 43, poId: 8 },
       ]);
       expect(warning.mock.calls.every(call => call.length === 1)).toBe(true);
@@ -327,7 +328,7 @@ describe("PO email document hold audit logging", () => {
   });
 
   it("logs a persisted claimed hold without exposing the message or recipients", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warning = spyLoggerJson("warn");
     try {
       const query = vi.fn()
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
@@ -336,14 +337,15 @@ describe("PO email document hold audit logging", () => {
         .mockResolvedValueOnce({ rows: [returnedHold], rowCount: 1 });
       const deliver = vi.fn();
       await processPoEmailOutboxBatch({ dbPool: makePool(query), deliver, now });
-      expect(warning).toHaveBeenCalledExactlyOnceWith(JSON.stringify(expectedAudit));
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(warning.mock.calls[0][0])).toMatchObject(expectedAudit);
       expect(deliver).not.toHaveBeenCalled();
       expect(JSON.stringify(warning.mock.calls)).not.toMatch(/private-vendor|Private subject|Secret terms|htmlBody|toEmail/);
     } finally { warning.mockRestore(); }
   });
 
   it("does not claim an audit event when the hold write loses its lease", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warning = spyLoggerJson("warn");
     try {
       const query = vi.fn()
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })

@@ -4,11 +4,11 @@ const { recordAuthorityEvent } = vi.hoisted(() => ({
   recordAuthorityEvent: vi.fn(),
 }));
 
-vi.mock("../../oms-line-authority-ledger", () => ({
+vi.mock("../../application/oms-line-authority-ledger", () => ({
   recordOmsLineAuthorityEvent: recordAuthorityEvent,
 }));
 
-import { reconcileShopifyLineReadiness } from "../../shopify-line-readiness.service";
+import { reconcileShopifyLineReadiness } from "../../application/shopify-line-readiness.service";
 
 const NOW = new Date("2026-08-21T12:00:00.000Z");
 

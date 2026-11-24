@@ -1,0 +1,4626 @@
+/**
+ * Fulfillment Push Service
+ *
+ * Pushes tracking numbers back to the originating channel when an OMS order
+ * is marked shipped. Supports eBay and Shopify (and future channels).
+ *
+ * Shopify push (§6 Commit 21) is multi-shipment-native: each
+ * `wms.outbound_shipments` row becomes ONE Shopify fulfillment via the
+ * `fulfillmentCreateV2` Admin GQL mutation. Shopify's customer order page
+ * automatically reflects each fulfillment with its items + tracking and
+ * marks the order "Partially fulfilled" until all shipments complete.
+ *
+ * ShipStation V2 calls `pushShopifyFulfillment` after shipped events, and
+ * `SHOPIFY_FULFILLMENT_PUSH_ENABLED=false` can disable the hot path.
+ */
+
+import { eq, sql } from "drizzle-orm";
+import { omsOrders, omsOrderLines, omsOrderEvents, channels } from "@shared/schema";
+import { knownCarrierCode } from "@shared/utils/carrier-identity";
+import { incr } from "../../../instrumentation/metrics";
+import {
+  sqlBigintArray,
+  sqlTextArray,
+} from "../../../infrastructure/postgres-array";
+import {
+  clearDeadShopifyFulfillmentIdsOnOutboundShipmentInWms,
+  persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms,
+} from "../../wms/outbound-shipment-mutations.api";
+import type { EbayApiClient } from "../../channels/ebay-connector.api";
+import type { ChannelFulfillmentProviderClients, ShopifyFulfillmentAccount } from "../../channels/channel-fulfillment-provider-clients.service.api";
+import { ChannelFulfillmentProviderError } from "../../channels/channel-fulfillment-provider.error.api";
+import {
+  DropshipError,
+  buildChannelFulfillmentTrackingIdempotencyKey,
+} from "../../dropship/fulfillment-tracking.api";
+import {
+  DROPSHIP_LINE_FULFILLMENT_PROVIDER,
+  DROPSHIP_ORDER_CHANNEL_PROVIDER,
+  DROPSHIP_WRITEBACK_PROVIDER,
+} from "../domain/channel-fulfillment-authority.policy";
+import { resolveChannelFulfillmentNotifyCustomer } from "../domain/channel-fulfillment-notification.policy";
+import { shopifyOrderFulfillmentLockId } from "./shopify-fulfillment-lock";
+import { assertShopifyCommandLabelActive } from "../infrastructure/shopify-label-command-guard.repository";
+import type { EbayShippingFulfillmentRequest } from "../../channels/ebay-connector.api";
+import type {
+  ShopifyAdminGraphQLClient,
+  ShopifyUserError,
+} from "../../shopify/admin-gql-client.api";
+import { normalizeEbayTrackingNumber } from "../../channels/ebay-connector.api";
+import {
+  EbayTrackingConflictError,
+  recordEbayTrackingConflict,
+} from "./channel-fulfillment-conflict";
+import { logger } from "../../../platform/observability/logger";
+
+// ---------------------------------------------------------------------------
+// Carrier code mapping: WMS/internal → eBay carrier codes
+// ---------------------------------------------------------------------------
+
+function mapCarrierCode(carrier: string): string {
+  return knownCarrierCode(carrier) ?? carrier.toUpperCase();
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Shopify fulfillment push — error type + helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured error thrown by `pushShopifyFulfillment`. The `context`
+ * payload is shaped for log ingestion and for the C22 retry/DLQ caller
+ * to decide retry-vs-dead-letter without parsing message strings.
+ */
+export class ShopifyFulfillmentPushError extends Error {
+  public readonly context: {
+    code: string;
+    shipmentId: number;
+    field?: string;
+    value?: unknown;
+    userErrors?: ShopifyUserError[];
+    cause?: string;
+  };
+
+  constructor(
+    message: string,
+    context: ShopifyFulfillmentPushError["context"],
+  ) {
+    super(message);
+    this.name = "ShopifyFulfillmentPushError";
+    this.context = context;
+  }
+}
+
+export const SHOPIFY_PUSH_INVALID_INPUT = "shopify_push_invalid_input";
+export const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
+export const SHOPIFY_PUSH_USER_ERRORS = "shopify_push_user_errors";
+export const SHOPIFY_PUSH_NETWORK_ERROR = "shopify_push_network_error";
+export const SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS = "shopify_push_no_fulfillment_orders";
+export const SHOPIFY_PUSH_NO_OUR_LOCATIONS = "shopify_push_no_our_locations";
+export const SHOPIFY_PUSH_IN_PROGRESS = "shopify_push_in_progress";
+export const SHOPIFY_PUSH_INCOMPLETE = "shopify_push_incomplete";
+export const SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT =
+  "shopify_push_package_state_conflict";
+
+const SHOPIFY_FULFILLMENT_GROUP_LOCK_BASE = 1_700_000_000_000;
+export const SHOPIFY_CANCEL_INVALID_INPUT = "shopify_cancel_invalid_input";
+export const SHOPIFY_CANCEL_USER_ERRORS = "shopify_cancel_user_errors";
+export const SHOPIFY_CANCEL_NETWORK_ERROR = "shopify_cancel_network_error";
+export const SHOPIFY_TRACKING_UPDATE_INVALID_INPUT =
+  "shopify_tracking_update_invalid_input";
+export const SHOPIFY_TRACKING_UPDATE_USER_ERRORS =
+  "shopify_tracking_update_user_errors";
+export const SHOPIFY_TRACKING_UPDATE_NETWORK_ERROR =
+  "shopify_tracking_update_network_error";
+
+/**
+ * Result returned by `cancelShopifyFulfillment`. The `alreadyCancelled`
+ * discriminator lets callers distinguish a fresh cancel from an idempotent
+ * skip without parsing log strings. See §6 Commit 23 for the idempotency
+ * contract — userErrors mentioning "already cancelled" / "cancelled state"
+ * are treated as success rather than thrown.
+ */
+export interface ShopifyFulfillmentCancelResult {
+  fulfillmentGid: string;
+  alreadyCancelled: boolean;
+}
+
+/**
+ * Result returned by `updateShopifyFulfillmentTracking`. The
+ * `trackingNumberChanged` discriminator lets callers (markShipmentShipped
+ * re-label flow, future retry/DLQ layers) distinguish a fresh tracking
+ * update from an idempotent skip without parsing log strings.
+ *
+ *   - `trackingNumberChanged: true`  — Shopify accepted the update; the
+ *     fulfillment now carries the new tracking number we sent.
+ *   - `trackingNumberChanged: false` — Shopify reported the fulfillment
+ *     already carried this tracking number (idempotent retry-safety);
+ *     no state change was needed on the Shopify side.
+ */
+export interface ShopifyFulfillmentTrackingUpdateResult {
+  fulfillmentGid: string;
+  trackingNumberChanged: boolean;
+}
+
+/**
+ * Result returned by `pushShopifyFulfillment`. The `alreadyPushed`
+ * discriminator lets callers (C22d retry/DLQ) distinguish a fresh push
+ * from an idempotent skip without relying on log strings. Per D1.
+ *
+ * `shopifyFulfillmentId` is `null` only in the no-op cases:
+ *   - non-Shopify channel,
+ *   - no fulfillment orders left after location filtering (all FOs are
+ *     assigned to a 3PL location and not ours).
+ *
+ * For combined-order groups (§6 Commit 25 + Overlord D8) the public
+ * `pushShopifyFulfillment` method fans out one Shopify fulfillment per
+ * order in the group, but the returned shape always reflects the
+ * TRIGGERING shipment only — the caller's retry/DLQ logic must keep
+ * thinking in terms of one shipment id at a time. Sibling outcomes are
+ * handled internally; failed siblings retry independently via DLQ.
+ */
+export interface ShopifyFulfillmentPushResult {
+  shopifyFulfillmentId: string | null;
+  alreadyPushed: boolean;
+  /**
+   * True only after Shopify live state accounts for every Shopify-owned item
+   * in the current WMS package signature. Callers must not treat a stored
+   * fulfillment id by itself as proof of completion.
+   */
+  writebackComplete: boolean;
+  /**
+   * Shopify's live remaining quantity proved this shipment's channel debt was
+   * already satisfied by earlier fulfillment(s) or a later line disposition.
+   * No fulfillmentCreateV2 mutation was issued for this result.
+   */
+  alreadySatisfied?: boolean;
+}
+
+export const CHANNEL_FULFILLMENT_INVALID_INPUT = "channel_fulfillment_invalid_input";
+export const CHANNEL_FULFILLMENT_LINEAGE_MISMATCH = "channel_fulfillment_lineage_mismatch";
+export const CHANNEL_FULFILLMENT_TRACKING_MISMATCH = "channel_fulfillment_tracking_mismatch";
+
+export type ChannelFulfillmentProviderInputErrorCode =
+  | typeof CHANNEL_FULFILLMENT_INVALID_INPUT
+  | typeof CHANNEL_FULFILLMENT_LINEAGE_MISMATCH
+  | typeof CHANNEL_FULFILLMENT_TRACKING_MISMATCH;
+
+export class ChannelFulfillmentProviderInputError extends Error {
+  readonly code: ChannelFulfillmentProviderInputErrorCode;
+  readonly context: Readonly<Record<string, unknown>>;
+
+  constructor(
+    code: ChannelFulfillmentProviderInputErrorCode,
+    message: string,
+    context: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = "ChannelFulfillmentProviderInputError";
+    this.code = code;
+    this.context = Object.freeze({ ...context });
+  }
+}
+
+export interface ChannelFulfillmentProviderCommandItem {
+  /** Persisted allocation provenance; legacy commands omit both fields. */
+  readonly packageAllocationEntryId?: number | null;
+  readonly packageAllocationEffectIntentId?: number | null;
+  readonly legacyWmsShipmentId: number;
+  readonly legacyWmsShipmentItemId: number;
+  readonly omsOrderLineId: number;
+  readonly channelOrderLineId: string;
+  readonly quantity: number;
+}
+
+export interface ChannelFulfillmentProviderCommandInput {
+  readonly trackingReplacement?: boolean;
+  readonly commandId: number;
+  readonly physicalShipmentId: number;
+  readonly omsOrderId: number;
+  readonly legacyWmsShipmentIds: readonly number[];
+  readonly trackingNumber: string;
+  readonly carrier: string;
+  readonly trackingUrl: string | null;
+  readonly shippedAt: Date | null;
+  /** Persisted per command; legacy callers retain their original notifying behavior. */
+  readonly notifyCustomer?: boolean;
+  readonly items: readonly ChannelFulfillmentProviderCommandItem[];
+}
+
+/**
+ * Per-sibling outcome of a combined-group fan-out push (§6 Commit 25).
+ * Only used internally between `pushFulfillmentForCombinedGroup` and
+ * `pushShopifyFulfillment`; the public method narrows to the triggering
+ * shipment's row before returning to the caller.
+ */
+export interface CombinedGroupFulfillmentOutcome {
+  shipmentId: number;
+  orderId: number | null;
+  shopifyFulfillmentId: string | null;
+  alreadyPushed: boolean;
+  writebackComplete: boolean;
+  alreadySatisfied?: boolean;
+  skipped: boolean;
+  skipReason?: string;
+  error?: { code: string; message: string };
+}
+
+export type FulfillmentPushExclusiveRunner = <T>(
+  lockId: number,
+  fn: () => Promise<T>,
+) => Promise<T | null>;
+
+export interface FulfillmentPushServiceOptions {
+  /** Canonical commands must resolve their own originating account; never use legacy singletons. */
+  providerClients?: ChannelFulfillmentProviderClients;
+  /**
+   * Production injects a dedicated-session Postgres advisory-lock runner.
+   * Tests default to direct execution so they remain deterministic and do not
+   * depend on environment database credentials.
+   */
+  runExclusive?: FulfillmentPushExclusiveRunner;
+}
+
+/**
+ * Aggregate result returned by `pushFulfillmentForCombinedGroup`.
+ * `triggeringShipmentId` is the shipment id passed to the public
+ * `pushShopifyFulfillment` call that fanned out; `fulfillments` is one
+ * row per sibling shipment in the group (parent + children).
+ */
+export interface CombinedGroupFanOutResult {
+  triggeringShipmentId: number;
+  combinedGroupId: number;
+  fulfillments: CombinedGroupFulfillmentOutcome[];
+}
+
+/**
+ * WMS shipment row shape used by `pushShopifyFulfillment`.
+ */
+interface WmsShipmentForShopify {
+  id: number;
+  order_id: number | null;
+  channel_id: number | null;
+  status: string;
+  carrier: string | null;
+  tracking_number: string | null;
+  tracking_url: string | null;
+  shopify_fulfillment_id: string | null;
+}
+
+/**
+ * WMS order row shape used by `pushShopifyFulfillment`.
+ */
+interface WmsOrderForShopify {
+  id: number;
+  channel_id: number | null;
+  source: string;
+  external_order_id: string | null;
+  oms_fulfillment_order_id: string | null;
+  combined_group_id: number | null;
+  combined_role: string | null;
+  // Shopify location id this order ships FROM, via its warehouse mapping
+  // (wms.orders.warehouse_id → warehouse.warehouses.shopify_location_id).
+  // Used to pin fulfillment matching to the correct warehouse's ticket in a
+  // multi-warehouse split. Null when no warehouse→location mapping exists.
+  // Stage 2 (one order across multiple warehouses) sources this per-shipment
+  // instead — see the order-load query note.
+  ship_from_location_id: string | null;
+}
+
+/**
+ * WMS shipment-item row joined with WMS order_items, shaped for the
+ * fulfillment-order line-item resolution step.
+ */
+interface WmsShipmentItemForShopify {
+  shipment_id: number;
+  shipment_item_id: number;
+  order_item_id: number | null;
+  oms_order_line_id: number | null;
+  oms_order_id: number | null;
+  fulfillment_provider: string | null;
+  sku: string | null;
+  // Shopify order line-item id (bare numeric string from
+  // oms_order_lines.external_line_item_id). Used as the canonical match key
+  // when SKU is missing/UNKNOWN — e.g. wax/special products that carry no
+  // warehouse SKU but are still real, fulfillable Shopify line items.
+  external_line_item_id: string | null;
+  qty: number;
+  stored_fulfillment_order_id?: string | null;
+  stored_fulfillment_order_line_item_id?: string | null;
+}
+
+interface LegacyShipmentLineSnapshot {
+  shipment_id: number;
+  shipment_item_id: number;
+  order_item_id?: number | null;
+  oms_order_line_id: number | null;
+  oms_order_id: number | null;
+  fulfillment_provider: string | null;
+  external_line_item_id: string | null;
+  qty: number;
+}
+
+/**
+ * Result of resolving a WMS shipment item to a Shopify fulfillment-order
+ * line item. One Shopify fulfillment-order can supply multiple of our
+ * shipment items, so the caller groups by `fulfillmentOrderId`.
+ *
+ * `omsOrderLineId` is carried through so the self-healing back-write
+ * (D2) can update the matched `oms.oms_order_lines` row when Path B
+ * resolves the IDs from a live Shopify query.
+ */
+interface ResolvedFulfillmentOrderLine {
+  fulfillmentOrderId: string;
+  fulfillmentOrderLineItemId: string;
+  quantity: number;
+  omsOrderLineId: number | null;
+}
+
+interface FulfillmentOrderLineReconciliation {
+  resolved: ResolvedFulfillmentOrderLine[];
+  requestedQuantity: number;
+  alreadySatisfiedQuantity: number;
+}
+
+const SHOPIFY_WRITEBACK_COVERAGE_VERSION = 2;
+
+/**
+ * Stable evidence key for the exact Shopify-owned WMS package contents.
+ * Shipment-item and order-item ids are database identities; including both
+ * quantity and identity makes a late insert, replacement, or quantity edit
+ * invalidate earlier completion evidence.
+ */
+function buildShopifyPackageSignature(
+  items: WmsShipmentItemForShopify[],
+): string {
+  const parts = [...items]
+    .sort((left, right) => left.shipment_item_id - right.shipment_item_id)
+    .map((item) => {
+      if (!Number.isInteger(item.shipment_item_id) || item.shipment_item_id <= 0) {
+        throw new Error(`invalid shipment item id: ${item.shipment_item_id}`);
+      }
+      if (!Number.isInteger(item.qty) || item.qty <= 0) {
+        throw new Error(`invalid shipment item quantity: ${item.qty}`);
+      }
+      const orderItemId = Number.isInteger(item.order_item_id) && Number(item.order_item_id) > 0
+        ? String(item.order_item_id)
+        : "0";
+      return `${item.shipment_item_id}:${orderItemId}:${item.qty}`;
+    });
+  return `v${SHOPIFY_WRITEBACK_COVERAGE_VERSION}|${parts.join(",")}`;
+}
+
+/**
+ * Build the carrier-name string Shopify expects in `trackingInfo.company`.
+ * Shopify is permissive — it just needs a string — so we pass the WMS
+ * carrier through verbatim. Validation upstream guarantees non-empty.
+ */
+function shopifyTrackingCompany(carrier: string): string {
+  return carrier.trim();
+}
+
+type DropshipMarketplaceTrackingPushStatus =
+  | "not_dropship"
+  | "already_succeeded"
+  | "already_processing"
+  | "succeeded";
+
+interface DropshipMarketplaceTrackingServiceHandle {
+  pushForOmsOrder(input: {
+    omsOrderId: number;
+    wmsShipmentId?: number | null;
+    carrier: string;
+    trackingNumber: string;
+    shippedAt: Date;
+    idempotencyKey?: string;
+    lineItems?: readonly { externalLineItemId: string; quantity: number }[];
+    lastAttempt?: boolean;
+  }): Promise<{
+    status: DropshipMarketplaceTrackingPushStatus;
+    push?: {
+      pushId: number;
+      storeConnectionId: number;
+      platform: string;
+      externalFulfillmentId: string | null;
+    };
+  }>;
+}
+
+/** Writeback providers whose commands carry exact, persisted line lineage. */
+type CanonicalCommandChannelProvider = "shopify" | "ebay" | "walmart" | typeof DROPSHIP_WRITEBACK_PROVIDER;
+
+/** What the channel fulfillment worker records for one dropship command attempt. */
+export interface DropshipTrackingCommandPushResult {
+  readonly outcome: "success" | "ignored";
+  readonly dropshipTrackingPushId: number;
+  readonly externalFulfillmentId: string | null;
+  readonly alreadySatisfied: boolean;
+}
+
+/**
+ * Sums command items per channel line, sorted by line id. This is exactly
+ * what a store is told shipped in the package.
+ */
+function aggregateCommandLineQuantities(
+  items: readonly ChannelFulfillmentProviderCommandItem[],
+): Array<{ channelOrderLineId: string; quantity: number }> {
+  const quantityByLine = new Map<string, number>();
+  for (const item of items) {
+    quantityByLine.set(
+      item.channelOrderLineId,
+      (quantityByLine.get(item.channelOrderLineId) ?? 0) + item.quantity,
+    );
+  }
+  return [...quantityByLine.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([channelOrderLineId, quantity]) => ({ channelOrderLineId, quantity }));
+}
+
+/**
+ * Maps a dropship tracking failure to the rails' failure classes with the
+ * dropship service's own rule: a DropshipError is retryable unless its context
+ * says `retryable: false`; any other failure is retryable.
+ */
+function toDropshipTrackingProviderError(error: unknown): ChannelFulfillmentProviderError {
+  if (error instanceof ChannelFulfillmentProviderError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof DropshipError) {
+    return new ChannelFulfillmentProviderError(
+      error.code,
+      message,
+      error.context?.retryable === false ? "permanent" : "transient",
+    );
+  }
+  return new ChannelFulfillmentProviderError("DROPSHIP_TRACKING_PUSH_FAILED", message, "transient");
+}
+
+function isDropshipOmsOrder(order: any): boolean {
+  const rawPayload = order?.rawPayload;
+  if (rawPayload && typeof rawPayload === "object" && rawPayload.dropship) {
+    return true;
+  }
+  if (typeof order?.tags === "string") {
+    return order.tags.includes('"dropship"') || order.tags.includes("dropship");
+  }
+  return false;
+}
+
+function resolveDropshipShippedAt(order: any, orderId: number): Date {
+  if (order?.shippedAt instanceof Date && !Number.isNaN(order.shippedAt.getTime())) {
+    return order.shippedAt;
+  }
+  if (typeof order?.shippedAt === "string") {
+    const parsed = new Date(order.shippedAt);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+  throw new Error(`Dropship marketplace tracking requires shipped_at for order ${orderId}`);
+}
+
+function buildDropshipMarketplaceTrackingIdempotencyKey(input: {
+  omsOrderId: number;
+  wmsShipmentId: number | null;
+  carrier: string;
+  trackingNumber: string;
+}): string {
+  const carrier = input.carrier.trim().toLowerCase();
+  const trackingNumber = input.trackingNumber.trim();
+  if (input.wmsShipmentId !== null) {
+    return `dropship:oms:${input.omsOrderId}:shipment:${input.wmsShipmentId}:tracking:${carrier}:${trackingNumber}`;
+  }
+  return `dropship:oms:${input.omsOrderId}:tracking:${carrier}:${trackingNumber}`;
+}
+
+function parseDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+function normalizeChannelCommandInput(
+  input: ChannelFulfillmentProviderCommandInput,
+): ChannelFulfillmentProviderCommandInput {
+  const positiveFields: Array<[string, number]> = [
+    ["commandId", input.commandId],
+    ["physicalShipmentId", input.physicalShipmentId],
+    ["omsOrderId", input.omsOrderId],
+  ];
+  for (const [field, value] of positiveFields) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new ChannelFulfillmentProviderInputError(
+        CHANNEL_FULFILLMENT_INVALID_INPUT,
+        `${field} must be a positive integer`,
+        { field, value },
+      );
+    }
+  }
+
+  const trackingNumber = input.trackingNumber.trim();
+  const carrier = input.carrier.trim();
+  if (!trackingNumber || !carrier || input.items.length === 0) {
+    throw new ChannelFulfillmentProviderInputError(
+      CHANNEL_FULFILLMENT_INVALID_INPUT,
+      "Canonical fulfillment command requires tracking, carrier, and at least one line item",
+      { commandId: input.commandId },
+    );
+  }
+
+  const legacyWmsShipmentIds = [...new Set(input.legacyWmsShipmentIds)]
+    .sort((left, right) => left - right);
+  if (
+    legacyWmsShipmentIds.length === 0
+    || legacyWmsShipmentIds.some((shipmentId) => !Number.isInteger(shipmentId) || shipmentId <= 0)
+  ) {
+    throw new ChannelFulfillmentProviderInputError(
+      CHANNEL_FULFILLMENT_INVALID_INPUT,
+      "Canonical fulfillment command requires at least one valid legacy WMS shipment reference",
+      { commandId: input.commandId, legacyWmsShipmentIds: input.legacyWmsShipmentIds },
+    );
+  }
+  const shipmentIdSet = new Set(legacyWmsShipmentIds);
+  const seen = new Set<number>();
+  const items = input.items.map((item) => {
+    const hasAllocation = item.packageAllocationEntryId != null || item.packageAllocationEffectIntentId != null;
+    if (
+      !Number.isInteger(item.legacyWmsShipmentId)
+      || item.legacyWmsShipmentId <= 0
+      || !shipmentIdSet.has(item.legacyWmsShipmentId)
+      || !Number.isInteger(item.legacyWmsShipmentItemId)
+      || item.legacyWmsShipmentItemId <= 0
+      || !Number.isInteger(item.omsOrderLineId)
+      || item.omsOrderLineId <= 0
+      || !Number.isInteger(item.quantity)
+      || item.quantity <= 0
+      || !item.channelOrderLineId.trim()
+      || seen.has(item.legacyWmsShipmentItemId)
+      || (hasAllocation && (
+        !Number.isSafeInteger(item.packageAllocationEntryId) || Number(item.packageAllocationEntryId) <= 0
+        || !Number.isSafeInteger(item.packageAllocationEffectIntentId) || Number(item.packageAllocationEffectIntentId) <= 0
+      ))
+    ) {
+      throw new ChannelFulfillmentProviderInputError(
+        CHANNEL_FULFILLMENT_INVALID_INPUT,
+        "Canonical fulfillment command has an invalid or duplicate line item",
+        { commandId: input.commandId, item },
+      );
+    }
+    seen.add(item.legacyWmsShipmentItemId);
+    return Object.freeze({
+      ...(hasAllocation ? {
+        packageAllocationEntryId: item.packageAllocationEntryId,
+        packageAllocationEffectIntentId: item.packageAllocationEffectIntentId,
+      } : {}),
+      legacyWmsShipmentId: item.legacyWmsShipmentId,
+      legacyWmsShipmentItemId: item.legacyWmsShipmentItemId,
+      omsOrderLineId: item.omsOrderLineId,
+      channelOrderLineId: item.channelOrderLineId.trim(),
+      quantity: item.quantity,
+    });
+  });
+
+  return Object.freeze({
+    ...input,
+    notifyCustomer: resolveChannelFulfillmentNotifyCustomer(input.notifyCustomer),
+    legacyWmsShipmentIds: Object.freeze(legacyWmsShipmentIds),
+    trackingNumber,
+    carrier,
+    trackingUrl: input.trackingUrl?.trim() || null,
+    items: Object.freeze(items),
+  });
+}
+
+function commandLineSignature(input: {
+  legacyWmsShipmentId: number;
+  legacyWmsShipmentItemId: number;
+  omsOrderLineId: number;
+  channelOrderLineId: string;
+  quantity: number;
+}): string {
+  return JSON.stringify([
+    input.legacyWmsShipmentId,
+    input.legacyWmsShipmentItemId,
+    input.omsOrderLineId,
+    input.channelOrderLineId.trim(),
+    input.quantity,
+  ]);
+}
+
+function assertExactChannelCommandLineage(
+  command: ChannelFulfillmentProviderCommandInput,
+  rows: readonly LegacyShipmentLineSnapshot[],
+  ownsLine: (provider: string | null | undefined) => boolean,
+): void {
+  const actual = rows
+    .filter((row) => Number.isInteger(Number(row.qty)) && Number(row.qty) > 0)
+    .filter((row) => ownsLine(row.fulfillment_provider))
+    .map((row) => {
+      const shipmentItemId = Number(row.shipment_item_id);
+      const shipmentId = Number(row.shipment_id);
+      const omsOrderLineId = Number(row.oms_order_line_id);
+      const omsOrderId = Number(row.oms_order_id);
+      const channelOrderLineId = String(row.external_line_item_id ?? "").trim();
+      const quantity = Number(row.qty);
+      if (
+        !Number.isInteger(shipmentId)
+        || shipmentId <= 0
+        || !Number.isInteger(shipmentItemId)
+        || shipmentItemId <= 0
+        || !Number.isInteger(omsOrderLineId)
+        || omsOrderLineId <= 0
+        || omsOrderId !== command.omsOrderId
+        || !channelOrderLineId
+        || !Number.isInteger(quantity)
+        || quantity <= 0
+      ) {
+        throw new ChannelFulfillmentProviderInputError(
+          CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+          `Canonical command ${command.commandId} has incomplete legacy shipment lineage`,
+          { commandId: command.commandId, row },
+        );
+      }
+      return commandLineSignature({
+        legacyWmsShipmentId: shipmentId,
+        legacyWmsShipmentItemId: shipmentItemId,
+        omsOrderLineId,
+        channelOrderLineId,
+        quantity,
+      });
+    })
+    .sort();
+  const expected = command.items.map(commandLineSignature).sort();
+
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new ChannelFulfillmentProviderInputError(
+      CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+      `Legacy shipment lineage no longer matches command ${command.commandId}`,
+      { commandId: command.commandId, legacyWmsShipmentIds: command.legacyWmsShipmentIds, expected, actual },
+    );
+  }
+}
+
+interface ShopifyFulfillmentPackageQueryResponse {
+  order?: {
+    fulfillmentsCount?: { count?: number | null } | null;
+    fulfillments?: Array<{
+      id?: string | null;
+      status?: string | null;
+      trackingInfo?: Array<{ number?: string | null }> | null;
+      fulfillmentLineItems?: {
+        nodes?: Array<{
+          quantity?: number | null;
+          lineItem?: { id?: string | null } | null;
+        }> | null;
+        pageInfo?: { hasNextPage?: boolean | null } | null;
+      } | null;
+    }> | null;
+  } | null;
+}
+
+type ShopifyExactPackageState =
+  | { readonly kind: "absent" }
+  | { readonly kind: "present"; readonly fulfillmentId: string }
+  | {
+      readonly kind: "conflict";
+      readonly evidence: Readonly<Record<string, unknown>>;
+    };
+
+function normalizeShopifyLineAllocations(
+  items: readonly { channelOrderLineId: string; quantity: number }[],
+): readonly { lineItemId: string; quantity: number }[] | null {
+  if (items.length === 0) return null;
+  const quantities = new Map<string, number>();
+  for (const item of items) {
+    const lineItemId = normalizeShopifyNumericId(item.channelOrderLineId);
+    const quantity = Number(item.quantity);
+    if (!lineItemId || !Number.isInteger(quantity) || quantity <= 0) return null;
+    quantities.set(lineItemId, (quantities.get(lineItemId) ?? 0) + quantity);
+  }
+  return Object.freeze(
+    [...quantities.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([lineItemId, quantity]) => Object.freeze({ lineItemId, quantity })),
+  );
+}
+
+function lineAllocationMapsEqual(
+  left: ReadonlyMap<string, number>,
+  right: ReadonlyMap<string, number>,
+): boolean {
+  if (left.size !== right.size) return false;
+  for (const [lineItemId, quantity] of left) {
+    if (right.get(lineItemId) !== quantity) return false;
+  }
+  return true;
+}
+
+function classifyExactShopifyPackageState(input: {
+  response: ShopifyFulfillmentPackageQueryResponse;
+  expectedTrackingNumber: string;
+  expectedFulfillmentIds: readonly string[];
+  expectedItems: readonly { channelOrderLineId: string; quantity: number }[];
+  priorItems?: readonly { channelOrderLineId: string; quantity: number }[];
+}): ShopifyExactPackageState {
+  const expectedTrackingNumber = input.expectedTrackingNumber.trim();
+  const expectedItems = normalizeShopifyLineAllocations(input.expectedItems);
+  const priorItems = input.priorItems?.length
+    ? normalizeShopifyLineAllocations(input.priorItems)
+    : Object.freeze([]);
+  if (!expectedTrackingNumber || !expectedItems || priorItems === null) {
+    return {
+      kind: "conflict",
+      evidence: Object.freeze({
+        reason: "invalid_expected_package",
+        expectedTrackingNumber,
+        expectedItems: input.expectedItems,
+        priorItems: input.priorItems ?? [],
+      }),
+    };
+  }
+
+  const expectedFulfillmentIds = new Set(
+    input.expectedFulfillmentIds.map((value) => value.trim()).filter(Boolean),
+  );
+  const fulfillmentNodes = input.response.order?.fulfillments ?? [];
+  const reportedFulfillmentCount = Number(input.response.order?.fulfillmentsCount?.count);
+  const fulfillmentListIncomplete = Number.isInteger(reportedFulfillmentCount)
+    && reportedFulfillmentCount > fulfillmentNodes.length;
+  const incompleteLineFulfillmentIds = fulfillmentNodes
+    .filter((fulfillment) => fulfillment.fulfillmentLineItems?.pageInfo?.hasNextPage === true)
+    .map((fulfillment) => String(fulfillment.id ?? "").trim() || null);
+  if (
+    fulfillmentListIncomplete
+    || incompleteLineFulfillmentIds.length > 0
+  ) {
+    return {
+      kind: "conflict",
+      evidence: Object.freeze({
+        reason: "provider_package_page_incomplete",
+        reportedFulfillmentCount: Number.isInteger(reportedFulfillmentCount)
+          ? reportedFulfillmentCount
+          : null,
+        loadedFulfillmentCount: fulfillmentNodes.length,
+        incompleteLineFulfillmentIds,
+      }),
+    };
+  }
+
+  const candidates = fulfillmentNodes
+    .map((fulfillment) => {
+      const fulfillmentId = String(fulfillment.id ?? "").trim();
+      const status = String(fulfillment.status ?? "").trim().toUpperCase();
+      const trackingNumbers = (fulfillment.trackingInfo ?? [])
+        .map((tracking) => String(tracking.number ?? "").trim())
+        .filter(Boolean);
+      const lineItems = normalizeShopifyLineAllocations(
+        (fulfillment.fulfillmentLineItems?.nodes ?? []).map((line) => ({
+          channelOrderLineId: String(line.lineItem?.id ?? ""),
+          quantity: Number(line.quantity),
+        })),
+      );
+      return { fulfillmentId, status, trackingNumbers, lineItems };
+    })
+    .filter((candidate) => candidate.status !== "CANCELLED" && candidate.status !== "CANCELED")
+    .filter((candidate) =>
+      candidate.trackingNumbers.includes(expectedTrackingNumber)
+      || expectedFulfillmentIds.has(candidate.fulfillmentId),
+    );
+
+  if (candidates.length === 0) return { kind: "absent" };
+
+  const expectedIdentityConflicts = candidates.filter((candidate) =>
+    expectedFulfillmentIds.has(candidate.fulfillmentId)
+    && (
+      candidate.status !== "SUCCESS"
+      || !candidate.trackingNumbers.includes(expectedTrackingNumber)
+      || candidate.lineItems === null
+    ),
+  );
+  if (expectedIdentityConflicts.length > 0) {
+    return {
+      kind: "conflict",
+      evidence: Object.freeze({
+        reason: "provider_fulfillment_identity_changed",
+        expectedTrackingNumber,
+        expectedFulfillmentIds: [...expectedFulfillmentIds],
+        providerCandidates: expectedIdentityConflicts,
+      }),
+    };
+  }
+
+  const successfulTrackingCandidates = candidates.filter((candidate) =>
+    candidate.status === "SUCCESS"
+    && Boolean(candidate.fulfillmentId)
+    && candidate.trackingNumbers.includes(expectedTrackingNumber),
+  );
+  const nonTerminalCandidates = candidates.filter((candidate) =>
+    candidate.status !== "SUCCESS",
+  );
+  if (nonTerminalCandidates.length > 0) {
+    return {
+      kind: "conflict",
+      evidence: Object.freeze({
+        reason: "provider_package_not_terminal",
+        expectedTrackingNumber,
+        providerCandidates: nonTerminalCandidates,
+      }),
+    };
+  }
+  if (successfulTrackingCandidates.some((candidate) => candidate.lineItems === null)) {
+    return {
+      kind: "conflict",
+      evidence: Object.freeze({
+        reason: "provider_package_lineage_incomplete",
+        expectedTrackingNumber,
+        providerCandidates: successfulTrackingCandidates,
+      }),
+    };
+  }
+
+  const providerQuantities = new Map<string, number>();
+  for (const candidate of successfulTrackingCandidates) {
+    for (const item of candidate.lineItems ?? []) {
+      providerQuantities.set(
+        item.lineItemId,
+        (providerQuantities.get(item.lineItemId) ?? 0) + item.quantity,
+      );
+    }
+  }
+  const priorQuantities = new Map(priorItems.map((item) => [item.lineItemId, item.quantity]));
+  const targetQuantities = new Map(priorQuantities);
+  for (const item of expectedItems) {
+    targetQuantities.set(
+      item.lineItemId,
+      (targetQuantities.get(item.lineItemId) ?? 0) + item.quantity,
+    );
+  }
+  const providerAtPriorState = lineAllocationMapsEqual(
+    providerQuantities,
+    priorQuantities,
+  );
+  if (providerAtPriorState) return { kind: "absent" };
+
+  const providerAtTargetState = lineAllocationMapsEqual(
+    providerQuantities,
+    targetQuantities,
+  );
+  if (providerAtTargetState && successfulTrackingCandidates.length > 0) {
+    const fulfillmentId = successfulTrackingCandidates
+      .map((candidate) => candidate.fulfillmentId)
+      .sort((left, right) => left.localeCompare(right))[0];
+    return { kind: "present", fulfillmentId };
+  }
+
+  return {
+    kind: "conflict",
+    evidence: Object.freeze({
+      reason: "provider_package_identity_mismatch",
+      expectedTrackingNumber,
+      expectedFulfillmentIds: [...expectedFulfillmentIds],
+      expectedItems,
+      priorItems,
+      providerQuantities: Object.fromEntries(providerQuantities),
+      targetQuantities: Object.fromEntries(targetQuantities),
+      providerCandidates: candidates,
+    }),
+  };
+}
+
+async function fetchExactShopifyPackageState(input: {
+  client: ShopifyAdminGraphQLClient;
+  shopifyOrderGid: string;
+  shipmentId: number;
+  trackingNumber: string;
+  existingFulfillmentIds: readonly string[];
+  items: readonly ChannelFulfillmentProviderCommandItem[];
+  priorItems: readonly { channelOrderLineId: string; quantity: number }[];
+}): Promise<ShopifyExactPackageState> {
+  try {
+    const response = await input.client.request<ShopifyFulfillmentPackageQueryResponse>(
+      `
+        query exactFulfillmentPackageForOrder($id: ID!) {
+          order(id: $id) {
+            fulfillmentsCount { count }
+            fulfillments(first: 100) {
+              id
+              status
+              trackingInfo(first: 10) { number }
+              fulfillmentLineItems(first: 250) {
+                nodes {
+                  quantity
+                  lineItem { id }
+                }
+                pageInfo { hasNextPage }
+              }
+            }
+          }
+        }
+      `,
+      { id: input.shopifyOrderGid },
+    );
+    return classifyExactShopifyPackageState({
+      response,
+      expectedTrackingNumber: input.trackingNumber,
+      expectedFulfillmentIds: input.existingFulfillmentIds,
+      expectedItems: input.items,
+      priorItems: input.priorItems,
+    });
+  } catch (error) {
+    if (error instanceof ShopifyFulfillmentPushError || error instanceof ChannelFulfillmentProviderError) throw error;
+    throw new ShopifyFulfillmentPushError(
+      `pushShopifyFulfillment: failed to read exact Shopify package state for shipment ${input.shipmentId}`,
+      {
+        code: SHOPIFY_PUSH_NETWORK_ERROR,
+        shipmentId: input.shipmentId,
+        cause: error instanceof Error ? error.message : String(error),
+      },
+    );
+  }
+}
+
+function resolveEbayFulfillmentShippedDate(
+  candidate: unknown,
+  minimumDates: unknown[],
+  fallback: Date = new Date(),
+): Date {
+  const validFallback =
+    fallback instanceof Date && !Number.isNaN(fallback.getTime())
+      ? fallback
+      : new Date();
+  const minimumTime = minimumDates
+    .map(parseDate)
+    .filter((date): date is Date => date !== null)
+    .reduce<number | null>(
+      (latest, date) => Math.max(latest ?? date.getTime(), date.getTime()),
+      null,
+    );
+  const floorTime = minimumTime === null ? null : minimumTime + 1000;
+  const candidateDate = parseDate(candidate);
+
+  if (
+    candidateDate &&
+    (floorTime === null || candidateDate.getTime() > floorTime)
+  ) {
+    return candidateDate;
+  }
+
+  if (floorTime !== null && validFallback.getTime() <= floorTime) {
+    return new Date(floorTime);
+  }
+
+  return validFallback;
+}
+
+export function createFulfillmentPushService(
+  db: any,
+  ebayApiClient: EbayApiClient | null,
+  options: FulfillmentPushServiceOptions = {},
+) {
+  // Mutable reference to allow injecting the eBay client after service creation
+  let _ebayApiClient = ebayApiClient;
+  // Shopify Admin GraphQL client — injected via setShopifyClient() once the
+  // env is wired up. Null here means callers that try to push will get a
+  // structured `shopify_push_client_not_set` error and can defer.
+  let _shopifyClient: ShopifyAdminGraphQLClient | null = null;
+  let _dropshipMarketplaceTrackingService:
+    | DropshipMarketplaceTrackingServiceHandle
+    | null
+    | undefined;
+  const runExclusive: FulfillmentPushExclusiveRunner =
+    options.runExclusive ?? (async (_lockId, fn) => fn());
+
+  async function loadCanonicalFulfillmentOrder(
+    command: ChannelFulfillmentProviderCommandInput,
+    provider: "shopify" | "ebay" | "walmart" | typeof DROPSHIP_ORDER_CHANNEL_PROVIDER,
+  ) {
+    const result = await db.execute(sql`
+      SELECT oms_order.id AS oms_order_id, oms_order.channel_id, oms_order.external_order_id,
+             oms_order.ordered_at, oms_order.created_at AS oms_created_at,
+             LOWER(channel.provider) AS channel_provider
+      FROM oms.oms_orders oms_order
+      JOIN channels.channels channel ON channel.id = oms_order.channel_id
+      WHERE oms_order.id = ${command.omsOrderId}
+    `);
+    const rows: Array<Record<string, unknown>> = result?.rows ?? [];
+    const row = rows[0];
+    const channelId = Number(row?.channel_id);
+    const externalOrderId = typeof row?.external_order_id === "string" ? row.external_order_id.trim() : "";
+    if (rows.length !== 1 || Number(row.oms_order_id) !== command.omsOrderId
+      || !Number.isInteger(channelId) || channelId <= 0 || channelId > 2_147_483_647
+      || row.channel_provider !== provider || !externalOrderId) {
+      throw new ChannelFulfillmentProviderInputError(CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        "Canonical fulfillment requires the exact originating OMS channel and order", { commandId: command.commandId, omsOrderId: command.omsOrderId });
+    }
+    return Object.freeze({ channelId, externalOrderId, ordered_at: row.ordered_at, oms_created_at: row.oms_created_at });
+  }
+
+  function requireProviderClients(): ChannelFulfillmentProviderClients {
+    if (!options.providerClients) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_RESOLVER_UNAVAILABLE", "Canonical fulfillment account resolution is not configured");
+    return options.providerClients;
+  }
+
+  async function projectCanonicalCommandQuantities<T extends LegacyShipmentLineSnapshot>(
+    command: ChannelFulfillmentProviderCommandInput,
+    rows: readonly T[],
+    provider: CanonicalCommandChannelProvider,
+  ): Promise<T[]> {
+    const allocationItems = command.items.filter((item) => item.packageAllocationEntryId != null);
+    if ((provider === "shopify" || provider === "ebay") && command.trackingReplacement === true) {
+      const result = await db.execute(sql`SELECT item.label_replacement_source_item_id AS source_id,
+        item.quantity_shipped, line.id AS oms_order_line_id, line.external_line_item_id,
+        source.order_item_id, push_item.quantity_pushed
+        FROM oms.channel_fulfillment_pushes push
+        JOIN oms.channel_fulfillment_push_items push_item ON push_item.channel_fulfillment_push_id = push.id
+        JOIN wms.physical_shipment_items item ON item.id = push_item.physical_shipment_item_id
+          AND item.physical_shipment_id = push.physical_shipment_id
+        JOIN wms.ebay_label_replacement_work work ON work.physical_shipment_id = item.physical_shipment_id
+          AND work.state = 'applied'
+        JOIN wms.outbound_shipment_items source ON source.id = item.label_replacement_source_item_id
+          AND source.id = ANY(work.source_item_ids)
+        JOIN wms.order_items order_item ON order_item.id = source.order_item_id
+        JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
+          AND line.id = push_item.oms_order_line_id AND line.order_id = push.oms_order_id
+        WHERE push.id = ${command.commandId} AND push.physical_shipment_id = ${command.physicalShipmentId}
+          AND push.oms_order_id = ${command.omsOrderId} AND push.channel_provider = ${provider}
+          AND push.tracking_number = ${command.trackingNumber} AND push.carrier = ${command.carrier}
+          AND item.shipment_item_purpose = 'customer_fulfillment'`);
+      const proof: Array<Record<string, unknown>> = result?.rows ?? [];
+      if (proof.length !== command.items.length || command.items.some(item => {
+        const match = proof.filter(row => Number(row.source_id) === item.legacyWmsShipmentItemId);
+        return match.length !== 1 || Number(match[0].quantity_shipped) !== item.quantity
+          || Number(match[0].quantity_pushed) !== item.quantity || Number(match[0].oms_order_line_id) !== item.omsOrderLineId
+          || match[0].external_line_item_id !== item.channelOrderLineId
+          || !rows.some(row => row.shipment_item_id === item.legacyWmsShipmentItemId
+            && row.order_item_id === Number(match[0].order_item_id));
+      })) throw new ChannelFulfillmentProviderInputError(CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        "Replacement has no exact persisted package grant", { commandId: command.commandId });
+      const projected = rows.map(row => ({ ...row,
+        qty: command.items.find(item => item.legacyWmsShipmentItemId === row.shipment_item_id)?.quantity ?? row.qty }));
+      assertExactChannelCommandLineage(command, projected, provider === 'shopify' ? isShopifyFulfillmentProvider : (value) => value === 'ebay');
+      return projected;
+    }
+
+    // The allocation source is frozen; the compatibility WMS row can shrink
+    // when ShipStation splits its units into separate shipment rows. Read the
+    // already-materialized, activated command's exact grant;
+    // never infer a partial grant from `command.quantity <= shipment.qty`.
+    const result = await db.execute(sql`
+      SELECT push.id AS command_id, push.oms_order_id, push.physical_shipment_id,
+             push.channel_provider, push.tracking_number, push.carrier,
+             push_item.oms_order_line_id, push_item.channel_order_line_id,
+             push_item.quantity_pushed, push_item.package_allocation_effect_intent_id,
+             physical_item.package_allocation_entry_id, physical_item.quantity_shipped,
+             entry.quantity AS allocation_quantity, entry.target_kind,
+             source.source_wms_shipment_item_id, source.source_quantity,
+             source.order_item_id AS source_order_item_id, source.shipment_item_purpose,
+             intent.quantity AS intent_quantity, intent.effect_type,
+             intent.id AS matched_intent_id, binding.id AS matched_binding_id,
+             activation.id AS matched_activation_id
+      FROM oms.channel_fulfillment_pushes AS push
+      JOIN oms.channel_fulfillment_push_items AS push_item ON push_item.channel_fulfillment_push_id = push.id
+      LEFT JOIN wms.physical_shipment_items AS physical_item ON physical_item.id = push_item.physical_shipment_item_id
+      LEFT JOIN wms.physical_shipments AS physical ON physical.id = physical_item.physical_shipment_id
+        AND physical.id = push.physical_shipment_id
+      LEFT JOIN wms.package_allocation_entries AS entry ON entry.id = physical_item.package_allocation_entry_id
+      LEFT JOIN wms.package_allocation_source_lines AS source ON source.id = entry.package_allocation_source_line_id
+      LEFT JOIN wms.package_allocation_package_bindings AS binding ON binding.id = entry.package_allocation_package_binding_id
+        AND binding.package_allocation_group_id = entry.package_allocation_group_id
+        AND binding.provider = physical.provider
+        AND binding.provider_physical_shipment_id = physical.provider_physical_shipment_id
+      LEFT JOIN wms.package_allocation_effect_intents AS intent ON intent.id = push_item.package_allocation_effect_intent_id
+        AND intent.package_allocation_source_line_id = source.id
+        AND intent.package_allocation_plan_id = entry.package_allocation_plan_id
+        AND intent.package_allocation_group_id = entry.package_allocation_group_id
+      LEFT JOIN oms.package_allocation_commercial_fulfillment_activations AS activation ON activation.channel_fulfillment_push_id = push.id
+        AND activation.package_allocation_plan_id = entry.package_allocation_plan_id
+      WHERE push.id = ${command.commandId}
+      ORDER BY physical_item.id
+    `);
+    const persistedItems: Array<Record<string, unknown>> = result?.rows ?? [];
+    const evidence = persistedItems.filter((row) => row.package_allocation_entry_id != null || row.package_allocation_effect_intent_id != null);
+    if (allocationItems.length === 0 && evidence.length === 0) {
+      assertExactChannelCommandLineage(command, rows, channelLineOwner(provider));
+      return [...rows];
+    }
+    const fail = (shipmentItemId?: number): never => {
+      throw new ChannelFulfillmentProviderInputError(
+        CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        `Canonical command ${command.commandId} lacks exact persisted package-allocation lineage`,
+        { commandId: command.commandId, legacyWmsShipmentItemId: shipmentItemId },
+      );
+    };
+    // Activated allocation commands never mix legacy/ungranted items (0645).
+    // Require the complete persisted package, not just a valid subset of it.
+    if (evidence.length !== allocationItems.length
+      || allocationItems.length !== command.items.length
+      || persistedItems.length !== command.items.length) fail();
+    const quantities = new Map<number, number>();
+    for (const item of allocationItems) {
+      const matches = evidence.filter((row) => Number(row.package_allocation_entry_id) === item.packageAllocationEntryId);
+      const current = rows.filter((row) => Number(row.shipment_item_id) === item.legacyWmsShipmentItemId);
+      if (matches.length !== 1 || current.length !== 1) fail(item.legacyWmsShipmentItemId);
+      const proof = matches[0];
+      const source = current[0];
+      if (Number(proof.command_id) !== command.commandId
+        || Number(proof.oms_order_id) !== command.omsOrderId
+        || Number(proof.physical_shipment_id) !== command.physicalShipmentId
+        || proof.channel_provider !== provider
+        || String(proof.tracking_number ?? "").trim() !== command.trackingNumber
+        || String(proof.carrier ?? "").trim() !== command.carrier
+        || Number(proof.oms_order_line_id) !== item.omsOrderLineId
+        || String(proof.channel_order_line_id ?? "").trim() !== item.channelOrderLineId
+        || Number(proof.package_allocation_effect_intent_id) !== item.packageAllocationEffectIntentId
+        || Number(proof.matched_intent_id) !== item.packageAllocationEffectIntentId
+        || !Number.isSafeInteger(Number(proof.matched_binding_id)) || Number(proof.matched_binding_id) <= 0
+        || !Number.isSafeInteger(Number(proof.matched_activation_id)) || Number(proof.matched_activation_id) <= 0
+        || Number(proof.source_wms_shipment_item_id) !== item.legacyWmsShipmentItemId
+        || !Number.isSafeInteger(Number(proof.source_order_item_id)) || Number(proof.source_order_item_id) <= 0
+        || Number(proof.source_order_item_id) !== Number(source.order_item_id)
+        || proof.shipment_item_purpose !== "customer_fulfillment"
+        || !Number.isSafeInteger(Number(proof.source_quantity)) || Number(proof.source_quantity) <= 0
+        // A later split may reduce the compatibility row without revoking an
+        // already activated package grant. Identity and grant quantities below
+        // remain exact; an invalid or enlarged live source still fails closed.
+        || !Number.isSafeInteger(source.qty) || Number(source.qty) < 0
+        || Number(source.qty) > Number(proof.source_quantity)
+        || Number(proof.quantity_pushed) !== item.quantity
+        || Number(proof.quantity_shipped) !== item.quantity
+        || Number(proof.allocation_quantity) !== item.quantity
+        || item.quantity > Number(proof.source_quantity)
+        || proof.target_kind !== "package" || proof.effect_type !== "commercial_fulfillment"
+        || !Number.isSafeInteger(Number(proof.intent_quantity)) || Number(proof.intent_quantity) < item.quantity) {
+        fail(item.legacyWmsShipmentItemId);
+      }
+      quantities.set(item.legacyWmsShipmentItemId, item.quantity);
+    }
+    const projected = rows.map((row) => ({
+      ...row,
+      qty: quantities.get(Number(row.shipment_item_id)) ?? row.qty,
+    }));
+    // Retain every original source/order/provider identity check. Only a proven
+    // allocated row changes quantity; non-allocation legacy rows stay exact.
+    assertExactChannelCommandLineage(command, projected, channelLineOwner(provider));
+    return projected;
+  }
+
+  function shopifyFulfillmentWriteLockId(
+    scope: "oms_order" | "combined_group",
+    scopeId: number,
+    shipmentId: number,
+  ): number {
+    const lockId = scope === "combined_group"
+      ? SHOPIFY_FULFILLMENT_GROUP_LOCK_BASE + scopeId
+      : shopifyOrderFulfillmentLockId(scopeId);
+    if (!Number.isSafeInteger(lockId)) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: ${scope} ${scopeId} exceeds advisory-lock key range`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: scope === "combined_group" ? "combinedGroupId" : "omsOrderId",
+          value: scopeId,
+        },
+      );
+    }
+    return lockId;
+  }
+
+  async function runShopifyFulfillmentExclusive<T>(
+    lockId: number,
+    shipmentId: number,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const result = await runExclusive(lockId, fn);
+    if (result === null) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: fulfillment lock ${lockId} is already held`,
+        {
+          code: SHOPIFY_PUSH_IN_PROGRESS,
+          shipmentId,
+          field: "fulfillmentLockId",
+          value: lockId,
+        },
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Set the eBay API client (called after service initialization when client is ready).
+   */
+  function setEbayClient(client: EbayApiClient): void {
+    _ebayApiClient = client;
+  }
+
+  /**
+   * Set the Shopify Admin GraphQL client. Mirrors `setEbayClient`.
+   * Called by the bootstrap once env credentials are validated.
+   */
+  function setShopifyClient(client: ShopifyAdminGraphQLClient): void {
+    _shopifyClient = client;
+  }
+
+  function setDropshipMarketplaceTrackingService(
+    service: DropshipMarketplaceTrackingServiceHandle,
+  ): void {
+    _dropshipMarketplaceTrackingService = service;
+  }
+
+  async function resolveDropshipMarketplaceTrackingService():
+    Promise<DropshipMarketplaceTrackingServiceHandle> {
+    if (_dropshipMarketplaceTrackingService !== undefined) {
+      if (!_dropshipMarketplaceTrackingService) {
+        throw new Error("Dropship marketplace tracking service is unavailable.");
+      }
+      return _dropshipMarketplaceTrackingService;
+    }
+    const mod = await import("../../dropship/fulfillment-tracking.api");
+    _dropshipMarketplaceTrackingService = mod.createDropshipMarketplaceTrackingServiceFromEnv();
+    return _dropshipMarketplaceTrackingService;
+  }
+
+  async function pushDropshipMarketplaceTrackingIfNeeded(
+    order: any,
+    orderId: number,
+    options: { wmsShipmentId?: number | null } = {},
+  ): Promise<boolean | null> {
+    if (!isDropshipOmsOrder(order)) {
+      return null;
+    }
+    const carrier = String(order.trackingCarrier).trim();
+    const trackingNumber = String(order.trackingNumber).trim();
+    const shippedAt = resolveDropshipShippedAt(order, orderId);
+    const service = await resolveDropshipMarketplaceTrackingService();
+    const result = await service.pushForOmsOrder({
+      omsOrderId: orderId,
+      wmsShipmentId: options.wmsShipmentId ?? null,
+      carrier,
+      trackingNumber,
+      shippedAt,
+      idempotencyKey: buildDropshipMarketplaceTrackingIdempotencyKey({
+        omsOrderId: orderId,
+        wmsShipmentId: options.wmsShipmentId ?? null,
+        carrier,
+        trackingNumber,
+      }),
+    });
+    if (result.status === "not_dropship") {
+      return null;
+    }
+    if (
+      result.status === "succeeded" ||
+      result.status === "already_succeeded" ||
+      result.status === "already_processing"
+    ) {
+      return true;
+    }
+    throw new Error(`Unexpected dropship marketplace tracking status: ${result.status}`);
+  }
+
+  /**
+   * Push tracking to the originating channel for a shipped OMS order.
+   */
+  async function pushTracking(orderId: number): Promise<boolean> {
+    const [order] = await db
+      .select()
+      .from(omsOrders)
+      .where(eq(omsOrders.id, orderId))
+      .limit(1);
+
+    if (!order) {
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] Order ${orderId} not found` });
+      return false;
+    }
+
+    // Get channel info
+    const [channel] = await db
+      .select()
+      .from(channels)
+      .where(eq(channels.id, order.channelId))
+      .limit(1);
+
+    if (!channel) {
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] Channel ${order.channelId} not found` });
+      return false;
+    }
+
+    try {
+      const shipmentScopedPush = await pushShipmentScopedTrackingIfAvailable(orderId);
+      if (shipmentScopedPush !== null) {
+        return shipmentScopedPush;
+      }
+
+      if (!order.trackingNumber || !order.trackingCarrier) {
+        logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] Order ${orderId} has no tracking info` });
+        return false;
+      }
+
+      const dropshipPushed = await pushDropshipMarketplaceTrackingIfNeeded(order, orderId);
+      if (dropshipPushed !== null) {
+        return dropshipPushed;
+      }
+
+      if (channel.provider === "ebay") {
+        return await pushToEbay(order, orderId);
+      } else if (channel.provider === "shopify") {
+        // Shopify tracking is handled by the existing fulfillment webhook flow
+        // No push needed — Shopify already has its own fulfillment system
+        logger.info("oms.fulfillment_push_service", { message: `[FulfillmentPush] Skipping Shopify push for order ${orderId} — handled natively` });
+        return true;
+      }
+
+      logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] No push handler for provider: ${channel.provider}` });
+      return false;
+    } catch (err: any) {
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] Failed to push tracking for order ${orderId}: ${err.message}` });
+
+      // Record failure event
+      await db.insert(omsOrderEvents).values({
+        orderId,
+        eventType: "tracking_push_failed",
+        details: { error: err.message, provider: channel.provider },
+      });
+
+      return false;
+    }
+  }
+
+  async function pushShipmentScopedTrackingIfAvailable(orderId: number): Promise<boolean | null> {
+    const shipmentIds = await findShippedWmsShipmentIdsForOmsOrder(orderId);
+    if (shipmentIds.length === 0) {
+      return null;
+    }
+
+    const failures: string[] = [];
+    for (const shipmentId of shipmentIds) {
+      try {
+        const pushed = await pushTrackingForShipment(shipmentId);
+        if (!pushed) {
+          failures.push(`shipment ${shipmentId}: tracking push returned false`);
+        }
+      } catch (error: any) {
+        failures.push(`shipment ${shipmentId}: ${error?.message ?? String(error)}`);
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`Shipment-scoped tracking push failed for order ${orderId}: ${failures.join("; ")}`);
+    }
+    return true;
+  }
+
+  async function findShippedWmsShipmentIdsForOmsOrder(orderId: number): Promise<number[]> {
+    const result: any = await db.execute(sql`
+      SELECT os.id AS shipment_id
+      FROM wms.outbound_shipments os
+      JOIN wms.orders w ON w.id = os.order_id
+      WHERE w.oms_fulfillment_order_id ~ '^[0-9]+$'
+        AND (w.oms_fulfillment_order_id)::bigint = ${orderId}
+        AND os.status = 'shipped'
+        AND os.tracking_number IS NOT NULL
+        AND btrim(os.tracking_number) <> ''
+        AND os.carrier IS NOT NULL
+        AND btrim(os.carrier) <> ''
+      ORDER BY os.id ASC
+    `);
+    const rows: any[] = Array.isArray(result) ? result : result?.rows ?? [];
+    const uniqueShipmentIds = new Set<number>();
+    for (const row of rows) {
+      const shipmentId = Number(row?.shipment_id);
+      if (Number.isInteger(shipmentId) && shipmentId > 0) {
+        uniqueShipmentIds.add(shipmentId);
+      }
+    }
+    return [...uniqueShipmentIds];
+  }
+
+  async function pushToEbay(order: any, orderId: number): Promise<boolean> {
+    if (!_ebayApiClient) {
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay API client not available` });
+      return false;
+    }
+
+    // Get line items for the fulfillment payload
+    const lines = await db
+      .select()
+      .from(omsOrderLines)
+      .where(eq(omsOrderLines.orderId, orderId));
+
+    if (lines.length === 0) {
+      logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] No line items for order ${orderId}` });
+      return false;
+    }
+
+    const lineItems = lines
+      .filter((l: any) =>
+        l.externalLineItemId &&
+        Number(l.quantity) > 0 &&
+        isEbayFulfillmentProvider(l.fulfillmentProvider ?? l.fulfillment_provider)
+      )
+      .map((l: any) => ({
+        lineItemId: l.externalLineItemId,
+        quantity: l.quantity,
+      }));
+    if (lineItems.length === 0) {
+      throw new Error(`No eBay external line item ids available for order ${orderId}`);
+    }
+
+    const fulfillmentPayload: EbayShippingFulfillmentRequest = {
+      lineItems,
+      shippedDate: resolveEbayFulfillmentShippedDate(
+        order.shippedAt,
+        [order.orderedAt, order.createdAt],
+      ).toISOString(),
+      shippingCarrierCode: mapCarrierCode(order.trackingCarrier),
+      trackingNumber: normalizeEbayTrackingNumber(order.trackingNumber),
+    };
+
+    // Push to Card Shellz's eBay (or the originating channel)
+    const result = await _ebayApiClient.createShippingFulfillment(
+      order.externalOrderId,
+      fulfillmentPayload,
+    );
+
+    const fulfillmentId = result?.fulfillmentId;
+    logger.info("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay tracking pushed for order ${orderId} → fulfillment ${fulfillmentId ?? "(no id — accepted by eBay)"}` });
+
+    // Record success event
+    await db.insert(omsOrderEvents).values({
+      orderId,
+      eventType: "tracking_pushed",
+      details: {
+        provider: "ebay",
+        fulfillmentId: fulfillmentId ?? null,
+        trackingNumber: order.trackingNumber,
+        carrier: order.trackingCarrier,
+      },
+    });
+
+
+    return true;
+  }
+
+  async function pushTrackingForShipmentInternal(
+    shipmentId: number,
+    commandInput?: ChannelFulfillmentProviderCommandInput,
+  ): Promise<boolean> {
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new Error(`pushTrackingForShipment: shipmentId must be a positive integer (got ${shipmentId})`);
+    }
+    const command = commandInput ? normalizeChannelCommandInput(commandInput) : null;
+    if (command && !command.legacyWmsShipmentIds.includes(shipmentId)) {
+      throw new ChannelFulfillmentProviderInputError(
+        CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        `Command ${command.commandId} does not own legacy shipment ${shipmentId}`,
+        {
+          commandId: command.commandId,
+          expected: command.legacyWmsShipmentIds,
+          actual: shipmentId,
+        },
+      );
+    }
+    const shipmentResult: any = await db.execute(sql`
+      SELECT
+        os.id AS shipment_id,
+        os.status AS shipment_status,
+        os.carrier AS carrier,
+        os.tracking_number AS tracking_number,
+        os.shipped_at AS shipped_at,
+        w.id AS wms_order_id,
+        o.id AS oms_order_id,
+        o.external_order_id AS external_order_id,
+        o.ordered_at AS ordered_at,
+        o.created_at AS oms_created_at,
+        o.raw_payload AS raw_payload,
+        o.tags AS tags,
+        c.provider AS provider
+      FROM wms.outbound_shipments os
+      JOIN wms.orders w ON w.id = os.order_id
+      JOIN oms.oms_orders o
+        ON w.oms_fulfillment_order_id ~ '^[0-9]+$'
+       AND o.id = (w.oms_fulfillment_order_id)::bigint
+      JOIN channels.channels c ON c.id = o.channel_id
+      WHERE os.id = ${shipmentId}
+      LIMIT 1
+    `);
+    const shipment = shipmentResult?.rows?.[0];
+    if (!shipment) {
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] Shipment ${shipmentId} not found or not linked to OMS` });
+      return false;
+    }
+
+    const omsOrderId = Number(shipment.oms_order_id);
+    if (command && omsOrderId !== command.omsOrderId) {
+      throw new ChannelFulfillmentProviderInputError(
+        CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        `Legacy shipment ${shipmentId} belongs to OMS order ${omsOrderId}, not ${command.omsOrderId}`,
+        { commandId: command.commandId, shipmentId, expectedOmsOrderId: command.omsOrderId, actualOmsOrderId: omsOrderId },
+      );
+    }
+    const carrier = command?.carrier ?? String(shipment.carrier ?? "").trim();
+    const trackingNumber = command?.trackingNumber ?? String(shipment.tracking_number ?? "").trim();
+    const shippedAt = command?.shippedAt
+      ?? (shipment.shipped_at instanceof Date
+        ? shipment.shipped_at
+        : new Date(shipment.shipped_at));
+
+    if (!carrier || !trackingNumber) {
+      logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] Shipment ${shipmentId} has no tracking info` });
+      return false;
+    }
+    if (Number.isNaN(shippedAt.getTime())) {
+      throw new Error(`Shipment ${shipmentId} has invalid shipped_at for tracking push`);
+    }
+
+    const dropshipPushed = command ? null : await pushDropshipMarketplaceTrackingIfNeeded(
+      {
+        rawPayload: shipment.raw_payload,
+        tags: shipment.tags,
+        trackingCarrier: carrier,
+        trackingNumber,
+        shippedAt,
+      },
+      omsOrderId,
+      { wmsShipmentId: shipmentId },
+    );
+    if (dropshipPushed !== null) {
+      return dropshipPushed;
+    }
+
+    if (!command && shipment.provider === "shopify") {
+      const result = await pushShopifyFulfillment(shipmentId);
+      return result.writebackComplete;
+    }
+
+    if (shipment.provider !== "ebay") {
+      logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] No shipment push handler for provider: ${shipment.provider}` });
+      return false;
+    }
+    if (!shipment.external_order_id) {
+      throw new Error(`Shipment ${shipmentId} is linked to an eBay OMS order without external_order_id`);
+    }
+
+    if (!_ebayApiClient) {
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay API client not available` });
+      return false;
+    }
+
+    const priorPush: any = await db.execute(sql`
+      SELECT
+        id,
+        NULLIF(details->>'fulfillmentId', '') AS fulfillment_id,
+        NULLIF(details->>'trackingNumber', '') AS tracking_number
+      FROM oms.oms_order_events
+      WHERE order_id = ${omsOrderId}
+        AND event_type = 'tracking_pushed'
+        AND details->>'provider' = 'ebay'
+        AND details->>'wmsShipmentId' = ${String(shipmentId)}
+        AND NULLIF(details->>'trackingNumber', '') IS NOT NULL
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `);
+    const priorPushRow = priorPush?.rows?.[0];
+    if (priorPushRow) {
+      const priorTrackingNumber = normalizeEbayTrackingNumber(
+        String(priorPushRow.tracking_number),
+      );
+      const currentTrackingNumber = normalizeEbayTrackingNumber(trackingNumber);
+      if (priorTrackingNumber !== currentTrackingNumber) {
+        const conflictInput = {
+          omsOrderId,
+          wmsOrderId: Number(shipment.wms_order_id),
+          wmsShipmentId: shipmentId,
+          externalOrderId: String(shipment.external_order_id),
+          priorEventId: Number(priorPushRow.id),
+          priorFulfillmentId: priorPushRow.fulfillment_id
+            ? String(priorPushRow.fulfillment_id)
+            : null,
+          priorTrackingNumber,
+          currentTrackingNumber,
+        };
+        await recordEbayTrackingConflict(db, conflictInput);
+        throw new EbayTrackingConflictError(conflictInput);
+      }
+      logger.info("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay tracking already pushed for shipment ${shipmentId}; idempotent skip` });
+      return true;
+    }
+
+    const lineResult: any = await db.execute(sql`
+      SELECT
+        si.shipment_id AS shipment_id,
+        si.id AS shipment_item_id,
+        wi.oms_order_line_id AS oms_order_line_id,
+        ol.order_id AS oms_order_id,
+        ol.fulfillment_provider AS fulfillment_provider,
+        ol.external_line_item_id AS external_line_item_id,
+        si.qty::int AS qty
+      FROM wms.outbound_shipment_items si
+      JOIN wms.order_items wi ON wi.id = si.order_item_id
+      JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
+      WHERE si.shipment_id = ${shipmentId}
+        AND COALESCE(si.qty, 0) > 0
+        AND ol.external_line_item_id IS NOT NULL
+        AND COALESCE(wi.status, 'pending') <> 'cancelled'
+      ORDER BY si.id
+    `);
+    const rawLineItems: LegacyShipmentLineSnapshot[] = lineResult?.rows ?? [];
+    if (command) {
+      assertExactChannelCommandLineage(command, rawLineItems, isEbayFulfillmentProvider);
+    }
+    const quantityByLine = new Map<string, number>();
+    for (const line of rawLineItems) {
+      if (!isEbayFulfillmentProvider(line.fulfillment_provider)) continue;
+      const lineItemId = String(line.external_line_item_id ?? "").trim();
+      const quantity = Number(line.qty);
+      if (!lineItemId || !Number.isInteger(quantity) || quantity <= 0) continue;
+      quantityByLine.set(lineItemId, (quantityByLine.get(lineItemId) ?? 0) + quantity);
+    }
+    const lineItems = [...quantityByLine.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([lineItemId, quantity]) => ({ lineItemId, quantity }));
+
+    if (lineItems.length === 0) {
+      throw new Error(`No eBay external line item ids available for shipment ${shipmentId}`);
+    }
+
+    const fulfillmentPayload: EbayShippingFulfillmentRequest = {
+      lineItems,
+      shippedDate: resolveEbayFulfillmentShippedDate(
+        shippedAt,
+        [shipment.ordered_at, shipment.oms_created_at],
+      ).toISOString(),
+      shippingCarrierCode: mapCarrierCode(carrier),
+      trackingNumber: normalizeEbayTrackingNumber(trackingNumber),
+    };
+
+    const result = await _ebayApiClient.createShippingFulfillment(
+      shipment.external_order_id,
+      fulfillmentPayload,
+    );
+    const fulfillmentId = result?.fulfillmentId;
+    logger.info("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay tracking pushed for shipment ${shipmentId} (order ${omsOrderId}) -> fulfillment ${fulfillmentId ?? "(no id - accepted by eBay)"}` });
+
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "tracking_pushed",
+      details: {
+        provider: "ebay",
+        fulfillmentId: fulfillmentId ?? null,
+        wmsShipmentId: shipmentId,
+        trackingNumber,
+        carrier,
+        lineItems,
+      },
+    });
+
+    return true;
+  }
+
+  async function pushTrackingForShipment(shipmentId: number): Promise<boolean> {
+    return pushTrackingForShipmentInternal(shipmentId);
+  }
+
+  async function prepareWalmartFulfillmentCommand(input: ChannelFulfillmentProviderCommandInput) {
+    const command = normalizeChannelCommandInput(input);
+    const order = await loadCanonicalFulfillmentOrder(command, "walmart");
+    const shipmentItemIds = command.items.map((item) => item.legacyWmsShipmentItemId);
+    const lineResult: any = await db.execute(sql`
+      SELECT
+        shipment_item.shipment_id,
+        shipment_item.id AS shipment_item_id,
+        shipment_item.order_item_id,
+        order_item.oms_order_line_id,
+        order_line.order_id AS oms_order_id,
+        order_line.fulfillment_provider,
+        order_line.external_line_item_id,
+        shipment_item.qty::int AS qty
+      FROM wms.outbound_shipment_items shipment_item
+      JOIN wms.order_items order_item ON order_item.id = shipment_item.order_item_id
+      JOIN oms.oms_order_lines order_line ON order_line.id = order_item.oms_order_line_id
+      WHERE shipment_item.id = ANY(${sqlBigintArray(shipmentItemIds)})
+        AND shipment_item.shipment_id = ANY(${sqlBigintArray(command.legacyWmsShipmentIds)})
+        AND COALESCE(order_item.status, 'pending') <> 'cancelled'
+      ORDER BY shipment_item.id
+    `);
+    const rawLineItems: LegacyShipmentLineSnapshot[] = lineResult?.rows ?? [];
+    await projectCanonicalCommandQuantities(command, rawLineItems, "walmart");
+    const revoked = await db.execute(sql`
+      SELECT line.id FROM oms.oms_order_lines line
+      WHERE line.order_id = ${command.omsOrderId}
+        AND line.id = ANY(${sqlBigintArray(command.items.map(item => item.omsOrderLineId))})
+        AND (line.cancelled_quantity > 0 OR line.refunded_quantity > 0 OR line.paid_quantity <= 0)
+      UNION ALL
+      SELECT source_order.id FROM oms.oms_orders source_order WHERE source_order.id = ${command.omsOrderId}
+        AND (source_order.status IN ('cancelled','refunded') OR source_order.financial_status IN ('refunded','voided'))
+      UNION ALL
+      SELECT package.id FROM wms.physical_shipments package
+      JOIN wms.shipping_provider_labels label ON label.provider = package.provider
+        AND label.provider_label_id = package.provider_physical_shipment_id
+      WHERE package.id = ${command.physicalShipmentId} AND label.label_status IN ('voided','superseded')
+    `);
+    if ((revoked?.rows ?? []).length > 0) throw new ChannelFulfillmentProviderError("WALMART_FULFILLMENT_REVOKED", "Cancelled, refunded, voided or superseded shipment authority requires review");
+    return order;
+  }
+
+  /**
+   * The command's own WMS shipment items, read live so the adapter can prove
+   * the package still matches the command before any store is told.
+   * Cancelled order items are excluded.
+   */
+  async function loadCommandShipmentLines(
+    command: ChannelFulfillmentProviderCommandInput,
+  ): Promise<LegacyShipmentLineSnapshot[]> {
+    const shipmentItemIds = command.items.map((item) => item.legacyWmsShipmentItemId);
+    const lineResult: any = await db.execute(sql`
+      SELECT
+        shipment_item.shipment_id,
+        shipment_item.id AS shipment_item_id,
+        shipment_item.order_item_id,
+        order_item.oms_order_line_id,
+        order_line.order_id AS oms_order_id,
+        order_line.fulfillment_provider,
+        order_line.external_line_item_id,
+        shipment_item.qty::int AS qty
+      FROM wms.outbound_shipment_items shipment_item
+      JOIN wms.order_items order_item ON order_item.id = shipment_item.order_item_id
+      JOIN oms.oms_order_lines order_line ON order_line.id = order_item.oms_order_line_id
+      WHERE shipment_item.id = ANY(${sqlBigintArray(shipmentItemIds)})
+        AND shipment_item.shipment_id = ANY(${sqlBigintArray(command.legacyWmsShipmentIds)})
+        AND COALESCE(order_item.status, 'pending') <> 'cancelled'
+      ORDER BY shipment_item.id
+    `);
+    return lineResult?.rows ?? [];
+  }
+
+  async function pushTrackingForShipmentCommand(
+    input: ChannelFulfillmentProviderCommandInput,
+  ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
+    const validated = normalizeChannelCommandInput(input);
+    // All eBay writes for an order share the same lock, including ordinary
+    // packages. Two repack commands must not race each other's read/modify/write.
+    const result = await runExclusive(shopifyOrderFulfillmentLockId(validated.omsOrderId), () => pushEbayCommandExclusive(validated));
+    if (result === null) throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_IN_PROGRESS", "Another fulfillment update owns this order", "transient");
+    return result;
+  }
+
+  async function pushEbayCommandExclusive(
+    input: ChannelFulfillmentProviderCommandInput,
+  ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
+    const command = normalizeChannelCommandInput(input);
+    const order = await loadCanonicalFulfillmentOrder(command, "ebay");
+    const externalOrderId = order.externalOrderId;
+
+    const rawLineItems = await loadCommandShipmentLines(command);
+    await projectCanonicalCommandQuantities(command, rawLineItems, "ebay");
+    const account = await requireProviderClients().ebay(order.channelId);
+    if (account.channelId !== order.channelId) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_CHANNEL_MISMATCH", "Resolved eBay account belongs to another channel");
+
+    const lineItems = aggregateCommandLineQuantities(command.items)
+      .map(({ channelOrderLineId, quantity }) => ({ lineItemId: channelOrderLineId, quantity }));
+    const shippedAt = resolveEbayFulfillmentShippedDate(
+      command.shippedAt,
+      [order.ordered_at, order.oms_created_at],
+    );
+    const fulfillmentPayload: EbayShippingFulfillmentRequest = {
+      lineItems,
+      shippedDate: shippedAt.toISOString(),
+      shippingCarrierCode: mapCarrierCode(command.carrier),
+      trackingNumber: normalizeEbayTrackingNumber(command.trackingNumber),
+    };
+    let previousTrackingNumbers: string[] = [];
+    let replacementPackages: EbayShippingFulfillmentRequest[] | undefined;
+    if (command.trackingReplacement === true) {
+      const replacementEvidence = await db.execute(sql`
+        SELECT DISTINCT prior_package.tracking_number
+        FROM wms.ebay_label_replacement_work work
+        JOIN wms.physical_shipment_items current_item ON current_item.physical_shipment_id = work.physical_shipment_id
+        JOIN wms.physical_shipment_item_quantity_adjustments adjustment
+          ON adjustment.adjustment_kind = 'provider_label_replacement'
+          AND (adjustment.metadata->>'sourceItemId')::integer = current_item.label_replacement_source_item_id
+          AND (adjustment.repair_run_id = work.replacement_batch_id
+            OR (work.replacement_batch_id IS NULL AND adjustment.metadata->>'replacementLabelId' = work.shipping_provider_label_id::text))
+        JOIN wms.physical_shipment_items prior_item ON prior_item.id = adjustment.physical_shipment_item_id
+        JOIN wms.physical_shipments prior_package ON prior_package.id = prior_item.physical_shipment_id
+        JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = current_item.fulfillment_plan_line_id
+        JOIN oms.oms_order_lines order_line ON order_line.id = plan_line.oms_order_line_id
+        WHERE work.state = 'applied' AND work.physical_shipment_id = ${command.physicalShipmentId}
+          AND order_line.order_id = ${command.omsOrderId}`);
+      previousTrackingNumbers = [...new Set<string>((replacementEvidence.rows ?? []).map((row: { tracking_number: string }) => normalizeEbayTrackingNumber(row.tracking_number)))];
+      // A combined replacement can also contain a newly fulfilled source from
+      // another order. That order has no consumed predecessor: its exact grant
+      // was admitted under ordinary paid/request quantity constraints.
+      const batchEvidence = await db.execute(sql`
+        SELECT package.id::text AS package_id, package.tracking_number, package.carrier,
+          line.external_line_item_id, SUM(item.quantity_shipped)::integer AS quantity
+        FROM wms.ebay_label_replacement_work current_work
+        JOIN wms.ebay_label_replacement_work work ON work.state = 'applied'
+          AND (work.shipping_provider_label_id = current_work.shipping_provider_label_id
+            OR work.replacement_batch_id = current_work.replacement_batch_id)
+        JOIN wms.physical_shipments package ON package.id = work.physical_shipment_id
+        JOIN wms.physical_shipment_items item ON item.physical_shipment_id = package.id
+        JOIN wms.fulfillment_plan_lines plan ON plan.id = item.fulfillment_plan_line_id
+        JOIN oms.oms_order_lines line ON line.id = plan.oms_order_line_id
+        JOIN wms.shipping_provider_labels label ON label.id = work.shipping_provider_label_id
+        WHERE current_work.physical_shipment_id = ${command.physicalShipmentId} AND current_work.state = 'applied'
+          AND line.order_id = ${command.omsOrderId} AND label.label_status = 'active'
+        GROUP BY package.id, line.external_line_item_id ORDER BY package.id, line.external_line_item_id`);
+      const packages = new Map<string, EbayShippingFulfillmentRequest>();
+      for (const row of batchEvidence.rows as { package_id: string; tracking_number: string; carrier: string; external_line_item_id: string; quantity: number }[]) {
+        let pkg = packages.get(row.package_id);
+        if (!pkg) {
+          pkg = { trackingNumber: normalizeEbayTrackingNumber(row.tracking_number), shippingCarrierCode: mapCarrierCode(row.carrier), shippedDate: shippedAt.toISOString(), lineItems: [] };
+          packages.set(row.package_id, pkg);
+        }
+        pkg.lineItems.push({ lineItemId: row.external_line_item_id, quantity: row.quantity });
+      }
+      replacementPackages = [...packages.values()];
+      if (!packages.has(String(command.physicalShipmentId))) throw new ChannelFulfillmentProviderError("EBAY_TRACKING_REPLACEMENT_INVALID", "The current replacement batch is no longer active", "permanent");
+    }
+    if (previousTrackingNumbers.length > 0 && !account.client.replaceShippingFulfillmentTracking) {
+      throw new ChannelFulfillmentProviderError("EBAY_TRACKING_ADAPTER_UNAVAILABLE", "eBay tracking replacement adapter is unavailable", "permanent");
+    }
+    const result = previousTrackingNumbers.length > 0
+      ? await account.client.replaceShippingFulfillmentTracking!(externalOrderId, fulfillmentPayload, previousTrackingNumbers, { packages: replacementPackages! })
+      : await account.client.createShippingFulfillment(externalOrderId, fulfillmentPayload);
+    const fulfillmentId = String(result?.fulfillmentId ?? "").trim();
+    if (!fulfillmentId) {
+      throw Object.assign(
+        new Error(`eBay did not return a verified fulfillment id for command ${command.commandId}`),
+        { code: "EBAY_WRITEBACK_INCOMPLETE" },
+      );
+    }
+
+    await db.insert(omsOrderEvents).values({
+      orderId: command.omsOrderId,
+      eventType: "tracking_pushed",
+      details: {
+        provider: "ebay",
+        fulfillmentId,
+        channelFulfillmentCommandId: command.commandId,
+        ...(result.quantityEvidenceSource ? { quantityEvidenceSource: result.quantityEvidenceSource } : {}),
+        channelId: account.channelId,
+        externalAccountId: account.externalAccountId,
+        physicalShipmentId: command.physicalShipmentId,
+        wmsShipmentIds: command.legacyWmsShipmentIds,
+        trackingNumber: command.trackingNumber,
+        carrier: command.carrier,
+        lineItems,
+      },
+    });
+    return command.trackingReplacement === true ? { fulfillmentId, writebackComplete: true } : true;
+  }
+
+  /**
+   * Channel command adapter for dropship lines. The sale lives in the vendor's
+   * own marketplace store, so the update goes through the dropship tracking
+   * service, which holds that store's connection. It sends exactly the
+   * command's lines, keyed by the command id: a retried command replays its
+   * own push row, and the vendor's store is never told twice.
+   */
+  async function pushDropshipTrackingForShipmentCommand(
+    input: ChannelFulfillmentProviderCommandInput,
+    options: { readonly lastAttempt?: boolean } = {},
+  ): Promise<DropshipTrackingCommandPushResult> {
+    const command = normalizeChannelCommandInput(input);
+    // Every channel write for an order shares this lock, as in the eBay and
+    // Shopify command adapters.
+    const result = await runExclusive(
+      shopifyOrderFulfillmentLockId(command.omsOrderId),
+      () => pushDropshipCommandExclusive(command, options.lastAttempt === true),
+    );
+    if (result === null) {
+      throw new ChannelFulfillmentProviderError(
+        "DROPSHIP_FULFILLMENT_IN_PROGRESS",
+        "Another fulfillment update owns this order",
+        "transient",
+      );
+    }
+    return result;
+  }
+
+  async function pushDropshipCommandExclusive(
+    command: ChannelFulfillmentProviderCommandInput,
+    lastAttempt: boolean,
+  ): Promise<DropshipTrackingCommandPushResult> {
+    // The vendor's store has no way to swap one tracking number for another.
+    if (command.trackingReplacement === true) {
+      throw new ChannelFulfillmentProviderError(
+        "DROPSHIP_TRACKING_REPLACEMENT_UNSUPPORTED",
+        `Command ${command.commandId} replaces a label; the vendor's store must be corrected by hand`,
+        "permanent",
+      );
+    }
+    await loadCanonicalFulfillmentOrder(command, DROPSHIP_ORDER_CHANNEL_PROVIDER);
+    const rawLineItems = await loadCommandShipmentLines(command);
+    await projectCanonicalCommandQuantities(command, rawLineItems, DROPSHIP_WRITEBACK_PROVIDER);
+    if (!command.shippedAt) {
+      throw new ChannelFulfillmentProviderError(
+        "DROPSHIP_TRACKING_SHIPPED_AT_REQUIRED",
+        `Command ${command.commandId} has no ship date for the vendor's store`,
+        "permanent",
+      );
+    }
+
+    const lineItems = aggregateCommandLineQuantities(command.items)
+      .map(({ channelOrderLineId, quantity }) => ({ externalLineItemId: channelOrderLineId, quantity }));
+    // The push row records one WMS shipment; a package built from several has none.
+    const wmsShipmentId = command.legacyWmsShipmentIds.length === 1
+      ? command.legacyWmsShipmentIds[0]
+      : null;
+    let pushed: Awaited<ReturnType<DropshipMarketplaceTrackingServiceHandle["pushForOmsOrder"]>>;
+    try {
+      const service = await resolveDropshipMarketplaceTrackingService();
+      pushed = await service.pushForOmsOrder({
+        omsOrderId: command.omsOrderId,
+        wmsShipmentId,
+        carrier: command.carrier,
+        trackingNumber: command.trackingNumber,
+        shippedAt: command.shippedAt,
+        idempotencyKey: buildChannelFulfillmentTrackingIdempotencyKey(command.commandId),
+        lineItems,
+        lastAttempt,
+      });
+    } catch (error) {
+      throw toDropshipTrackingProviderError(error);
+    }
+
+    switch (pushed.status) {
+      case "succeeded":
+      case "already_succeeded": {
+        const push = pushed.push;
+        if (!push || !Number.isSafeInteger(push.pushId) || push.pushId <= 0) {
+          throw new ChannelFulfillmentProviderError(
+            "DROPSHIP_TRACKING_RESULT_INVALID",
+            `Dropship tracking returned no push record for command ${command.commandId}`,
+            "permanent",
+          );
+        }
+        const alreadySatisfied = pushed.status === "already_succeeded";
+        // Recorded only by the attempt that told the store, so a replay never
+        // adds a second event. If this insert fails, the retry finds the push
+        // done and completes the command; the push row, its dropship audit
+        // event and the command row still record the update.
+        if (!alreadySatisfied) {
+          await db.insert(omsOrderEvents).values({
+            orderId: command.omsOrderId,
+            eventType: "tracking_pushed",
+            details: {
+              provider: DROPSHIP_WRITEBACK_PROVIDER,
+              platform: push.platform,
+              storeConnectionId: push.storeConnectionId,
+              dropshipTrackingPushId: push.pushId,
+              fulfillmentId: push.externalFulfillmentId,
+              channelFulfillmentCommandId: command.commandId,
+              physicalShipmentId: command.physicalShipmentId,
+              wmsShipmentIds: command.legacyWmsShipmentIds,
+              trackingNumber: command.trackingNumber,
+              carrier: command.carrier,
+              lineItems,
+            },
+          });
+        }
+        return Object.freeze({
+          outcome: alreadySatisfied ? "ignored" : "success",
+          dropshipTrackingPushId: push.pushId,
+          externalFulfillmentId: push.externalFulfillmentId,
+          alreadySatisfied,
+        });
+      }
+      case "already_processing":
+        throw new ChannelFulfillmentProviderError(
+          "DROPSHIP_TRACKING_PUSH_IN_PROGRESS",
+          `Dropship tracking for command ${command.commandId} is still being pushed`,
+          "transient",
+        );
+      case "not_dropship":
+        throw new ChannelFulfillmentProviderError(
+          "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+          `OMS order ${command.omsOrderId} has no dropship intake to push tracking to`,
+          "permanent",
+        );
+      default:
+        throw new ChannelFulfillmentProviderError(
+          "DROPSHIP_TRACKING_RESULT_INVALID",
+          `Unexpected dropship tracking status for command ${command.commandId}`,
+          "permanent",
+        );
+    }
+  }
+
+
+  // -----------------------------------------------------------------------
+  // Shopify fulfillment push (§6 Commit 21) — scaffolding only.
+  //
+  // Reads strictly from WMS (the SOR after the WMS-source-of-truth
+  // refactor), resolves Shopify fulfillment-order line-item ids on the
+  // fly, calls `fulfillmentCreateV2`, then writes the resulting
+  // `Fulfillment.id` back into `wms.outbound_shipments.shopify_fulfillment_id`.
+  //
+  // No callers in this commit. Tests cover happy path + every documented
+  // failure mode. The retry/DLQ wrapper lands in C22.
+  // -----------------------------------------------------------------------
+
+  /**
+   * Public push entrypoint. Internally dispatches to either single-
+   * shipment push (current C22c behaviour) or a combined-group fan-out
+   * (§6 Commit 25 + Overlord D8) once the order's `combined_group_id` is
+   * loaded.
+   *
+   * The returned `{shopifyFulfillmentId, alreadyPushed}` always reflects
+   * the TRIGGERING shipment's row only — the caller's retry/DLQ logic
+   * (C22d) keeps thinking in terms of one shipment id at a time. Sibling
+   * outcomes (success, idempotent skip, voided skip, error) are handled
+   * internally; failed siblings retry independently via DLQ on their own
+   * shipment id.
+   */
+  async function pushShopifyFulfillment(
+    shipmentId: number,
+  ): Promise<ShopifyFulfillmentPushResult> {
+    try {
+      const lockScope = await resolveShopifyFulfillmentLockScope(shipmentId);
+      if (lockScope === null) {
+        return await pushSingleShipmentFulfillment(shipmentId);
+      }
+      return await runShopifyFulfillmentExclusive(
+        lockScope,
+        shipmentId,
+        () => pushSingleShipmentFulfillment(shipmentId),
+      );
+    } catch (err: unknown) {
+      const code =
+        err instanceof ShopifyFulfillmentPushError
+          ? err.context?.code ?? "unknown"
+          : "unknown";
+      incr("shopify_push_failed", 1, { shipmentId, code });
+      throw err;
+    }
+  }
+
+  async function pushShopifyFulfillmentForCommand(
+    input: ChannelFulfillmentProviderCommandInput,
+  ): Promise<ShopifyFulfillmentPushResult> {
+    const command = normalizeChannelCommandInput(input);
+    const anchorShipmentId = command.legacyWmsShipmentIds[0];
+    const sharedTrackingInfo: { number: string; company: string; url?: string } = {
+      number: command.trackingNumber,
+      company: command.carrier,
+    };
+    if (command.trackingUrl) sharedTrackingInfo.url = command.trackingUrl;
+
+    try {
+      const lockScope = shopifyFulfillmentWriteLockId(
+        "oms_order",
+        command.omsOrderId,
+        anchorShipmentId,
+      );
+      const execute = async () => {
+        await assertShopifyCommandLabelActive(db, command);
+        const order = await loadCanonicalFulfillmentOrder(command, "shopify");
+        const account = await requireProviderClients().shopify(order.channelId);
+        if (account.channelId !== order.channelId) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_CHANNEL_MISMATCH", "Resolved Shopify account belongs to another channel");
+        return pushSingleShipmentFulfillment(anchorShipmentId, sharedTrackingInfo, command, { order, account });
+      };
+      return await runShopifyFulfillmentExclusive(
+        lockScope,
+        anchorShipmentId,
+        execute,
+      );
+    } catch (error) {
+      const code = error instanceof ChannelFulfillmentProviderInputError
+        ? error.code
+        : error instanceof ShopifyFulfillmentPushError
+          ? error.context?.code ?? "unknown"
+          : "unknown";
+      incr("shopify_push_failed", 1, {
+        shipmentId: anchorShipmentId,
+        commandId: command.commandId,
+        code,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Push a single WMS shipment to Shopify as a `fulfillmentCreateV2`.
+   *
+   * Returns `{ shopifyFulfillmentId, alreadyPushed, writebackComplete }`.
+   * A stored fulfillment id is only a historical handle; it never bypasses
+   * live per-line reconciliation. `writebackComplete` is true only when the
+   * package signature and every Shopify-owned package quantity are covered.
+   *   - `alreadyPushed: true` — live Shopify state already covered the package.
+   *   - `alreadyPushed: false, shopifyFulfillmentId: <gid>` — fresh push.
+   *   - `alreadyPushed: false, shopifyFulfillmentId: null` — non-Shopify
+   *     channel no-op. Shopify-owned quantities assigned only to non-owned
+   *     locations remain explicit incomplete debt and throw for retry/review.
+   *
+   * Throws `ShopifyFulfillmentPushError` on any other failure; the
+   * caller (C22d) is responsible for retry-vs-DLQ classification based
+   * on `context.code`.
+   *
+   * `sharedTrackingInfo` (§6 Commit 25): when provided by the combined
+   * fan-out caller, overrides the per-shipment tracking columns. Solo
+   * callers omit it so each shipment uses its own row's tracking. The
+   * trim/non-empty validation is identical regardless of source.
+   */
+  async function pushSingleShipmentFulfillment(
+    shipmentId: number,
+    sharedTrackingInfo?: { number: string; company: string; url?: string },
+    commandInput?: ChannelFulfillmentProviderCommandInput,
+    canonicalTarget?: { order: Awaited<ReturnType<typeof loadCanonicalFulfillmentOrder>>; account: ShopifyFulfillmentAccount },
+  ): Promise<ShopifyFulfillmentPushResult> {
+    const command = commandInput ? normalizeChannelCommandInput(commandInput) : null;
+    const shopifyClient = canonicalTarget?.account.client ?? (command ? null : _shopifyClient);
+    if (command && !command.legacyWmsShipmentIds.includes(shipmentId)) {
+      throw new ChannelFulfillmentProviderInputError(
+        CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        `Command ${command.commandId} does not own legacy shipment ${shipmentId}`,
+        {
+          commandId: command.commandId,
+          expected: command.legacyWmsShipmentIds,
+          actual: shipmentId,
+        },
+      );
+    }
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new ShopifyFulfillmentPushError(
+        "pushShopifyFulfillment: shipmentId must be a positive integer",
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "shipmentId", value: shipmentId },
+      );
+    }
+
+    // ---- 0. Load fulfillment identity for this package -----------------
+    // Split packages share a legacy shipment header. Its first fulfillment ID
+    // therefore cannot identify each canonical physical package. Keep that
+    // compatibility handle only for legacy callers; canonical calls use their
+    // exact persisted command/package scope plus live tracking/line evidence.
+    const legacyWmsShipmentIds = command?.legacyWmsShipmentIds ?? [shipmentId];
+    const idempotencyResult: any = command
+      ? await db.execute(sql`
+          SELECT id, channel_fulfillment_id AS shopify_fulfillment_id
+          FROM oms.channel_fulfillment_pushes
+          WHERE physical_shipment_id = ${command.physicalShipmentId}
+            AND oms_order_id = ${command.omsOrderId}
+            AND channel_provider = 'shopify'
+            AND (id = ${command.commandId} OR push_status IN ('success', 'ignored'))
+            AND NULLIF(BTRIM(channel_fulfillment_id), '') IS NOT NULL
+          ORDER BY id
+        `)
+      : await db.execute(sql`
+          SELECT id, shopify_fulfillment_id
+          FROM wms.outbound_shipments
+          WHERE id = ANY(${sqlBigintArray(legacyWmsShipmentIds)})
+          ORDER BY id
+        `);
+    const existingFulfillmentIds: string[] = [...new Set<string>(
+      (idempotencyResult?.rows ?? [])
+        .map((row: any) => String(row?.shopify_fulfillment_id ?? "").trim())
+        .filter((value: string) => value.length > 0),
+    )];
+    const existingFulfillmentId = existingFulfillmentIds[0] ?? null;
+
+    incr("shopify_push_attempted", 1, { shipmentId });
+
+    // ---- 1. Load WMS shipment ------------------------------------------
+    const shipmentResult: any = await db.execute(sql`
+      SELECT
+        id,
+        order_id,
+        channel_id,
+        status,
+        carrier,
+        tracking_number,
+        tracking_url,
+        shopify_fulfillment_id
+      FROM wms.outbound_shipments
+      WHERE id = ${shipmentId}
+      LIMIT 1
+    `);
+    const shipment: WmsShipmentForShopify | undefined = shipmentResult?.rows?.[0];
+    if (!shipment) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: shipment ${shipmentId} not found`,
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "shipment", value: null },
+      );
+    }
+
+    if (!shipment.order_id) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: shipment ${shipmentId} has no order_id`,
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "order_id", value: null },
+      );
+    }
+
+    // ---- 2. Validate header fields -------------------------------------
+    // When `sharedTrackingInfo` is provided (combined-group fan-out per
+    // §6 Commit 25 + D8), the triggering shipment's tracking is reused
+    // for every sibling so all orders in the group share the same UPS/
+    // USPS link. Solo callers omit it; the per-shipment row supplies its
+    // own tracking. Validation is identical either way.
+    const useSharedTracking = sharedTrackingInfo !== undefined;
+    const trackingNumberSource = useSharedTracking
+      ? sharedTrackingInfo!.number
+      : shipment.tracking_number;
+    const carrierSource = useSharedTracking
+      ? sharedTrackingInfo!.company
+      : shipment.carrier;
+    const trackingUrlSource = useSharedTracking
+      ? sharedTrackingInfo!.url ?? null
+      : shipment.tracking_url;
+
+    const trackingNumber = (trackingNumberSource ?? "").trim();
+    if (trackingNumber.length === 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: shipment ${shipmentId} has no tracking_number`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: "tracking_number",
+          value: trackingNumberSource,
+        },
+      );
+    }
+    const carrier = (carrierSource ?? "").trim();
+    if (carrier.length === 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: shipment ${shipmentId} has no carrier`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: "carrier",
+          value: carrierSource,
+        },
+      );
+    }
+    // Trimmed url (or undefined if blank/null) — reused below for the
+    // mutation payload AND, for combined-group fan-outs, for the shared
+    // trackingInfo passed to siblings.
+    const trackingInfoUrl: string | undefined =
+      typeof trackingUrlSource === "string" && trackingUrlSource.trim().length > 0
+        ? trackingUrlSource.trim()
+        : undefined;
+
+    // ---- 3. Load WMS order ---------------------------------------------
+    // ship_from_location_id comes via the order's warehouse mapping. Stage 2
+    // (one order split across warehouses → one shipment per warehouse) moves
+    // this join to the shipment's own warehouse_id; the column name and the
+    // downstream resolver contract stay the same.
+    const orderResult: any = await db.execute(sql`
+      SELECT w.id, w.channel_id, w.source, w.external_order_id, w.oms_fulfillment_order_id,
+             w.combined_group_id, w.combined_role,
+             wh.shopify_location_id AS ship_from_location_id
+      FROM wms.orders w
+      LEFT JOIN warehouse.warehouses wh ON wh.id = w.warehouse_id
+      WHERE w.id = ${shipment.order_id}
+      LIMIT 1
+    `);
+    const order: WmsOrderForShopify | undefined = orderResult?.rows?.[0];
+    if (!order) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: order ${shipment.order_id} not found for shipment ${shipmentId}`,
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "order", value: shipment.order_id },
+      );
+    }
+    if (command && (!canonicalTarget || order.channel_id !== canonicalTarget.order.channelId
+      || (shipment.channel_id != null && shipment.channel_id !== canonicalTarget.order.channelId)
+      || resolveShopifyOrderGid(order.external_order_id ?? "") !== resolveShopifyOrderGid(canonicalTarget.order.externalOrderId))) {
+      throw new ChannelFulfillmentProviderInputError(CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        "WMS shipment header does not match the originating OMS channel/order", { commandId: command.commandId, shipmentId });
+    }
+    const canonicalWarehouseLocationId = command ? order.ship_from_location_id?.trim() ?? "" : null;
+    if (command && !/^(?:gid:\/\/shopify\/Location\/)?[1-9]\d*$/.test(canonicalWarehouseLocationId ?? "")) {
+      throw new ChannelFulfillmentProviderError("SHOPIFY_FULFILLMENT_LOCATION_UNRESOLVED", "The shipment warehouse has no explicit Shopify location mapping");
+    }
+
+    // ---- 3b. Combined-group dispatch (§6 Commit 25 + Overlord D8) ------
+    // If this order is part of a combined-order group AND we are not
+    // already inside a fan-out (sharedTrackingInfo undefined), hand off
+    // to the fan-out helper. Each sibling shipment then re-enters this
+    // function with `sharedTrackingInfo` set, which both:
+    //   (a) supplies the shared tracking number/carrier/url, and
+    //   (b) acts as the recursion guard so we never re-fan-out.
+    //
+    // The fan-out's return is narrowed back to the triggering shipment's
+    // outcome before returning to the caller, so the public method's
+    // contract (one shipment id in, one result out) is preserved.
+    const combinedGroupId =
+      typeof order.combined_group_id === "number" ? order.combined_group_id : null;
+    if (combinedGroupId !== null && !useSharedTracking) {
+      const fanOutTrackingInfo: { number: string; company: string; url?: string } = {
+        number: trackingNumber,
+        company: shopifyTrackingCompany(carrier),
+      };
+      if (trackingInfoUrl !== undefined) fanOutTrackingInfo.url = trackingInfoUrl;
+
+      const fanOut = await pushFulfillmentForCombinedGroup({
+        triggeringShipmentId: shipmentId,
+        combinedGroupId,
+        sharedTrackingInfo: fanOutTrackingInfo,
+      });
+
+      const triggeringOutcome = fanOut.fulfillments.find(
+        (f) => f.shipmentId === shipmentId,
+      );
+      if (!triggeringOutcome) {
+        throw new ShopifyFulfillmentPushError(
+          `pushShopifyFulfillment: combined-group fan-out for shipment ${shipmentId} did not return an outcome for the triggering shipment`,
+          {
+            code: SHOPIFY_PUSH_INVALID_INPUT,
+            shipmentId,
+            field: "combined_group",
+            value: combinedGroupId,
+          },
+        );
+      }
+      if (triggeringOutcome.error) {
+        // Re-throw the triggering shipment's error so the caller's
+        // retry/DLQ classification (C22d) sees the same shape it would
+        // for a solo push. Sibling errors stay internal — each one is
+        // independently retryable on its own shipment id.
+        throw new ShopifyFulfillmentPushError(triggeringOutcome.error.message, {
+          code: triggeringOutcome.error.code,
+          shipmentId,
+        });
+      }
+      const result: ShopifyFulfillmentPushResult = {
+        shopifyFulfillmentId: triggeringOutcome.shopifyFulfillmentId,
+        alreadyPushed: triggeringOutcome.alreadyPushed,
+        writebackComplete: triggeringOutcome.writebackComplete,
+      };
+      if (triggeringOutcome.alreadySatisfied === true) {
+        result.alreadySatisfied = true;
+      }
+      return result;
+    }
+
+    // ---- 4. Channel guard — no-op for non-Shopify -----------------------
+    // Channel can be identified two ways: (a) order.source === 'shopify',
+    // (b) channels.provider === 'shopify' joined via channel_id. Source
+    // is the cheapest check and is set during ingestion. We honour
+    // either signal to be defensive against legacy rows.
+    const sourceIsShopify = (order.source ?? "").toLowerCase() === "shopify";
+    let providerIsShopify = false;
+    if (order.channel_id) {
+      const channelResult: any = await db.execute(sql`
+        SELECT provider FROM channels.channels WHERE id = ${order.channel_id} LIMIT 1
+      `);
+      const provider = (channelResult?.rows?.[0]?.provider ?? "").toLowerCase();
+      providerIsShopify = provider === "shopify";
+    }
+    if (!command && !sourceIsShopify && !providerIsShopify) {
+      // Non-Shopify channel — silent no-op per brief. The eBay path is
+      // owned by `pushTracking`/`pushToEbay` above.
+      return { shopifyFulfillmentId: null, alreadyPushed: false, writebackComplete: true };
+    }
+
+    if (!order.external_order_id || order.external_order_id.trim().length === 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: order ${order.id} missing external_order_id`,
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "external_order_id", value: null },
+      );
+    }
+    const shopifyOrderGid = resolveShopifyOrderGid(canonicalTarget?.order.externalOrderId ?? order.external_order_id);
+    if (!shopifyOrderGid) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: order ${order.id} has invalid Shopify external_order_id`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: "external_order_id",
+          value: order.external_order_id,
+        },
+      );
+    }
+
+    // ---- 5. Shopify client must be set ---------------------------------
+    if (!shopifyClient) {
+      throw new ShopifyFulfillmentPushError(
+        "shopify client not initialized",
+        { code: SHOPIFY_PUSH_CLIENT_NOT_SET, shipmentId },
+      );
+    }
+
+    // ---- 6. Load shipment items ----------------------------------------
+    // Shipment-item quantity is package-scoped physical evidence. Do not
+    // subtract OMS line adjustments here: one order line can span multiple
+    // packages, so an order-level adjustment would be applied once per
+    // package. The live Shopify remaining quantity is the disposition clamp.
+    const itemsResult: any = command
+      ? await db.execute(sql`
+          SELECT
+            si.shipment_id AS shipment_id,
+            si.id            AS shipment_item_id,
+            si.order_item_id AS order_item_id,
+            oi.oms_order_line_id AS oms_order_line_id,
+            ol.order_id AS oms_order_id,
+            ol.fulfillment_provider AS fulfillment_provider,
+            oi.sku           AS sku,
+            ol.external_line_item_id AS external_line_item_id,
+            COALESCE(NULLIF(ol.provider_fulfillment_order_id, ''), ol.shopify_fulfillment_order_id) AS stored_fulfillment_order_id,
+            COALESCE(NULLIF(ol.provider_fulfillment_order_line_item_id, ''), ol.shopify_fulfillment_order_line_item_id) AS stored_fulfillment_order_line_item_id,
+            si.qty::int      AS qty
+          FROM wms.outbound_shipment_items si
+          JOIN wms.order_items oi ON oi.id = si.order_item_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE si.id = ANY(${sqlBigintArray(
+            command.items.map((item) => item.legacyWmsShipmentItemId),
+          )})
+            AND si.shipment_id = ANY(${sqlBigintArray(command.legacyWmsShipmentIds)})
+            AND COALESCE(oi.status, 'pending') <> 'cancelled'
+          ORDER BY si.id
+        `)
+      : await db.execute(sql`
+          SELECT
+            si.shipment_id AS shipment_id,
+            si.id            AS shipment_item_id,
+            si.order_item_id AS order_item_id,
+            oi.oms_order_line_id AS oms_order_line_id,
+            ol.order_id AS oms_order_id,
+            ol.fulfillment_provider AS fulfillment_provider,
+            oi.sku           AS sku,
+            ol.external_line_item_id AS external_line_item_id,
+            si.qty::int      AS qty
+          FROM wms.outbound_shipment_items si
+          LEFT JOIN wms.order_items oi ON oi.id = si.order_item_id
+          LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE si.shipment_id = ${shipmentId}
+            AND COALESCE(oi.status, 'pending') <> 'cancelled'
+        `);
+    const sourceItems: WmsShipmentItemForShopify[] = itemsResult?.rows ?? [];
+    const items = command
+      ? await projectCanonicalCommandQuantities(command, sourceItems, "shopify")
+      : sourceItems;
+    const positiveItems = items.filter((it) => Number.isInteger(it.qty) && it.qty > 0);
+    if (positiveItems.length === 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: shipment ${shipmentId} has no items with positive quantity`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: "items",
+          value: items.length,
+        },
+      );
+    }
+    const shopifyPositiveItems = positiveItems.filter((item) =>
+      isShopifyFulfillmentProvider(item.fulfillment_provider),
+    );
+    const packageSignature = buildShopifyPackageSignature(shopifyPositiveItems);
+    const requestedQuantity = shopifyPositiveItems.reduce(
+      (sum, item) => sum + item.qty,
+      0,
+    );
+    if (shopifyPositiveItems.length === 0) {
+      logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} has no Shopify-provider items; skipping Shopify fulfillment push` });
+      await recordShopifyWritebackEvidence({
+        eventType: "shopify_fulfillment_reconciled",
+        order,
+        shipmentId,
+        trackingNumber,
+        carrier,
+        packageSignature,
+        items: shopifyPositiveItems,
+        requestedQuantity,
+        pushedQuantity: 0,
+        alreadySatisfiedQuantity: 0,
+        writebackComplete: true,
+        reconciliationSource: "no_shopify_owned_package_items",
+        shopifyFulfillmentId: existingFulfillmentId,
+      });
+      return {
+        shopifyFulfillmentId: existingFulfillmentId,
+        alreadyPushed: existingFulfillmentId !== null,
+        writebackComplete: true,
+      };
+    }
+    const skippedProviderItems = positiveItems.length - shopifyPositiveItems.length;
+    if (skippedProviderItems > 0) {
+      logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} skipping ${skippedProviderItems} non-Shopify provider item(s)` });
+    }
+
+    if (command) {
+      const priorCommandItemsResult: any = await db.execute(sql`
+        SELECT
+          item.channel_order_line_id,
+          SUM(item.quantity_pushed)::int AS quantity
+        FROM oms.channel_fulfillment_pushes AS prior
+        JOIN oms.channel_fulfillment_push_items AS item
+          ON item.channel_fulfillment_push_id = prior.id
+        WHERE prior.physical_shipment_id = ${command.physicalShipmentId}
+          AND prior.oms_order_id = ${command.omsOrderId}
+          AND prior.channel_provider = 'shopify'
+          AND prior.id <> ${command.commandId}
+          AND prior.push_status IN ('success', 'ignored')
+          AND prior.tracking_number = ${trackingNumber}
+        GROUP BY item.channel_order_line_id
+        ORDER BY item.channel_order_line_id
+      `);
+      const priorCommandItems = (priorCommandItemsResult?.rows ?? []).map((row: any) => ({
+        channelOrderLineId: String(row.channel_order_line_id ?? ""),
+        quantity: Number(row.quantity),
+      }));
+      const providerPackageState = await fetchExactShopifyPackageState({
+        client: shopifyClient,
+        shopifyOrderGid,
+        shipmentId,
+        trackingNumber,
+        existingFulfillmentIds,
+        items: command.items,
+        priorItems: priorCommandItems,
+      });
+      if (providerPackageState.kind === "conflict") {
+        throw new ShopifyFulfillmentPushError(
+          `pushShopifyFulfillment: Shopify package state conflicts with command ${command.commandId}`,
+          {
+            code: SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT,
+            shipmentId,
+            field: "fulfillments",
+            value: providerPackageState.evidence,
+          },
+        );
+      }
+      if (providerPackageState.kind === "present") {
+        await persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms(
+          db,
+          sqlBigintArray(command.legacyWmsShipmentIds),
+          providerPackageState.fulfillmentId,
+        );
+        await recordShopifyWritebackEvidence({
+          eventType: "shopify_fulfillment_reconciled",
+          order,
+          omsOrderId: command.omsOrderId,
+          originAccount: canonicalTarget?.account,
+          shipmentId,
+          wmsShipmentIds: command.legacyWmsShipmentIds,
+          trackingNumber,
+          carrier,
+          packageSignature,
+          items: shopifyPositiveItems,
+          requestedQuantity,
+          pushedQuantity: 0,
+          alreadySatisfiedQuantity: requestedQuantity,
+          writebackComplete: true,
+          reconciliationSource: "exact_provider_package_match",
+          shopifyFulfillmentId: providerPackageState.fulfillmentId,
+        });
+        incr("shopify_push_already_satisfied", 1, {
+          shipmentId,
+          commandId: command.commandId,
+          alreadySatisfiedQuantity: requestedQuantity,
+        });
+        return {
+          shopifyFulfillmentId: providerPackageState.fulfillmentId,
+          alreadyPushed: true,
+          writebackComplete: true,
+          alreadySatisfied: true,
+        };
+      }
+    }
+
+    // ---- 7. Resolve Shopify fulfillment-order line items ---------------
+    // Path A (D2/D4): read FO line item IDs from oms.oms_order_lines
+    // populated by C22b, then validate those stored IDs against live
+    // Shopify remainingQuantity before creating a fulfillment. Partial
+    // cancellations/refunds can make previously stored FO line IDs stale.
+    //
+    // Path B (fallback): live Shopify GQL `order.fulfillmentOrders`
+    // query + exact order-line reconciliation. Legacy rows without external
+    // line identity may use an ambiguity-checked SKU fallback. Used when
+    // any item's stored FO line item id is null/stale — typical for
+    // orders ingested before C22a/b shipped, transient Shopify errors,
+    // or Shopify fulfillment-order changes after cancellations.
+    // Canonical Path A uses the same validated item snapshot and allocation
+    // quantity as Path B. Re-reading the anchor legacy shipment would restore
+    // its full source quantity or accidentally include an unallocated sibling.
+    const pathARead: PathARow[] | null = command
+      ? shopifyPositiveItems.map((item) => ({
+          shipmentItemId: item.shipment_item_id,
+          quantity: item.qty,
+          omsOrderLineId: item.oms_order_line_id,
+          fulfillmentOrderId: firstNonEmptyString(item.stored_fulfillment_order_id),
+          fulfillmentOrderLineItemId: firstNonEmptyString(item.stored_fulfillment_order_line_item_id),
+        }))
+      : await tryReadPathA(db, shipmentId);
+    let resolved: ResolvedFulfillmentOrderLine[] = [];
+    let pathAUsed = false;
+    let pathAReason = "";
+    let liveCandidates: ShopifyFulfillmentOrderLineCandidate[] | null = command
+      ? await fetchFulfillmentOrderLineCandidates(shopifyClient, shopifyOrderGid, shipmentId)
+      : null;
+    if (command && !liveCandidates?.some((candidate) => candidate.assignedLocationId === normaliseShopifyLocationId(canonicalWarehouseLocationId!))) {
+      // A global warehouse mapping is not account proof. The exact originating
+      // store must expose that location on this order before either Path A or B.
+      throw new ChannelFulfillmentProviderError("SHOPIFY_FULFILLMENT_LOCATION_MISMATCH", "The shipment warehouse location is not assigned to this order in its originating Shopify store");
+    }
+    let alreadySatisfiedQuantity = 0;
+
+    if (pathARead === null) {
+      pathAReason = "no rows joinable to oms_order_lines";
+    } else if (pathARead.length !== shopifyPositiveItems.length) {
+      pathAReason = `row count mismatch (path A=${pathARead.length}, items=${shopifyPositiveItems.length})`;
+    } else if (pathARead.some((r) => !r.fulfillmentOrderId || !r.fulfillmentOrderLineItemId)) {
+      pathAReason = "some oms_order_lines have null FO line item id";
+    } else {
+      liveCandidates ??= await fetchFulfillmentOrderLineCandidates(
+        shopifyClient,
+        shopifyOrderGid,
+        shipmentId,
+      );
+      const validation = validatePathAAgainstLiveCandidates(
+        shopifyOrderGid,
+        pathARead,
+        shipmentId,
+        liveCandidates,
+        canonicalWarehouseLocationId,
+      );
+      if (validation.ok) {
+        resolved = validation.resolved;
+        pathAUsed = true;
+        logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} using Path A (stored FO line item ids validated against live Shopify quantities)` });
+      } else {
+        pathAReason = validation.reason;
+      }
+    }
+
+    if (!pathAUsed) {
+      logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} using Path B (Shopify fulfillmentOrders GQL) — reason: ${pathAReason}` });
+      // Pin matching to the warehouse this shipment shipped from so a
+      // multi-warehouse split line routes to the correct location's
+      // fulfillment ticket. Sourced from the order load (no extra query).
+      // Null when no warehouse→location mapping exists (single-location
+      // stores) → location-agnostic matching.
+      const shipFromLocationId = canonicalWarehouseLocationId ?? order.ship_from_location_id ?? null;
+      const reconciliation = liveCandidates
+        ? reconcileFulfillmentOrderLinesFromCandidates(
+            shopifyOrderGid,
+            shopifyPositiveItems,
+            shipmentId,
+            liveCandidates,
+            shipFromLocationId,
+          )
+        : await reconcileFulfillmentOrderLines(
+            shopifyClient,
+            shopifyOrderGid,
+            shopifyPositiveItems,
+            shipmentId,
+            shipFromLocationId,
+          );
+      resolved = reconciliation.resolved;
+      alreadySatisfiedQuantity = reconciliation.alreadySatisfiedQuantity;
+
+      // Self-healing back-write (D2): now that Path B has resolved these IDs,
+      // store them on the provider-neutral OMS line columns and maintain the
+      // Shopify aliases so the next push can use Path A during the transition.
+      // The WHERE guard only updates null or stale Shopify mappings, which lets
+      // us repair fulfillment-order mappings changed by Shopify partial
+      // cancellations/refunds without clobbering another provider's references.
+      for (const r of resolved) {
+        if (
+          r.omsOrderLineId &&
+          r.fulfillmentOrderId &&
+          r.fulfillmentOrderLineItemId
+        ) {
+          try {
+            await db.execute(sql`
+              UPDATE oms.oms_order_lines
+                 SET fulfillment_provider = 'shopify',
+                     provider_fulfillment_order_id = ${r.fulfillmentOrderId},
+                     provider_fulfillment_order_line_item_id = ${r.fulfillmentOrderLineItemId},
+                     shopify_fulfillment_order_id = ${r.fulfillmentOrderId},
+                     shopify_fulfillment_order_line_item_id = ${r.fulfillmentOrderLineItemId}
+               WHERE id = ${r.omsOrderLineId}
+                 AND COALESCE(LOWER(NULLIF(BTRIM(fulfillment_provider), '')), 'shopify') = 'shopify'
+                 AND (
+                   COALESCE(LOWER(NULLIF(BTRIM(fulfillment_provider), '')), '') <> 'shopify'
+                   OR provider_fulfillment_order_id IS NULL
+                   OR provider_fulfillment_order_id <> ${r.fulfillmentOrderId}
+                   OR provider_fulfillment_order_line_item_id IS NULL
+                   OR provider_fulfillment_order_line_item_id <> ${r.fulfillmentOrderLineItemId}
+                   OR shopify_fulfillment_order_id IS NULL
+                   OR shopify_fulfillment_order_id <> ${r.fulfillmentOrderId}
+                   OR shopify_fulfillment_order_line_item_id IS NULL
+                   OR shopify_fulfillment_order_line_item_id <> ${r.fulfillmentOrderLineItemId}
+                 )
+            `);
+          } catch (err: any) {
+            logger.error("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] back-write failed for oms_order_line ${r.omsOrderLineId}: ${err?.message ?? String(err)}` });
+            // Non-fatal — continue with the actual push.
+          }
+        }
+      }
+    }
+
+    if (command && alreadySatisfiedQuantity > 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: Shopify remaining quantity cannot prove package ${command.physicalShipmentId} was fulfilled`,
+        {
+          code: SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT,
+          shipmentId,
+          field: "fulfillmentOrders.remainingQuantity",
+          value: {
+            commandId: command.commandId,
+            physicalShipmentId: command.physicalShipmentId,
+            requestedQuantity,
+            alreadySatisfiedQuantity,
+            trackingNumber,
+          },
+        },
+      );
+    }
+
+    if (resolved.length === 0 && alreadySatisfiedQuantity > 0) {
+      await recordShopifyWritebackEvidence({
+        eventType: "shopify_fulfillment_reconciled",
+        order,
+        shipmentId,
+        trackingNumber,
+        carrier,
+        packageSignature,
+        items: shopifyPositiveItems,
+        requestedQuantity,
+        pushedQuantity: 0,
+        alreadySatisfiedQuantity,
+        writebackComplete: true,
+        reconciliationSource: "live_shopify_remaining_quantity",
+        shopifyFulfillmentId: existingFulfillmentId,
+      });
+      incr("shopify_push_already_satisfied", 1, {
+        shipmentId,
+        alreadySatisfiedQuantity,
+      });
+      return {
+        shopifyFulfillmentId: existingFulfillmentId,
+        alreadyPushed: existingFulfillmentId !== null,
+        writebackComplete: true,
+        alreadySatisfied: true,
+      };
+    }
+
+    // ---- 7b. Location filtering (D13) ----------------------------------
+    // Only push for FOs assigned to OUR warehouse locations.
+    // 3PL-assigned FOs (ShipMonk etc.) handle themselves via their own
+    // Shopify apps and must not be touched here, otherwise we'd create
+    // duplicate / conflicting fulfillments.
+    //
+    // The FO -> location mapping isn't stored anywhere yet, so we make
+    // one extra GQL call (`fulfillmentOrders.assignedLocation.location.id`)
+    // even on Path A. Cost is ~1 small query; correctness wins.
+    //
+    // TODO(C22d+): add `oms_order_lines.shopify_fulfillment_order_location_id`
+    // (or cache on a per-shipment basis) so Path A can skip this query.
+    const ourLocationIds = command ? [canonicalWarehouseLocationId!] : await getOurShopifyLocationIds(
+      db,
+      order.channel_id ?? null,
+      shipmentId,
+    );
+
+    if (ourLocationIds.length === 0) {
+      // Misconfiguration: no warehouses or channel set up with
+      // shopify_location_id. We can't safely filter, so skip the filter
+      // (legacy behaviour) and warn loudly. Per D13 fallback note.
+      logger.warn("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} — no warehouses.shopify_location_id (or channels.shopify_location_id) configured — skipping location filter` });
+    } else {
+      const foIds = Array.from(new Set(resolved.map((r) => r.fulfillmentOrderId)));
+      const allowedFoIds = await fetchOurFulfillmentOrderIds(
+        shopifyClient,
+        shopifyOrderGid,
+        foIds,
+        ourLocationIds,
+        shipmentId,
+      );
+      if (command && resolved.some((line) => !allowedFoIds.has(line.fulfillmentOrderId))) {
+        throw new ChannelFulfillmentProviderError("SHOPIFY_FULFILLMENT_LOCATION_MISMATCH", "Canonical fulfillment lines are not assigned to the proven shipment warehouse location");
+      }
+
+      const beforeCount = resolved.length;
+      resolved = resolved.filter((r) => allowedFoIds.has(r.fulfillmentOrderId));
+      const filteredCount = beforeCount - resolved.length;
+      if (filteredCount > 0) {
+        logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} — filtered ${filteredCount}/${beforeCount} resolved items to 3PL/non-our locations (kept ${resolved.length})` });
+      }
+
+      if (resolved.length === 0) {
+        await recordShopifyWritebackEvidence({
+          eventType: "shopify_fulfillment_reconciled",
+          order,
+          shipmentId,
+          trackingNumber,
+          carrier,
+          packageSignature,
+          items: shopifyPositiveItems,
+          requestedQuantity,
+          pushedQuantity: 0,
+          alreadySatisfiedQuantity,
+          writebackComplete: false,
+          reconciliationSource: "non_owned_shopify_locations_pending",
+          shopifyFulfillmentId: existingFulfillmentId,
+        });
+        throw new ShopifyFulfillmentPushError(
+          `pushShopifyFulfillment: shipment ${shipmentId} still has Shopify quantity assigned to non-owned locations`,
+          {
+            code: SHOPIFY_PUSH_INCOMPLETE,
+            shipmentId,
+            field: "fulfillmentOrders.assignedLocation",
+            value: {
+              requestedQuantity,
+              alreadySatisfiedQuantity,
+            },
+          },
+        );
+      }
+    }
+
+    const pushedQuantity = resolved.reduce((sum, line) => sum + line.quantity, 0);
+    const writebackComplete =
+      pushedQuantity + alreadySatisfiedQuantity === requestedQuantity;
+
+    // ---- 8. Group by fulfillmentOrderId for the mutation payload ------
+    const grouped = new Map<
+      string,
+      Array<{ id: string; quantity: number }>
+    >();
+    for (const r of resolved) {
+      const list = grouped.get(r.fulfillmentOrderId) ?? [];
+      list.push({ id: r.fulfillmentOrderLineItemId, quantity: r.quantity });
+      grouped.set(r.fulfillmentOrderId, list);
+    }
+    const lineItemsByFulfillmentOrder = Array.from(grouped.entries()).map(
+      ([fulfillmentOrderId, fulfillmentOrderLineItems]) => {
+        const byLineItemId = new Map<string, number>();
+        for (const item of fulfillmentOrderLineItems) {
+          byLineItemId.set(item.id, (byLineItemId.get(item.id) ?? 0) + item.quantity);
+        }
+        return {
+          fulfillmentOrderId,
+          fulfillmentOrderLineItems: Array.from(byLineItemId.entries()).map(
+            ([id, quantity]) => ({ id, quantity }),
+          ),
+        };
+      },
+    );
+
+    // ---- 9. Call fulfillmentCreateV2 -----------------------------------
+    if (command) await assertShopifyCommandLabelActive(db, command);
+    const mutation = `
+      mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
+        fulfillmentCreateV2(fulfillment: $fulfillment) {
+          fulfillment { id status }
+          userErrors { field message }
+        }
+      }
+    `;
+    const trackingInfo: { number: string; company: string; url?: string } = {
+      number: trackingNumber,
+      company: shopifyTrackingCompany(carrier),
+    };
+    if (trackingInfoUrl !== undefined) {
+      trackingInfo.url = trackingInfoUrl;
+    }
+    const variables = {
+      fulfillment: {
+        lineItemsByFulfillmentOrder,
+        trackingInfo,
+        notifyCustomer: command?.notifyCustomer ?? true,
+      },
+    };
+
+    let mutationResult: any;
+    try {
+      mutationResult = await shopifyClient.request<any>(mutation, variables);
+    } catch (err: any) {
+      if (err instanceof ChannelFulfillmentProviderError) throw err;
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentCreateV2 transport error: ${err?.message ?? String(err)}`,
+        {
+          code: SHOPIFY_PUSH_NETWORK_ERROR,
+          shipmentId,
+          cause: err?.message ?? String(err),
+        },
+      );
+    }
+
+    const payload = mutationResult?.fulfillmentCreateV2;
+    const userErrors: ShopifyUserError[] = payload?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentCreateV2 userErrors: ${userErrors.map((e) => e.message).join("; ")}`,
+        { code: SHOPIFY_PUSH_USER_ERRORS, shipmentId, userErrors },
+      );
+    }
+
+    const fulfillmentGid: string | undefined = payload?.fulfillment?.id;
+    if (!fulfillmentGid || typeof fulfillmentGid !== "string") {
+      throw new ShopifyFulfillmentPushError(
+        "Shopify fulfillmentCreateV2 returned no fulfillment.id",
+        { code: SHOPIFY_PUSH_USER_ERRORS, shipmentId, userErrors },
+      );
+    }
+
+    // ---- 10. Persist Fulfillment.id back to WMS -----------------------
+    // D-PUSHIDEM: Preserve the first legacy handle for backward compatibility.
+    // Additional repair fulfillments are append-only in OMS event evidence;
+    // the live quantity clamp and order-scoped advisory lock provide mutation
+    // idempotency. A rowCount of zero never means package coverage is complete.
+    const persistResult: any = await persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms(
+      db,
+      sqlBigintArray(legacyWmsShipmentIds),
+      fulfillmentGid,
+    );
+
+    const persistRowCount = persistResult?.rowCount ?? null;
+    if (persistRowCount === 0) {
+      logger.info("oms.fulfillment_push_service", { detail: `[pushShopifyFulfillment] shipment ${shipmentId} preserved legacy fulfillment ` +
+          `${existingFulfillmentId ?? "(concurrent value)"}; recorded additional fulfillment ${fulfillmentGid}` });
+    }
+
+    // D-PUSHAUDIT: This evidence is part of the writeback contract, not
+    // optional logging. If it cannot be persisted, the caller retries; live
+    // Shopify quantities make that retry safe and allow evidence recovery.
+    await recordShopifyWritebackEvidence({
+      eventType: "shopify_fulfillment_pushed",
+      order,
+      omsOrderId: command?.omsOrderId,
+      originAccount: canonicalTarget?.account,
+      shipmentId,
+      wmsShipmentIds: legacyWmsShipmentIds,
+      trackingNumber,
+      carrier,
+      packageSignature,
+      items: shopifyPositiveItems,
+      requestedQuantity,
+      pushedQuantity,
+      alreadySatisfiedQuantity,
+      writebackComplete,
+      reconciliationSource: "fulfillment_create_v2",
+      shopifyFulfillmentId: fulfillmentGid,
+      priorShopifyFulfillmentId: existingFulfillmentId,
+    });
+
+    if (!writebackComplete) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: shipment ${shipmentId} pushed ${pushedQuantity}/${requestedQuantity} package units; remaining ownership must converge before completion`,
+        {
+          code: SHOPIFY_PUSH_INCOMPLETE,
+          shipmentId,
+          field: "items",
+          value: {
+            requestedQuantity,
+            pushedQuantity,
+            alreadySatisfiedQuantity,
+          },
+        },
+      );
+    }
+
+    incr("shopify_push_succeeded", 1, { shipmentId, fulfillmentId: fulfillmentGid });
+    return {
+      shopifyFulfillmentId: fulfillmentGid,
+      alreadyPushed: false,
+      writebackComplete,
+    };
+  }
+
+  async function recordShopifyWritebackEvidence(args: {
+    eventType: "shopify_fulfillment_pushed" | "shopify_fulfillment_reconciled";
+    order: WmsOrderForShopify;
+    omsOrderId?: number;
+    originAccount?: Pick<ShopifyFulfillmentAccount, "channelId" | "connectionId" | "externalAccountId">;
+    shipmentId: number;
+    wmsShipmentIds?: readonly number[];
+    trackingNumber: string;
+    carrier: string;
+    packageSignature: string;
+    items: WmsShipmentItemForShopify[];
+    requestedQuantity: number;
+    pushedQuantity: number;
+    alreadySatisfiedQuantity: number;
+    writebackComplete: boolean;
+    reconciliationSource: string;
+    shopifyFulfillmentId: string | null;
+    priorShopifyFulfillmentId?: string | null;
+  }): Promise<void> {
+    const omsOrderId = args.omsOrderId ?? Number(args.order.oms_fulfillment_order_id);
+    if (!Number.isInteger(omsOrderId) || omsOrderId <= 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: order ${args.order.id} cannot record reconciled writeback without an OMS order id`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId: args.shipmentId,
+          field: "oms_fulfillment_order_id",
+          value: args.order.oms_fulfillment_order_id,
+        },
+      );
+    }
+
+    const details = JSON.stringify({
+      provider: "shopify",
+      ...(args.originAccount ? { originAccount: {
+        channelId: args.originAccount.channelId,
+        connectionId: args.originAccount.connectionId,
+        externalAccountId: args.originAccount.externalAccountId,
+      } } : {}),
+      wmsShipmentId: args.shipmentId,
+      wmsShipmentIds: args.wmsShipmentIds ?? [args.shipmentId],
+      trackingNumber: args.trackingNumber,
+      carrier: args.carrier,
+      coverageVersion: SHOPIFY_WRITEBACK_COVERAGE_VERSION,
+      packageSignature: args.packageSignature,
+      writebackComplete: args.writebackComplete,
+      requestedQuantity: args.requestedQuantity,
+      pushedQuantity: args.pushedQuantity,
+      alreadySatisfiedQuantity: args.alreadySatisfiedQuantity,
+      reconciliationSource: args.reconciliationSource,
+      shopifyFulfillmentId: args.shopifyFulfillmentId,
+      priorShopifyFulfillmentId: args.priorShopifyFulfillmentId ?? null,
+      lineEvidence: args.items.map((item) => ({
+        shipmentItemId: item.shipment_item_id,
+        orderItemId: item.order_item_id,
+        omsOrderLineId: item.oms_order_line_id,
+        externalLineItemId: item.external_line_item_id,
+        sku: item.sku,
+        requestedQuantity: item.qty,
+      })),
+    });
+
+    await db.execute(sql`
+      INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+      SELECT
+        ${omsOrderId},
+        ${args.eventType},
+        ${details}::jsonb,
+        NOW()
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM oms.oms_order_events existing
+        WHERE existing.order_id = ${omsOrderId}
+          AND existing.event_type = ${args.eventType}
+          AND existing.details->>'wmsShipmentId' = ${String(args.shipmentId)}
+          AND existing.details->>'coverageVersion' = ${String(SHOPIFY_WRITEBACK_COVERAGE_VERSION)}
+          AND existing.details->>'packageSignature' = ${args.packageSignature}
+          AND existing.details->>'writebackComplete' = ${String(args.writebackComplete)}
+          AND COALESCE(existing.details->>'shopifyFulfillmentId', '') = ${args.shopifyFulfillmentId ?? ""}
+      )
+    `);
+  }
+
+  /**
+   * Fan out one Shopify fulfillment per sibling shipment in a combined
+   * group (§6 Commit 25 + Overlord D8).
+   *
+   * Real-world example: Alice places orders #1234 + #1235; we combine
+   * them into one box with UPS tracking 1Z999. Each order should show
+   * "Shipped" with the same UPS link on Alice's customer order page.
+   * Each order has its own `wms.outbound_shipments` row (parent linked
+   * to the original ShipStation order, child rows source=
+   * 'echelon_combined_child' from C14). This helper iterates every
+   * sibling and calls `pushSingleShipmentFulfillment(siblingId,
+   * sharedTrackingInfo)` so each Shopify order gets its own fulfillment
+   * record carrying the same tracking number.
+   *
+   * Failure semantics:
+   *   - Each sibling pushes independently. A sibling that errors does
+   *     NOT abort the fan-out — we capture the error and continue to the
+   *     next. The successful pushes are recorded; failed siblings retry
+   *     individually on their own shipment id via DLQ (C22d).
+   *   - Sibling shipments already carrying a `shopify_fulfillment_id`
+   *     skip idempotently (the single helper's D1 check fires first).
+   *   - Voided / cancelled sibling shipments are skipped without
+   *     contacting Shopify — their cancel flow (C17) handles them and
+   *     pushing tracking onto a voided shipment would be incorrect.
+   *
+   * The aggregate result is consumed by the public `pushShopifyFulfillment`
+   * which narrows it to the triggering shipment's outcome for caller
+   * compatibility. Sibling outcomes are intentionally not surfaced to
+   * the caller so its retry/DLQ logic stays per-shipment.
+   */
+  async function pushFulfillmentForCombinedGroup(args: {
+    triggeringShipmentId: number;
+    combinedGroupId: number;
+    sharedTrackingInfo: { number: string; company: string; url?: string };
+  }): Promise<CombinedGroupFanOutResult> {
+    const { triggeringShipmentId, combinedGroupId, sharedTrackingInfo } = args;
+
+    // ---- 1. Load all sibling shipments in the group ----------------
+    // Order parent first by convention (`combined_role='parent'` ranks
+    // ahead of children), with a stable secondary sort by shipment id.
+    // Includes the triggering shipment itself.
+    const siblingsResult: any = await db.execute(sql`
+      SELECT
+        os.id                    AS shipment_id,
+        os.order_id              AS order_id,
+        os.shopify_fulfillment_id AS shopify_fulfillment_id,
+        os.status                AS status,
+        o.combined_role          AS combined_role
+      FROM wms.outbound_shipments os
+      JOIN wms.orders o ON o.id = os.order_id
+      WHERE o.combined_group_id = ${combinedGroupId}
+      ORDER BY
+        CASE WHEN o.combined_role = 'parent' THEN 0 ELSE 1 END,
+        os.id ASC
+    `);
+    const siblings: Array<{
+      shipment_id: number;
+      order_id: number | null;
+      shopify_fulfillment_id: string | null;
+      status: string | null;
+      combined_role: string | null;
+    }> = siblingsResult?.rows ?? [];
+
+    if (siblings.length === 0) {
+      // No rows at all is unusual — the dispatch query already proved at
+      // least the triggering shipment exists in the group. Surface as a
+      // structured error rather than silently no-op-ing.
+      throw new ShopifyFulfillmentPushError(
+        `pushFulfillmentForCombinedGroup: combined group ${combinedGroupId} returned no shipments (triggering shipment ${triggeringShipmentId})`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId: triggeringShipmentId,
+          field: "combined_group",
+          value: combinedGroupId,
+        },
+      );
+    }
+
+    const fulfillments: CombinedGroupFulfillmentOutcome[] = [];
+
+    for (const sib of siblings) {
+      const sibShipmentId = Number(sib.shipment_id);
+      const sibOrderId = sib.order_id == null ? null : Number(sib.order_id);
+      const sibStatus = (sib.status ?? "").toLowerCase();
+
+      // Voided / cancelled siblings: skip. Pushing tracking to a voided
+      // shipment would be wrong; C17 handles their cancel-side cleanup.
+      if (sibStatus === "voided" || sibStatus === "cancelled") {
+        logger.info("oms.fulfillment_push_service", { message: `[pushFulfillmentForCombinedGroup] group ${combinedGroupId}: skipping sibling shipment ${sibShipmentId} (status=${sibStatus})` });
+        fulfillments.push({
+          shipmentId: sibShipmentId,
+          orderId: sibOrderId,
+          shopifyFulfillmentId: null,
+          alreadyPushed: false,
+          writebackComplete: true,
+          skipped: true,
+          skipReason: `status=${sibStatus}`,
+        });
+        continue;
+      }
+
+      // Per-sibling push: any error is captured and the loop continues
+      // so partial success is recorded. The single helper owns its own
+      // idempotency check (D1) so an already-pushed sibling returns
+      // `alreadyPushed: true` without contacting Shopify.
+      try {
+        const pushSibling = () => pushSingleShipmentFulfillment(
+          sibShipmentId,
+          sharedTrackingInfo,
+        );
+        const result = await pushSibling();
+        const outcome: CombinedGroupFulfillmentOutcome = {
+          shipmentId: sibShipmentId,
+          orderId: sibOrderId,
+          shopifyFulfillmentId: result.shopifyFulfillmentId,
+          alreadyPushed: result.alreadyPushed,
+          writebackComplete: result.writebackComplete,
+          skipped: false,
+        };
+        if (result.alreadySatisfied === true) {
+          outcome.alreadySatisfied = true;
+        }
+        fulfillments.push(outcome);
+      } catch (err: any) {
+        const code: string =
+          err instanceof ShopifyFulfillmentPushError && err.context?.code
+            ? err.context.code
+            : "shopify_push_unknown_error";
+        const message: string = err?.message ?? String(err);
+        logger.error("oms.fulfillment_push_service", { message: `[pushFulfillmentForCombinedGroup] group ${combinedGroupId}: sibling shipment ${sibShipmentId} push failed (code=${code}): ${message} — continuing fan-out for remaining siblings` });
+        fulfillments.push({
+          shipmentId: sibShipmentId,
+          orderId: sibOrderId,
+          shopifyFulfillmentId: null,
+          alreadyPushed: false,
+          writebackComplete: false,
+          skipped: false,
+          error: { code, message },
+        });
+      }
+    }
+
+    return { triggeringShipmentId, combinedGroupId, fulfillments };
+  }
+
+  async function resolveShopifyFulfillmentLockScope(
+    shipmentId: number,
+  ): Promise<number | null> {
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new ShopifyFulfillmentPushError(
+        "pushShopifyFulfillment: shipmentId must be a positive integer",
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "shipmentId", value: shipmentId },
+      );
+    }
+
+    const scopeResult: any = await db.execute(sql`
+      WITH target AS (
+        SELECT
+          target_order.id AS wms_order_id,
+          target_order.combined_group_id AS fulfillment_lock_combined_group_id,
+          target_order.oms_fulfillment_order_id AS fulfillment_lock_oms_order_id,
+          target_order.source,
+          target_order.channel_id
+        FROM wms.outbound_shipments target_shipment
+        JOIN wms.orders target_order ON target_order.id = target_shipment.order_id
+        WHERE target_shipment.id = ${shipmentId}
+      )
+      SELECT
+        target.wms_order_id,
+        target.fulfillment_lock_combined_group_id,
+        target.fulfillment_lock_oms_order_id,
+        target.source AS fulfillment_lock_source,
+        channel.provider AS fulfillment_lock_channel_provider
+      FROM target
+      LEFT JOIN channels.channels channel ON channel.id = target.channel_id
+    `);
+    const scopeRows: any[] = scopeResult?.rows ?? [];
+    if (scopeRows.length === 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: shipment ${shipmentId} has no WMS order lock scope`,
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "shipment", value: shipmentId },
+      );
+    }
+
+    const sourceIsShopify =
+      String(scopeRows[0].fulfillment_lock_source ?? "").trim().toLowerCase() === "shopify";
+    const providerIsShopify =
+      String(scopeRows[0].fulfillment_lock_channel_provider ?? "").trim().toLowerCase() === "shopify";
+    if (!sourceIsShopify && !providerIsShopify) return null;
+
+    const combinedGroupId = Number(scopeRows[0].fulfillment_lock_combined_group_id);
+    if (Number.isInteger(combinedGroupId) && combinedGroupId > 0) {
+      return shopifyFulfillmentWriteLockId("combined_group", combinedGroupId, shipmentId);
+    }
+
+    const omsOrderId = Number(scopeRows[0].fulfillment_lock_oms_order_id);
+    if (!Number.isInteger(omsOrderId) || omsOrderId <= 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: WMS order ${scopeRows[0].wms_order_id} cannot be serialized without an OMS order id`,
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: "oms_fulfillment_order_id",
+          value: scopeRows[0].fulfillment_lock_oms_order_id,
+        },
+      );
+    }
+    return shopifyFulfillmentWriteLockId("oms_order", omsOrderId, shipmentId);
+  }
+
+  /**
+   * Return every Shopify fulfillment handle ever recorded for one WMS
+   * shipment. The legacy shipment column can hold only one handle, while a
+   * package-completeness repair can legitimately create another fulfillment
+   * for previously omitted lines. Append-only OMS event evidence is therefore
+   * part of the authoritative handle set for later tracking changes and voids.
+   */
+  async function loadShopifyFulfillmentIdsForShipment(
+    shipmentId: number,
+  ): Promise<string[]> {
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new ShopifyFulfillmentPushError(
+        "loadShopifyFulfillmentIdsForShipment: shipmentId must be a positive integer",
+        {
+          code: SHOPIFY_PUSH_INVALID_INPUT,
+          shipmentId,
+          field: "shipmentId",
+          value: shipmentId,
+        },
+      );
+    }
+
+    const result: any = await db.execute(sql`
+      WITH target AS (
+        SELECT
+          shipment.shopify_fulfillment_id,
+          orders.oms_fulfillment_order_id
+        FROM wms.outbound_shipments shipment
+        JOIN wms.orders orders ON orders.id = shipment.order_id
+        WHERE shipment.id = ${shipmentId}
+      ), fulfillment_ids AS (
+        SELECT target.shopify_fulfillment_id AS fulfillment_gid
+        FROM target
+
+        UNION ALL
+
+        SELECT events.details->>'shopifyFulfillmentId' AS fulfillment_gid
+        FROM target
+        JOIN oms.oms_order_events events
+          ON events.order_id = target.oms_fulfillment_order_id
+        WHERE events.event_type IN (
+          'shopify_fulfillment_pushed',
+          'shopify_fulfillment_reconciled'
+        )
+          AND events.details->>'wmsShipmentId' = ${String(shipmentId)}
+
+        UNION ALL
+
+        SELECT events.details->>'priorShopifyFulfillmentId' AS fulfillment_gid
+        FROM target
+        JOIN oms.oms_order_events events
+          ON events.order_id = target.oms_fulfillment_order_id
+        WHERE events.event_type IN (
+          'shopify_fulfillment_pushed',
+          'shopify_fulfillment_reconciled'
+        )
+          AND events.details->>'wmsShipmentId' = ${String(shipmentId)}
+      )
+      SELECT DISTINCT fulfillment_gid
+      FROM fulfillment_ids
+      WHERE fulfillment_gid LIKE 'gid://shopify/Fulfillment/%'
+      ORDER BY fulfillment_gid
+    `);
+
+    const ids: string[] = [];
+    for (const row of result?.rows ?? []) {
+      const value: unknown = row.fulfillment_gid ?? row.shopify_fulfillment_id;
+      if (
+        typeof value === "string" &&
+        value.startsWith("gid://shopify/Fulfillment/")
+      ) {
+        ids.push(value);
+      }
+    }
+    return [...new Set<string>(ids)];
+  }
+
+  /**
+   * Cancel a Shopify fulfillment via the Admin GraphQL `fulfillmentCancel`
+   * mutation (§6 Commit 23). Called by `markShipmentVoided` (C17) when a
+   * WMS shipment is voided and we need to tell Shopify to drop the
+   * fulfillment record so the customer-facing order page reflects reality.
+   *
+   * Idempotent: if Shopify reports the fulfillment is already cancelled,
+   * we return `alreadyCancelled: true` instead of throwing — the caller
+   * (markShipmentVoided) catches all errors anyway, but the structured
+   * idempotency signal lets future retry/alerting layers tell apart "first
+   * cancel" from "already done" without parsing log strings.
+   *
+   * `opts.notifyCustomer` is accepted for API parity with `pushTracking`
+   * (Overlord D10 — default true), but the current Shopify Admin
+   * `fulfillmentCancel(id: ID!)` mutation does NOT take a notifyCustomer
+   * parameter — cancellation notifications follow the merchant's order
+   * settings. The option is preserved on the signature so a future Shopify
+   * API change (or a different cancel flow that does take it) can wire it
+   * through without a caller change.
+   *
+   * Failure modes (each throws a structured `ShopifyFulfillmentPushError`):
+   *   - SHOPIFY_CANCEL_INVALID_INPUT  — fulfillmentGid is not a non-empty
+   *     string starting with `gid://shopify/Fulfillment/`.
+   *   - SHOPIFY_PUSH_CLIENT_NOT_SET   — `setShopifyClient` was never called.
+   *   - SHOPIFY_CANCEL_USER_ERRORS    — Shopify returned non-idempotent
+   *     userErrors.
+   *   - SHOPIFY_CANCEL_NETWORK_ERROR  — request threw (5xx, fetch reject,
+   *     timeout, etc.).
+   */
+  async function cancelShopifyFulfillment(
+    fulfillmentGid: string,
+    opts: { notifyCustomer?: boolean } = {},
+  ): Promise<ShopifyFulfillmentCancelResult> {
+    incr("shopify_cancel_attempted", 1, { fulfillmentGid });
+    // ---- 1. Validate input -------------------------------------------
+    if (
+      typeof fulfillmentGid !== "string" ||
+      fulfillmentGid.length === 0 ||
+      !fulfillmentGid.startsWith("gid://shopify/Fulfillment/")
+    ) {
+      throw new ShopifyFulfillmentPushError(
+        "cancelShopifyFulfillment: fulfillmentGid must be a non-empty string starting with 'gid://shopify/Fulfillment/'",
+        {
+          code: SHOPIFY_CANCEL_INVALID_INPUT,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+        },
+      );
+    }
+
+    // notifyCustomer is intentionally not threaded into variables — see
+    // jsdoc above. Read it so TypeScript / linters don't flag it unused
+    // and so a future change can hook it up here.
+    const notifyCustomer =
+      typeof opts.notifyCustomer === "boolean" ? opts.notifyCustomer : true;
+    void notifyCustomer;
+
+    // ---- 2. Client must be wired -------------------------------------
+    if (!_shopifyClient) {
+      throw new ShopifyFulfillmentPushError(
+        "cancelShopifyFulfillment: Shopify client not set",
+        {
+          code: SHOPIFY_PUSH_CLIENT_NOT_SET,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+        },
+      );
+    }
+
+    // ---- 3. Issue cancel mutation ------------------------------------
+    const mutation = `
+      mutation cancelFulfillment($id: ID!) {
+        fulfillmentCancel(id: $id) {
+          fulfillment { id status }
+          userErrors { field message }
+        }
+      }
+    `;
+    const variables = { id: fulfillmentGid };
+
+    let mutationResult: any;
+    try {
+      mutationResult = await _shopifyClient.request<any>(mutation, variables);
+    } catch (err: any) {
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentCancel transport error: ${err?.message ?? String(err)}`,
+        {
+          code: SHOPIFY_CANCEL_NETWORK_ERROR,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+          cause: err?.message ?? String(err),
+        },
+      );
+    }
+
+    // ---- 4. Inspect response -----------------------------------------
+    const payload = mutationResult?.fulfillmentCancel;
+    const userErrors: ShopifyUserError[] = payload?.userErrors ?? [];
+
+    if (userErrors.length > 0) {
+      // Idempotent shapes: case-insensitive substring match. Shopify has
+      // returned each of these phrasings in production:
+      //   "Fulfillment is already cancelled."
+      //   "Fulfillment is in CANCELLED state."
+      const isAlreadyCancelled = userErrors.some((e) => {
+        const m = (e?.message ?? "").toLowerCase();
+        return (
+          m.includes("already cancelled") ||
+          m.includes("already canceled") ||
+          m.includes("cancelled state") ||
+          m.includes("canceled state")
+        );
+      });
+
+      if (isAlreadyCancelled) {
+        logger.info("oms.fulfillment_push_service", { message: `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} already cancelled — idempotent skip` });
+        incr("shopify_cancel_idempotent_skip", 1, { fulfillmentGid });
+        return { fulfillmentGid, alreadyCancelled: true };
+      }
+
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentCancel userErrors: ${userErrors.map((e) => e.message).join("; ")}`,
+        {
+          code: SHOPIFY_CANCEL_USER_ERRORS,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+          userErrors,
+        },
+      );
+    }
+
+    logger.info("oms.fulfillment_push_service", { message: `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} cancelled (status=${payload?.fulfillment?.status ?? "unknown"})` });
+    incr("shopify_cancel_succeeded", 1, { fulfillmentGid });
+    return { fulfillmentGid, alreadyCancelled: false };
+  }
+
+  /**
+   * Cancel every Shopify fulfillment associated with a WMS shipment. Calls
+   * are intentionally sequential and fail fast: a retry safely replays the
+   * already-cancelled handles and resumes at the first unresolved handle.
+   */
+  async function cancelShopifyFulfillmentsForShipment(
+    shipmentId: number,
+  ): Promise<{ fulfillmentIds: string[]; cancelledCount: number }> {
+    const fulfillmentIds = await loadShopifyFulfillmentIdsForShipment(shipmentId);
+    let cancelledCount = 0;
+    for (const fulfillmentId of fulfillmentIds) {
+      await cancelShopifyFulfillment(fulfillmentId);
+      cancelledCount += 1;
+    }
+    return { fulfillmentIds, cancelledCount };
+  }
+
+  /**
+   * Update the tracking info on an existing Shopify fulfillment via the
+   * Admin GraphQL `fulfillmentTrackingInfoUpdate` mutation (§6 Commit 24).
+   * Called by `markShipmentShipped` (C18) when a re-label arrives on a
+   * shipment that has already been pushed to Shopify — we update the
+   * existing Fulfillment record rather than creating a new one (Overlord
+   * D9), so the customer's order page reflects the new tracking number
+   * without spawning a duplicate fulfillment row.
+   *
+   * Idempotent: if Shopify reports the fulfillment already carries the
+   * tracking number we sent, we return `trackingNumberChanged: false`
+   * instead of throwing. Two signals are accepted:
+   *   - the response's `fulfillment.trackingInfo.number` matches the
+   *     number we sent (Shopify accepted but it was a no-op), OR
+   *   - userErrors mentions "already has this tracking" or similar
+   *     (case-insensitive match).
+   *
+   * `opts.notifyCustomer` defaults to `true` per Overlord D11 (a
+   * re-label is a real change the customer should know about); callers
+   * (e.g. silent carrier-mapping fixes) can pass `false` to suppress.
+   *
+   * Failure modes (each throws a structured `ShopifyFulfillmentPushError`):
+   *   - SHOPIFY_TRACKING_UPDATE_INVALID_INPUT — fulfillmentGid is not a
+   *     non-empty string starting with `gid://shopify/Fulfillment/`, or
+   *     trackingInfo.number / trackingInfo.company is empty.
+   *   - SHOPIFY_PUSH_CLIENT_NOT_SET — `setShopifyClient` was never called.
+   *   - SHOPIFY_TRACKING_UPDATE_USER_ERRORS — Shopify returned
+   *     non-idempotent userErrors.
+   *   - SHOPIFY_TRACKING_UPDATE_NETWORK_ERROR — request threw (5xx,
+   *     fetch reject, timeout, etc.).
+   */
+  async function updateShopifyFulfillmentTracking(
+    fulfillmentGid: string,
+    trackingInfo: {
+      number: string;
+      company: string;
+      url?: string;
+    },
+    opts: { notifyCustomer?: boolean } = {},
+  ): Promise<ShopifyFulfillmentTrackingUpdateResult> {
+    incr("shopify_tracking_update_attempted", 1, { fulfillmentGid });
+    // ---- 1. Validate input -----------------------------------------
+    if (
+      typeof fulfillmentGid !== "string" ||
+      fulfillmentGid.length === 0 ||
+      !fulfillmentGid.startsWith("gid://shopify/Fulfillment/")
+    ) {
+      throw new ShopifyFulfillmentPushError(
+        "updateShopifyFulfillmentTracking: fulfillmentGid must be a non-empty string starting with 'gid://shopify/Fulfillment/'",
+        {
+          code: SHOPIFY_TRACKING_UPDATE_INVALID_INPUT,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+        },
+      );
+    }
+
+    if (
+      !trackingInfo ||
+      typeof trackingInfo.number !== "string" ||
+      trackingInfo.number.trim().length === 0
+    ) {
+      throw new ShopifyFulfillmentPushError(
+        "updateShopifyFulfillmentTracking: trackingInfo.number is required",
+        {
+          code: SHOPIFY_TRACKING_UPDATE_INVALID_INPUT,
+          shipmentId: -1,
+          field: "trackingInfo.number",
+          value: trackingInfo?.number,
+        },
+      );
+    }
+
+    if (
+      typeof trackingInfo.company !== "string" ||
+      trackingInfo.company.trim().length === 0
+    ) {
+      throw new ShopifyFulfillmentPushError(
+        "updateShopifyFulfillmentTracking: trackingInfo.company is required",
+        {
+          code: SHOPIFY_TRACKING_UPDATE_INVALID_INPUT,
+          shipmentId: -1,
+          field: "trackingInfo.company",
+          value: trackingInfo.company,
+        },
+      );
+    }
+
+    // ---- 2. Client must be wired -----------------------------------
+    if (!_shopifyClient) {
+      throw new ShopifyFulfillmentPushError(
+        "updateShopifyFulfillmentTracking: Shopify client not set",
+        {
+          code: SHOPIFY_PUSH_CLIENT_NOT_SET,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+        },
+      );
+    }
+
+    // ---- 3. Build mutation -----------------------------------------
+    const mutation = `
+      mutation updateFulfillmentTracking($fulfillmentId: ID!, $trackingInfoInput: FulfillmentTrackingInput!, $notifyCustomer: Boolean) {
+        fulfillmentTrackingInfoUpdate(
+          fulfillmentId: $fulfillmentId,
+          trackingInfoInput: $trackingInfoInput,
+          notifyCustomer: $notifyCustomer
+        ) {
+          fulfillment {
+            id
+            trackingInfo {
+              number
+              company
+              url
+            }
+          }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const trimmedNumber = trackingInfo.number.trim();
+    const trimmedCompany = trackingInfo.company.trim();
+    const trimmedUrl =
+      typeof trackingInfo.url === "string" && trackingInfo.url.trim().length > 0
+        ? trackingInfo.url.trim()
+        : undefined;
+
+    const trackingInfoInput: { number: string; company: string; url?: string } = {
+      number: trimmedNumber,
+      company: trimmedCompany,
+    };
+    if (trimmedUrl !== undefined) {
+      trackingInfoInput.url = trimmedUrl;
+    }
+
+    const notifyCustomer =
+      typeof opts.notifyCustomer === "boolean" ? opts.notifyCustomer : true; // D11: default true
+
+    const variables = {
+      fulfillmentId: fulfillmentGid,
+      trackingInfoInput,
+      notifyCustomer,
+    };
+
+    // ---- 4. Issue mutation -----------------------------------------
+    let mutationResult: any;
+    try {
+      mutationResult = await _shopifyClient.request<any>(mutation, variables);
+    } catch (err: any) {
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentTrackingInfoUpdate transport error: ${err?.message ?? String(err)}`,
+        {
+          code: SHOPIFY_TRACKING_UPDATE_NETWORK_ERROR,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+          cause: err?.message ?? String(err),
+        },
+      );
+    }
+
+    // ---- 5. Inspect response ---------------------------------------
+    const payload = mutationResult?.fulfillmentTrackingInfoUpdate;
+    const userErrors: ShopifyUserError[] = payload?.userErrors ?? [];
+    const returnedNumber: string | undefined =
+      payload?.fulfillment?.trackingInfo?.number;
+
+    if (userErrors.length > 0) {
+      // Idempotency: case-insensitive substring match on userError
+      // messages. Shopify wording varies, so cast a small net rather
+      // than brittle exact-match.
+      const isAlreadyHasTracking = userErrors.some((e) => {
+        const m = (e?.message ?? "").toLowerCase();
+        return (
+          m.includes("already has this tracking") ||
+          m.includes("already has the same tracking") ||
+          m.includes("already has this tracking number") ||
+          m.includes("tracking number is the same") ||
+          m.includes("tracking info is unchanged")
+        );
+      });
+
+      if (isAlreadyHasTracking) {
+        logger.info("oms.fulfillment_push_service", { message: `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} already has tracking ${trimmedNumber} — idempotent skip` });
+        incr("shopify_tracking_update_idempotent_skip", 1, { fulfillmentGid });
+        return { fulfillmentGid, trackingNumberChanged: false };
+      }
+
+      throw new ShopifyFulfillmentPushError(
+        `Shopify fulfillmentTrackingInfoUpdate userErrors: ${userErrors.map((e) => e.message).join("; ")}`,
+        {
+          code: SHOPIFY_TRACKING_UPDATE_USER_ERRORS,
+          shipmentId: -1,
+          field: "fulfillmentGid",
+          value: fulfillmentGid,
+          userErrors,
+        },
+      );
+    }
+
+    // No userErrors — Shopify accepted the update. The returned
+    // tracking number should match what we sent (or echo our input);
+    // either way the caller wants `trackingNumberChanged: true`.
+    if (
+      typeof returnedNumber === "string" &&
+      returnedNumber === trimmedNumber
+    ) {
+      logger.info("oms.fulfillment_push_service", { message: `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking updated to ${trimmedNumber}` });
+      incr("shopify_tracking_update_succeeded", 1, { fulfillmentGid });
+      return { fulfillmentGid, trackingNumberChanged: true };
+    }
+
+    // Defensive fallthrough: no userErrors and no returned tracking
+    // info. Treat as success — Shopify accepted the call.
+    logger.info("oms.fulfillment_push_service", { message: `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking update accepted (no echoed trackingInfo)` });
+    incr("shopify_tracking_update_succeeded", 1, { fulfillmentGid });
+    return { fulfillmentGid, trackingNumberChanged: true };
+  }
+
+  /**
+   * Converge every Shopify fulfillment for a (re-)shipped WMS shipment to
+   * its current tracking. Closes the void→re-ship gap that left channel
+   * tracking stale (Flow Monitor `CHANNEL_TRACKING_STALE`, order #58910):
+   *
+   *   - On a label void, `markShipmentVoided` nulls the shipment's
+   *     `tracking_number` (so `markShipmentShipped`'s old re-label
+   *     detector, which keyed on a differing PRIOR tracking, no longer
+   *     fired on the re-ship) but leaves `shopify_fulfillment_id` set
+   *     (so the create path idempotent-skips). Neither path updated
+   *     Shopify, so the customer kept the voided label's tracking.
+   *
+   * Strategy ("converge to live"):
+   *   1. Load handles from the backward-compatible shipment column and
+   *      append-only OMS events. No handles means the create path owns the
+   *      first ship. → mode `no_fulfillment`.
+   *   2. Update tracking on every live handle. → mode `updated`.
+   *   3. Cancel-confirm dead handles, clear only a dead legacy handle, then
+   *      let live Shopify quantities recreate uncovered package quantity.
+   *      → mode `recreated`.
+   *   4. Any other failure (network, auth, unexpected userErrors)
+   *      is RETHROWN — we never recreate on a transient error, which
+   *      could spawn a duplicate LIVE fulfillment. The caller retries.
+   *
+   * Non-blocking by contract: callers (`markShipmentShipped`) invoke
+   * this inside a try/catch so a convergence failure never rolls back
+   * the shipment state transition; reconcile + the
+   * `CHANNEL_TRACKING_STALE` detector catch any residual drift.
+   */
+  async function reconcileShopifyFulfillment(
+    shipmentId: number,
+    trackingInfo: { number: string; company: string; url?: string },
+  ): Promise<{
+    reconciled: boolean;
+    mode: "no_fulfillment" | "updated" | "recreated";
+    fulfillmentGid: string | null;
+  }> {
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new ShopifyFulfillmentPushError(
+        "reconcileShopifyFulfillment: shipmentId must be a positive integer",
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "shipmentId", value: shipmentId },
+      );
+    }
+
+    // A completeness repair may create multiple Shopify fulfillments for one
+    // physical package, so the legacy row handle alone is insufficient.
+    const fulfillmentIds = await loadShopifyFulfillmentIdsForShipment(shipmentId);
+
+    if (fulfillmentIds.length === 0) {
+      // Never pushed to Shopify — the create path owns this shipment.
+      return { reconciled: false, mode: "no_fulfillment", fulfillmentGid: null };
+    }
+
+    const updatedFulfillmentIds: string[] = [];
+    const deadFulfillmentIds: string[] = [];
+
+    for (const fulfillmentGid of fulfillmentIds) {
+      // Shopify accepts tracking updates on cancelled fulfillments without
+      // restoring fulfillment state, so status must be probed first.
+      let fulfillmentDead = false;
+      if (_shopifyClient) {
+        try {
+          const statusResult: any = await _shopifyClient.request(
+            `query($id: ID!){ fulfillment(id: $id){ status } }`,
+            { id: fulfillmentGid },
+          );
+          const fulfillment = statusResult?.fulfillment;
+          if (fulfillment == null) {
+            fulfillmentDead = true;
+          } else {
+            const status = String(fulfillment.status ?? "").toUpperCase();
+            fulfillmentDead =
+              status === "CANCELLED" || status === "ERROR" || status === "FAILURE";
+          }
+        } catch (probeErr: any) {
+          logger.warn("oms.fulfillment_push_service", { message: `[reconcileShopifyFulfillment] status probe failed for ${fulfillmentGid} (shipment ${shipmentId}): ${probeErr?.message ?? probeErr}` });
+        }
+      }
+
+      if (!fulfillmentDead) {
+        try {
+          await updateShopifyFulfillmentTracking(fulfillmentGid, trackingInfo);
+          updatedFulfillmentIds.push(fulfillmentGid);
+          continue;
+        } catch (err: unknown) {
+          const userErrors =
+            err instanceof ShopifyFulfillmentPushError
+              ? err.context?.userErrors ?? []
+              : [];
+          const deadByUserError =
+            err instanceof ShopifyFulfillmentPushError &&
+            err.context?.code === SHOPIFY_TRACKING_UPDATE_USER_ERRORS &&
+            userErrors.some((error) => {
+              const message = (error?.message ?? "").toLowerCase();
+              return (
+                message.includes("cancel") ||
+                message.includes("does not exist") ||
+                message.includes("not found") ||
+                message.includes("closed") ||
+                message.includes("cannot be updated")
+              );
+            });
+          if (!deadByUserError) throw err;
+          fulfillmentDead = true;
+        }
+      }
+
+      if (fulfillmentDead) {
+        deadFulfillmentIds.push(fulfillmentGid);
+        logger.info("oms.fulfillment_push_service", { message: `[reconcileShopifyFulfillment] fulfillment ${fulfillmentGid} not live for shipment ${shipmentId}; recreating uncovered quantity` });
+        try {
+          await cancelShopifyFulfillment(fulfillmentGid);
+        } catch (cancelErr: any) {
+          logger.warn("oms.fulfillment_push_service", { message: `[reconcileShopifyFulfillment] cancel-confirm failed for ${fulfillmentGid} (shipment ${shipmentId}): ${cancelErr?.message ?? cancelErr}` });
+        }
+      }
+    }
+
+    if (deadFulfillmentIds.length === 0) {
+      return {
+        reconciled: true,
+        mode: "updated",
+        fulfillmentGid: updatedFulfillmentIds[0] ?? null,
+      };
+    }
+
+    incr("shopify_reconcile_recreate", 1, {
+      shipmentId,
+      deadFulfillmentCount: deadFulfillmentIds.length,
+    });
+
+    // Clear the backward-compatible handle only if that specific fulfillment
+    // is dead. A different live fulfillment may share this physical package.
+    await clearDeadShopifyFulfillmentIdsOnOutboundShipmentInWms(
+      db,
+      shipmentId,
+      sqlTextArray(deadFulfillmentIds),
+    );
+
+    const created = await pushShopifyFulfillment(shipmentId);
+    if (!created.writebackComplete) {
+      throw new ShopifyFulfillmentPushError(
+        `reconcileShopifyFulfillment: recreated fulfillment for shipment ${shipmentId} without complete package coverage`,
+        { code: SHOPIFY_PUSH_INCOMPLETE, shipmentId },
+      );
+    }
+    return {
+      reconciled: true,
+      mode: "recreated",
+      fulfillmentGid:
+        created.shopifyFulfillmentId ?? updatedFulfillmentIds[0] ?? null,
+    };
+  }
+
+  return {
+    pushTracking,
+    pushTrackingForShipment,
+    pushTrackingForShipmentCommand,
+    pushDropshipTrackingForShipmentCommand,
+    prepareWalmartFulfillmentCommand,
+    setEbayClient,
+    setShopifyClient,
+    setDropshipMarketplaceTrackingService,
+    pushShopifyFulfillment,
+    pushShopifyFulfillmentForCommand,
+    cancelShopifyFulfillment,
+    cancelShopifyFulfillmentsForShipment,
+    updateShopifyFulfillmentTracking,
+    reconcileShopifyFulfillment,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shopify fulfillment-order line-item resolution (Path B)
+// ---------------------------------------------------------------------------
+//
+// Exported for unit testing and to keep the service body small. Pure with
+// respect to the injected Shopify client — no DB, no env reads.
+// ---------------------------------------------------------------------------
+
+interface ShopifyFulfillmentOrderQueryNode {
+  id: string;
+  status?: string;
+  assignedLocation?: { location?: { id?: string | null } | null } | null;
+  lineItems: {
+    edges: Array<{
+      node: {
+        id: string;
+        sku?: string | null;
+        remainingQuantity: number;
+        lineItem?: { id?: string | null } | null;
+      };
+    }>;
+  };
+}
+
+interface ShopifyFulfillmentOrderLineCandidate {
+  fulfillmentOrderId: string;
+  fulfillmentOrderLineItemId: string;
+  sku: string | null;
+  // Shopify order line-item id (bare numeric, normalized from the GID) for
+  // the underlying line this FO line item fulfills. Lets us match by line id
+  // when SKU is unavailable on either side.
+  externalLineItemId: string | null;
+  // Shopify location id (numeric tail) this fulfillment order is assigned to.
+  // Used to pin a shipment to the fulfillment ticket at ITS ship-from
+  // warehouse — required once a single order line is split across multiple
+  // locations (multi-warehouse). Null if Shopify didn't report a location.
+  assignedLocationId: string | null;
+  remaining: number;
+  status: string;
+}
+
+const FULFILLMENT_ORDERS_QUERY = `
+  query fulfillmentOrdersForOrder($id: ID!) {
+    order(id: $id) {
+      id
+      fulfillmentOrders(first: 50) {
+        edges {
+          node {
+            id
+            status
+            assignedLocation { location { id } }
+            lineItems(first: 100) {
+              edges {
+                node {
+                  id
+                  sku
+                  remainingQuantity
+                  lineItem { id }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Resolve each WMS shipment item to a Shopify FulfillmentOrderLineItem id.
+ *
+ * Strategy:
+ *   1. Query Shopify's live fulfillment-order line state.
+ *   2. Match each WMS item by exact Shopify order-line identity. Use SKU only
+ *      for legacy rows, and reject fallback when one SKU spans multiple lines.
+ *   3. Allocate only the live remaining quantity. Quantity already fulfilled,
+ *      cancelled, or refunded is treated as satisfied channel state.
+ *   4. Decrement remainingQuantity locally so two WMS items cannot allocate
+ *      the same fulfillment-order quantity.
+ *
+ * Throws `ShopifyFulfillmentPushError` if any WMS item can't be matched.
+ */
+async function resolveFulfillmentOrderLines(
+  client: ShopifyAdminGraphQLClient,
+  shopifyOrderGid: string,
+  items: WmsShipmentItemForShopify[],
+  shipmentId: number,
+  shipFromLocationId?: string | null,
+): Promise<ResolvedFulfillmentOrderLine[]> {
+  const reconciliation = await reconcileFulfillmentOrderLines(
+    client,
+    shopifyOrderGid,
+    items,
+    shipmentId,
+    shipFromLocationId,
+  );
+  return reconciliation.resolved;
+}
+
+async function reconcileFulfillmentOrderLines(
+  client: ShopifyAdminGraphQLClient,
+  shopifyOrderGid: string,
+  items: WmsShipmentItemForShopify[],
+  shipmentId: number,
+  shipFromLocationId?: string | null,
+): Promise<FulfillmentOrderLineReconciliation> {
+  const candidates = await fetchFulfillmentOrderLineCandidates(
+    client,
+    shopifyOrderGid,
+    shipmentId,
+  );
+  return reconcileFulfillmentOrderLinesFromCandidates(
+    shopifyOrderGid,
+    items,
+    shipmentId,
+    candidates,
+    shipFromLocationId,
+  );
+}
+
+async function fetchFulfillmentOrderLineCandidates(
+  client: ShopifyAdminGraphQLClient,
+  shopifyOrderGid: string,
+  shipmentId: number,
+): Promise<ShopifyFulfillmentOrderLineCandidate[]> {
+  let response: any;
+  try {
+    response = await client.request<any>(FULFILLMENT_ORDERS_QUERY, { id: shopifyOrderGid });
+  } catch (err: any) {
+    if (err instanceof ChannelFulfillmentProviderError) throw err;
+    throw new ShopifyFulfillmentPushError(
+      `Shopify fulfillmentOrders lookup transport error: ${err?.message ?? String(err)}`,
+      {
+        code: SHOPIFY_PUSH_NETWORK_ERROR,
+        shipmentId,
+        cause: err?.message ?? String(err),
+      },
+    );
+  }
+
+  const fulfillmentOrders: ShopifyFulfillmentOrderQueryNode[] =
+    response?.order?.fulfillmentOrders?.edges?.map((e: any) => e.node) ?? [];
+
+  const candidates: ShopifyFulfillmentOrderLineCandidate[] = [];
+  for (const fo of fulfillmentOrders) {
+    const foLocationRaw = fo.assignedLocation?.location?.id;
+    const foLocationId =
+      typeof foLocationRaw === "string" && foLocationRaw.length > 0
+        ? normaliseShopifyLocationId(foLocationRaw)
+        : null;
+    for (const edge of fo.lineItems.edges) {
+      candidates.push({
+        fulfillmentOrderId: fo.id,
+        fulfillmentOrderLineItemId: edge.node.id,
+        sku: edge.node.sku ?? null,
+        externalLineItemId: normalizeShopifyNumericId(edge.node.lineItem?.id),
+        assignedLocationId: foLocationId,
+        remaining: Number.isInteger(edge.node.remainingQuantity)
+          ? edge.node.remainingQuantity
+          : 0,
+        status: (fo.status ?? "").toUpperCase(),
+      });
+    }
+  }
+
+  return candidates;
+}
+
+/**
+ * Normalize a Shopify id to its bare numeric form so a stored
+ * `external_line_item_id` ("35767315431583") compares equal to a GID
+ * returned by the Admin API ("gid://shopify/LineItem/35767315431583").
+ * Returns null for blank/non-numeric input.
+ */
+function normalizeShopifyNumericId(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const match = String(value).trim().match(/(\d+)\s*$/);
+  return match ? match[1] : null;
+}
+
+function resolveFulfillmentOrderLinesFromCandidates(
+  shopifyOrderGid: string,
+  items: WmsShipmentItemForShopify[],
+  shipmentId: number,
+  candidates: ShopifyFulfillmentOrderLineCandidate[],
+  shipFromLocationId?: string | null,
+): ResolvedFulfillmentOrderLine[] {
+  return reconcileFulfillmentOrderLinesFromCandidates(
+    shopifyOrderGid,
+    items,
+    shipmentId,
+    candidates,
+    shipFromLocationId,
+  ).resolved;
+}
+
+function reconcileFulfillmentOrderLinesFromCandidates(
+  shopifyOrderGid: string,
+  items: WmsShipmentItemForShopify[],
+  shipmentId: number,
+  candidates: ShopifyFulfillmentOrderLineCandidate[],
+  shipFromLocationId?: string | null,
+): FulfillmentOrderLineReconciliation {
+  if (candidates.length === 0) {
+    throw new ShopifyFulfillmentPushError(
+      `Shopify order ${shopifyOrderGid} has no fulfillment orders / line items available`,
+      {
+        code: SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
+        shipmentId,
+        field: "fulfillmentOrders",
+        value: 0,
+      },
+    );
+  }
+
+  const pinnedLocation =
+    typeof shipFromLocationId === "string" && shipFromLocationId.length > 0
+      ? normaliseShopifyLocationId(shipFromLocationId)
+      : null;
+
+  const resolved: ResolvedFulfillmentOrderLine[] = [];
+  let requestedQuantity = 0;
+  let alreadySatisfiedQuantity = 0;
+
+  const appendResolved = (
+    candidate: ShopifyFulfillmentOrderLineCandidate,
+    quantity: number,
+    omsOrderLineId: number | null,
+  ) => {
+    const existing = resolved.find(
+      (line) =>
+        line.fulfillmentOrderId === candidate.fulfillmentOrderId &&
+        line.fulfillmentOrderLineItemId === candidate.fulfillmentOrderLineItemId,
+    );
+    if (existing) {
+      existing.quantity += quantity;
+      return;
+    }
+    resolved.push({
+      fulfillmentOrderId: candidate.fulfillmentOrderId,
+      fulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
+      quantity,
+      omsOrderLineId,
+    });
+  };
+
+  for (const item of items) {
+    const rawSku = (item.sku ?? "").trim();
+    // "UNKNOWN" is the WMS sentinel for an order line with no mapped
+    // warehouse SKU (e.g. members-only wax/special products). Treat it the
+    // same as a blank SKU — unusable for SKU matching, fall back to line id.
+    const skuUsable = rawSku.length > 0 && rawSku.toUpperCase() !== "UNKNOWN";
+    const externalLineId = normalizeShopifyNumericId(item.external_line_item_id);
+    requestedQuantity += item.qty;
+
+    let matchingCandidates: ShopifyFulfillmentOrderLineCandidate[];
+    if (externalLineId !== null) {
+      // Exact Shopify order-line identity is authoritative. Never drift an OMS
+      // line onto another Shopify line merely because the SKUs are equal.
+      matchingCandidates = candidates.filter(
+        (candidate) =>
+          normalizeShopifyNumericId(candidate.externalLineItemId) === externalLineId,
+      );
+    } else if (skuUsable) {
+      // SKU fallback exists only for legacy OMS lines that predate stored
+      // external line identity. Multiple Shopify lines sharing that SKU are
+      // ambiguous and must be repaired rather than guessed.
+      matchingCandidates = candidates.filter((candidate) => candidate.sku === rawSku);
+      const matchedExternalLineIds = new Set(
+        matchingCandidates
+          .map((candidate) => normalizeShopifyNumericId(candidate.externalLineItemId))
+          .filter((value): value is string => value !== null),
+      );
+      if (matchedExternalLineIds.size > 1) {
+        throw new ShopifyFulfillmentPushError(
+          `pushShopifyFulfillment: legacy sku=${rawSku} is ambiguous across Shopify order lines on ${shopifyOrderGid}`,
+          {
+            code: SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
+            shipmentId,
+            field: "items",
+            value: {
+              sku: rawSku,
+              externalLineItemIds: Array.from(matchedExternalLineIds),
+            },
+          },
+        );
+      }
+    } else {
+      matchingCandidates = [];
+    }
+
+    if (matchingCandidates.length === 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: no fulfillment-order line item available for ` +
+          `sku=${rawSku || "(none)"} lineItemId=${externalLineId ?? "(none)"} ` +
+          `qty=${item.qty} on order ${shopifyOrderGid}`,
+        {
+          code: SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
+          shipmentId,
+          field: "items",
+          value: { sku: rawSku, externalLineItemId: externalLineId, qty: item.qty },
+        },
+      );
+    }
+
+    const liveRemaining = matchingCandidates.reduce(
+      (sum, candidate) => sum + Math.max(0, candidate.remaining),
+      0,
+    );
+    let quantityToAllocate = Math.min(item.qty, liveRemaining);
+    alreadySatisfiedQuantity += item.qty - quantityToAllocate;
+    if (quantityToAllocate === 0) continue;
+
+    // Closed/cancelled fulfillment orders cannot accept a mutation. A stale
+    // positive remaining quantity on only terminal candidates is a real
+    // provider contradiction and remains an explicit error.
+    const allocatable = matchingCandidates
+      .filter(
+        (candidate) =>
+          candidate.remaining > 0 &&
+          candidate.status !== "CLOSED" &&
+          candidate.status !== "CANCELLED",
+      )
+      .sort((left, right) => {
+        if (pinnedLocation === null) return 0;
+        const leftPinned = left.assignedLocationId === pinnedLocation ? 0 : 1;
+        const rightPinned = right.assignedLocationId === pinnedLocation ? 0 : 1;
+        return leftPinned - rightPinned;
+      });
+
+    if (
+      pinnedLocation !== null &&
+      allocatable.length > 0 &&
+      allocatable[0].assignedLocationId !== pinnedLocation
+    ) {
+      logger.warn("oms.fulfillment_push_service", { detail: `[pushShopifyFulfillment] shipment ${shipmentId} item (sku=${rawSku || "(none)"}, ` +
+          `lineItemId=${externalLineId ?? "(none)"}) matched a fulfillment ticket at location ` +
+          `${allocatable[0].assignedLocationId ?? "(none)"} but shipped from ${pinnedLocation} — ` +
+          `location mismatch, allocating anyway` });
+    }
+
+    for (const candidate of allocatable) {
+      if (quantityToAllocate === 0) break;
+      const allocated = Math.min(quantityToAllocate, candidate.remaining);
+      appendResolved(candidate, allocated, item.oms_order_line_id ?? null);
+      candidate.remaining -= allocated;
+      quantityToAllocate -= allocated;
+    }
+
+    if (quantityToAllocate > 0) {
+      throw new ShopifyFulfillmentPushError(
+        `pushShopifyFulfillment: Shopify reports remaining quantity that cannot be allocated for ` +
+          `sku=${rawSku || "(none)"} lineItemId=${externalLineId ?? "(none)"} ` +
+          `qty=${item.qty} on order ${shopifyOrderGid}`,
+        {
+          code: SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
+          shipmentId,
+          field: "items",
+          value: {
+            sku: rawSku,
+            externalLineItemId: externalLineId,
+            qty: item.qty,
+            unallocatedQuantity: quantityToAllocate,
+          },
+        },
+      );
+    }
+  }
+
+  return { resolved, requestedQuantity, alreadySatisfiedQuantity };
+}
+
+function validatePathAAgainstLiveCandidates(
+  shopifyOrderGid: string,
+  pathARead: PathARow[],
+  shipmentId: number,
+  candidates: ShopifyFulfillmentOrderLineCandidate[],
+  expectedLocationId?: string | null,
+): { ok: true; resolved: ResolvedFulfillmentOrderLine[] } | { ok: false; reason: string } {
+  const working = candidates.map((candidate) => ({ ...candidate }));
+  const resolved: ResolvedFulfillmentOrderLine[] = [];
+
+  for (const row of pathARead) {
+    const candidate = working.find(
+      (entry) =>
+        entry.fulfillmentOrderId === row.fulfillmentOrderId &&
+        entry.fulfillmentOrderLineItemId === row.fulfillmentOrderLineItemId,
+    );
+    if (!candidate) {
+      return {
+        ok: false,
+        reason: `shipment ${shipmentId} stored FO line item ${row.fulfillmentOrderLineItemId} is no longer present on Shopify order ${shopifyOrderGid}`,
+      };
+    }
+    if (candidate.status === "CLOSED" || candidate.status === "CANCELLED") {
+      return {
+        ok: false,
+        reason: `shipment ${shipmentId} stored FO ${candidate.fulfillmentOrderId} is ${candidate.status}`,
+      };
+    }
+    if (expectedLocationId && candidate.assignedLocationId !== normaliseShopifyLocationId(expectedLocationId)) {
+      return { ok: false, reason: "stored fulfillment-order line is assigned to a different warehouse" };
+    }
+    if (candidate.remaining < row.quantity) {
+      return {
+        ok: false,
+        reason: `shipment ${shipmentId} stored FO line item ${row.fulfillmentOrderLineItemId} has remainingQuantity=${candidate.remaining}, shipment quantity=${row.quantity}`,
+      };
+    }
+
+    resolved.push({
+      fulfillmentOrderId: candidate.fulfillmentOrderId,
+      fulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
+      quantity: row.quantity,
+      omsOrderLineId: row.omsOrderLineId,
+    });
+    candidate.remaining -= row.quantity;
+  }
+
+  return { ok: true, resolved };
+}
+
+// ---------------------------------------------------------------------------
+// Path A reader (D2/D4) — stored Shopify FO line item ids
+// ---------------------------------------------------------------------------
+//
+// Joins wms.outbound_shipment_items → wms.order_items → oms.oms_order_lines
+// and returns one row per shipment item with the stored FO + FO line
+// item GIDs (or null when C22b hasn't populated them yet).
+//
+// Returns null when the join produces no rows at all (defensive — the
+// caller's positiveItems check will already have caught zero-item
+// shipments, but if the WMS row layout drifts we want Path A to step
+// aside and let Path B handle it).
+// ---------------------------------------------------------------------------
+
+interface PathARow {
+  shipmentItemId: number;
+  quantity: number;
+  omsOrderLineId: number | null;
+  fulfillmentOrderId: string | null;
+  fulfillmentOrderLineItemId: string | null;
+}
+
+async function tryReadPathA(
+  db: any,
+  shipmentId: number,
+): Promise<PathARow[] | null> {
+  let result: any;
+  try {
+    // Keep the stored-ID path on the same package-scoped quantity as Path B.
+    // Live remainingQuantity validation sends partial dispositions to Path B.
+    result = await db.execute(sql`
+      SELECT
+        si.id  AS shipment_item_id,
+        si.qty::int AS quantity,
+        oi.oms_order_line_id AS oms_order_line_id,
+        COALESCE(NULLIF(ol.provider_fulfillment_order_id, ''), ol.shopify_fulfillment_order_id) AS fulfillment_order_id,
+        COALESCE(NULLIF(ol.provider_fulfillment_order_line_item_id, ''), ol.shopify_fulfillment_order_line_item_id) AS fulfillment_order_line_item_id
+      FROM wms.outbound_shipment_items si
+      JOIN wms.order_items wi ON wi.id = si.order_item_id
+      LEFT JOIN wms.order_items oi ON oi.id = si.order_item_id
+      LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+      WHERE si.shipment_id = ${shipmentId}
+        AND si.qty > 0
+        AND COALESCE(oi.status, 'pending') <> 'cancelled'
+        AND COALESCE(LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')), 'shopify') = 'shopify'
+    `);
+  } catch (err: any) {
+    logger.warn("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] Path A read failed for shipment ${shipmentId}: ${err?.message ?? String(err)} — falling back to Path B` });
+    return null;
+  }
+
+  const rows: any[] = result?.rows ?? [];
+  if (rows.length === 0) return null;
+
+  return rows.map((r) => ({
+    shipmentItemId: Number(r.shipment_item_id),
+    quantity: Number(r.quantity),
+    omsOrderLineId:
+      r.oms_order_line_id == null ? null : Number(r.oms_order_line_id),
+    fulfillmentOrderId: firstNonEmptyString(r.fulfillment_order_id),
+    fulfillmentOrderLineItemId: firstNonEmptyString(r.fulfillment_order_line_item_id),
+  }));
+}
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Location filtering (D13) — OUR Shopify location ids
+// ---------------------------------------------------------------------------
+//
+// Returns the union of
+//   - all `warehouse.warehouses.shopify_location_id` (warehouses we run)
+//   - the channel row's primary `channels.channels.shopify_location_id`
+//
+// Empty array means no warehouses or channels carry the column — the
+// caller treats this as a misconfiguration warning + skips the filter.
+// ---------------------------------------------------------------------------
+
+async function getOurShopifyLocationIds(
+  db: any,
+  channelId: number | null,
+  shipmentId: number,
+): Promise<string[]> {
+  const ids: string[] = [];
+
+  try {
+    const whResult: any = await db.execute(sql`
+      SELECT w.shopify_location_id
+      FROM wms.outbound_shipments os
+      JOIN wms.orders ord ON ord.id = os.order_id
+      JOIN warehouse.warehouses w ON w.id = ord.warehouse_id
+      WHERE os.id = ${shipmentId}
+        AND w.shopify_location_id IS NOT NULL
+    `);
+    for (const r of whResult?.rows ?? []) {
+      const id = r?.shopify_location_id;
+      if (typeof id === "string" && id.length > 0) ids.push(id);
+    }
+  } catch (err: any) {
+    logger.warn("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] getOurShopifyLocationIds: warehouses query failed: ${err?.message ?? String(err)}` });
+  }
+
+  if (channelId != null) {
+    try {
+      const chResult: any = await db.execute(sql`
+        SELECT shopify_location_id
+        FROM channels.channel_connections
+        WHERE channel_id = ${channelId}
+        LIMIT 1
+      `);
+      const chId = chResult?.rows?.[0]?.shopify_location_id;
+      if (typeof chId === "string" && chId.length > 0) ids.push(chId);
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (
+        err?.code !== "42703" &&
+        !message.includes('column "shopify_location_id" does not exist')
+      ) {
+        logger.warn("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] getOurShopifyLocationIds: channels query failed: ${message}` });
+      }
+    }
+  }
+
+  return Array.from(new Set(ids));
+}
+
+// ---------------------------------------------------------------------------
+// FO -> location verification GQL query (D13)
+// ---------------------------------------------------------------------------
+//
+// Single small query. Returns the subset of `wantedFoIds` whose
+// `assignedLocation.location.id` is one of `ourLocationIds`. Used to
+// strip 3PL-assigned FOs from the resolved set even on Path A.
+//
+// We don't paginate — same `first: 50` cap as the C21 resolver. If a
+// Shopify order legitimately has more than 50 fulfillment orders we
+// have a much bigger problem than this filter missing rows.
+// ---------------------------------------------------------------------------
+
+const FULFILLMENT_ORDERS_LOCATION_QUERY = `
+  query fulfillmentOrderLocations($id: ID!) {
+    order(id: $id) {
+      id
+      fulfillmentOrders(first: 50) {
+        edges {
+          node {
+            id
+            assignedLocation { location { id } }
+          }
+        }
+      }
+    }
+  }
+`;
+
+async function fetchOurFulfillmentOrderIds(
+  client: ShopifyAdminGraphQLClient,
+  shopifyOrderGid: string,
+  wantedFoIds: string[],
+  ourLocationIds: string[],
+  shipmentId: number,
+): Promise<Set<string>> {
+  const ourLocSet = new Set(ourLocationIds.map(normaliseShopifyLocationId));
+  let response: any;
+  try {
+    response = await client.request<any>(FULFILLMENT_ORDERS_LOCATION_QUERY, {
+      id: shopifyOrderGid,
+    });
+  } catch (err: any) {
+    if (err instanceof ChannelFulfillmentProviderError) throw err;
+    throw new ShopifyFulfillmentPushError(
+      `Shopify fulfillmentOrders location lookup transport error: ${err?.message ?? String(err)}`,
+      {
+        code: SHOPIFY_PUSH_NETWORK_ERROR,
+        shipmentId,
+        cause: err?.message ?? String(err),
+      },
+    );
+  }
+
+  const allowed = new Set<string>();
+  const edges: any[] = response?.order?.fulfillmentOrders?.edges ?? [];
+  for (const edge of edges) {
+    const node = edge?.node;
+    if (!node?.id) continue;
+    if (!wantedFoIds.includes(node.id)) continue;
+    const locGid: string | undefined = node?.assignedLocation?.location?.id;
+    if (typeof locGid !== "string" || locGid.length === 0) continue;
+    if (ourLocSet.has(normaliseShopifyLocationId(locGid))) {
+      allowed.add(node.id);
+    }
+  }
+  return allowed;
+}
+
+function resolveShopifyOrderGid(externalOrderId: string): string | null {
+  const trimmed = externalOrderId.trim();
+  if (trimmed.startsWith("gid://shopify/Order/")) {
+    return trimmed;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    return `gid://shopify/Order/${trimmed}`;
+  }
+  return null;
+}
+
+/**
+ * Compare Shopify location ids regardless of GID/numeric form.
+ *
+ * Shopify hands back `gid://shopify/Location/12345` from GQL but our
+ * `warehouses.shopify_location_id` column historically stores the
+ * numeric tail. Normalise both ends to the numeric tail for the set
+ * comparison so a stored `"12345"` matches an incoming
+ * `"gid://shopify/Location/12345"`.
+ */
+function normaliseShopifyLocationId(id: string): string {
+  const trimmed = id.trim();
+  if (trimmed.length === 0) return trimmed;
+  const slashIdx = trimmed.lastIndexOf("/");
+  return slashIdx >= 0 ? trimmed.slice(slashIdx + 1) : trimmed;
+}
+
+function isShopifyFulfillmentProvider(provider: string | null | undefined): boolean {
+  const normalized = String(provider ?? "").trim().toLowerCase();
+  return normalized.length === 0 || normalized === "shopify";
+}
+
+function isEbayFulfillmentProvider(provider: string | null | undefined): boolean {
+  const normalized = String(provider ?? "").trim().toLowerCase();
+  return normalized.length === 0 || normalized === "ebay";
+}
+
+/** Dropship acceptance always writes the provider, so a blank line is never a dropship line. */
+function isDropshipFulfillmentProvider(provider: string | null | undefined): boolean {
+  return String(provider ?? "").trim().toLowerCase() === DROPSHIP_LINE_FULFILLMENT_PROVIDER;
+}
+
+/** Which order lines a command for this writeback provider may carry. */
+function channelLineOwner(
+  provider: CanonicalCommandChannelProvider,
+): (lineProvider: string | null | undefined) => boolean {
+  switch (provider) {
+    case "shopify": return isShopifyFulfillmentProvider;
+    case "ebay": return isEbayFulfillmentProvider;
+    case "walmart": return (value) => value === "walmart";
+    case DROPSHIP_WRITEBACK_PROVIDER: return isDropshipFulfillmentProvider;
+  }
+}
+
+export type FulfillmentPushService = ReturnType<typeof createFulfillmentPushService>;
+
+// Exposed for unit testing the resolver in isolation.
+export const __test__ = {
+  resolveEbayFulfillmentShippedDate,
+  resolveFulfillmentOrderLines,
+  resolveFulfillmentOrderLinesFromCandidates,
+  reconcileFulfillmentOrderLinesFromCandidates,
+  validatePathAAgainstLiveCandidates,
+  tryReadPathA,
+  getOurShopifyLocationIds,
+  fetchOurFulfillmentOrderIds,
+  normaliseShopifyLocationId,
+  isShopifyFulfillmentProvider,
+  isEbayFulfillmentProvider,
+  buildShopifyPackageSignature,
+  classifyExactShopifyPackageState,
+};

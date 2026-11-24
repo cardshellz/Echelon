@@ -5,7 +5,7 @@
  * (`shopify`, `ebay`) on `ChannelOrderAdapterRegistry`.
  */
 
-import { ChannelOrderAdapterRegistry } from "../../channels/channel-adapter.interface";
+import { ChannelOrderAdapterRegistry } from "../../channels/channel-adapter.interface.api";
 import type { EbayApiClient } from "../../channels/ebay-connector.api";
 import {
   createEbayOrderIntakeAdapter,

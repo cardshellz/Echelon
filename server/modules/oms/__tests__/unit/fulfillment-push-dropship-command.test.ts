@@ -6,10 +6,10 @@ import {
   createFulfillmentPushService,
   type ChannelFulfillmentProviderCommandInput,
   type FulfillmentPushExclusiveRunner,
-} from "../../fulfillment-push.service";
-import { ChannelFulfillmentProviderError } from "../../../channels/channel-fulfillment-provider.error";
+} from "../../application/fulfillment-push.service";
+import { ChannelFulfillmentProviderError } from "../../../channels/domain/channel-fulfillment-provider.error";
 import { DropshipError } from "../../../dropship/domain/errors";
-import { shopifyOrderFulfillmentLockId } from "../../shopify-fulfillment-lock";
+import { shopifyOrderFulfillmentLockId } from "../../application/shopify-fulfillment-lock";
 
 const dialect = new PgDialect();
 const SHIPPED_AT = new Date("2026-10-02T18:30:00.000Z");

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { downloadProductImage, MAX_PRODUCT_IMAGE_BYTES, validateProductImage } from "../../product-image-download.service";
+import { downloadProductImage, MAX_PRODUCT_IMAGE_BYTES, validateProductImage } from "../../application/product-image-download.service";
 import { reorderProductAssetsSchema, sortCatalogAssets } from "@shared/catalog/product-assets";
 
 const data = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);

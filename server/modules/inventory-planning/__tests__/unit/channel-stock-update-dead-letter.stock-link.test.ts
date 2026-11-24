@@ -3,7 +3,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   channelStockUpdateDeadLetterDestinationCountSql,
   channelStockUpdateDeadLetterDestinationSampleSql,
-} from "../../channel-stock-update-dead-letters";
+} from "../../channel-stock-update-dead-letters.api";
 import { STOCK_LINK_ACTOR } from "../../domain/stock-link";
 
 // Channels PR2 (PLAN-CH2 v4.1 §8 N9, SAF-12): a dead letter whose size the stock-link engine has since retired (head

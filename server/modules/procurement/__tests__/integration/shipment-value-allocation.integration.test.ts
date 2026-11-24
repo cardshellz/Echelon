@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { shipmentAllocationEvidenceSchema } from "@shared/procurement/shipment-allocation";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
-import { shipmentCostVersion } from "../../shipment-cost-version";
-import type { ShipmentCostCommand } from "../../shipment-cost-commands";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
+import { shipmentCostVersion } from "../../application/shipment-cost-version";
+import type { ShipmentCostCommand } from "../../application/shipment-cost-commands";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_ACTOR, FLOW_AT, FLOW_IDS, type FlowCostHarness } from "./procurement-flow-cost.fixture";
 
@@ -284,7 +284,7 @@ integration.sequential("exact shipment product-value allocation through real fin
     const [{ lockInventoryCostGraph }, { costEvidenceTransactionFromPg }, costModule, lineModule, { shipmentLineVersion }] = await Promise.all([
       import("../../../inventory/infrastructure/cost-evidence.repository"),
       import("../../../inventory/infrastructure/cost-evidence-pg"),
-      import("../../shipment-cost-commands"), import("../../shipment-line-commands"), import("../../shipment-line-version"),
+      import("../../application/shipment-cost-commands"), import("../../application/shipment-line-commands"), import("../../application/shipment-line-version"),
     ]);
     await owner.shipment.runAllocation(SHIPMENT_ID);
     const cost = await owner.storage.getInboundFreightCostById(DUTY_ID);
@@ -387,7 +387,7 @@ integration.sequential("exact shipment product-value allocation through real fin
     expect(original).toBeDefined();
     const command: ShipmentCostCommand = { operation: "update", resourceId: DUTY_ID,
       body: { expectedVersion: shipmentCostVersion(original!), actualCents: 990, reason: "Confirmed late subcent duty" } };
-    const { shipmentCostCommandScope, SHIPMENT_COST_COMMAND_PRINCIPAL } = await import("../../shipment-cost-commands");
+    const { shipmentCostCommandScope, SHIPMENT_COST_COMMAND_PRINCIPAL } = await import("../../application/shipment-cost-commands");
     const identity: FinancialCommandDescriptor = { actorType: "service", actorId: SHIPMENT_COST_COMMAND_PRINCIPAL,
       ...shipmentCostCommandScope(command), contractVersion: 1,
       idempotencyKey: "exact-value-late-duty", requestHash: createHash("sha256").update(JSON.stringify(command)).digest("hex") };

@@ -20,11 +20,11 @@ import {
   type HistoricalRepairSourceLineIdentity,
 } from "../domain/historical-order-line-identity-repair";
 import type { ResolvedOrderLineIdentity } from "../domain/order-line-catalog-identity";
-import { resolveAssignedBinLocation } from "../wms-sync.service";
+import { resolveAssignedBinLocation } from "../application/wms-sync.service";
 import {
   recordOrderLineCatalogIdentity,
   resolveOrderLineCatalogIdentity,
-} from "../order-line-catalog-identity.service";
+} from "../application/order-line-catalog-identity.service";
 
 const MAX_ORDER_LINES = 500;
 

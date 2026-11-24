@@ -3,7 +3,7 @@ import {
   packageCloseCommandSchema, packageCloseEvidenceSchema,
   type PackageCloseActor, type PackageCloseCommand, type PackageCloseEvidence,
 } from "@shared/warehouse-package-close";
-import { evaluatePackageClose, previewPackageClose } from "../../package-close-policy";
+import { evaluatePackageClose, previewPackageClose } from "../../domain/package-close-policy";
 
 function actor(): PackageCloseActor {
   return { actorId: "assembler", assignedActorId: "assembler", warehouseId: 1,

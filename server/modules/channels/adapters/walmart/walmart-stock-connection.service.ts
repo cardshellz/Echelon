@@ -2,7 +2,7 @@ import { z } from "zod";
 import { getSchedulerDisableReason } from "../../../../infrastructure/scheduler-config";
 import { channelCatalogItemSchema } from "@shared/types/channel-catalog";
 import { logger as platformLogger } from "../../../../platform/observability/logger";
-import type { VerifiedListingStockService } from "../../../inventory-planning/application/verified-listing-stock.service";
+import type { VerifiedListingStockService } from "../../../inventory-planning/verified-listing-stock.service.api";
 import { isActiveSellerShipNode, walmartListingAccount, type WalmartChannelService } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";
 

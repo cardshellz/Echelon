@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
-import { buildPurchasingRecommendationRunDetail } from "../../purchasing-recommendation.run-detail";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
+import { buildPurchasingRecommendationRunDetail } from "../../application/purchasing-recommendation.run-detail";
 
 describe("purchasing recommendation run detail", () => {
   it("builds a compact audit payload with actionable and skipped recommendation samples", () => {

@@ -24,7 +24,7 @@ vi.hoisted(() => {
   process.env.DATABASE_URL ??= "postgres://stub:stub@localhost:5432/stub";
 });
 
-import { __test__ } from "../../oms-webhooks";
+import { __test__ } from "../../application/oms-webhooks";
 const { extractShopifyRisk } = __test__;
 
 describe("extractShopifyRisk :: modern risk_assessments payload", () => {

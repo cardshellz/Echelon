@@ -1,8 +1,8 @@
-import type { InventorySyncResult } from "../../channels/echelon-sync-orchestrator.service";
+import type { InventorySyncResult } from "../../channels/echelon-sync-orchestrator.service.api";
 import type {
   EffectiveChannelSyncState,
   GlobalSyncSettingsView,
-} from "../../channels/sync-settings.service";
+} from "../../channels/sync-settings.service.api";
 import type { InventoryAvailabilityRuntimeAuthority } from "./inventory-availability-runtime-atp.service";
 
 interface RuntimeAuthorityReader {

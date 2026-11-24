@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
   STOCK_LINK_HEALTH_CHECKS, STOCK_LINK_HEALTH_CHECKS_RUNNER_OFF, stockLinkHealthChecks, stockLinkHealthChecksForProcess,
-} from "../../../inventory-planning/stock-link-health";
+} from "../../../inventory-planning/stock-link-health.api";
 import {
   STOCK_LINK_HEALTH_ENGINE_ACTOR, STOCK_LINK_HEALTH_ESCALATION, STOCK_LINK_HEALTH_RETIRE_HOLD, STOCK_LINK_HEALTH_RETIRES_HELD_CODE,
   STOCK_LINK_HEALTH_SKU_CHANGED_CODE, stockLinkRetiresHeldCountText,
@@ -10,8 +10,8 @@ import {
 import { STOCK_LINK_RETIRES_WITHOUT_REPLACEMENT_SQL } from "../../../inventory-planning/infrastructure/stock-link-checks.repository";
 import { STOCK_LINK_ACTOR, STOCK_LINK_DECISION_CODES, STOCK_LINK_RETIRE_HOLD } from "../../../inventory-planning/domain/stock-link";
 import { STOCK_LINK_ENROLLMENT_CODES } from "../../../inventory-planning/domain/stock-link-enrollment";
-import { getOmsOpsHealth } from "../../ops-health.service";
-import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
+import { getOmsOpsHealth } from "../../application/ops-health.service";
+import { evaluateOmsOpsAlert } from "../../application/oms-ops-alert.service";
 import { getOperationsControlTower, parseControlTowerFilters } from "../../../operations/legacy-overview.api";
 
 // Channels PR2 (PLAN-CH2 v4.1 §8): OMS operations health embeds inventory planning's published read-only stock-link

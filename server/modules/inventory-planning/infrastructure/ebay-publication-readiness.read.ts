@@ -6,7 +6,7 @@ import type { PublicationMembershipBlocker } from "@shared/types/inventory-publi
 import { ebayPublicationMappingRowSchema, reviewEbayPublicationMember, type EbayPublicationMappingRow } from "../domain/ebay-publication-readiness";
 import { reviewMappingPreparation, readTargets, type PublicationMappingProposal } from "./publication-mapping-preparation.repository";
 import type { ActivePublicationVariantMappingSnapshot } from "../application/inventory-channel-exposure-runtime.service";
-import { readEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope";
+import { readEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope.api";
 
 export const readinessDigest = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const blocker = (code: string, message: string, productVariantId: number | null = null,

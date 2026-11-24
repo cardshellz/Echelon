@@ -1,0 +1,712 @@
+import { randomUUID } from "node:crypto";
+
+import type {
+  ChannelFulfillmentAuthorityService,
+} from "./channel-fulfillment-authority.service";
+import {
+  FulfillmentAuthorityError,
+} from "../infrastructure/channel-fulfillment-authority.repository";
+import type {
+  ChannelFulfillmentIngressRepository,
+  IngressEngineCancellationCandidate,
+  IngressInventoryItem,
+} from "../infrastructure/channel-fulfillment-ingress.repository";
+import {
+  ChannelFulfillmentIngressError,
+  normalizeChannelFulfillmentIngress,
+  type ChannelFulfillmentIngressInput,
+  type NormalizedChannelFulfillmentIngress,
+} from "./channel-fulfillment-ingress";
+import type { EngineCancelResult } from "../../shipping/engine-and-reconcile.api";
+import { logger as platformLogger } from "../../../platform/observability/logger";
+
+const DEFAULT_RECEIPT_LEASE_DURATION_MS = 120_000;
+const MAX_TRANSIENT_RECEIPT_FAILURES = 5;
+const TRANSIENT_RECEIPT_RETRY_BASE_DELAY_MS = 2 * 60_000;
+const TRANSIENT_RECEIPT_RETRY_MAX_DELAY_MS = 60 * 60_000;
+
+export interface ChannelFulfillmentIngressClock {
+  now(): Date;
+}
+
+export interface ChannelFulfillmentIngressLogger {
+  info(event: Readonly<Record<string, unknown>>): void;
+  warn(event: Readonly<Record<string, unknown>>): void;
+  error(event: Readonly<Record<string, unknown>>): void;
+}
+
+export interface ChannelFulfillmentInventoryRecorder {
+  recordShipment(input: {
+    productVariantId: number;
+    warehouseLocationId: number | null;
+    qty: number;
+    orderId: number;
+    orderItemId: number;
+    shipmentId: string;
+    shipmentItemId: number;
+    userId: string;
+    deductFromOnHandOnly: boolean;
+  }): Promise<void>;
+}
+
+export interface ChannelFulfillmentIngressResult {
+  readonly receiptId: number;
+  readonly processingStatus: "processed" | "ignored" | "review";
+  readonly physicalShipmentId: number | null;
+  readonly sourceEcho: boolean;
+  readonly replayed: boolean;
+  readonly inventoryFailures: number;
+  readonly cancellationFailures: number;
+  readonly partialOverlapShipmentIds: readonly number[];
+}
+
+export interface ChannelFulfillmentIngressDependencies {
+  readonly repository: ChannelFulfillmentIngressRepository;
+  readonly authority: Pick<
+    ChannelFulfillmentAuthorityService,
+    "recordPhysicalPackage" | "projectPhysicalPackage"
+  >;
+  readonly inventory: ChannelFulfillmentInventoryRecorder;
+  readonly cancelEngineShipment: (
+    candidate: IngressEngineCancellationCandidate,
+    occurredAt: Date,
+  ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
+  readonly clock?: ChannelFulfillmentIngressClock;
+  readonly logger?: ChannelFulfillmentIngressLogger;
+  readonly createLeaseToken?: () => string;
+  readonly leaseDurationMs?: number;
+}
+
+export interface ChannelFulfillmentIngressService {
+  process(input: ChannelFulfillmentIngressInput): Promise<ChannelFulfillmentIngressResult>;
+}
+
+interface ProcessingFailure {
+  readonly code: string;
+  readonly message: string;
+  readonly context: Readonly<Record<string, unknown>>;
+}
+
+function defaultLogger(): ChannelFulfillmentIngressLogger {
+  return {
+    info: (event) => platformLogger.info("oms.channel_fulfillment_ingress_service", { detail: JSON.stringify(event) }),
+    warn: (event) => platformLogger.warn("oms.channel_fulfillment_ingress_service", { detail: JSON.stringify(event) }),
+    error: (event) => platformLogger.error("oms.channel_fulfillment_ingress_service", { error: JSON.stringify(event) }),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorCode(error: unknown): string {
+  if (error instanceof ChannelFulfillmentIngressError) return error.code;
+  if (error instanceof FulfillmentAuthorityError) return error.code;
+  if (typeof (error as any)?.code === "string") return String((error as any).code);
+  return "CHANNEL_FULFILLMENT_INGRESS_FAILED";
+}
+
+function errorContext(error: unknown): Readonly<Record<string, unknown>> {
+  if (
+    error instanceof ChannelFulfillmentIngressError
+    || error instanceof FulfillmentAuthorityError
+  ) {
+    return error.context;
+  }
+  return Object.freeze({});
+}
+
+function shouldRouteToReview(error: unknown): boolean {
+  if (error instanceof ChannelFulfillmentIngressError) return error.reviewRequired;
+  return error instanceof FulfillmentAuthorityError;
+}
+
+function inventoryFailure(
+  item: IngressInventoryItem,
+  error: unknown,
+): ProcessingFailure {
+  return Object.freeze({
+    code: "INVENTORY_RECORD_FAILED",
+    message: errorMessage(error),
+    context: Object.freeze({
+      causeCode: errorCode(error),
+      legacyWmsShipmentId: item.legacyWmsShipmentId,
+      legacyWmsShipmentItemId: item.legacyWmsShipmentItemId,
+      wmsOrderId: item.wmsOrderId,
+      wmsOrderItemId: item.wmsOrderItemId,
+      productVariantId: item.productVariantId,
+      warehouseLocationId: item.warehouseLocationId,
+      quantity: item.quantity,
+    }),
+  });
+}
+
+function cancellationFailure(
+  candidate: IngressEngineCancellationCandidate,
+  error: unknown,
+): ProcessingFailure {
+  return Object.freeze({
+    code: "ENGINE_CANCEL_FAILED",
+    message: errorMessage(error),
+    context: Object.freeze({
+      wmsShipmentId: candidate.wmsShipmentId,
+      engine: candidate.engine,
+      engineOrderRef: candidate.engineOrderRef,
+      engineShipmentRef: candidate.engineShipmentRef,
+    }),
+  });
+}
+
+async function recordInventory(
+  dependencies: ChannelFulfillmentIngressDependencies,
+  items: readonly IngressInventoryItem[],
+  beforeEach: () => Promise<void>,
+): Promise<readonly ProcessingFailure[]> {
+  const failures: ProcessingFailure[] = [];
+  for (const item of items) {
+    await beforeEach();
+    if (!item.productVariantId) {
+      failures.push(inventoryFailure(item, new Error(
+        "Exact product variant lineage is required to post inventory",
+      )));
+      continue;
+    }
+    try {
+      await dependencies.inventory.recordShipment({
+        productVariantId: item.productVariantId,
+        warehouseLocationId: item.warehouseLocationId,
+        qty: item.quantity,
+        orderId: item.wmsOrderId,
+        orderItemId: item.wmsOrderItemId,
+        shipmentId: String(item.legacyWmsShipmentId),
+        shipmentItemId: item.legacyWmsShipmentItemId,
+        userId: "system:channel-fulfillment-ingress",
+        deductFromOnHandOnly: item.deductFromOnHandOnly,
+      });
+    } catch (error) {
+      // The dispatcher has already exhausted its bounded whole-transaction
+      // retries. Preserve the receipt's durable retry path for contention;
+      // earlier sources are safe to replay and must not turn this into a
+      // permanent inventory discrepancy. No provider-controlled retry flag is
+      // trusted and no canonical failure selects the legacy recorder.
+      const code = errorCode(error);
+      if (code === "40001" || code === "40P01" || code === "INVENTORY_PUBLICATION_TARGET_BUSY") throw error;
+      failures.push(inventoryFailure(item, error));
+    }
+  }
+  return Object.freeze(failures);
+}
+
+async function cancelSupersededEngineShipments(
+  dependencies: ChannelFulfillmentIngressDependencies,
+  candidates: readonly IngressEngineCancellationCandidate[],
+  occurredAt: Date,
+  beforeEach: () => Promise<void>,
+): Promise<readonly ProcessingFailure[]> {
+  const failures: ProcessingFailure[] = [];
+  for (const candidate of candidates) {
+    await beforeEach();
+    try {
+      const outcome = await dependencies.cancelEngineShipment(candidate, occurredAt);
+      if (
+        outcome &&
+        typeof outcome === "object" &&
+        (outcome.state === "already_shipped" || outcome.state === "not_found")
+      ) {
+        failures.push(
+          cancellationFailure(
+            candidate,
+            Object.assign(
+              new Error(
+                `Superseded shipping-engine shipment ${candidate.wmsShipmentId} cancellation returned ${outcome.state}`,
+              ),
+              { code: `ENGINE_CANCEL_${outcome.state.toUpperCase()}` },
+            ),
+          ),
+        );
+      }
+    } catch (error) {
+      failures.push(cancellationFailure(candidate, error));
+    }
+  }
+  return Object.freeze(failures);
+}
+
+function firstFailure(
+  inventoryFailures: readonly ProcessingFailure[],
+  cancellationFailures: readonly ProcessingFailure[],
+  partialOverlapShipmentIds: readonly number[],
+): ProcessingFailure | null {
+  if (inventoryFailures.length > 0) return inventoryFailures[0];
+  if (cancellationFailures.length > 0) return cancellationFailures[0];
+  if (partialOverlapShipmentIds.length > 0) {
+    return Object.freeze({
+      code: "ENGINE_SHIPMENT_PARTIAL_OVERLAP",
+      message: "An open shipping-engine shipment only partially overlaps the externally fulfilled lines",
+      context: Object.freeze({ shipmentIds: [...partialOverlapShipmentIds] }),
+    });
+  }
+  return null;
+}
+
+async function recordReview(
+  repository: ChannelFulfillmentIngressRepository,
+  input: {
+    receiptId: number;
+    leaseToken: string;
+    physicalShipmentId?: number | null;
+    failure: ProcessingFailure;
+    completedAt: Date;
+  },
+): Promise<void> {
+  await repository.recordReviewException({
+    receiptId: input.receiptId,
+    rule: input.failure.code.toLowerCase(),
+    summary: input.failure.message,
+    details: input.failure.context,
+  });
+  await repository.completeReceipt({
+    receiptId: input.receiptId,
+    leaseToken: input.leaseToken,
+    processingStatus: "review",
+    physicalShipmentId: input.physicalShipmentId ?? null,
+    errorCode: input.failure.code,
+    errorMessage: input.failure.message,
+    completedAt: input.completedAt,
+    metadata: input.failure.context,
+  });
+}
+
+function logContext(
+  input: NormalizedChannelFulfillmentIngress,
+  receiptId: number,
+): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    receiptId,
+    receiptKey: input.receiptKey,
+    sourceProvider: input.sourceProvider,
+    sourceChannelId: input.sourceChannelId,
+    sourceOrderId: input.sourceOrderId,
+    sourceFulfillmentId: input.sourceFulfillmentId,
+    sourceEventId: input.sourceEventId,
+  });
+}
+
+export function createChannelFulfillmentIngressService(
+  dependencies: ChannelFulfillmentIngressDependencies,
+): ChannelFulfillmentIngressService {
+  const clock = dependencies.clock ?? { now: () => new Date() };
+  const logger = dependencies.logger ?? defaultLogger();
+  const createLeaseToken = dependencies.createLeaseToken ?? randomUUID;
+  const leaseDurationMs = dependencies.leaseDurationMs ?? DEFAULT_RECEIPT_LEASE_DURATION_MS;
+
+  async function process(rawInput: ChannelFulfillmentIngressInput): Promise<ChannelFulfillmentIngressResult> {
+    const input = normalizeChannelFulfillmentIngress(rawInput);
+    const occurredAt = input.shippedAt ?? clock.now();
+    const staged = await dependencies.repository.stageReceipt(input);
+    const context = logContext(input, staged.receiptId);
+    const requestedLeaseToken = createLeaseToken();
+    let activeLeaseToken: string | null = null;
+    let activePhysicalShipmentId: number | null = staged.physicalShipmentId;
+
+    const renewLease = async (): Promise<void> => {
+      if (!activeLeaseToken) {
+        throw new ChannelFulfillmentIngressError(
+          "RECEIPT_LEASE_OWNERSHIP_LOST",
+          `Receipt ${staged.receiptId} has no active processing lease`,
+          { receiptId: staged.receiptId },
+          { reviewRequired: false },
+        );
+      }
+      await dependencies.repository.renewReceiptLease({
+        receiptId: staged.receiptId,
+        leaseToken: activeLeaseToken,
+        now: clock.now(),
+        leaseDurationMs,
+      });
+    };
+
+    try {
+      const claimed = await dependencies.repository.claimReceipt({
+        receiptId: staged.receiptId,
+        input,
+        now: clock.now(),
+        leaseToken: requestedLeaseToken,
+        leaseDurationMs,
+        maxFailures: MAX_TRANSIENT_RECEIPT_FAILURES,
+      });
+      if (claimed.terminalReplay) {
+        logger.info({
+          code: "CHANNEL_FULFILLMENT_RECEIPT_REPLAYED",
+          ...context,
+          terminalReason: claimed.terminalReason,
+        });
+        const processingStatus = claimed.terminalProcessingStatus ?? (
+          claimed.sourceEcho ? "ignored" : "processed"
+        );
+        if (claimed.terminalReason === "lease_retry_exhausted") {
+          try {
+            await dependencies.repository.recordReviewException({
+              receiptId: staged.receiptId,
+              rule: "channel_fulfillment_lease_retry_exhausted",
+              summary: "Channel fulfillment receipt exhausted recovery after repeated lease expiry",
+              details: Object.freeze({
+                attemptNumber: claimed.attemptNumber,
+              }),
+            });
+          } catch (reviewError) {
+            logger.error({
+              code: "CHANNEL_FULFILLMENT_RECEIPT_REVIEW_EVIDENCE_FAILED",
+              ...context,
+              errorCode: errorCode(reviewError),
+              errorMessage: errorMessage(reviewError),
+            });
+          }
+        }
+        return Object.freeze({
+          receiptId: staged.receiptId,
+          processingStatus,
+          physicalShipmentId: claimed.physicalShipmentId,
+          sourceEcho: claimed.sourceEcho,
+          replayed: true,
+          inventoryFailures: 0,
+          cancellationFailures: 0,
+          partialOverlapShipmentIds: Object.freeze([]),
+        });
+      }
+      activeLeaseToken = claimed.leaseToken;
+      if (!activeLeaseToken) {
+        throw new ChannelFulfillmentIngressError(
+          "RECEIPT_LEASE_OWNERSHIP_LOST",
+          `Receipt ${staged.receiptId} was claimed without a lease token`,
+          { receiptId: staged.receiptId },
+          { reviewRequired: false },
+        );
+      }
+
+      const prepared = await dependencies.repository.prepareReceipt(
+        staged.receiptId,
+        input,
+        activeLeaseToken,
+        clock.now(),
+      );
+
+      if (prepared.shippingEvidenceMissing) {
+        const failure = Object.freeze({
+          code: "SHIPPING_ENGINE_EVIDENCE_MISSING",
+          message: "Channel fulfillment has no matching shipping-engine package; no warehouse or inventory changes were made",
+          context: Object.freeze({ omsOrderId: prepared.omsOrderId,
+            sourceOrderId: input.sourceOrderId, sourceFulfillmentId: input.sourceFulfillmentId,
+            lineItems: input.lineItems }),
+        });
+        await renewLease();
+        await recordReview(dependencies.repository, {
+          receiptId: staged.receiptId, leaseToken: activeLeaseToken, failure, completedAt: clock.now(),
+        });
+        logger.warn({ code: failure.code, ...context, omsOrderId: prepared.omsOrderId });
+        return Object.freeze({
+          receiptId: staged.receiptId, processingStatus: "review", physicalShipmentId: null,
+          sourceEcho: false, replayed: false, inventoryFailures: 0,
+          cancellationFailures: 0, partialOverlapShipmentIds: Object.freeze([]),
+        });
+      }
+
+      if (prepared.nonShippingOnly) {
+        await renewLease();
+        await dependencies.repository.completeReceipt({
+          receiptId: staged.receiptId, leaseToken: activeLeaseToken,
+          processingStatus: "processed", physicalShipmentId: null,
+          completedAt: clock.now(), metadata: Object.freeze({ nonShippingOnly: true }),
+        });
+        logger.info({ code: "CHANNEL_NON_SHIPPING_FULFILLMENT_RECORDED", ...context });
+        return Object.freeze({
+          receiptId: staged.receiptId, processingStatus: "processed", physicalShipmentId: null,
+          sourceEcho: false, replayed: false, inventoryFailures: 0,
+          cancellationFailures: 0, partialOverlapShipmentIds: Object.freeze([]),
+        });
+      }
+
+      let physicalShipmentId = prepared.physicalShipmentId;
+      activePhysicalShipmentId = physicalShipmentId;
+      if (!physicalShipmentId) {
+        const identity = prepared.materializationIdentity;
+        if (!identity) {
+          throw new ChannelFulfillmentIngressError(
+            "CANONICAL_PACKAGE_CONFLICT",
+            "Receipt preparation did not provide a physical package identity",
+            {
+              receiptId: staged.receiptId,
+              sourceProvider: input.sourceProvider,
+              sourceFulfillmentId: input.sourceFulfillmentId,
+              legacyWmsShipmentIds: prepared.legacyWmsShipmentIds,
+            },
+          );
+        }
+        await renewLease();
+        const materialized = await dependencies.authority.recordPhysicalPackage({
+          legacyWmsShipmentIds: [...prepared.legacyWmsShipmentIds],
+          shippingProvider: identity.shippingProvider,
+          providerPhysicalShipmentId: identity.providerPhysicalShipmentId,
+          providerOrderId: identity.providerOrderId,
+          providerOrderKey: identity.providerOrderKey,
+          trackingNumber: identity.trackingNumber,
+          carrier: identity.carrier,
+          trackingUrl: identity.trackingUrl,
+          serviceCode: identity.serviceCode,
+          shippedAt: identity.shippedAt,
+          source: input.source,
+          correlationId: input.correlationId,
+          causationId: input.causationId,
+          suppressChannelProviders: [input.sourceProvider],
+        }, { executeImmediately: false });
+        physicalShipmentId = materialized.materialized.physicalShipmentId;
+        activePhysicalShipmentId = physicalShipmentId;
+      }
+
+      await renewLease();
+      await dependencies.repository.attachPhysicalShipment(
+        staged.receiptId,
+        physicalShipmentId,
+        activeLeaseToken,
+        clock.now(),
+      );
+      if (input.trackingNumber || input.carrier || input.trackingUrl) {
+        await dependencies.repository.recordTrackingAmendment(
+          staged.receiptId,
+          physicalShipmentId,
+          activeLeaseToken,
+          input,
+          occurredAt,
+          clock.now(),
+        );
+      }
+      await dependencies.authority.projectPhysicalPackage(physicalShipmentId);
+
+      if (prepared.sourceEcho) {
+        // Legacy echo preparation returns no inventory work. Canonical echoes
+        // carry exact existing sources: their recorder replays committed custody
+        // or repairs a missing posting, never creates another package or source.
+        const inventoryFailures = await recordInventory(dependencies, prepared.inventoryItems, renewLease);
+        if (inventoryFailures.length > 0) {
+          await recordReview(dependencies.repository, {
+            receiptId: staged.receiptId, leaseToken: activeLeaseToken, physicalShipmentId,
+            failure: inventoryFailures[0], completedAt: clock.now(),
+          });
+          logger.warn({
+            code: "CHANNEL_FULFILLMENT_SOURCE_ECHO_INVENTORY_REVIEW", ...context,
+            physicalShipmentId, inventoryFailures: inventoryFailures.length,
+            errorCode: inventoryFailures[0].code, errorMessage: inventoryFailures[0].message,
+          });
+          return Object.freeze({
+            receiptId: staged.receiptId, processingStatus: "review", physicalShipmentId,
+            sourceEcho: true, replayed: false, inventoryFailures: inventoryFailures.length,
+            cancellationFailures: 0, partialOverlapShipmentIds: Object.freeze([]),
+          });
+        }
+        await renewLease();
+        await dependencies.repository.completeReceipt({
+          receiptId: staged.receiptId,
+          leaseToken: activeLeaseToken,
+          processingStatus: "ignored",
+          physicalShipmentId,
+          completedAt: clock.now(),
+          metadata: Object.freeze({ sourceEcho: true }),
+        });
+        logger.info({
+          code: "CHANNEL_FULFILLMENT_SOURCE_ECHO_IGNORED",
+          ...context,
+          physicalShipmentId,
+        });
+        return Object.freeze({
+          receiptId: staged.receiptId,
+          processingStatus: "ignored",
+          physicalShipmentId,
+          sourceEcho: true,
+          replayed: false,
+          inventoryFailures: 0,
+          cancellationFailures: 0,
+          partialOverlapShipmentIds: Object.freeze([]),
+        });
+      }
+
+      const inventoryFailures = await recordInventory(
+        dependencies,
+        prepared.inventoryItems,
+        renewLease,
+      );
+      const cancellationFailures = await cancelSupersededEngineShipments(
+        dependencies,
+        prepared.cancellationCandidates,
+        occurredAt,
+        renewLease,
+      );
+      const failure = firstFailure(
+        inventoryFailures,
+        cancellationFailures,
+        prepared.partialOverlapShipmentIds,
+      );
+      if (failure) {
+        await recordReview(dependencies.repository, {
+          receiptId: staged.receiptId,
+          leaseToken: activeLeaseToken,
+          physicalShipmentId,
+          failure,
+          completedAt: clock.now(),
+        });
+        logger.warn({
+          code: "CHANNEL_FULFILLMENT_RECEIPT_REVIEW_REQUIRED",
+          ...context,
+          physicalShipmentId,
+          errorCode: failure.code,
+          errorMessage: failure.message,
+          inventoryFailures: inventoryFailures.length,
+          cancellationFailures: cancellationFailures.length,
+          partialOverlapShipmentIds: prepared.partialOverlapShipmentIds,
+        });
+        return Object.freeze({
+          receiptId: staged.receiptId,
+          processingStatus: "review",
+          physicalShipmentId,
+          sourceEcho: false,
+          replayed: false,
+          inventoryFailures: inventoryFailures.length,
+          cancellationFailures: cancellationFailures.length,
+          partialOverlapShipmentIds: Object.freeze([...prepared.partialOverlapShipmentIds]),
+        });
+      }
+
+      await renewLease();
+      await dependencies.repository.completeReceipt({
+        receiptId: staged.receiptId,
+        leaseToken: activeLeaseToken,
+        processingStatus: "processed",
+        physicalShipmentId,
+        completedAt: clock.now(),
+        metadata: Object.freeze({
+          inventoryItemCount: prepared.inventoryItems.length,
+          cancellationCandidateCount: prepared.cancellationCandidates.length,
+        }),
+      });
+      logger.info({
+        code: "CHANNEL_FULFILLMENT_RECEIPT_PROCESSED",
+        ...context,
+        physicalShipmentId,
+      });
+      return Object.freeze({
+        receiptId: staged.receiptId,
+        processingStatus: "processed",
+        physicalShipmentId,
+        sourceEcho: false,
+        replayed: false,
+        inventoryFailures: 0,
+        cancellationFailures: 0,
+        partialOverlapShipmentIds: Object.freeze([]),
+      });
+    } catch (error) {
+      if (!shouldRouteToReview(error)) {
+        const transientErrorCode = errorCode(error);
+        const transientErrorMessage = errorMessage(error);
+        logger.error({
+          code: "CHANNEL_FULFILLMENT_RECEIPT_TRANSIENT_FAILURE",
+          ...context,
+          errorCode: transientErrorCode,
+          errorMessage: transientErrorMessage,
+        });
+
+        if (activeLeaseToken) {
+          try {
+            const failedAttempt = await dependencies.repository.failReceiptAttempt({
+              receiptId: staged.receiptId,
+              leaseToken: activeLeaseToken,
+              failedAt: clock.now(),
+              errorCode: transientErrorCode,
+              errorMessage: transientErrorMessage,
+              metadata: errorContext(error),
+              maxFailures: MAX_TRANSIENT_RECEIPT_FAILURES,
+              retryBaseDelayMs: TRANSIENT_RECEIPT_RETRY_BASE_DELAY_MS,
+              retryMaxDelayMs: TRANSIENT_RECEIPT_RETRY_MAX_DELAY_MS,
+            });
+            if (failedAttempt.processingStatus === "review") {
+              const failure = Object.freeze({
+                code: "CHANNEL_FULFILLMENT_TRANSIENT_RETRY_EXHAUSTED",
+                message: `Channel fulfillment receipt exhausted transient retries: ${transientErrorMessage}`,
+                context: Object.freeze({
+                  originalErrorCode: transientErrorCode,
+                  retryFailureCount: failedAttempt.retryFailureCount,
+                  ...errorContext(error),
+                }),
+              });
+              try {
+                await dependencies.repository.recordReviewException({
+                  receiptId: staged.receiptId,
+                  rule: failure.code.toLowerCase(),
+                  summary: failure.message,
+                  details: failure.context,
+                });
+              } catch (reviewError) {
+                logger.error({
+                  code: "CHANNEL_FULFILLMENT_RECEIPT_REVIEW_EVIDENCE_FAILED",
+                  ...context,
+                  errorCode: errorCode(reviewError),
+                  errorMessage: errorMessage(reviewError),
+                });
+              }
+              return Object.freeze({
+                receiptId: staged.receiptId,
+                processingStatus: "review",
+                physicalShipmentId: activePhysicalShipmentId,
+                sourceEcho: false,
+                replayed: false,
+                inventoryFailures: 0,
+                cancellationFailures: 0,
+                partialOverlapShipmentIds: Object.freeze([]),
+              });
+            }
+          } catch (retryPersistenceError) {
+            logger.error({
+              code: "CHANNEL_FULFILLMENT_RECEIPT_RETRY_PERSISTENCE_FAILED",
+              ...context,
+              errorCode: errorCode(retryPersistenceError),
+              errorMessage: errorMessage(retryPersistenceError),
+              originalErrorCode: transientErrorCode,
+              originalErrorMessage: transientErrorMessage,
+            });
+          }
+        }
+        throw error;
+      }
+
+      const failure = Object.freeze({
+        code: errorCode(error),
+        message: errorMessage(error),
+        context: errorContext(error),
+      });
+      if (!activeLeaseToken) throw error;
+      await recordReview(dependencies.repository, {
+        receiptId: staged.receiptId,
+        leaseToken: activeLeaseToken,
+        physicalShipmentId: activePhysicalShipmentId,
+        failure,
+        completedAt: clock.now(),
+      });
+      logger.warn({
+        code: "CHANNEL_FULFILLMENT_RECEIPT_REVIEW_REQUIRED",
+        ...context,
+        errorCode: failure.code,
+        errorMessage: failure.message,
+      });
+      return Object.freeze({
+        receiptId: staged.receiptId,
+        processingStatus: "review",
+        physicalShipmentId: activePhysicalShipmentId,
+        sourceEcho: false,
+        replayed: false,
+        inventoryFailures: failure.code === "INVENTORY_RECORD_FAILED" ? 1 : 0,
+        cancellationFailures: failure.code === "ENGINE_CANCEL_FAILED" ? 1 : 0,
+        partialOverlapShipmentIds: Object.freeze([]),
+      });
+    }
+  }
+
+  return Object.freeze({ process });
+}

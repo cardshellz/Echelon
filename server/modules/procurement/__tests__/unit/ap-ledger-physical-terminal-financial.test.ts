@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // These orchestration fixtures contain ordinary product/manual invoices. The real
 // source reader and rejection behavior are covered by shipment-billing-ownership.integration.test.ts.
-vi.mock("../../shipment-billing-ownership.repository", () => ({
+vi.mock("../../infrastructure/shipment-billing-ownership.repository", () => ({
   readInvoiceSourceCapabilities: vi.fn(async () => {
     const verified = { allowed: true, code: "AP_INVOICE_SOURCE_VERIFIED", reason: "Fixture has ordinary invoice source ownership." };
     return { purchaseOrderLinks: verified, approval: verified, payment: verified, freightSourceLineIds: [] };
@@ -11,7 +11,7 @@ vi.mock("../../shipment-billing-ownership.repository", () => ({
 
 // Keep the COGS dependency without importing unrelated inventory repository owners.
 vi.mock("../../../inventory", async () => ({
-  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+  COGSService: (await import("../../../inventory/application/cogs.service")).COGSService,
 }));
 
 // These owner fixtures isolate financial state changes. The real PostgreSQL
@@ -79,11 +79,11 @@ vi.mock("drizzle-orm", () => ({
   asc: vi.fn((value: unknown) => value),
   like: vi.fn(),
 }));
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
   detectFinancialExceptions: vi.fn(),
 }));
-vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
+vi.mock("../../../inventory/application/cogs.service", () => ({ COGSService: class {} }));
 
 function selectChain(rows: unknown[]) {
   const chain: any = {};
@@ -131,7 +131,7 @@ describe("AP financial work after physical PO terminal states", () => {
         [{ id: 55, vendorId: 4, status }],
       ], writeReached);
       mocks.db.transaction.mockImplementationOnce(async (callback: any) => callback(tx));
-      const { linkPoToInvoice } = await import("../../ap-ledger.service");
+      const { linkPoToInvoice } = await import("../../application/ap-ledger.service");
 
       await expect(linkPoToInvoice(12, 55)).rejects.toBe(writeReached);
       expect(tx.insert).toHaveBeenCalledWith(tables.vendorInvoicePoLinks);
@@ -150,7 +150,7 @@ describe("AP financial work after physical PO terminal states", () => {
       [{ maxLine: 1 }],
     ], writeReached);
     mocks.db.transaction.mockImplementationOnce(async (callback: any) => callback(tx));
-    const { addInvoiceLine } = await import("../../ap-ledger.service");
+    const { addInvoiceLine } = await import("../../application/ap-ledger.service");
 
     await expect(addInvoiceLine(12, {
       purchaseOrderLineId: 88,
@@ -168,7 +168,7 @@ describe("AP financial work after physical PO terminal states", () => {
       [{ id: 55, vendorId: 4, status: "received", currency: "USD" }],
     ], writeReached);
     mocks.db.transaction.mockImplementationOnce(async (callback: any) => callback(tx));
-    const { linkPoToInvoice } = await import("../../ap-ledger.service");
+    const { linkPoToInvoice } = await import("../../application/ap-ledger.service");
 
     await expect(linkPoToInvoice(12, 55)).rejects.toMatchObject({
       statusCode: 422,

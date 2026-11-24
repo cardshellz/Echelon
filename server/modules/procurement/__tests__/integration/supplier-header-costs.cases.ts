@@ -5,19 +5,19 @@ import type { AddressInfo } from "node:net";
 import type pg from "pg";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { supplierHeaderContextSchema, supplierHeaderPreviewSchema, supplierHeaderResultSchema, type SupplierHeaderEntry, type SupplierHeaderTarget } from "@shared/procurement/supplier-header-costs";
-import { registerSupplierHeaderCostRoutes } from "../../supplier-header-costs.routes";
-import { createSupplierHeaderCostService } from "../../supplier-header-cost-review.service";
+import { registerSupplierHeaderCostRoutes } from "../../interfaces/http/supplier-header-costs.routes";
+import { createSupplierHeaderCostService } from "../../application/supplier-header-cost-review.service";
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
-import { createSupplierCreditCommands } from "../../supplier-credit.commands";
-import { createSupplierCreditCostPreview } from "../../supplier-credit.service";
-import { loadSupplierCreditSource, readSupplierCreditDetail } from "../../supplier-credit.repository";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
+import { createSupplierCreditCommands } from "../../application/supplier-credit.commands";
+import { createSupplierCreditCostPreview } from "../../application/supplier-credit.service";
+import { loadSupplierCreditSource, readSupplierCreditDetail } from "../../infrastructure/supplier-credit.repository";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { SupplierCreditCommand, SupplierCreditDetail } from "@shared/procurement/supplier-credit";
-import { createPurchaseTaxChangeService, purchaseTaxCommandScope } from "../../purchase-tax-change.service";
-import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
+import { createPurchaseTaxChangeService, purchaseTaxCommandScope } from "../../application/purchase-tax-change.service";
+import { readPoShipmentCosts } from "../../infrastructure/po-shipment-cost-summary.repository";
 
 export function registerSupplierHeaderCostCases(fixture: { pool: () => pg.Pool; database: () => AmendmentDatabase;
   shipments: () => ShipmentTrackingService; actorId: string; at: Date; receive: () => Promise<unknown>; consume: () => Promise<unknown> }) {

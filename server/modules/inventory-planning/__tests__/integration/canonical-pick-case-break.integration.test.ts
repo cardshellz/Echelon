@@ -11,12 +11,12 @@ import { createQuantityLedgerTestContext, prepareQuantityLotCreationMetadata,
   type QuantityLedgerTestContext } from "../../../inventory/__tests__/fixtures/quantity-ledger-database";
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
 import { PostgresInventoryAvailabilityClaimRepository } from "../../infrastructure/inventory-availability-claim.repository";
-import { PickCorrectionService } from "../../../orders/pick-correction.service";
-import { observeMissingPick } from "../../../wms/pick-correction.repository";
+import { PickCorrectionService } from "../../../orders/application/pick-correction.service";
+import { observeMissingPick } from "../../../wms/infrastructure/pick-correction.repository";
 import { PostgresCanonicalClaimDispatchRepository } from "../../infrastructure/inventory-availability-dispatch.repository";
-import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/canonical-claim-dispatch-source";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/infrastructure/canonical-claim-dispatch-source";
 import { installWarehouseOperationMigration } from "../../../orders/__tests__/fixtures/install-warehouse-operation-migration";
-import { preparePickingCommand, pickingCommandKey, readPickingCommand } from "../../../wms/picking-command.repository";
+import { preparePickingCommand, pickingCommandKey, readPickingCommand } from "../../../wms/infrastructure/picking-command.repository";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createShipStationLabelReconciliationService, planLabelScanWindow,
   LabelReconciliationError, labelRecoveryFailure,
-  type LabelRecoverySeed, type LabelScanCheckpoint, type LabelScanRepository, type LabelScanSource, type ShipStationLabelSnapshot } from "../../shipstation-label-reconciliation.service";
-import type { ShipStationShipment } from "../../shipstation.service";
+  type LabelRecoverySeed, type LabelScanCheckpoint, type LabelScanRepository, type LabelScanSource, type ShipStationLabelSnapshot } from "../../application/shipstation-label-reconciliation.service";
+import type { ShipStationShipment } from "../../application/shipstation.service";
 
 const now = new Date("2026-09-21T20:00:00Z");
 function shipment(id: number, voided = false, orderId = 790960007): ShipStationShipment {

@@ -7,6 +7,7 @@ import { CustomerReturnCustomerAccessError, RETURN_CUSTOMER_ENCODED_PROOF_MAX_LE
 import { requireCustomerReturnPreviewAccess } from "../../application/customer-return-preview-access";
 import { readCurrentPreviewIdentity } from "../../infrastructure/customer-return-preview-identity";
 import { createCustomerReturnCustomerAuth } from "../../infrastructure/customer-return-customer-auth.composition";
+import { logger } from "../../../../platform/observability/logger";
 
 declare module "express-session" {
   interface SessionData {
@@ -33,7 +34,7 @@ export function returnCustomerError(res: Response, error: unknown) {
   const code = known ? String(error.code) : error instanceof z.ZodError ? "RETURN_CUSTOMER_INPUT_INVALID" : "RETURN_CUSTOMER_UNAVAILABLE";
   const status = known ? Number(error.status) : error instanceof z.ZodError ? 400 : 503;
   // No token, signed proxy query, customer details, provider URL or raw exception.
-  console.error(JSON.stringify({ event: "customer_return_request_failed", code }));
+  logger.error("customer_return_request_failed", { event: "customer_return_request_failed", code });
   res.status(status).json({ error: { code, ...(error instanceof CustomerReturnIntakeError && error.reasonCode ? { reasonCode: error.reasonCode } : {}), message: known ? error.message : status === 400
     ? "The return request is invalid." : "Returns are temporarily unavailable. Please try again." } });
 }
@@ -115,7 +116,7 @@ export function registerCustomerReturnCustomerAuthRoutes(app: Express, dependenc
       req.session.customerReturnSession = session;
       req.session.cookie.secure = true;
       await save(req);
-      console.info(JSON.stringify({ event: "customer_return_sign_in", channelId: session.channelId, actor: `shopify:${session.channelId}:${session.externalCustomerId}` }));
+      logger.info("customer_return_sign_in", { event: "customer_return_sign_in", channelId: session.channelId, actor: `shopify:${session.channelId}:${session.externalCustomerId}` });
       res.json(customerReturnSessionStateSchema.parse({ authenticated: true, privateTesting: isPrivate(), sessionKey: session.sessionKey }));
     } catch (error) { returnCustomerError(res, error); }
   });

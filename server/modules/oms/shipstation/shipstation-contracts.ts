@@ -14,9 +14,9 @@ import type {
   ShippingProviderLabelObserver,
 } from "../../shipping/carrier-tracking-and-dispatch.api";
 import type { PackageAllocationLabelCommercialFulfillmentService } from "../../shipping/package-allocation-authority.api";
-import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
+import type { ChannelFulfillmentAuthorityService } from "../application/channel-fulfillment-authority.service";
 import type { InventoryUseCases } from "../../inventory/shipment-evidence.api";
-import type { InventoryShipmentRuntimeInput } from "../../inventory-planning/application/inventory-availability-runtime-shipment.service";
+import type { InventoryShipmentRuntimeInput } from "../../inventory-planning/inventory-availability-runtime-shipment.service.api";
 import {
   ShipStationRateLimitError,
   ShipStationRequestTimeoutError,
@@ -24,8 +24,9 @@ import {
   SS_RATE_LIMITED,
   SS_REQUEST_TIMEOUT,
   type ShipStationApiRequester,
-} from "../shipstation-api-request";
+} from "../application/shipstation-api-request";
 import type { SessionAdvisoryLockRunner } from "../../../infrastructure/session-advisory-lock";
+import { logger } from "../../../platform/observability/logger";
 
 export {
   ShipStationRateLimitError,
@@ -36,6 +37,25 @@ export {
 };
 
 export const EBAY_CHANNEL_ID = 67;
+
+/** Echelon's own, pre-assigned identity for a shipment's ShipStation order. */
+export function shipStationOrderKeyForShipment(shipmentId: number): string {
+  return `echelon-wms-shp-${shipmentId}`;
+}
+
+/**
+ * The orderNumber pushShipment sends to ShipStation. eBay keeps the "EB-"
+ * prefix so packer-facing order numbers stay stable. Shared with the key
+ * lookup, which can only search ShipStation by orderNumber.
+ */
+export function shipStationOrderNumberForWmsOrder(order: {
+  channel_id?: number | null;
+  order_number?: string | null;
+  external_order_id?: string | null;
+}): string {
+  const base = order.order_number || order.external_order_id || "";
+  return Number(order.channel_id) === EBAY_CHANNEL_ID ? `EB-${base}` : base;
+}
 // Provider hold is indefinite; the operation's payment deadline owns recovery.
 export const ORDER_EDIT_PROVIDER_HOLD_UNTIL = "2099-12-31";
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -351,10 +371,7 @@ export async function resolveShipStationIds(
         }
       }
     } catch (err) {
-      console.warn(
-        `[ShipStation] shipping_config lookup failed for channel ${args.channelId}, using defaults:`,
-        err,
-      );
+      logger.warn("oms.shipstation_contracts", { message: `[ShipStation] shipping_config lookup failed for channel ${args.channelId}, using defaults:`, error: err });
     }
   }
 
@@ -376,10 +393,7 @@ export async function resolveShipStationIds(
         }
       }
     } catch (err) {
-      console.warn(
-        `[ShipStation] shipping_config lookup failed for warehouse ${args.warehouseId}, using defaults:`,
-        err,
-      );
+      logger.warn("oms.shipstation_contracts", { message: `[ShipStation] shipping_config lookup failed for warehouse ${args.warehouseId}, using defaults:`, error: err });
     }
   }
 

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShopifyAdapter } from "../../adapters/shopify.adapter";
 import { EbayAdapter } from "../../adapters/ebay.adapter";
-import { ChannelInventoryPublicationTransportAdapter } from "../../channel-inventory-publication-transport.adapter";
-import { InventoryPublicationConfigurationError } from "../../channel-adapter.interface";
+import { ChannelInventoryPublicationTransportAdapter } from "../../infrastructure/channel-inventory-publication-transport.adapter";
+import { InventoryPublicationConfigurationError } from "../../domain/channel-adapter.interface";
 
 const database = { select: vi.fn(), insert: vi.fn(), update: vi.fn(), delete: vi.fn() };
 const destination = { kind: "channel_connection" as const, channelConnectionId: 22, dropshipStoreConnectionId: null };

@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { omsOrderEvents } from "@shared/schema";
-import { verifyRefundedChannelMerchandise } from "../channel-merchandise-dispatch.service";
+import { verifyRefundedChannelMerchandise } from "../application/channel-merchandise-dispatch.service";
 import {
   dispatchShipmentEvent,
   recomputeOrderStatusFromShipments,
@@ -19,8 +19,8 @@ import {
   resolveShipStationUnmappedPhysicalExceptionForExactReplay,
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
-} from "../shipstation-unmapped-physical";
-import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
+} from "../application/shipstation-unmapped-physical";
+import type { ChannelFulfillmentAuthorityService } from "../application/channel-fulfillment-authority.service";
 import {
   ReplacementInventoryUnavailableError,
   ShipmentInventoryUnavailableError,
@@ -42,6 +42,7 @@ import {
   type ShipStationShipmentItemOwnership,
 } from "./shipstation-contracts";
 import type { ShipStationNotifyPackageResolution } from "./shipstation-notify-package-resolution";
+import { logger } from "../../../platform/observability/logger";
 
 export function createShipStationNotifyV2Execution(
   ctx: ShipStationRuntimeContext,
@@ -137,11 +138,9 @@ export function createShipStationNotifyV2Execution(
       }
     }
 
-    console.warn(
-      `[ShipStation Webhook V2] Resolving ShipStation shipment ` +
+    logger.warn("oms.shipstation_notify_v2_execution", { detail: `[ShipStation Webhook V2] Resolving ShipStation shipment ` +
         `${shipment.shipmentId} as one physical package spanning ` +
-        `${shipmentGroups.length} active WMS orders before single-order split resolution.`,
-    );
+        `${shipmentGroups.length} active WMS orders before single-order split resolution.` });
     const groupResults: ShipNotifyV2Result[] = [];
     for (const group of shipmentGroups) {
       groupResults.push(
@@ -284,11 +283,7 @@ export function createShipStationNotifyV2Execution(
       // variant-less row used to send the whole package to review for good, so
       // a package like #63721's could never post its mapped lines. Judged now,
       // not at pick: a line mapped since then still fails closed below.
-      console.log(JSON.stringify({
-        level: "info", component: "shipstation", action: "ship_unmapped_line", outcome: "no_stock_movement",
-        shipmentId, shipmentItemId: Number(item.id), orderItemId: Number(item.order_item_id),
-        sku: item.order_item_sku ?? null, qty: Number(item.qty),
-      }));
+      logger.info("ship_unmapped_line", { component: "shipstation", outcome: "no_stock_movement", shipmentId, shipmentItemId: Number(item.id), orderItemId: Number(item.order_item_id), sku: item.order_item_sku ?? null, qty: Number(item.qty) });
     }
     const rows = stockRows.map((item) => {
       const pickLoc = item.pick_location_id ?? null;
@@ -317,10 +312,7 @@ export function createShipStationNotifyV2Execution(
         "inventory_deduction_missing_item_data",
       );
       const message = `Shipment ${shipmentId} has ${invalidItems.length} inventory source item(s) without a product variant or positive quantity; fulfillment requires review.`;
-      console.error(JSON.stringify({
-        level: "error", component: "shipstation", code: "SHIPMENT_INVENTORY_SOURCE_INVALID",
-        shipmentId, invalidItemCount: invalidItems.length, message,
-      }));
+      logger.error("SHIPMENT_INVENTORY_SOURCE_INVALID", { component: "shipstation", code: "SHIPMENT_INVENTORY_SOURCE_INVALID", shipmentId, invalidItemCount: invalidItems.length, message });
       // Missing source identity is not an empty shipment or successful posting.
       // Keep the review flag, and stop before inventory posting and the later
       // physical-package materialization (earlier source synchronization remains).
@@ -401,18 +393,7 @@ export function createShipStationNotifyV2Execution(
       shipmentId,
       HISTORICAL_REPLACEMENT_INVENTORY_RULE,
     );
-    console.warn(JSON.stringify({
-      level: "warn",
-      component: "shipstation",
-      code: "HISTORICAL_REPLACEMENT_INVENTORY_DEFERRED",
-      wmsShipmentId: shipmentId,
-      wmsShipmentItemId: Number(item.id),
-      wmsOrderId,
-      productVariantId: Number(item.product_variant_id),
-      quantity: Number(item.qty),
-      warehouseId: item.warehouse_id ?? null,
-      message: error.message,
-    }));
+    logger.warn("HISTORICAL_REPLACEMENT_INVENTORY_DEFERRED", { component: "shipstation", code: "HISTORICAL_REPLACEMENT_INVENTORY_DEFERRED", wmsShipmentId: shipmentId, wmsShipmentItemId: Number(item.id), wmsOrderId, productVariantId: Number(item.product_variant_id), quantity: Number(item.qty), warehouseId: item.warehouse_id ?? null, message: error.message });
   }
 
   function historicalCustomerFulfillmentInventoryKey(shipmentItemId: number): string {
@@ -532,19 +513,7 @@ export function createShipStationNotifyV2Execution(
         occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
         details = wms.reconciliation_exceptions.details || EXCLUDED.details
     `);
-    console.warn(JSON.stringify({
-      level: "warn",
-      component: "shipstation",
-      code: "HISTORICAL_CUSTOMER_FULFILLMENT_INVENTORY_DEFERRED",
-      wmsShipmentId: shipmentId,
-      wmsShipmentItemId: Number(item.id),
-      wmsOrderId,
-      productVariantId: Number(item.product_variant_id),
-      quantity: Number(item.qty),
-      carrierDispatchCommandId: authorityContext.carrierDispatchCommandId,
-      repairRequeueId: reviewedRepair.requeueId,
-      message: errorMessage,
-    }));
+    logger.warn("HISTORICAL_CUSTOMER_FULFILLMENT_INVENTORY_DEFERRED", { component: "shipstation", code: "HISTORICAL_CUSTOMER_FULFILLMENT_INVENTORY_DEFERRED", wmsShipmentId: shipmentId, wmsShipmentItemId: Number(item.id), wmsOrderId, productVariantId: Number(item.product_variant_id), quantity: Number(item.qty), carrierDispatchCommandId: authorityContext.carrierDispatchCommandId, repairRequeueId: reviewedRepair.requeueId, message: errorMessage });
   }
 
   async function recordInventoryForShipment(
@@ -584,10 +553,8 @@ export function createShipStationNotifyV2Execution(
                 warehouseLocationId: recorded.warehouseLocationId,
               });
             }
-            console.log(
-              `[ShipStation Webhook V2] Recorded replacement shipment for variant ${item.product_variant_id} ` +
-              `qty ${item.qty} from location ${recorded.warehouseLocationId} (wmsOrder ${wmsOrderId})`,
-            );
+            logger.info("oms.shipstation_notify_v2_execution", { detail: `[ShipStation Webhook V2] Recorded replacement shipment for variant ${item.product_variant_id} ` +
+              `qty ${item.qty} from location ${recorded.warehouseLocationId} (wmsOrder ${wmsOrderId})` });
           } catch (error: any) {
             if (
               isHistoricalReplacementAdoption(item)
@@ -638,10 +605,10 @@ export function createShipStationNotifyV2Execution(
           }
           throw error;
         }
-        console.log(`[ShipStation Webhook V2] Recorded shipment for variant ${item.product_variant_id} qty ${item.qty} (wmsOrder ${wmsOrderId})`);
+        logger.info("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] Recorded shipment for variant ${item.product_variant_id} qty ${item.qty} (wmsOrder ${wmsOrderId})` });
       }
     } catch (invErr: any) {
-      console.error(`[ShipStation Webhook V2] Inventory deduction failed for shipment ${shipmentId}: ${invErr.message}`);
+      logger.error("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] Inventory deduction failed for shipment ${shipmentId}: ${invErr.message}` });
       throw invErr;
     }
   }
@@ -782,9 +749,7 @@ export function createShipStationNotifyV2Execution(
       },
     });
 
-    console.error(
-      `[ShipStation Webhook V2] Shipment ${shipmentId} shipped after OMS order ${omsOrderId} was final (${finality.status}/${finality.financialStatus}); OMS/channel fulfillment update suppressed`,
-    );
+    logger.error("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] Shipment ${shipmentId} shipped after OMS order ${omsOrderId} was final (${finality.status}/${finality.financialStatus}); OMS/channel fulfillment update suppressed` });
   }
 
   async function resolveOmsOrderIdForWmsOrder(
@@ -799,17 +764,13 @@ export function createShipStationNotifyV2Execution(
     `);
     const omsPointer = orderResult?.rows?.[0]?.oms_fulfillment_order_id;
     if (!omsPointer) {
-      console.warn(
-        `[ShipStation Webhook V2] WMS order ${wmsOrderId} has no oms_fulfillment_order_id - canonical fulfillment authority cannot resolve the OMS order (shipment=${shipmentId})`,
-      );
+      logger.warn("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] WMS order ${wmsOrderId} has no oms_fulfillment_order_id - canonical fulfillment authority cannot resolve the OMS order (shipment=${shipmentId})` });
       return null;
     }
 
     const omsOrderId = parseInt(String(omsPointer), 10);
     if (!Number.isInteger(omsOrderId) || omsOrderId <= 0) {
-      console.warn(
-        `[ShipStation Webhook V2] WMS order ${wmsOrderId} has non-numeric oms_fulfillment_order_id=${omsPointer} (shipment=${shipmentId})`,
-      );
+      logger.warn("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] WMS order ${wmsOrderId} has non-numeric oms_fulfillment_order_id=${omsPointer} (shipment=${shipmentId})` });
       return null;
     }
     return omsOrderId;
@@ -870,19 +831,7 @@ export function createShipStationNotifyV2Execution(
       // a split or combined shipment.
       legacyHeaderPolicy: "aggregate_projection",
     }, { executeImmediately: false });
-    console.log(JSON.stringify({
-      code: "SHIPSTATION_PHYSICAL_PACKAGE_MATERIALIZED",
-      shipstationShipmentId: shipment.shipmentId,
-      physicalShipmentId: authorityResult.materialized.physicalShipmentId,
-      legacyWmsShipmentIds,
-      channelCommandIds: authorityResult.materialized.channelCommands.map((command) => command.id),
-      dispatch: authorityResult.dispatch,
-      authoritySource: authorityContext.source,
-      authorityActor: authorityContext.actor,
-      authorityReason: authorityContext.reason,
-      carrierTrackingEventId: authorityContext.carrierTrackingEventId,
-      carrierDispatchCommandId: authorityContext.carrierDispatchCommandId,
-    }));
+    logger.info("SHIPSTATION_PHYSICAL_PACKAGE_MATERIALIZED", { code: "SHIPSTATION_PHYSICAL_PACKAGE_MATERIALIZED", shipstationShipmentId: shipment.shipmentId, physicalShipmentId: authorityResult.materialized.physicalShipmentId, legacyWmsShipmentIds, channelCommandIds: authorityResult.materialized.channelCommands.map((command) => command.id), dispatch: authorityResult.dispatch, authoritySource: authorityContext.source, authorityActor: authorityContext.actor, authorityReason: authorityContext.reason, carrierTrackingEventId: authorityContext.carrierTrackingEventId, carrierDispatchCommandId: authorityContext.carrierDispatchCommandId });
 
     return {
       processed,
@@ -909,9 +858,7 @@ export function createShipStationNotifyV2Execution(
     const carrier = mapShipStationCarrier(shipment.carrierCode);
     const event = deriveEventFromSSShipment(shipment, carrier);
     if (!event) {
-      console.log(
-        `[ShipStation Webhook V2] No actionable event for ShipStation shipment ${shipment.shipmentId ?? "unknown"} (SS order ${shipment.orderId ?? "unknown"}) - skipping`,
-      );
+      logger.info("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] No actionable event for ShipStation shipment ${shipment.shipmentId ?? "unknown"} (SS order ${shipment.orderId ?? "unknown"}) - skipping` });
       return { processed: false, fallback: false, handled: true };
     }
 
@@ -922,11 +869,9 @@ export function createShipStationNotifyV2Execution(
           resolvedBy: "system:shipstation_webhook",
         });
       } catch (exceptionErr: any) {
-        console.error(
-          `[ShipStation Webhook V2] Could not resolve the prior unmapped-package ` +
+        logger.error("oms.shipstation_notify_v2_execution", { error: `[ShipStation Webhook V2] Could not resolve the prior unmapped-package ` +
           `exception for voided provider shipment ${shipment.shipmentId}: ` +
-          `${exceptionErr?.message ?? String(exceptionErr)}`,
-        );
+          `${exceptionErr?.message ?? String(exceptionErr)}` });
       }
     }
 
@@ -962,10 +907,8 @@ export function createShipStationNotifyV2Execution(
           await resolveCombinedShipmentGroupsFromShipStationItems(null, shipment)
         ).filter((group) => group.row);
         if (recoveredGroups.length > 0) {
-          console.warn(
-            `[ShipStation Webhook V2] orderKey ${shipment.orderKey} (SS order ${shipment.orderId}) resolved to no live shipment; ` +
-              `recovered ${recoveredGroups.length} order shipment(s) from shipment items (combined/merged shipment).`,
-          );
+          logger.warn("oms.shipstation_notify_v2_execution", { detail: `[ShipStation Webhook V2] orderKey ${shipment.orderKey} (SS order ${shipment.orderId}) resolved to no live shipment; ` +
+              `recovered ${recoveredGroups.length} order shipment(s) from shipment items (combined/merged shipment).` });
           const groupResults: ShipNotifyV2Result[] = [];
           for (const group of recoveredGroups) {
             const result = await applyShipNotifyV2EventToResolvedShipment(
@@ -1035,10 +978,8 @@ export function createShipStationNotifyV2Execution(
       event.kind === "shipped" &&
       ["returned", "lost"].includes(currentWmsShipmentStatus)
     ) {
-      console.warn(
-        `[ShipStation Webhook V2] Ignored late shipped replay for ` +
-          `${currentWmsShipmentStatus} WMS shipment ${wmsShipmentRow.id}.`,
-      );
+      logger.warn("oms.shipstation_notify_v2_execution", { detail: `[ShipStation Webhook V2] Ignored late shipped replay for ` +
+          `${currentWmsShipmentStatus} WMS shipment ${wmsShipmentRow.id}.` });
       return { processed: false, fallback: false, handled: true };
     }
 
@@ -1060,10 +1001,8 @@ export function createShipStationNotifyV2Execution(
           currentTrackingNumber: wmsShipmentRow.tracking_number ?? null,
         });
       }
-      console.warn(
-        `[ShipStation Webhook V2] Ignored fulfillment replay for historical ` +
-          `ShipStation compatibility shipment ${wmsShipmentRow.id}.`,
-      );
+      logger.warn("oms.shipstation_notify_v2_execution", { detail: `[ShipStation Webhook V2] Ignored fulfillment replay for historical ` +
+          `ShipStation compatibility shipment ${wmsShipmentRow.id}.` });
       return { processed: false, fallback: false, handled: true };
     }
 
@@ -1192,11 +1131,9 @@ export function createShipStationNotifyV2Execution(
           currentTrackingNumber: wmsShipmentRow.tracking_number,
           resolvedBy: authorityContext.actor,
         });
-      console.log(
-        `[ShipStation Webhook V2] Exact physical shipment replay ` +
+      logger.info("oms.shipstation_notify_v2_execution", { detail: `[ShipStation Webhook V2] Exact physical shipment replay ` +
           `${shipment.shipmentId} matched WMS shipment ${wmsShipmentRow.id}; ` +
-          `provider line remapping skipped, exceptionResolved=${exceptionResolved}.`,
-      );
+          `provider line remapping skipped, exceptionResolved=${exceptionResolved}.` });
     }
 
     if (
@@ -1233,10 +1170,8 @@ export function createShipStationNotifyV2Execution(
           currentPhysicalShipmentRef: wmsShipmentRow.external_fulfillment_id ?? null,
           currentTrackingNumber: wmsShipmentRow.tracking_number ?? null,
         });
-        console.warn(
-          `[ShipStation Webhook V2] Shipment ${shipment.shipmentId} was quarantined ` +
-            `because its items could not be mapped authoritatively.`,
-        );
+        logger.warn("oms.shipstation_notify_v2_execution", { detail: `[ShipStation Webhook V2] Shipment ${shipment.shipmentId} was quarantined ` +
+            `because its items could not be mapped authoritatively.` });
         return { processed: false, fallback: false, handled: true };
       }
     }
@@ -1271,15 +1206,11 @@ export function createShipStationNotifyV2Execution(
       event,
     );
     if (!changed && event.kind !== "shipped") {
-      console.log(
-        `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already in target state - no-op`,
-      );
+      logger.info("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already in target state - no-op` });
       return { processed: false, fallback: false, handled: true };
     }
     if (!changed) {
-      console.log(
-        `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already shipped - running repair cascade`,
-      );
+      logger.info("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] Shipment ${wmsShipmentRow.id} already shipped - running repair cascade` });
     }
 
     // Roll up order-level warehouse_status from ALL shipments. This is
@@ -1292,9 +1223,7 @@ export function createShipStationNotifyV2Execution(
     // legacy broad rollup here would create a second fulfillment writer.
     if (event.kind !== "shipped" && changed) {
       const rollup = await recomputeOrderStatusFromShipments(db, wmsOrderId);
-      console.log(
-        `[ShipStation Webhook V2] WMS order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus} (changed=${rollup.changed})`,
-      );
+      logger.info("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] WMS order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus} (changed=${rollup.changed})` });
     }
 
 
@@ -1307,10 +1236,8 @@ export function createShipStationNotifyV2Execution(
           authorityContext,
         );
       }
-      console.log(
-        `[ShipStation Webhook V2] Processed replacement shipment ${wmsShipmentRow.id} ` +
-          `without changing customer fulfillment or channel state`,
-      );
+      logger.info("oms.shipstation_notify_v2_execution", { detail: `[ShipStation Webhook V2] Processed replacement shipment ${wmsShipmentRow.id} ` +
+          `without changing customer fulfillment or channel state` });
       return {
         processed: true,
         fallback: false,
@@ -1378,9 +1305,7 @@ export function createShipStationNotifyV2Execution(
       );
     }
 
-    console.log(
-      `[ShipStation Webhook V2] Processed shipment ${wmsShipmentRow.id} (event=${event.kind}) → OMS ${omsOrderId}`,
-    );
+    logger.info("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] Processed shipment ${wmsShipmentRow.id} (event=${event.kind}) → OMS ${omsOrderId}` });
     return {
       processed: true,
       fallback: false,
@@ -1440,9 +1365,7 @@ export function createShipStationNotifyV2Execution(
       });
     } catch (err: any) {
       if (err?.code === "23505" && String(err?.constraint ?? "").includes("shipment_dedup")) {
-        console.log(
-          `[ShipStation Webhook V2] Dedup: event ${eventType} for OMS order ${omsOrderId} shipment ${meta.wmsShipmentId} already recorded`,
-        );
+        logger.info("oms.shipstation_notify_v2_execution", { message: `[ShipStation Webhook V2] Dedup: event ${eventType} for OMS order ${omsOrderId} shipment ${meta.wmsShipmentId} already recorded` });
         return;
       }
       throw err;

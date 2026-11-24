@@ -4,8 +4,8 @@
 export {
   applyHistoricalPoSupplierEvidence,
   previewHistoricalPoSupplierEvidence,
-} from "./historical-po-supplier-evidence-backfill.service";
+} from "./application/historical-po-supplier-evidence-backfill.service";
 export {
   applyLegacyPoReceiveConfigRemediation,
   previewLegacyPoReceiveConfigRemediation,
-} from "./legacy-po-receive-config-remediation.service";
+} from "./application/legacy-po-receive-config-remediation.service";

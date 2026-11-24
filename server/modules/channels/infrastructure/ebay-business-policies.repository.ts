@@ -13,12 +13,13 @@ import type {
   EbayPolicyTransaction,
   EbayPolicyTarget,
   EbayCategoryMappingPatch,
-} from "../ebay-business-policies.service";
+} from "../application/ebay-business-policies.service";
 import {
   readCatalogEbayPolicyFields,
   readCatalogEbayPolicySelection,
   writeCatalogEbayPolicyFields,
-} from "../../catalog/catalog-ebay-policy-fields";
+} from "../../catalog/catalog-ebay-policy-fields.api";
+import { logger } from "../../../platform/observability/logger";
 
 const categoryColumns =
   'fulfillment_policy_override AS "fulfillmentPolicyId", return_policy_override AS "returnPolicyId", payment_policy_override AS "paymentPolicyId"';
@@ -98,11 +99,7 @@ export class PgEbayBusinessPolicyRepository
           await client.query("ROLLBACK");
         } catch {
           discardClient = true;
-          console.error(JSON.stringify({
-            event: "ebay_policy_rollback_failed",
-            channelId: scope.channelId,
-            connectionId: scope.connectionId,
-          }));
+          logger.error("ebay_policy_rollback_failed", { event: "ebay_policy_rollback_failed", channelId: scope.channelId, connectionId: scope.connectionId });
         }
       }
       throw error;

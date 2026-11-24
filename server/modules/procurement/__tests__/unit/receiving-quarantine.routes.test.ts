@@ -18,25 +18,25 @@ vi.mock("../../../identity", () => ({ hasPermission: vi.fn(), readCurrentStaffAc
   roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
 })) }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.log } }));
-vi.mock("../../receiving-quarantine-command-evidence.repository", () => ({ assertNoLegacyCustodyCommand: vi.fn() }));
+vi.mock("../../infrastructure/receiving-quarantine-command-evidence.repository", () => ({ assertNoLegacyCustodyCommand: vi.fn() }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
 vi.mock("../../../../platform/commands/transactional-command.service", async (original) => ({
   ...await original<typeof import("../../../../platform/commands/transactional-command.service")>(),
   runTransactionalFinancialCommand: mocks.run,
 }));
-vi.mock("../../receiving-quarantine.service", async (original) => ({
-  ...await original<typeof import("../../receiving-quarantine.service")>(),
+vi.mock("../../application/receiving-quarantine.service", async (original) => ({
+  ...await original<typeof import("../../application/receiving-quarantine.service")>(),
   readReceivingQuarantineView: mocks.view,
   executeReceivingCustodyCommand: mocks.execute,
 }));
-vi.mock("../../receiving-quarantine-options.repository", async (original) => ({
-  ...await original<typeof import("../../receiving-quarantine-options.repository")>(),
+vi.mock("../../infrastructure/receiving-quarantine-options.repository", async (original) => ({
+  ...await original<typeof import("../../infrastructure/receiving-quarantine-options.repository")>(),
   readQuarantineAcceptanceOptions: mocks.options,
 }));
 
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 import { ReceivingQuarantineError } from "../../domain/receiving-quarantine";
-import { registerReceivingQuarantineRoutes } from "../../receiving-quarantine.routes";
+import { registerReceivingQuarantineRoutes } from "../../interfaces/http/receiving-quarantine.routes";
 
 const intake = { kind: "unidentified", condition: "unexpected", quantity: 2, unitLabel: "sealed cartons",
   description: "Unidentified delivery", observedSku: null, holdingLocationId: 6, reason: "Source requires review", evidenceReference: "PHOTO-42" };

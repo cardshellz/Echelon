@@ -1,7 +1,7 @@
 import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { productVariants, products, vendorProducts, vendors } from "@shared/schema";
-import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+import { createPurchasingService, PurchasingError } from "../../application/purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests for the mills (4-decimal per-unit cost) service contract.

@@ -106,8 +106,8 @@ describe("inventory availability runtime claim routing contract", () => {
   });
 
   it("routes durable order-edit events through one demand-reconciliation contract", () => {
-    const wmsSync = source("server/modules/oms/wms-sync.service.ts");
-    const webhooks = source("server/modules/oms/oms-webhooks.ts");
+    const wmsSync = source("server/modules/oms/application/wms-sync.service.ts");
+    const webhooks = source("server/modules/oms/application/oms-webhooks.ts");
     expect(wmsSync).toContain("this.services.reservation.reconcileOrderDemand({");
     expect(wmsSync).toContain("demandChanged,");
     expect(wmsSync).not.toContain("// Re-reserve inventory (release all then re-reserve for updated items)");
@@ -119,8 +119,8 @@ describe("inventory availability runtime claim routing contract", () => {
   });
 
   it("routes each Shopify refund through one grouped whole-order demand reconciliation", () => {
-    const cascade = source("server/modules/oms/shopify-refund-cascade.service.ts");
-    const webhooks = source("server/modules/oms/oms-webhooks.ts");
+    const cascade = source("server/modules/oms/application/shopify-refund-cascade.service.ts");
+    const webhooks = source("server/modules/oms/application/oms-webhooks.ts");
 
     expect(cascade).toContain("await helpers.reconcileRefundOrderDemand!");
     expect(cascade).toContain("releaseTargets: internal.releaseTargets");
@@ -148,8 +148,8 @@ describe("inventory availability runtime publication routing contract", () => {
   });
 
   it("makes the publication router mandatory for orchestrator and variant-availability composition", () => {
-    const orchestrator = source("server/modules/channels/echelon-sync-orchestrator.service.ts");
-    const availability = source("server/modules/channels/variant-availability-sync.service.ts");
+    const orchestrator = source("server/modules/channels/application/echelon-sync-orchestrator.service.ts");
+    const availability = source("server/modules/channels/application/variant-availability-sync.service.ts");
 
     expect(orchestrator).toContain(
       "inventoryPublication: AuthorityAwareInventoryPublicationService",
@@ -161,13 +161,13 @@ describe("inventory availability runtime publication routing contract", () => {
   });
 
   it("keeps direct provider writes behind legacy callbacks or the canonical outbox worker", () => {
-    const orchestrator = source("server/modules/channels/echelon-sync-orchestrator.service.ts");
-    const availability = source("server/modules/channels/variant-availability-sync.service.ts");
+    const orchestrator = source("server/modules/channels/application/echelon-sync-orchestrator.service.ts");
+    const availability = source("server/modules/channels/application/variant-availability-sync.service.ts");
     const outbox = source(
       "server/modules/inventory-planning/application/inventory-publication-outbox.service.ts",
     );
     const channelTransport = source(
-      "server/modules/channels/channel-inventory-publication-transport.adapter.ts",
+      "server/modules/channels/infrastructure/channel-inventory-publication-transport.adapter.ts",
     );
 
     const orchestratorWrites = indexesOf(orchestrator, ".pushInventory(");

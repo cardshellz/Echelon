@@ -2,7 +2,8 @@ import { EbayBusinessPolicyError, ebayPolicySourceSchema } from "@shared/ebay-bu
 import { z } from 'zod';
 import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
 import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
-import { publicationSelectionBusyIssue } from '../../modules/inventory-planning/publication-selection-work';
+import { publicationSelectionBusyIssue } from '../../modules/inventory-planning/publication-selection-work.api';
+import { logger } from "../../platform/observability/logger";
 
 export function listingFailure(error: unknown, productId?: number, jobId?: string) {
   const busy = publicationSelectionBusyIssue(error);
@@ -18,7 +19,7 @@ export function listingFailure(error: unknown, productId?: number, jobId?: strin
     : error instanceof Error && code !== 'EBAY_LISTING_SYNC_FAILED' ? safeListingDiagnostic(error.message)
       : 'The listing operation could not finish. Refresh its saved status before retrying.';
   const policySource = error instanceof EbayBusinessPolicyError ? ebayPolicySourceSchema.safeParse(error.context.policySource) : undefined;
-  console.error(JSON.stringify({ event: 'ebay_listing_request_failed', code, productId, ...(providerRead ? { providerRead } : {}) }));
+  logger.error("ebay_listing_request_failed", { event: 'ebay_listing_request_failed', code, productId, ...(providerRead ? { providerRead } : {}) });
   return { code, error: message, issue: resolveEbayListingIssue({ code, message, productId, providerRead, jobId: savedJob.success ? savedJob.data : undefined, ...(policySource?.success ? { policySource: policySource.data } : {}) }) };
 }
 export function listingFailureStatus(error: unknown): number {

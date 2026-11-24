@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { inspectPurchaseReceiptSupplyCapture } from "@shared/procurement/purchase-receipt-supply-evidence";
-import { projectPurchasePlanningSupply, type PurchasePlanningOpenLine } from "../../purchase-planning-receipt-supply";
-import type { PurchaseReceiptEvidence } from "../../purchase-receipt-quantity-evidence";
-import { buildPurchaseSupplyTiming } from "../../purchase-supply-timing";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import { projectPurchasePlanningSupply, type PurchasePlanningOpenLine } from "../../application/purchase-planning-receipt-supply";
+import type { PurchaseReceiptEvidence } from "../../application/purchase-receipt-quantity-evidence";
+import { buildPurchaseSupplyTiming } from "../../application/purchase-supply-timing";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
 
 const line = (overrides: Partial<PurchasePlanningOpenLine> = {}): PurchasePlanningOpenLine => ({
   id: 11, purchaseOrderId: 1, purchaseOrderNumber: "PO-1", productId: 10,

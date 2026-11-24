@@ -22,7 +22,7 @@ vi.mock("../../../channels", () => ({ channelsStorage: {
   upsertChannelListing: fixture.upsertChannelListing,
   getChannelFeedByChannelAndVariant: vi.fn(async () => ({ id: 500, isActive: 1 })),
 } }));
-import { createChannelProductPushService } from "../../product-push.service";
+import { createChannelProductPushService } from "../../application/product-push.service";
 
 afterEach(() => { vi.unstubAllGlobals(); fixture.variantOverrides = []; });
 describe("product push weight through the existing Shopify writer", () => {

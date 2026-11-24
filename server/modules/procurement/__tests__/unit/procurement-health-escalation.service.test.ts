@@ -3,8 +3,8 @@ import {
   PROCUREMENT_HEALTH_CRITICAL_NOTIFICATION_KEY,
   buildProcurementHealthCriticalNotification,
   sendProcurementHealthCriticalEscalation,
-} from "../../procurement-health-escalation.service";
-import type { ProcurementHealthSummary } from "../../procurement-health.service";
+} from "../../application/procurement-health-escalation.service";
+import type { ProcurementHealthSummary } from "../../application/procurement-health.service";
 
 function summary(overrides: Partial<ProcurementHealthSummary> = {}): ProcurementHealthSummary {
   return {

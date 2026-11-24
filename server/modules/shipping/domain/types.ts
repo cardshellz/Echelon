@@ -1,0 +1,259 @@
+import { parseDecimalCents, MoneyInputError } from "@shared/money-read";
+/**
+ * Canonical shipping vocabulary — engine-agnostic types.
+ *
+ * Every core (C3/C5/C7/C8) and every reconciler speaks these types.
+ * Engine-specific adapters (ShipStation, etc.) translate to/from them.
+ * No engine-specific field (shipstation_order_id, orderKey format, etc.)
+ * leaks past the adapter boundary.
+ */
+
+import { knownCarrierCode } from "@shared/utils/carrier-identity";
+
+// Re-export the shared enums so callers import from one place.
+export {
+  SHIPMENT_STATUS_VALUES,
+  TERMINAL_SHIPMENT_STATUSES,
+  OPEN_SHIPMENT_STATUSES,
+  isShipmentShipped,
+  isShipmentOpen,
+  type ShipmentStatus,
+} from "@shared/enums/order-status";
+
+// ─── Canonical carrier codes ────────────────────────────────────────
+// Normalized to uppercase. Adapters map vendor-specific codes to these.
+
+export type CanonicalCarrier =
+  | "USPS"
+  | "FEDEX"
+  | "UPS"
+  | "DHL"
+  | "OTHER";
+
+export function normalizeCarrier(raw: string): CanonicalCarrier {
+  return knownCarrierCode(raw) ?? "OTHER";
+}
+
+// ─── Engine reference triple ────────────────────────────────────────
+// Replaces shipstation_order_id. The adapter populates these; the
+// pipeline stores them on outbound_shipments for round-tripping.
+
+export interface EngineRef {
+  engine: string;
+  engineOrderRef: string;
+  engineShipmentRef?: string;
+}
+
+// ─── Canonical inbound shipment event ───────────────────────────────
+// Produced by ShippingEngine.normalizeWebhook(). Consumed by C5
+// (shipment-event applier). Engine-agnostic — no SS fields.
+
+export type CanonicalShipmentEvent =
+  | {
+      kind: "shipped";
+      shipmentId: number;
+      engineRef: EngineRef;
+      trackingNumber: string;
+      carrier: CanonicalCarrier;
+      carrierRaw: string;
+      /** Null when the provider supplied only a calendar date. */
+      shipDate: Date | null;
+      shipCalendarDate?: string | null;
+      trackingUrl?: string | null;
+      serviceCode?: string | null;
+      carrierCostCents?: number;
+      carrierCostSource?: string;
+      items?: CanonicalShipmentItem[];
+    }
+  | {
+      kind: "cancelled";
+      shipmentId: number;
+      engineRef: EngineRef;
+      reason?: string;
+    }
+  | {
+      kind: "voided";
+      shipmentId: number;
+      engineRef: EngineRef;
+      reason?: string;
+      trackingNumber?: string | null;
+    }
+  | {
+      kind: "label_created";
+      shipmentId: number;
+      engineRef: EngineRef;
+      trackingNumber?: string;
+      carrier?: CanonicalCarrier;
+      carrierRaw?: string;
+    };
+
+export interface CanonicalShipmentItem {
+  sku: string;
+  quantity: number;
+  name?: string;
+}
+
+/**
+ * Convert a provider decimal-money value to integer cents without using
+ * floating-point arithmetic. Provider payloads with fractional cents,
+ * exponents, negatives, or unsafe totals are rejected.
+ */
+export function parseProviderAmountCents(value: unknown): number | null {
+  try {
+    return parseDecimalCents(typeof value === "string" ? value.trim() : value, "provider amount");
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    return null;
+  }
+}
+
+// ─── Outbound push result ───────────────────────────────────────────
+// Returned by ShippingEngine.upsertShipment().
+
+export interface EnginePushResult {
+  engineRef: EngineRef;
+  alreadyExisted: boolean;
+}
+
+export interface ShipmentItemAppendPayload {
+  shipmentId: number;
+  shipmentItemIds: readonly number[];
+}
+
+/**
+ * Raise the quantity of one package row the engine already holds to the
+ * current WMS demand for that order item. The target quantity is computed by
+ * the adapter at execution time, so the payload carries identity only.
+ */
+export interface ShipmentItemQuantityPayload {
+  shipmentId: number;
+  shipmentItemId: number;
+}
+
+export type EngineShipmentItemAppendState =
+  | "applied"
+  | "already_applied"
+  | "not_editable";
+
+export interface EngineShipmentItemAppendResult {
+  state: EngineShipmentItemAppendState;
+  providerStatus: string;
+}
+
+// ─── Cancel result ──────────────────────────────────────────────────
+
+/**
+ * P0.3: discriminated cancel outcome. `alreadyInState: true` used to cover
+ * two OPPOSITE terminal states — already cancelled (fine, nothing to do) and
+ * already shipped (package left the building; the order must be recorded
+ * shipped, never cancelled). Reconcilers MUST branch on `state`;
+ * `alreadyInState` is kept as the legacy summary flag.
+ */
+export type EngineCancelState =
+  | "cancelled"          // engine accepted the cancel now
+  | "already_cancelled"  // engine had it cancelled — no-op
+  | "already_shipped"    // engine shipped it — cancel impossible, truth wins
+  | "not_found";         // engine has no such order (or engine not configured)
+
+export interface EngineCancelResult {
+  alreadyInState: boolean;
+  state: EngineCancelState;
+}
+
+// ─── Mark-shipped result ────────────────────────────────────────────
+
+export interface EngineMarkShippedResult {
+  alreadyInState: boolean;
+}
+
+// ─── Shipment data for push ─────────────────────────────────────────
+// The engine-agnostic payload that C3 passes to the engine for push.
+
+export interface ShipmentPushPayload {
+  shipmentId: number;
+  orderId: number;
+  orderNumber: string;
+  channelId: number | null;
+  warehouseId: number | null;
+
+  customer: {
+    name: string | null;
+    email: string | null;
+  };
+  shippingAddress: {
+    name: string | null;
+    company: string | null;
+    street1: string | null;
+    street2: string | null;
+    city: string | null;
+    state: string | null;
+    postalCode: string | null;
+    country: string | null;
+  };
+  financials: {
+    amountPaidCents: number;
+    taxCents: number;
+    shippingCents: number;
+    discountCents: number;
+    totalCents: number;
+    nonShippingTotalCents?: number;
+    currency: string;
+  };
+
+  items: ShipmentPushItem[];
+  orderPlacedAt: Date | string | null;
+  externalOrderId: string | null;
+  sortRank: string | null;
+  isPartialShipment?: boolean;
+  fulfillmentOrderId?: string | null;
+  onHold?: boolean;
+  isReplacementShipment?: boolean;
+  overrideReview?: boolean;
+
+  existingEngineRef?: EngineRef;
+}
+
+export interface ShipmentPushItem {
+  itemId: number;
+  shipmentItemId?: number;
+  sku: string;
+  name: string;
+  quantity: number;
+  unitPriceCents: number;
+}
+
+// ─── Engine order state (query result) ──────────────────────────────
+
+export interface EngineOrderState {
+  engineRef: EngineRef;
+  status: string;
+  holdUntil?: Date | null;
+  holdUntilDate?: string | null;
+  trackingNumber?: string | null;
+  carrier?: string | null;
+  shipDate?: Date | null;
+  shipCalendarDate?: string | null;
+}
+
+export type OrderEditShipmentSyncMode =
+  | "hold"
+  | "verify"
+  | "synchronize"
+  | "release"
+  | "verify_shipped"
+  | "verify_cancelled"
+  | "verify_retired"
+  | "release_unsubmitted";
+
+export interface OrderEditShipmentSyncInput {
+  shipmentId: number;
+  operationId: string;
+  mode: OrderEditShipmentSyncMode;
+}
+
+export interface EngineRefResolutionMetrics {
+  canonicalHits: number;
+  legacyFallbackHits: number;
+  unresolvedHits: number;
+  lastLegacyFallbackAt: string | null;
+}

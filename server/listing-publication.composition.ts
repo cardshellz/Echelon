@@ -4,12 +4,12 @@ import { ListingPublicationService } from "./modules/marketplace-listings/applic
 import { ListingPublicationError } from "./modules/marketplace-listings/domain/listing-publication";
 import { PostgresListingPublicationRepository } from "./modules/marketplace-listings/infrastructure/pg-listing-publication.repository";
 import { PostgresListingUpdateRepository } from "./modules/marketplace-listings/infrastructure/pg-listing-update.repository";
-import { ChannelListingCatalogRepository } from "./modules/channels/channel-listing-catalog.repository";
+import { ChannelListingCatalogRepository } from "./modules/channels/infrastructure/channel-listing-catalog.repository";
 import { WalmartListingProvider } from "./modules/channels/adapters/walmart/walmart-listing.provider";
 import type { WalmartChannelService } from "./modules/channels/adapters/walmart/walmart-channel.service";
-import type { ChannelCatalogDirectory } from "./modules/channels/channel-catalog.routes";
+import type { ChannelCatalogDirectory } from "./modules/channels/interfaces/http/channel-catalog.routes";
 import type { QuantityPublicationAdmission } from "./modules/inventory-planning/application/quantity-publication-admission.port";
-import { createCatalogPublicImageUrl } from "./modules/catalog/catalog-public-image";
+import { createCatalogPublicImageUrl } from "./modules/catalog/domain/catalog-public-image";
 import type { ListingSnapshot } from "./modules/marketplace-listings/domain/listing-publication";
 import type { VerifiedListingStockService } from "./modules/inventory-planning/application/verified-listing-stock.service";
 import { InventoryPublicationMembershipError } from "./modules/inventory-planning/application/inventory-publication-membership.service";

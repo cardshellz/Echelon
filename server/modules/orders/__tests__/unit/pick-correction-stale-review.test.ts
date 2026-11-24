@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { resolveCorrectivePick } from "../../../wms/pick-correction.repository";
+import { resolveCorrectivePick } from "../../../wms/infrastructure/pick-correction.repository";
 
 // #64254 (2026-10-18): after the shipped-line fix, 7 of 20 units posted but the
 // card kept showing the pre-fix error, so the picker believed nothing worked.

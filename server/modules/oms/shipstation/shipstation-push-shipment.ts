@@ -1,25 +1,34 @@
 import { readIntegerCents } from "@shared/money-read";
 import { and, eq, sql } from "drizzle-orm";
 import { OrderEditError } from "../../order-edits/oms-coordination.api";
-import { verifyRefundedChannelMerchandise } from "../channel-merchandise-dispatch.service";
+import { verifyRefundedChannelMerchandise } from "../application/channel-merchandise-dispatch.service";
 import { outboundShipmentItems, outboundShipments, wmsOrderItems, wmsOrders } from "@shared/schema";
 import { recomputeOrderStatusFromShipments } from "../../orders/shipment-rollup-and-context.api";
-import type { EngineShipmentItemAppendResult } from "../../shipping/engine-and-reconcile.api";
+import {
+  serializeShipmentPushPayloadToShipStationOrder,
+  type EngineShipmentItemAppendResult,
+  type ShipmentPushPayload,
+} from "../../shipping/engine-and-reconcile.api";
 import { maybeGetPackInstruction } from "../../cartonization/pack-plan.api";
 import {
   clearOutboundShipmentReviewFlagByReasonInWms,
   commitAmendedShipmentItemQuantityInWms,
   markAppendedShipmentItemsAuthoritativeInWms,
+  countOpenShipmentsSharingShipStationOrderInWms,
+  linkShipStationOrderIdentityOnOutboundShipmentInWms,
   markOutboundShipmentQueuedAfterShipStationPushInWms,
+  setOutboundShipmentReviewFlagInWms,
 } from "../../wms/outbound-shipment-mutations.api";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 import {
   adoptProvenShipStationOrder,
   proveShipStationOrderAdoption,
   resolveShipStationHandoffCommands,
-} from "../shipstation-order-adoption";
+} from "../application/shipstation-order-adoption";
 import {
-  EBAY_CHANNEL_ID,
   PUSHABLE_SHIPMENT_STATUSES,
+  shipStationOrderKeyForShipment,
+  shipStationOrderNumberForWmsOrder,
   SS_PUSH_INVALID_SHIPMENT,
   ShipStationPushError,
   requireShipStationCountryCode,
@@ -33,12 +42,23 @@ import {
   type WmsShipmentRow,
 } from "./shipstation-contracts";
 
+/** Review reasons stamped when a push lands on a shipment that stopped mid-flight. */
+export const SS_REVIEW_CANCEL_UNVERIFIED = "shipstation_cancel_unverified";
+export const SS_REVIEW_PUSH_AFTER_TERMINAL = "shipstation_push_landed_after_terminal";
+
+/** Result shape of orderControls.cancelOrder, injected to avoid a module cycle. */
+export type ShipStationCancelOrderFn = (shipstationOrderId: number) => Promise<{
+  alreadyInState: boolean;
+  state: "cancelled" | "already_cancelled" | "already_shipped" | "not_found";
+}>;
+
 export function createShipStationPushHandlers(
   ctx: ShipStationRuntimeContext,
   getOmsFinalOrderBlockerForShipmentPush: (
     omsFulfillmentOrderId: string | null | undefined,
     verifiedRefundMerchandise?: boolean,
   ) => Promise<ShipmentPushOmsBlocker>,
+  cancelProviderOrder?: ShipStationCancelOrderFn,
 ) {
   const { db, dependencies, apiRequest, withShipmentPushLock, getOrderById, getOrderByKey } = ctx;
 
@@ -408,16 +428,7 @@ export function createShipStationPushHandlers(
         );
       }
       await commitLocalQuantity();
-      console.log(JSON.stringify({
-        level: "info",
-        action: "shipstation_line_quantity_amended",
-        outcome: "applied",
-        shipment_id: shipmentId,
-        shipment_item_id: shipmentItemId,
-        engine_ref: shipstationOrderId,
-        before: currentQuantity,
-        after: targetQuantity,
-      }));
+      platformLogger.info("shipstation_line_quantity_amended", { outcome: "applied", shipment_id: shipmentId, shipment_item_id: shipmentItemId, engine_ref: shipstationOrderId, before: currentQuantity, after: targetQuantity });
       return { state: "applied", providerStatus };
     });
   }
@@ -725,14 +736,11 @@ export function createShipStationPushHandlers(
     // ─── 5. Build SS payload ────────────────────────────────────────
     // `let` because the sibling-dedup guard (step 6) may adopt an existing
     // ShipStation order's key when a duplicate full shipment is detected.
-    let orderKey = `echelon-wms-shp-${shipmentId}`;
+    let orderKey = shipStationOrderKeyForShipment(shipmentId);
 
     // eBay keeps the "EB-" prefix convention from pushOrder so packer-
     // facing order numbers stay stable across the flag flip.
-    const isEbay = orderRow.channel_id === EBAY_CHANNEL_ID;
-    const baseOrderNumber =
-      orderRow.order_number || orderRow.external_order_id || "";
-    const orderNumber = isEbay ? `EB-${baseOrderNumber}` : baseOrderNumber;
+    const orderNumber = shipStationOrderNumberForWmsOrder(orderRow);
 
     const orderDateIso = orderRow.order_placed_at
       ? new Date(orderRow.order_placed_at).toISOString()
@@ -855,11 +863,9 @@ export function createShipStationPushHandlers(
             orderKey = siblingKey;
             payload.orderKey = siblingKey;
           }
-          console.warn(
-            `[ShipStation] Duplicate full shipment for WMS order ${shipmentRow.order_id}: ` +
+          platformLogger.warn("oms.shipstation_push_shipment", { detail: `[ShipStation] Duplicate full shipment for WMS order ${shipmentRow.order_id}: ` +
               `shipment ${shipmentId} adopting sibling SS order ${hitSsId} ` +
-              `instead of creating a second ShipStation order`,
-          );
+              `instead of creating a second ShipStation order` });
         }
       }
     }
@@ -917,10 +923,8 @@ export function createShipStationPushHandlers(
         }
 
         await recomputeOrderStatusFromShipments(db, adoption.wmsOrderId);
-        console.warn(
-          `[ShipStation] pushShipment ${shipmentId}: adopted exact existing SS order ` +
-            `${proof.providerOrderId} for key ${proof.orderKey}; no provider write was repeated`,
-        );
+        platformLogger.warn("oms.shipstation_push_shipment", { detail: `[ShipStation] pushShipment ${shipmentId}: adopted exact existing SS order ` +
+            `${proof.providerOrderId} for key ${proof.orderKey}; no provider write was repeated` });
         return {
           shipstationOrderId: proof.providerOrderId,
           orderKey: proof.orderKey,
@@ -929,9 +933,7 @@ export function createShipStationPushHandlers(
     }
     if (ssOrderIdForPayload) {
       payload.orderId = ssOrderIdForPayload;
-      console.log(
-        `[ShipStation] Updating existing SS order ${ssOrderIdForPayload} for WMS shipment ${shipmentId} (key: ${orderKey})`,
-      );
+      platformLogger.info("oms.shipstation_push_shipment", { message: `[ShipStation] Updating existing SS order ${ssOrderIdForPayload} for WMS shipment ${shipmentId} (key: ${orderKey})` });
     }
 
     // A keyed CREATE (no orderId) is never replayed after a 429: the first
@@ -951,13 +953,41 @@ export function createShipStationPushHandlers(
     // Write both the legacy SS columns (back-compat) and the engine-
     // agnostic triple (C9) in a single atomic UPDATE.
     const now = new Date();
+    let queued = false;
+    // False when step 6 adopted a duplicate sibling's ShipStation order: that
+    // order belongs to the sibling, so it must never be linked to or
+    // cancelled on behalf of THIS shipment.
+    const pushedOwnOrder = orderKey === shipStationOrderKeyForShipment(shipmentId);
     await db.transaction(async (tx: any) => {
-      await markOutboundShipmentQueuedAfterShipStationPushInWms(tx, {
+      queued = await markOutboundShipmentQueuedAfterShipStationPushInWms(tx, {
         shipmentId,
         shipstationOrderId: result.orderId,
         orderKey,
         now,
       });
+      if (!queued && pushedOwnOrder) {
+        // The shipment left a pushable state while ShipStation was creating
+        // the order (cancel paths do not wait for this lock). The provider
+        // order exists regardless: save its id without touching status so it
+        // is never orphaned, then stop it below (#65805).
+        const link = await linkShipStationOrderIdentityOnOutboundShipmentInWms(tx, {
+          shipmentId,
+          providerOrderId: result.orderId,
+          orderKey,
+          now,
+        });
+        if (!link.linked) {
+          throw new ShipStationPushError(
+            `shipment ${shipmentId} is linked to ShipStation order ${link.existingProviderOrderId}; push created ${result.orderId}`,
+            {
+              code: SS_PUSH_INVALID_SHIPMENT,
+              shipmentId,
+              field: "provider_order_linkage",
+              value: { existing: link.existingProviderOrderId, created: result.orderId },
+            },
+          );
+        }
+      }
 
       await resolveShipStationHandoffCommands(
         tx,
@@ -968,24 +998,372 @@ export function createShipStationPushHandlers(
       if (opts.overrideReview) {
         // The operator explicitly resolved the review by re-pushing; clear the
         // flag so the shipment leaves the SHIPMENT_REQUIRES_REVIEW bucket
-        // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md P2).
-        await clearOutboundShipmentReviewFlagByReasonInWms(tx, {
-          shipmentId,
-          updatedAt: now,
-        });
+        // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md P2). Only when the push actually
+        // re-queued the row: a row that stopped mid-flight is handled, and
+        // flagged if needed, below.
+        if (queued) {
+          await clearOutboundShipmentReviewFlagByReasonInWms(tx, {
+            shipmentId,
+            updatedAt: now,
+          });
+        }
       }
     });
+    if (!queued) {
+      await stopProviderOrderForStoppedShipment(
+        shipmentId,
+        shipmentRow.order_id,
+        result.orderId,
+        pushedOwnOrder,
+      );
+      return { shipstationOrderId: result.orderId, orderKey };
+    }
     await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);
 
-    console.log(
-      `[ShipStation] ${isUpdate ? "Updated" : "Pushed"} WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})`,
-    );
+    platformLogger.info("oms.shipstation_push_shipment", { message: `[ShipStation] ${isUpdate ? "Updated" : "Pushed"} WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})` });
 
     return { shipstationOrderId: result.orderId, orderKey };
   }
 
+  /**
+   * A push landed after the shipment stopped being pushable. Runs under the
+   * push lock. A cancelled shipment must not stay live in ShipStation, so the
+   * provider order is cancelled now. Any outcome that is not a proven stop is
+   * flagged for review (never swallowed); the queue sweeper retries the
+   * cancel for cancelled shipments, so a transient failure here self-heals.
+   */
+  async function stopProviderOrderForStoppedShipment(
+    shipmentId: number,
+    wmsOrderId: number,
+    providerOrderId: number,
+    pushedOwnOrder: boolean,
+  ): Promise<void> {
+    const current: any = await db.execute(sql`
+      SELECT status FROM wms.outbound_shipments WHERE id = ${shipmentId} LIMIT 1
+    `);
+    const status = String(current?.rows?.[0]?.status ?? "missing");
+    const fields = {
+      action: "push_landed_after_shipment_stopped",
+      wms_shipment_id: shipmentId,
+      wms_order_id: wmsOrderId,
+      engine_ref: providerOrderId,
+      before: { status },
+    };
+
+    if (status !== "cancelled" || !pushedOwnOrder) {
+      // Shipped/returned/lost while a push was in flight, or the provider order
+      // is a duplicate sibling's: nothing to cancel safely without a human.
+      await setOutboundShipmentReviewFlagInWms(db, shipmentId, SS_REVIEW_PUSH_AFTER_TERMINAL);
+      platformLogger.error("shipstation.push", { ...fields, outcome: "flagged_for_review",
+        error_code: SS_REVIEW_PUSH_AFTER_TERMINAL });
+      return;
+    }
+
+    const sharing = await countOpenShipmentsSharingShipStationOrderInWms(db, {
+      shipmentId,
+      providerOrderId,
+      orderKey: shipStationOrderKeyForShipment(shipmentId),
+    });
+    if (sharing > 0) {
+      await setOutboundShipmentReviewFlagInWms(db, shipmentId, SS_REVIEW_PUSH_AFTER_TERMINAL);
+      platformLogger.error("shipstation.push", { ...fields, outcome: "flagged_for_review",
+        error_code: SS_REVIEW_PUSH_AFTER_TERMINAL, shared_with_open_shipments: sharing });
+      return;
+    }
+
+    if (!cancelProviderOrder) {
+      await setOutboundShipmentReviewFlagInWms(db, shipmentId, SS_REVIEW_CANCEL_UNVERIFIED);
+      platformLogger.error("shipstation.push", { ...fields, outcome: "cancel_unavailable",
+        error_code: SS_REVIEW_CANCEL_UNVERIFIED });
+      return;
+    }
+
+    try {
+      const cancel = await cancelProviderOrder(providerOrderId);
+      if (cancel.state === "cancelled" || cancel.state === "already_cancelled") {
+        platformLogger.warn("shipstation.push", { ...fields, outcome: "provider_order_cancelled",
+          after: { status, provider_state: cancel.state } });
+        return;
+      }
+      // already_shipped, or not_found (getOrderById could not read it): not proven stopped.
+      await setOutboundShipmentReviewFlagInWms(db, shipmentId, SS_REVIEW_CANCEL_UNVERIFIED);
+      platformLogger.error("shipstation.push", { ...fields, outcome: "flagged_for_review",
+        error_code: SS_REVIEW_CANCEL_UNVERIFIED, after: { status, provider_state: cancel.state } });
+    } catch (err: any) {
+      await setOutboundShipmentReviewFlagInWms(db, shipmentId, SS_REVIEW_CANCEL_UNVERIFIED);
+      platformLogger.error("shipstation.push", { ...fields, outcome: "cancel_failed",
+        error_code: SS_REVIEW_CANCEL_UNVERIFIED, error: err?.message ?? String(err) });
+    }
+  }
+
+  /**
+   * Payload-driven ShipStation upsert (`P3.3`).
+   *
+   * Consumes the WMS-assembled `ShipmentPushPayload` directly instead of
+   * re-querying `wms.orders` and `wms.outbound_shipment_items`, while still
+   * acquiring the per-shipment session advisory lock, verifying OMS final-order
+   * blockers and concurrent/sibling adoption, enforcing cancelled-order
+   * resurrection guards, and writing back canonical + legacy engine linkage.
+   */
+  async function upsertShipmentFromPayload(
+    pushPayload: ShipmentPushPayload,
+  ): Promise<{ shipstationOrderId: number; orderKey: string; alreadyExisted: boolean }> {
+    const shipmentId = pushPayload.shipmentId;
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new ShipStationPushError("shipmentId must be a positive integer", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "shipmentId",
+        value: shipmentId,
+      });
+    }
+
+    return withShipmentPushLock(shipmentId, async () => {
+      const overrideReview = pushPayload.overrideReview === true;
+      const isReplacementShipment = pushPayload.isReplacementShipment === true;
+
+      validateShipmentForPush(
+        { id: shipmentId },
+        {
+          amount_paid_cents: pushPayload.financials.amountPaidCents,
+          tax_cents: pushPayload.financials.taxCents,
+          shipping_cents: pushPayload.financials.shippingCents,
+          discount_cents: pushPayload.financials.discountCents,
+          total_cents: pushPayload.financials.totalCents,
+          non_shipping_total_cents: pushPayload.financials.nonShippingTotalCents,
+          is_partial_shipment: pushPayload.isPartialShipment,
+          shipping_address: pushPayload.shippingAddress.street1,
+          shipping_country: pushPayload.shippingAddress.country,
+          customer_email: pushPayload.customer.email,
+        },
+        pushPayload.items.map((item) => ({
+          qty: item.quantity,
+          unit_price_cents: item.unitPriceCents,
+        })),
+      );
+
+      const omsBlocker = await getOmsFinalOrderBlockerForShipmentPush(
+        pushPayload.fulfillmentOrderId,
+        false,
+      );
+      if (
+        omsBlocker.blocked &&
+        !(isReplacementShipment && omsBlocker.reason === "oms_fully_shipped")
+      ) {
+        throw new ShipStationPushError(
+          `OMS order ${pushPayload.fulfillmentOrderId} is ${omsBlocker.reason} — refusing to push cancelled/refunded order to ShipStation`,
+          {
+            code: SS_PUSH_INVALID_SHIPMENT,
+            shipmentId,
+            field: "oms.status",
+            value: omsBlocker.reason,
+          },
+        );
+      }
+
+      const existingOrderRefNum = pushPayload.existingEngineRef?.engineOrderRef
+        ? Number(pushPayload.existingEngineRef.engineOrderRef)
+        : null;
+      let ssOrderIdForPayload: number | null =
+        existingOrderRefNum != null &&
+        Number.isInteger(existingOrderRefNum) &&
+        existingOrderRefNum > 0
+          ? existingOrderRefNum
+          : null;
+      let orderKeyOverride: string | null = null;
+
+      if (!ssOrderIdForPayload) {
+        const dedupCheck: any = await db.execute(sql`
+          SELECT id, shipstation_order_id, shipstation_order_key,
+                 (id = ${shipmentId}) AS is_self
+          FROM wms.outbound_shipments
+          WHERE order_id = ${pushPayload.orderId}
+            AND shipstation_order_id IS NOT NULL
+            AND (id = ${shipmentId} OR status NOT IN ('voided', 'cancelled'))
+          ORDER BY (id = ${shipmentId}) DESC, id
+          LIMIT 1
+        `);
+        const hit = dedupCheck?.rows?.[0];
+        const hitSsId = Number(hit?.shipstation_order_id ?? 0);
+        const isSelf =
+          hit?.is_self === true || hit?.is_self === "t" || Number(hit?.id) === shipmentId;
+        if (
+          Number.isInteger(hitSsId) &&
+          hitSsId > 0 &&
+          (isSelf || (!isReplacementShipment && !pushPayload.isPartialShipment))
+        ) {
+          ssOrderIdForPayload = hitSsId;
+          if (!isSelf && typeof hit?.shipstation_order_key === "string") {
+            orderKeyOverride = hit.shipstation_order_key;
+          }
+        }
+      }
+
+      const isUpdate = ssOrderIdForPayload != null;
+      if (isUpdate && !overrideReview) {
+        const liveSsOrder = await getOrderById(ssOrderIdForPayload as number);
+        if (liveSsOrder?.orderStatus === "cancelled") {
+          throw new ShipStationPushError(
+            "ShipStation order is cancelled — refusing to resurrect it via push",
+            {
+              code: SS_PUSH_INVALID_SHIPMENT,
+              shipmentId,
+              field: "ss_order.cancelled",
+              value: ssOrderIdForPayload,
+            },
+          );
+        }
+      }
+
+      const routing = await resolveShipStationIds(db, {
+        channelId: pushPayload.channelId,
+        warehouseId: pushPayload.warehouseId,
+      });
+      const packInstruction = await maybeGetPackInstruction(
+        pushPayload.orderId,
+        shipmentId,
+      );
+
+      const serialized = serializeShipmentPushPayloadToShipStationOrder(pushPayload, {
+        routing,
+        packInstruction,
+        orderKeyOverride,
+        providerOrderId: ssOrderIdForPayload,
+      });
+      const { orderKey, orderNumber, body } = serialized;
+
+      if (!ssOrderIdForPayload) {
+        const existingSsOrder = await getOrderByKey(orderKey, orderNumber);
+        if (existingSsOrder) {
+          const proof = proveShipStationOrderAdoption(
+            {
+              shipmentId,
+              wmsOrderId: pushPayload.orderId,
+              orderNumber,
+              items: pushPayload.items.map((item) => ({
+                lineItemKey: `wms-item-${item.shipmentItemId ?? item.itemId}`,
+                quantity: item.quantity,
+              })),
+            },
+            existingSsOrder,
+          );
+          if (!proof.matched) {
+            throw new ShipStationPushError(
+              `ShipStation order ${existingSsOrder.orderId ?? "unknown"} cannot be adopted for shipment ${shipmentId}: ${proof.reason}`,
+              {
+                code: SS_PUSH_INVALID_SHIPMENT,
+                shipmentId,
+                field: "provider_order_identity",
+                value: proof.reason,
+              },
+            );
+          }
+
+          const adoption = await db.transaction((tx: any) =>
+            adoptProvenShipStationOrder(tx, {
+              shipmentId,
+              providerOrderId: proof.providerOrderId,
+              orderKey: proof.orderKey,
+            }),
+          );
+          if (adoption.state !== "linked") {
+            throw new ShipStationPushError(
+              `ShipStation order ${proof.providerOrderId} adoption failed for shipment ${shipmentId}: ${adoption.state}`,
+              {
+                code: SS_PUSH_INVALID_SHIPMENT,
+                shipmentId,
+                field: "provider_order_linkage",
+                value: adoption,
+              },
+            );
+          }
+
+          await recomputeOrderStatusFromShipments(db, adoption.wmsOrderId);
+          return {
+            shipstationOrderId: proof.providerOrderId,
+            orderKey: proof.orderKey,
+            alreadyExisted: true,
+          };
+        }
+      }
+
+      const result = await apiRequest<ShipStationCreateOrderResponse>(
+        "POST",
+        "/orders/createorder",
+        body,
+        { replaySafe: Boolean(body.orderId) },
+      );
+
+      const now = new Date();
+      let queued = false;
+      const pushedOwnOrder = orderKey === shipStationOrderKeyForShipment(shipmentId);
+      await db.transaction(async (tx: any) => {
+        queued = await markOutboundShipmentQueuedAfterShipStationPushInWms(tx, {
+          shipmentId,
+          shipstationOrderId: result.orderId,
+          orderKey,
+          now,
+        });
+        if (!queued && pushedOwnOrder) {
+          const link = await linkShipStationOrderIdentityOnOutboundShipmentInWms(tx, {
+            shipmentId,
+            providerOrderId: result.orderId,
+            orderKey,
+            now,
+          });
+          if (!link.linked) {
+            throw new ShipStationPushError(
+              `shipment ${shipmentId} is linked to ShipStation order ${link.existingProviderOrderId}; push created ${result.orderId}`,
+              {
+                code: SS_PUSH_INVALID_SHIPMENT,
+                shipmentId,
+                field: "provider_order_linkage",
+                value: { existing: link.existingProviderOrderId, created: result.orderId },
+              },
+            );
+          }
+        }
+
+        await resolveShipStationHandoffCommands(
+          tx,
+          shipmentId,
+          "provider handoff persisted",
+        );
+
+        if (overrideReview && queued) {
+          await clearOutboundShipmentReviewFlagByReasonInWms(tx, {
+            shipmentId,
+            updatedAt: now,
+          });
+        }
+      });
+
+      if (!queued) {
+        await stopProviderOrderForStoppedShipment(
+          shipmentId,
+          pushPayload.orderId,
+          result.orderId,
+          pushedOwnOrder,
+        );
+        return {
+          shipstationOrderId: result.orderId,
+          orderKey,
+          alreadyExisted: isUpdate,
+        };
+      }
+
+      await recomputeOrderStatusFromShipments(db, pushPayload.orderId);
+      return {
+        shipstationOrderId: result.orderId,
+        orderKey,
+        alreadyExisted: isUpdate,
+      };
+    });
+  }
+
   return {
     pushShipment,
+    upsertShipmentFromPayload,
     appendShipmentItems,
     setShipmentItemQuantity,
   };

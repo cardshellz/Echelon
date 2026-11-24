@@ -1,11 +1,11 @@
 import type {
   MarketplaceListingProviderAccountClaim,
   MarketplaceListingProviderAccountClaimer,
-} from "../../marketplace-listings/application/registration-ports";
-import type { ProviderAccountClaimResult } from "../../marketplace-listings/application/registration-dtos";
-import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/domain/listing-registration-plan";
-import { sha256Canonical } from "../../marketplace-listings/domain/canonical-hash";
-import { MarketplaceListingRegistrationError } from "../../marketplace-listings/domain/registration-errors";
+} from "../../marketplace-listings/registration-ports.api";
+import type { ProviderAccountClaimResult } from "../../marketplace-listings/registration-dtos.api";
+import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/listing-registration-plan.api";
+import { sha256Canonical } from "../../marketplace-listings/canonical-hash.api";
+import { MarketplaceListingRegistrationError } from "../../marketplace-listings/registration-errors.api";
 import type { DropshipStoreConnectionService } from "./dropship-store-connection-service";
 
 export class DropshipMarketplaceRegistrationAccountClaimer

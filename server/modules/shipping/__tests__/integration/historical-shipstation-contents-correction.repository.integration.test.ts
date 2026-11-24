@@ -5,9 +5,9 @@ import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { PgHistoricalShipStationContentsCorrectionRepository } from "../../historical-shipstation-contents-correction.repository";
-import { planHistoricalShipStationContentsCorrection } from "../../historical-shipstation-contents-correction.domain";
-import { HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE } from "../../historical-shipstation-contents-review.service";
+import { PgHistoricalShipStationContentsCorrectionRepository } from "../../infrastructure/historical-shipstation-contents-correction.repository";
+import { planHistoricalShipStationContentsCorrection } from "../../domain/historical-shipstation-contents-correction.domain";
+import { HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE } from "../../application/historical-shipstation-contents-review.service";
 import { shipmentQuantityEvidenceFixtureSql } from "../fixtures/shipment-quantity-evidence.fixture";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;

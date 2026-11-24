@@ -3,11 +3,11 @@ import type {
   DropshipAtpProvider,
   DropshipAtpSnapshot,
 } from "../application/dropship-selection-atp-service";
-import { isAllocationEngineError } from "../../channels/allocation-engine.errors";
+import { isAllocationEngineError } from "../../channels/allocation-engine.errors.api";
 import {
   InventoryChannelQuantityRuntimeError,
   type InventoryChannelQuantityRuntimeService,
-} from "../../inventory-planning/application/inventory-channel-quantity-runtime.service";
+} from "../../inventory-planning/inventory-channel-quantity-runtime.service.api";
 
 /**
  * The slice of a Channel Allocation result the Dropship program consumes.

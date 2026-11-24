@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ReservationServiceContract } from "../../../channels/reservation.service";
+import type { ReservationServiceContract } from "../../../channels/application/reservation.service";
 
 import {
   admitInitialProviderShipmentAfterInventoryAuthority,
@@ -10,7 +10,8 @@ import {
   requireRoutedWarehouseId,
   WmsShipmentPrerequisiteError,
   WmsSyncService,
-} from "../../wms-sync.service";
+} from "../../application/wms-sync.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 interface ReservationPrerequisiteHarness {
   reserveBeforeShipmentProcessing(
@@ -21,7 +22,7 @@ interface ReservationPrerequisiteHarness {
 }
 
 const WMS_SYNC_SOURCE = readFileSync(
-  resolve(__dirname, "../../wms-sync.service.ts"),
+  resolve(__dirname, "../../application/wms-sync.service.ts"),
   "utf8",
 );
 
@@ -119,7 +120,7 @@ describe("WMS shipment inventory prerequisites", () => {
   });
 
   it("keeps an explicit business shortfall eligible for discrepancy picking", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    spyLoggerJson("warn");
     const reservation = {
       orderId: 9902,
       canonicalClaimId: "71",
@@ -139,7 +140,7 @@ describe("WMS shipment inventory prerequisites", () => {
   });
 
   it("fails the sync when reservation authority throws instead of treating it as a shortfall", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
     const cause = Object.assign(new Error("runtime authority unavailable"), {
       code: "INVENTORY_RUNTIME_AUTHORITY_UNAVAILABLE",
     });
@@ -161,7 +162,7 @@ describe("WMS shipment inventory prerequisites", () => {
   it("lets an order whose line has bad catalog data reach ShipStation instead of retrying forever", async () => {
     // 2026-10-02: an unmapped graded-card line failed the whole-order claim on
     // every retry, so the order never got a ShipStation shipment.
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const warn = spyLoggerJson("warn");
     const dataError = Object.assign(new Error("A physical open order item SKU does not resolve to one active catalog variant."), {
       code: "ORDER_ITEM_VARIANT_MISSING",
     });
@@ -172,7 +173,7 @@ describe("WMS shipment inventory prerequisites", () => {
   });
 
   it("recognizes a bad-line error wrapped by the runtime boundary", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    spyLoggerJson("warn");
     const wrapped = Object.assign(new Error("reservation failed"), {
       cause: Object.assign(new Error("identity conflict"), { code: "ORDER_ITEM_VARIANT_IDENTITY_CONFLICT" }),
     });

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EbayMarketplaceListingConnector, type EbayListingConnectorDraft, type EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
-import { ebayListingPushFailure } from "../../ebay-listing-push.service";
+import { ebayListingPushFailure } from "../../application/ebay-listing-push.service";
 
 async function fixture() {
   const provider = syncProviderFixture();

@@ -1,5 +1,5 @@
 import { readIntegerMills } from "@shared/money-read";
-import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/application/reserved-inventory-transfer.port";
+import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/reserved-inventory-transfer.port.api";
 import { repointCanonicalTransferPickLines } from "../../wms/order-intake-and-items.api";
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
 import { assertShipmentNotRetired } from "../../inventory-planning/cutover-retired-work.api";
@@ -12,15 +12,15 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { IInventoryStorage } from "../infrastructure/inventory.repository";
-import type { InventoryLotService } from "../lots.service";
-import type { COGSService } from "../cogs.service";
+import type { InventoryLotService } from "./lots.service";
+import type { COGSService } from "./cogs.service";
 import { productVariants } from "@shared/schema";
 import { warehouses, warehouseLocations, channelConnections } from "../../../storage/base";
 import { eq, and } from "drizzle-orm";
 import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction } from "../../../../shared/schema";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { AppError, IntegrityError, ValidationError } from "../../../../shared/errors";
-import { resolveCost } from "../cost-resolver";
+import { resolveCost } from "./cost-resolver";
 import { centsToMills, millsToCents } from "../../../../shared/utils/money";
 import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-intake-and-items.api";
 import { allocateBuildCostLayers } from "../domain/build.domain";
@@ -32,6 +32,7 @@ import {
   insertVirtual3plWarehouseLocationInWarehouse,
   updateWarehouseInventorySyncStatusInWarehouse,
 } from "../../warehouse/cross-module-warehouse-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 export class FreezeViolationError extends AppError {
   constructor(locationId: number) {
@@ -279,8 +280,7 @@ export class InventoryUseCases {
 
   triggerNotifyChange(productVariantId: number, triggeredBy: string): void {
     void this.publishInventoryChange(productVariantId, triggeredBy).catch(error => {
-      console.error(JSON.stringify({ event: "inventory_change_notification_failed", productVariantId, triggeredBy,
-        message: error instanceof Error ? error.message : String(error) }));
+      logger.error("inventory_change_notification_failed", { event: "inventory_change_notification_failed", productVariantId, triggeredBy, message: error instanceof Error ? error.message : String(error) });
     });
   }
 
@@ -2664,15 +2664,20 @@ export class InventoryUseCases {
           try {
             const currentLevel = await this.storage.getInventoryLevelByLocationAndVariant(virtualLocationId, variantId);
             const oldQty = currentLevel?.variantQty ?? 0;
-            const delta = qty - oldQty;
+            if (qty < 0) {
+              result.errors.push(
+                `Variant ${variantId}: 3PL reported negative quantity (${qty}); clamped to 0 and flagged shortfall`,
+              );
+            }
+            const clampedQty = Math.max(0, qty);
+            const delta = clampedQty - oldQty;
 
             if (delta !== 0) {
               await this.adjustInventory({
                 productVariantId: variantId,
                 warehouseLocationId: virtualLocationId,
                 qtyDelta: delta,
-                reason: `3PL sync (set to ${qty}, delta ${delta > 0 ? "+" : ""}${delta})`,
-                allowNegative: true,
+                reason: `3PL sync (set to ${clampedQty}${qty < 0 ? ` from raw ${qty}` : ""}, delta ${delta > 0 ? "+" : ""}${delta})`,
               });
             }
             result.synced++;

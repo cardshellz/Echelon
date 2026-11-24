@@ -9,13 +9,13 @@ import {
 } from "../configure-wms-integrity-audit-credential";
 import {
   SHIPMENT_LIFECYCLE_SHADOW_REQUIRED_RELATIONS,
-} from "../../server/modules/shipping/shipment-lifecycle-shadow-audit.repository";
+} from "../../server/modules/shipping/infrastructure/shipment-lifecycle-shadow-audit.repository";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
-} from "../../server/modules/shipping/package-allocation-authority-discovery.query";
+} from "../../server/modules/shipping/infrastructure/package-allocation-authority-discovery.query";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
-} from "../../server/modules/shipping/package-allocation-ledger.repository";
+} from "../../server/modules/shipping/infrastructure/package-allocation-ledger.repository";
 
 const REMOTE_URL = "postgresql://audit:test-password@db.example.com:5432/echelon";
 

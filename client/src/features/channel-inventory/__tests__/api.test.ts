@@ -79,7 +79,7 @@ describe("endpoints match the server routes", () => {
   const routes = readFileSync("server/modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes.ts", "utf8");
   const globalControl = readFileSync("server/modules/inventory-planning/interfaces/http/inventory-publication-global-control.routes.ts", "utf8");
   const shadow = readFileSync("server/modules/inventory-planning/interfaces/http/inventory-availability-shadow.routes.ts", "utf8");
-  const channels = readFileSync("server/modules/channels/channels.routes.ts", "utf8");
+  const channels = readFileSync("server/modules/channels/interfaces/http/channels.routes.ts", "utf8");
 
   it("uses only registered paths", () => {
     for (const path of [ENDPOINTS.view, ENDPOINTS.preview, ENDPOINTS.policyDraft, ENDPOINTS.sourceBindingDraft,

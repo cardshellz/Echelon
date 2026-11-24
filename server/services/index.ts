@@ -40,7 +40,7 @@ import { createWalmartStockLinkAdapter } from "../modules/channels/adapters/walm
 import { createWalmartStockLinkSource, createWalmartStockLinkWriter } from "../modules/channels/infrastructure/walmart-stock-link-source";
 import { createChannelEbayStockLinkAdapter } from "../modules/channels/adapters/ebay/ebay-stock-link.adapter";
 import { createChannelEbayStockLinkSource, createChannelEbayStockLinkWriter } from "../modules/channels/infrastructure/ebay-stock-link-source";
-import { requestStockLinkChecks } from "../modules/inventory-planning/quantity-publication";
+import { requestStockLinkChecks } from "../modules/inventory-planning/quantity-publication.api";
 import { createListingUpdateService } from "../listing-update.composition";
 import { InventoryPublicationInitialScopeService } from "../modules/inventory-planning/application/inventory-publication-initial-scope.service";
 import { PostgresInitialPublicationScopeStore } from "../modules/inventory-planning/infrastructure/inventory-publication-initial-scope.repository";
@@ -63,7 +63,7 @@ import {
   createRecipeBuildPromiseService,
   type RecipeBuildPromiseService,
 } from "../modules/wms/assembly-and-packing.api";
-import { createChannelSyncService } from "../modules/channels/sync.service";
+import { createChannelSyncService } from "../modules/channels/application/sync.service";
 import { createReturnsService } from "../modules/orders/runtime-services.api";
 import { createFulfillmentRouterService } from "../modules/orders/runtime-services.api";
 import { createSLAMonitorService } from "../modules/orders/runtime-services.api";
@@ -83,9 +83,9 @@ import {
   createReceiveValidationService,
   createReceivingService,
 } from "../modules/procurement/runtime-services.api";
-import { createProductImportService } from "../modules/catalog/product-import.service";
-import { createChannelProductPushService } from "../modules/channels/product-push.service";
-import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
+import { createProductImportService } from "../modules/catalog/application/product-import.service";
+import { createChannelProductPushService } from "../modules/channels/application/product-push.service";
+import { createSyncSettingsService } from "../modules/channels/application/sync-settings.service";
 import { InventoryPublicationWorkCoordinator } from "../modules/inventory-planning/application/inventory-publication-work-coordinator.service";
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.api";
 import {
@@ -154,8 +154,8 @@ import {
 import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-transport.api";
 import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-provider-reconciliation.api";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client.api";
-import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
-import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source";
+import { ChannelIdentityService } from "../modules/channels/application/channel-identity.service";
+import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source.api";
 import { createStockLinkService } from "../modules/inventory-planning/infrastructure/stock-link.factory";
 import { randomUUID } from "node:crypto";
 import { ProductSyncWorkflowService } from "../modules/inventory-planning/application/product-sync-workflow.service";
@@ -163,7 +163,7 @@ import { PostgresProductSyncWorkflowStore } from "../modules/inventory-planning/
 import { InventoryProductSyncService } from "../modules/inventory-planning/application/inventory-product-sync.service";
 import { PostgresInventoryProductSyncStore } from "../modules/inventory-planning/infrastructure/inventory-product-sync.repository";
 import { stockLinkRunnerDisableReason } from "../modules/inventory-planning/infrastructure/stock-link-runner-switch";
-import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../modules/channels/channel-fulfillment-provider-clients.service";
+import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../modules/channels/application/channel-fulfillment-provider-clients.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.api";
 import { catalogStorage } from "../modules/catalog";
 import { warehouseStorage } from "../modules/warehouse";
@@ -172,19 +172,19 @@ import { ordersStorage } from "../modules/orders";
 import { channelsStorage } from "../modules/channels";
 import { procurementStorage } from "../modules/procurement";
 import { identityStorage } from "../modules/identity";
-import { createAllocationEngine } from "../modules/channels/allocation-engine.service";
-import { describeAllocationFailure } from "../modules/channels/allocation-engine.errors";
+import { createAllocationEngine } from "../modules/channels/application/allocation-engine.service";
+import { describeAllocationFailure } from "../modules/channels/domain/allocation-engine.errors";
 import { logger as platformLogger } from "../platform/observability/logger";
-import { createSourceLockService } from "../modules/channels/source-lock.service";
+import { createSourceLockService } from "../modules/channels/application/source-lock.service";
 import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
 import { WalmartChannelService } from "../modules/channels/adapters/walmart/walmart-channel.service";
 import { PostgresListingLifecycleRepository } from "../modules/marketplace-listings/infrastructure/pg-listing-lifecycle.repository";
 import { createListingLifecycleService } from "../listing-lifecycle.composition";
 import { assertArchivedMemberPublicationAllowed } from "../modules/marketplace-listings/infrastructure/pg-listing-member-lifecycle.repository";
 import { WalmartCatalogAdapter } from "../modules/channels/adapters/walmart/walmart-catalog.adapter";
-import { ChannelCatalogService } from "../modules/channels/channel-catalog.service";
-import { PostgresChannelCatalogRepository } from "../modules/channels/channel-catalog.repository";
-import { ChannelIdentityError } from "../modules/channels/channel-identity.domain";
+import { ChannelCatalogService } from "../modules/channels/application/channel-catalog.service";
+import { PostgresChannelCatalogRepository } from "../modules/channels/infrastructure/channel-catalog.repository";
+import { ChannelIdentityError } from "../modules/channels/domain/channel-identity.domain";
 import { WalmartConnectionRepository } from "../modules/channels/adapters/walmart/walmart-connection.repository";
 import { WalmartAdapter } from "../modules/channels/adapters/walmart/walmart.adapter";
 import { WalmartOrderPollService } from "../modules/channels/adapters/walmart/walmart-order-poll.service";
@@ -192,17 +192,17 @@ import { PostgresInventoryPublicationSupplyReader } from "../modules/inventory-p
 import { createWalmartFulfillmentExecutor } from "../modules/channels/adapters/walmart/walmart-fulfillment";
 import { AesGcmFulfillmentProviderCredentialCipher } from "../modules/shipping-engine/fulfillment-routing-and-connections.api";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
-import { ChannelEbayListingPhotoResolver } from "../modules/channels/ebay-listing-photos.service";
-import { createCatalogPublicImageUrl } from "../modules/catalog/catalog-public-image";
-import { ChannelAdapterRegistry } from "../modules/channels/channel-adapter.interface";
-import { ChannelInventoryPublicationTransportAdapter } from "../modules/channels/channel-inventory-publication-transport.adapter";
+import { ChannelEbayListingPhotoResolver } from "../modules/channels/application/ebay-listing-photos.service";
+import { createCatalogPublicImageUrl } from "../modules/catalog/domain/catalog-public-image";
+import { ChannelAdapterRegistry } from "../modules/channels/domain/channel-adapter.interface";
+import { ChannelInventoryPublicationTransportAdapter } from "../modules/channels/infrastructure/channel-inventory-publication-transport.adapter";
 import {
   ChannelShippingCapabilityRegistry,
   MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
-} from "../modules/channels/channel-shipping-capability.registry";
-import { createEchelonSyncOrchestrator } from "../modules/channels/echelon-sync-orchestrator.service";
+} from "../modules/channels/application/channel-shipping-capability.registry";
+import { createEchelonSyncOrchestrator } from "../modules/channels/application/echelon-sync-orchestrator.service";
 import { PostgresChannelQuantityPublicationCatchupRepository } from "../modules/channels/infrastructure/channel-quantity-publication-catchup.repository";
-import { createVariantAvailabilitySyncService } from "../modules/channels/variant-availability-sync.service";
+import { createVariantAvailabilitySyncService } from "../modules/channels/application/variant-availability-sync.service";
 import { InventoryPublicationOutboxService } from "../modules/inventory-planning/application/inventory-publication-outbox.service";
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { PostgresPublicationSelectionWork } from "../modules/inventory-planning/infrastructure/publication-selection-work.repository";
@@ -210,8 +210,8 @@ import { markPublicationProductsChanged } from "../modules/inventory-planning/in
 import { withChannelQuantityUpdates } from "../modules/inventory-planning/application/order-claim-channel-quantity";
 import { PostgresOrderClaimVariantReader } from "../modules/inventory-planning/infrastructure/order-claim-variant.reader";
 import { quantityPublicationAdmission, createQuantityPublicationCatchupService } from "../modules/inventory-planning/infrastructure/quantity-publication-runtime";
-import { EbayPublicationReconciliationService, ebayPublicationReconciliationRepository } from "../modules/inventory-planning/quantity-publication";
-import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sync";
+import { EbayPublicationReconciliationService, ebayPublicationReconciliationRepository } from "../modules/inventory-planning/quantity-publication.api";
+import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sync.api";
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
@@ -670,7 +670,7 @@ export function createServices(
   const shopifyLabelLifecycle = createShopifyLabelLifecycleService({
     repository: createShopifyLabelLifecycleRepository(db), providerClients: fulfillmentProviderClients,
     runExclusive: withAdvisoryLock, clock: { now: () => new Date() },
-    logger: { info: event => console.log(JSON.stringify(event)), error: event => console.error(JSON.stringify(event)) },
+    logger: { info: event => platformLogger.info("services.index", { detail: JSON.stringify(event) }), error: event => platformLogger.error("services.index", { error: JSON.stringify(event) }) },
   });
   const fulfillmentPush = createFulfillmentPushService(db, null, {
     runExclusive: withAdvisoryLock,
@@ -745,9 +745,9 @@ export function createServices(
         pool: databasePool,
         clock: systemCarrierTrackingClock,
         logger: {
-          info: (event) => console.log(JSON.stringify(event)),
-          warn: (event) => console.warn(JSON.stringify(event)),
-          error: (event) => console.error(JSON.stringify(event)),
+          info: (event) => platformLogger.info("services.index", { detail: JSON.stringify(event) }),
+          warn: (event) => platformLogger.warn("services.index", { detail: JSON.stringify(event) }),
+          error: (event) => platformLogger.error("services.index", { error: JSON.stringify(event) }),
         },
       }),
       reviewRepository: createPackageAllocationLabelCommercialReviewRepository(db),
@@ -918,8 +918,8 @@ export type ServiceRegistry = ReturnType<typeof createServices>;
 
 // Re-export factory functions for individual service creation
 export { createBreakAssemblyService, createReplenishmentService, createCycleCountService, createInventoryAlertService } from "../modules/inventory";
-export { createReservationService } from "../modules/channels/reservation.service";
-export { createChannelSyncService } from "../modules/channels/sync.service";
+export { createReservationService } from "../modules/channels/application/reservation.service";
+export { createChannelSyncService } from "../modules/channels/application/sync.service";
 export { createReturnsService } from "../modules/orders/runtime-services.api";
 export { createFulfillmentRouterService } from "../modules/orders/runtime-services.api";
 export { createSLAMonitorService } from "../modules/orders/runtime-services.api";
@@ -927,13 +927,13 @@ export { createPickingService } from "../modules/orders/runtime-services.api";
 export { createOrderCombiningService } from "../modules/orders/runtime-services.api";
 export { createOperationsDashboardService } from "../modules/orders/runtime-services.api";
 export { createReceivingService } from "../modules/procurement/runtime-services.api";
-export { createProductImportService } from "../modules/catalog/product-import.service";
-export { createChannelProductPushService } from "../modules/channels/product-push.service";
+export { createProductImportService } from "../modules/catalog/application/product-import.service";
+export { createChannelProductPushService } from "../modules/channels/application/product-push.service";
 
 // Re-export service types
 export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary, BreakResult, AssembleResult, ConversionPreview } from "../modules/inventory";
-export type { SyncResult } from "../modules/channels/sync.service";
-export type { ReservationResult } from "../modules/channels/reservation.service";
+export type { SyncResult } from "../modules/channels/application/sync.service";
+export type { ReservationResult } from "../modules/channels/application/reservation.service";
 export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "../modules/orders/runtime-services.api";
 export type { OrderRoutingContext, RoutingResult } from "../modules/orders/runtime-services.api";
 export type { SLAAlert, SLASummary } from "../modules/orders/runtime-services.api";
@@ -942,10 +942,10 @@ export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineRe
 export type { CycleCountUseCases as CycleCountService, CycleCountError, ApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "../modules/inventory";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "../modules/orders/runtime-services.api";
 export type { ReceivingService, ReceivingError } from "../modules/procurement/runtime-services.api";
-export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";
-export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "../modules/channels/product-push.service";
-export { createSyncSettingsService } from "../modules/channels/sync-settings.service";
-export type { SyncSettingsService, SyncLogWriteParams } from "../modules/channels/sync-settings.service";
+export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/application/product-import.service";
+export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "../modules/channels/application/product-push.service";
+export { createSyncSettingsService } from "../modules/channels/application/sync-settings.service";
+export type { SyncSettingsService, SyncLogWriteParams } from "../modules/channels/application/sync-settings.service";
 export { createBinAssignmentService } from "../modules/warehouse/bin-assignment.api";
 export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "../modules/warehouse/bin-assignment.api";
 export { createPurchasingService } from "../modules/procurement/runtime-services.api";
@@ -956,10 +956,10 @@ export { createRecommendationPoHandoffService } from "../modules/procurement/pla
 export type { RecommendationPoHandoffService, RecommendationPoHandoffError } from "../modules/procurement/planning-and-pipeline-jobs.api";
 export { createShipmentTrackingService } from "../modules/procurement/runtime-services.api";
 export type { ShipmentTrackingService, ShipmentTrackingError } from "../modules/procurement/runtime-services.api";
-export { createInventoryLotService } from "../modules/inventory/lots.service";
-export type { InventoryLotService } from "../modules/inventory/lots.service";
-export { createCOGSService } from "../modules/inventory/cogs.service";
-export type { COGSService, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/cogs.service";
+export { createInventoryLotService } from "../modules/inventory/application/lots.service";
+export type { InventoryLotService } from "../modules/inventory/application/lots.service";
+export { createCOGSService } from "../modules/inventory/application/cogs.service";
+export type { COGSService, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/application/cogs.service";
 export { createShipStationService } from "../modules/oms/shipstation-execution.api";
 export type { ShipStationService } from "../modules/oms/shipstation-execution.api";
 export type { DrizzleDb } from "../db";

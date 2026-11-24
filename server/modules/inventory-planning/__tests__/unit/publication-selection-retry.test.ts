@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { retryPublicationSelectionWrite } from "../../publication-selection-retry";
+import { retryPublicationSelectionWrite } from "../../application/publication-selection-retry";
 
 const busy = () => Object.assign(new Error("PUBLICATION_SELECTION_BUSY"), { code: "55P03" });
 describe("atomic publication selection write retries", () => {

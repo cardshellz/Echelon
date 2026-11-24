@@ -11,8 +11,8 @@ const tables = [schema.vendors, schema.vendorInvoices, schema.supplierCredits, s
   ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseOrders, schema.vendorInvoicePoLinks, schema.apPayments, schema.apPaymentAllocations];
 databaseTests.sequential("AP work lists with real PostgreSQL", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let ownsSchema = false;
-  let repository: typeof import("../../ap-work-list.repository");
-  let poService: typeof import("../../purchase-order-work-list.service");
+  let repository: typeof import("../../infrastructure/ap-work-list.repository");
+  let poService: typeof import("../../application/purchase-order-work-list.service");
   const now = new Date("2026-10-18T12:00:00Z");
   let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
@@ -26,8 +26,8 @@ databaseTests.sequential("AP work lists with real PostgreSQL", () => {
     if (process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL) throw new Error("Unexpected application database URL");
     const dbModule = await import("../../../../db"); modulePool = dbModule.pool;
     modulePool.query = pool.query.bind(pool) as any; modulePool.connect = pool.connect.bind(pool) as any;
-    repository = await import("../../ap-work-list.repository");
-    poService = await import("../../purchase-order-work-list.service");
+    repository = await import("../../infrastructure/ap-work-list.repository");
+    poService = await import("../../application/purchase-order-work-list.service");
   });
   beforeEach(async () => {
     await pool.query(`TRUNCATE ${tables.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);

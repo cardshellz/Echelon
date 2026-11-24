@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { requireAssemblyOrderAuthority } from "../../assembly-handoff-authority";
+import { requireAssemblyOrderAuthority } from "../../application/assembly-handoff-authority";
 
 const input = { orderId: 70, orderItemId: 71, actorId: "picker", action: "handoff" as const };
 const row = { warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "picker", item_on_hold: false, item_status: "pending", requires_shipping: 1 };

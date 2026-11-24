@@ -4,7 +4,7 @@ import { logger } from "../../../platform/observability/logger";
 import {
   createDropshipEbayQuantityRequestAdmission,
   quantityProviderResponseRecovery,
-} from "../../inventory-planning/quantity-publication";
+} from "../../inventory-planning/quantity-publication.api";
 import { DropshipListingEndService, type ListingEndJobLog } from "../application/dropship-listing-end-service";
 import { systemDropshipListingPreviewClock } from "../application/dropship-listing-preview-service";
 import { DropshipEbayListingEndAdapter } from "./dropship-ebay-listing-end.adapter";

@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const schedulerSource = fs.readFileSync(
-  resolve(__dirname, "../../fulfillment-sweeper.scheduler.ts"),
+  resolve(__dirname, "../../application/fulfillment-sweeper.scheduler.ts"),
   "utf8",
 );
 const operatorSource = fs.readFileSync(

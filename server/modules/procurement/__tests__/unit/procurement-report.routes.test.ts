@@ -26,7 +26,7 @@ vi.mock("../../../../routes/middleware", () => {
 
 vi.mock("../..", () => ({ procurementStorage: mocks.storage }));
 
-import { registerProcurementReportRoutes } from "../../procurement-report.routes";
+import { registerProcurementReportRoutes } from "../../interfaces/http/procurement-report.routes";
 
 function buildApp(services: Record<string, any> = {}): Express {
   const app = express();

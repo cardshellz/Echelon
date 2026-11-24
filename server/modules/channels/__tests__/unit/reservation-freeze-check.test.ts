@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createReservationService } from "../../reservation.service";
+import { createReservationService } from "../../application/reservation.service";
 
 /**
  * Phase 3 (H1): reserveForOrder must skip frozen bins when selecting

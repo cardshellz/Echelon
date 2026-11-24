@@ -1,4 +1,4 @@
-import { CostEvidenceError, costInteger } from "../../inventory/infrastructure/cost-evidence-values";
+import { CostEvidenceError, costInteger } from "../../inventory/cost-evidence-values.api";
 import type { SupplierCreditSourceEvidence } from "./supplier-credit-source";
 
 /** Unaccepted returns cannot reduce an accepted receipt's price. Their exact

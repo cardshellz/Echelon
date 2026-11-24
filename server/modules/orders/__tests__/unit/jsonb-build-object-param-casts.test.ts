@@ -81,9 +81,9 @@ describe("jsonb_build_object parameter casts (orders module)", () => {
   });
 
   it("the exception-supersede UPDATE carries the specific casts (#59825)", () => {
-    const pickingSrc = readFileSync(join(ORDERS_DIR, "picking.use-cases.ts"), "utf8");
+    const pickingSrc = readFileSync(join(ORDERS_DIR, "application/picking.use-cases.ts"), "utf8");
     expect(pickingSrc).toContain("supersedePriorBlockingAllocationExceptionsInWms(");
-    const repoSrc = readFileSync(join(WMS_DIR, "allocation-exceptions-mutations.repository.ts"), "utf8");
+    const repoSrc = readFileSync(join(WMS_DIR, "infrastructure/allocation-exceptions-mutations.repository.ts"), "utf8");
     expect(repoSrc).toContain("'supersededAt', ${now}::timestamptz");
     expect(repoSrc).toContain("'supersededExceptionType', ${params.exceptionType}::text");
   });

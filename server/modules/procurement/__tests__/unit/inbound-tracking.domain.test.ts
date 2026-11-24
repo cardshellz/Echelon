@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { inboundTrackingConfigSchema, saveInboundTrackingSchema } from "@shared/procurement/inbound-tracking";
-import { acceptsTrackingSnapshot, parseSeaRatesTracking, parseShipStationInboundTracking, trackingDate, trackingFingerprint, trackingRetryDelay } from "../../inbound-tracking.domain";
+import { acceptsTrackingSnapshot, parseSeaRatesTracking, parseShipStationInboundTracking, trackingDate, trackingFingerprint, trackingRetryDelay } from "../../domain/inbound-tracking.domain";
 import { oceanConfig, oceanPayload, parcelConfig, parcelPayload } from "./inbound-tracking.fixtures";
 describe("inbound tracking evidence normalization", () => {
   it("preserves carrier dates, explicit estimates and distinct port/AIS timestamp provenance", () => {

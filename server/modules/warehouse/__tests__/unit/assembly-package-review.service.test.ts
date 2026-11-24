@@ -1,11 +1,11 @@
 import type { PoolClient } from "pg";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AssemblyPackageReviewService } from "../../work/application/assembly-package-review.service";
-import { readOrderPackingSources } from "../../../wms/packing-source-reader";
-import { readObservedPackagesForSources } from "../../../shipping/package-allocation-ledger.repository";
+import { readOrderPackingSources } from "../../../wms/infrastructure/packing-source-reader";
+import { readObservedPackagesForSources } from "../../../shipping/infrastructure/package-allocation-ledger.repository";
 import { task } from "../assembly-work.fixture";
-vi.mock("../../../wms/packing-source-reader", () => ({ readOrderPackingSources: vi.fn() }));
-vi.mock("../../../shipping/package-allocation-ledger.repository", () => ({ readObservedPackagesForSources: vi.fn() }));
+vi.mock("../../../wms/infrastructure/packing-source-reader", () => ({ readOrderPackingSources: vi.fn() }));
+vi.mock("../../../shipping/infrastructure/package-allocation-ledger.repository", () => ({ readObservedPackagesForSources: vi.fn() }));
 function harness() {
   const query = vi.fn(async (_sql: string) => ({ rows: [] }));
   const release = vi.fn();

@@ -22,6 +22,7 @@ import { PostgresReturnCaseAdminStore } from "../../infrastructure/return-case.r
 import { PostgresOpenReturnCaseStore } from "../../infrastructure/open-return-case.repository";
 import { PostgresReturnCaseOperationStore } from "../../infrastructure/return-case-operation.repository";
 import { createReturnCaseFinancialServiceFromEnv } from "../../infrastructure/return-case-financial.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 const listQuerySchema = z.object({
   search: z.string().trim().max(160).optional().transform((value) => value || null),
@@ -448,10 +449,6 @@ function sendError(res: Response, error: unknown, fallbackCode: string, fallback
       error: { code: error.code, message: error.message, context: error.context },
     });
   }
-  console.error(JSON.stringify({
-    code: fallbackCode,
-    message: fallbackMessage,
-    context: { error: error instanceof Error ? error.message : String(error) },
-  }));
+  logger.error("returns.return_case_admin_routes", { code: fallbackCode, message: fallbackMessage, context: { error: error instanceof Error ? error.message : String(error) } });
   return res.status(500).json({ error: { code: fallbackCode, message: fallbackMessage } });
 }

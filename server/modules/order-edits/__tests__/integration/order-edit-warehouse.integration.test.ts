@@ -40,13 +40,13 @@ import type { CanonicalAvailabilityReservationStatusProjection } from "@shared/t
 import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
 import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
 import { serviceHarness } from "../fixtures/order-edit-service.fixture";
-import { createShipStationService } from "../../../oms/shipstation.service";
+import { createShipStationService } from "../../../oms/application/shipstation.service";
 import { registerStoppedRefundDeferredShipment } from "../../infrastructure/order-edit-deferred-shipment";
 import { sql } from "drizzle-orm";
-import { OrderEditPaidProjection } from "../../../oms/order-edit-paid-projection";
+import { OrderEditPaidProjection } from "../../../oms/application/order-edit-paid-projection";
 import { paidRewardFixture } from "../fixtures/order-edit-paid-reward.fixture";
 import { settledRefundEditFixture } from "../fixtures/settled-refund-edit.fixture";
-import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../../orders/cancel-wms-order";
+import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../../orders/application/cancel-wms-order";
 import { OrderCancellationService } from "../../../customer-account/application/order-cancellation.service";
 import { PostgresCancellationRefundProgressReader } from "../../../customer-account/infrastructure/cancellation-refund-progress.reader";
 import { OrderEditProviderError } from "../../application/order-edit-provider";

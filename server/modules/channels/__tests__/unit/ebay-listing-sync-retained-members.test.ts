@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { captureExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
-import { buildEbayRouteListingDraft } from "../../ebay-listing-draft";
+import { captureExistingEbayListingIdentity } from "../../application/ebay-existing-listing-identity";
+import { buildEbayRouteListingDraft } from "../../application/ebay-listing-draft";
 import { EbayMarketplaceListingConnector, type EbayListingLifecycleClient } from "../../listing-connectors/ebay-listing.connector";
 import { syncProviderFixture, publishedContentFixture } from "../fixtures/ebay-listing-sync.fixture";
 import type { EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";

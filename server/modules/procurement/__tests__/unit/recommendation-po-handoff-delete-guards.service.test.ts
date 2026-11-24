@@ -7,7 +7,7 @@ import {
   purchaseOrders,
   purchasingRecommendationPoHandoffs,
 } from "@shared/schema";
-import { createPurchasingService } from "../../purchasing.service";
+import { createPurchasingService } from "../../application/purchasing.service";
 
 const VERSION = new Date("2026-07-13T12:00:00.000Z");
 

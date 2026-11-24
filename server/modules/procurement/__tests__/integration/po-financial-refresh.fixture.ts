@@ -17,7 +17,7 @@ export const REFRESH_ACTOR = "po-financial-refresh-reviewer";
 export class PoFinancialRefreshFixture {
   pool!: pg.Pool;
   db!: typeof import("../../../../db").db;
-  service!: typeof import("../../ap-ledger.service");
+  service!: typeof import("../../application/ap-ledger.service");
   private modulePool?: pg.Pool;
   private lease?: pg.PoolClient;
   private ownsProcurement = false;
@@ -55,7 +55,7 @@ export class PoFinancialRefreshFixture {
     this.modulePool = dbModule.pool;
     this.modulePool.query = this.pool.query.bind(this.pool) as typeof this.modulePool.query;
     this.modulePool.connect = this.pool.connect.bind(this.pool) as typeof this.modulePool.connect;
-    this.service = await import("../../ap-ledger.service");
+    this.service = await import("../../application/ap-ledger.service");
   }
 
   async seed(): Promise<void> {

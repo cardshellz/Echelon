@@ -1,4 +1,4 @@
-import type { RfqWorkListDatabase, RfqWorkListExecutor } from "../../rfq-work-list.repository";
+import type { RfqWorkListDatabase, RfqWorkListExecutor } from "../../infrastructure/rfq-work-list.repository";
 import { rfqListHeader, rfqListLine } from "../fixtures/rfq-work-list.fixture";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -9,7 +9,7 @@ import {
   purchasingSkuAllocationKey,
   RFQ_LIST_DEFAULT_LIMIT,
   RFQ_LIST_MAX_LIMIT,
-} from "../../purchasing-rfq.service";
+} from "../../application/purchasing-rfq.service";
 
 function recommendation(overrides: Record<string, unknown> = {}) {
   return {

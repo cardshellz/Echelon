@@ -4,9 +4,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { StockLinkDestination } from "@shared/types/stock-link";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { classifyStockLinkFailure } from "../../../inventory-planning/domain/stock-link-errors";
-import { ChannelIdentityService } from "../../channel-identity.service";
-import { readChannelStockSelection } from "../../channel-stock-selection";
-import { createShopifyStockLinkSource, shopifyStockLinkFingerprint } from "../../shopify-stock-link-source";
+import { ChannelIdentityService } from "../../application/channel-identity.service";
+import { readChannelStockSelection } from "../../channel-stock-selection.api";
+import { createShopifyStockLinkSource, shopifyStockLinkFingerprint } from "../../shopify-stock-link-source.api";
 
 /**
  * Channels' read-only SQL for the stock-link engine's Shopify destinations (PLAN-CH2 v4.1 §6.2) on real PostgreSQL:

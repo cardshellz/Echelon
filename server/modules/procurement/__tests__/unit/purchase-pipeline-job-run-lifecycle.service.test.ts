@@ -5,7 +5,7 @@ import {
   sanitizePurchasePipelineJobError,
   type PurchasePipelineJobRunLifecycleRepository,
   type PurchasePipelineJobRunRecord,
-} from "../../purchase-pipeline-job-run-lifecycle.service";
+} from "../../application/purchase-pipeline-job-run-lifecycle.service";
 
 const NOW = new Date("2026-07-26T05:00:00.000Z");
 

@@ -10,7 +10,7 @@ import {
   parseHistoricalShipStationContentsSystemRecoveryCliOptions,
   runHistoricalShipStationContentsSystemRecoveryJob,
 } from "../../historical-shipstation-contents-system-recovery.job";
-import { HistoricalShipStationContentsSystemRecoveryServiceError } from "../../../modules/shipping/historical-shipstation-contents-system-recovery.service";
+import { HistoricalShipStationContentsSystemRecoveryServiceError } from "../../../modules/shipping/application/historical-shipstation-contents-system-recovery.service";
 
 const providerClient = { loadShipmentContents: vi.fn() };
 const recoveryEnvironment = {

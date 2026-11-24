@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { InsertChannelConnection } from "@shared/schema";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { createEbayBusinessPolicyService } from "../../ebay-business-policies.service";
+import { createEbayBusinessPolicyService } from "../../application/ebay-business-policies.service";
 import { PgEbayBusinessPolicyRepository } from "../../infrastructure/ebay-business-policies.repository";
 import { EbayBusinessPolicyProvider } from "../../infrastructure/ebay-business-policies.provider";
 import { ebayBusinessPolicyFixtureSql, ebayBusinessPolicySeedSql, ebayPolicyScope, EbayPolicyCatalogHttp } from "../fixtures/ebay-business-policies.fixture";
@@ -13,7 +13,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get: (_target, key) => {
   const value = Reflect.get(fixture.database, key);
   return typeof value === "function" ? value.bind(fixture.database) : value;
 } }) }));
-import { channelMethods } from "../../channels.storage";
+import { channelMethods } from "../../infrastructure/channels.storage";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

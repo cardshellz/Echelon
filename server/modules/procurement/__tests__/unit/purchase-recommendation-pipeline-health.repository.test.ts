@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { createPurchaseRecommendationPipelineHealthRepository } from "../../purchase-recommendation-pipeline-health.repository";
+import { createPurchaseRecommendationPipelineHealthRepository } from "../../infrastructure/purchase-recommendation-pipeline-health.repository";
 
 function jobColumns(
   prefix: "snapshot_job" | "evaluation_job",

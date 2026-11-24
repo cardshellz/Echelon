@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveProviderOrderId } from "../../shipping-engine-order-identity";
+import { resolveProviderOrderId } from "../../application/shipping-engine-order-identity";
 
 const base = {
   legacyHeaderPolicy: "aggregate_projection" as const,

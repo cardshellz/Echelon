@@ -121,8 +121,8 @@ export async function assertFlowReadAgreement(
   // harness has fenced that module's pool to its exclusively owned local DB.
   const [{ createPurchaseWorkspaceRepository }, { createPurchaseWorkspaceService },
     { listRequestForQuotes }, { readInvoiceWorkList, readPaymentWorkList }] = await Promise.all([
-    import("../../purchase-workspace.repository"), import("../../purchase-workspace.service"),
-    import("../../purchasing-rfq.service"), import("../../ap-work-list.repository"),
+    import("../../infrastructure/purchase-workspace.repository"), import("../../application/purchase-workspace.service"),
+    import("../../application/purchasing-rfq.service"), import("../../infrastructure/ap-work-list.repository"),
   ]);
   const workspaceReader = createPurchaseWorkspaceService(createPurchaseWorkspaceRepository(harness.database));
   const workspaces = new Map<number, PurchaseWorkspace>();

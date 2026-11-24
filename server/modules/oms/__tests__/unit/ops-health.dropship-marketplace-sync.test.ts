@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../../../dropship/marketplace-sync-health";
-import { getOmsOpsHealth } from "../../ops-health.service";
-import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
+import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../../../dropship/marketplace-sync-health.api";
+import { getOmsOpsHealth } from "../../application/ops-health.service";
+import { evaluateOmsOpsAlert } from "../../application/oms-ops-alert.service";
 
 // Dropship eBay sync-back (plan v4 §10): OMS operations health embeds dropship's published read-only
 // checks, one count and one sample per issue. The SQL itself runs against PostgreSQL in

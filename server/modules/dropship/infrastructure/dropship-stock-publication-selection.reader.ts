@@ -5,7 +5,7 @@ import {
   type StockPublicationSelection,
   type StockSelectionQueryClient,
 } from "@shared/types/stock-publication-selection";
-import { readCatalogStockSelectionFacts, type CatalogStockSelectionFacts } from "../../catalog/catalog-stock-selection.reader";
+import { readCatalogStockSelectionFacts, type CatalogStockSelectionFacts } from "../../catalog/catalog-stock-selection.reader.api";
 import { parseCatalogVariantUomType } from "../domain/listing-tiers";
 import { DropshipError } from "../domain/errors";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";

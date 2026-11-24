@@ -16,7 +16,7 @@ import {
   type RecommendationProductVariantRecord,
   type RecommendationVendorProductRecord,
   type RecommendationVendorRecord,
-} from "../../recommendation-po-handoff.service";
+} from "../../application/recommendation-po-handoff.service";
 
 const NOW = new Date("2026-07-11T18:00:00.000Z");
 

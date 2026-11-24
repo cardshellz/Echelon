@@ -6,6 +6,7 @@ import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-ava
 import { InventoryCutoverManifestError } from "../../domain/inventory-cutover-manifest";
 import { PostgresChannelRuleStore } from "../../infrastructure/inventory-channel-rule.repository";
 import { sendError } from "./inventory-product-definition.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 /** One product or SKU rule: review a saved change and apply only it, or set a rule so it takes effect in one step. */
 export function registerChannelRuleDefinitionRoutes(app: Express,
@@ -13,14 +14,14 @@ export function registerChannelRuleDefinitionRoutes(app: Express,
 ): void {
   const respond = (res: Parameters<typeof sendError>[0], error: unknown) => {
     if (error instanceof ChannelDefinitionError) {
-      if (error.status >= 500) console.error(JSON.stringify({ level: "error", event: "channel_rule_command_failed", error_code: error.code }));
+      if (error.status >= 500) logger.error("channel_rule_command_failed", { event: "channel_rule_command_failed", error_code: error.code });
       res.status(error.status).json({ error: { code: error.code, message: error.message,
         ...(error.details.length > 0 ? { details: [...error.details] } : {}) } });
       return;
     }
     // Set runs the draft writer, which reports a moved head or an unusable SKU with its own typed error.
     if (error instanceof InventoryAvailabilityMasterDataError) {
-      if (error.status >= 500) console.error(JSON.stringify({ level: "error", event: "channel_rule_command_failed", error_code: error.code }));
+      if (error.status >= 500) logger.error("channel_rule_command_failed", { event: "channel_rule_command_failed", error_code: error.code });
       res.status(error.status).json({ error: { code: error.code, message: error.message,
         ...(error.details.length > 0 ? { details: [...error.details] } : {}) } });
       return;

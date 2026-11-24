@@ -1,7 +1,7 @@
 import {
   readStockClearingEvidence,
   fenceStockClearingEvidence,
-} from "../../../inventory-planning/stock-clearing-evidence";
+} from "../../../inventory-planning/stock-clearing-evidence.api";
 import { quantityPublicationScopeLockKey } from "../../../inventory-planning/infrastructure/quantity-publication-admission.repository";
 import type { QuantityPublicationScope } from "../../../inventory-planning/domain/quantity-publication-admission";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";

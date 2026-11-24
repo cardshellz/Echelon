@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PoolClient } from "pg";
-import { extractShopifyDiscountEvidence } from "../../archon-discount-evidence";
-import { loadArchonSnapshot } from "../../archon-order-delivery";
+import { extractShopifyDiscountEvidence } from "../../application/archon-discount-evidence";
+import { loadArchonSnapshot } from "../../application/archon-order-delivery";
 
 function rawOrder() {
   return {

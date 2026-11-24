@@ -8,11 +8,12 @@ import {
 import {
   handoffLegacyShipmentToChannelFulfillment,
   isChannelFulfillmentHandoffComplete,
-} from "../channel-fulfillment-authority.handoff";
-import type { ChannelFulfillmentIngressService } from "../channel-fulfillment-ingress.service";
-import { processShopifyFulfillmentIngress } from "../shopify-fulfillment-ingress.adapter";
-import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
-import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../channel-fulfillment-notification.policy";
+} from "../application/channel-fulfillment-authority.handoff";
+import type { ChannelFulfillmentIngressService } from "../application/channel-fulfillment-ingress.service";
+import { processShopifyFulfillmentIngress } from "../infrastructure/shopify-fulfillment-ingress.adapter";
+import type { ChannelFulfillmentAuthorityService } from "../application/channel-fulfillment-authority.service";
+import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../domain/channel-fulfillment-notification.policy";
+import { logger } from "../../../platform/observability/logger";
 
 interface ShopifyFulfillmentStatusResponse {
   order?: {
@@ -125,7 +126,7 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
 
       return "unknown";
     } catch (err: any) {
-      console.error(`[ShopifyFulfillmentReconciler] Error checking status for order ${order.id}: ${err.message}`);
+      logger.error("oms.shopify_reconciler", { message: `[ShopifyFulfillmentReconciler] Error checking status for order ${order.id}: ${err.message}` });
       return "unknown";
     }
   }
@@ -134,13 +135,13 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
     try {
       const orderId = Number((order as any).id);
       if (!Number.isInteger(orderId) || orderId <= 0) {
-        console.error(`[ShopifyFulfillmentReconciler] Cannot repush order without a valid id`);
+        logger.error("oms.shopify_reconciler", { message: `[ShopifyFulfillmentReconciler] Cannot repush order without a valid id` });
         return false;
       }
 
       const shipmentIds = await this.findShippedWmsShipmentIds(orderId);
       if (shipmentIds.length === 0) {
-        console.error(`[ShopifyFulfillmentReconciler] No shipped WMS shipments found for order ${orderId}`);
+        logger.error("oms.shopify_reconciler", { message: `[ShopifyFulfillmentReconciler] No shipped WMS shipments found for order ${orderId}` });
         return false;
       }
 
@@ -162,15 +163,13 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
           }
         } catch (err: any) {
           failures++;
-          console.error(
-            `[ShopifyFulfillmentReconciler] Error repushing fulfillment for shipment ${shipmentId}: ${err.message}`,
-          );
+          logger.error("oms.shopify_reconciler", { message: `[ShopifyFulfillmentReconciler] Error repushing fulfillment for shipment ${shipmentId}: ${err.message}` });
         }
       }
 
       return failures === 0;
     } catch (err: any) {
-      console.error(`[ShopifyFulfillmentReconciler] Error repushing tracking for order ${order.id}: ${err.message}`);
+      logger.error("oms.shopify_reconciler", { message: `[ShopifyFulfillmentReconciler] Error repushing tracking for order ${order.id}: ${err.message}` });
       return false;
     }
   }
@@ -258,9 +257,7 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
       if (outcome.result?.processingStatus === "review") reviewed++;
     }
 
-    console.log(
-      `[ShopifyFulfillmentReconciler] Reconciled ${fulfillments.length} Shopify fulfillment package(s) for order ${externalOrderId}; review=${reviewed}`,
-    );
+    logger.info("oms.shopify_reconciler", { message: `[ShopifyFulfillmentReconciler] Reconciled ${fulfillments.length} Shopify fulfillment package(s) for order ${externalOrderId}; review=${reviewed}` });
     return reviewed === 0;
   }
 

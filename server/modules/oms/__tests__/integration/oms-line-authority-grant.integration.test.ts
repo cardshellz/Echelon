@@ -11,7 +11,7 @@ import {
   grantDropshipAcceptanceLineAuthorityWithClient,
   OmsLineAuthorityGrantError,
   type GrantedOmsLineAuthority,
-} from "../../oms-line-authority-grant.repository";
+} from "../../infrastructure/oms-line-authority-grant.repository";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

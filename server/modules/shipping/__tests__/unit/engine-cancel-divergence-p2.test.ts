@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const omsDir = resolve(__dirname, "../../../oms");
 const shipStationSubDir = resolve(omsDir, "shipstation");
 const SHIPSTATION_SRC = [
-  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"),
+  readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf8"),
   ...(existsSync(shipStationSubDir)
     ? readdirSync(shipStationSubDir)
         .filter((f) => f.endsWith(".ts"))
@@ -38,7 +38,7 @@ describe("engine-cancel divergence P2 — clear-review-and-push override", () =>
 
   it("overrideReview clears the review flag after a successful push", () => {
     const wmsShipmentsRepoSrc = readFileSync(
-      resolve(__dirname, "../../../wms/outbound-shipments-mutations.repository.ts"),
+      resolve(__dirname, "../../../wms/infrastructure/outbound-shipments-mutations.repository.ts"),
       "utf8",
     );
     expect(SHIPSTATION_SRC).toMatch(/if \(opts\.overrideReview\)/);

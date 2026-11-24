@@ -46,12 +46,12 @@ vi.mock("@shared/schema", () => ({
 }));
 vi.mock("drizzle-orm", () => ({ eq: vi.fn() }));
 vi.mock("../../../../platform/observability/logger", () => ({
-  logger: { error: fixture.logError },
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: fixture.logError },
 }));
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { missionControlConnection, pushToMissionControl } from "../../mc-push";
+import { missionControlConnection, pushToMissionControl } from "../../application/mc-push";
 
 // Made up for this run only. No real secret, old or new, is written in this file.
 const TEST_SECRET = randomBytes(24).toString("hex");
@@ -113,7 +113,7 @@ describe("OMS to Archon acquisition payload", () => {
   );
   it("has no built-in default for the secret", () => {
     const source = readFileSync(
-      path.resolve(process.cwd(), "server/modules/oms/mc-push.ts"),
+      path.resolve(process.cwd(), "server/modules/oms/application/mc-push.ts"),
       "utf8",
     );
     // A fallback written after the setting ("||" or "??") is how a default gets in.

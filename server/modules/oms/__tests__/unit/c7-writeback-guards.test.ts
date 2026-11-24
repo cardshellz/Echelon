@@ -22,26 +22,26 @@ function readShipStationSource(): string {
         .sort()
         .map((f) => readFileSync(resolve(subDir, f), "utf8"))
     : [];
-  return [readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"), ...subFiles].join("\n");
+  return [readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf8"), ...subFiles].join("\n");
 }
 
 const SHIPSTATION_SRC = readShipStationSource();
 
 const FULFILLMENT_PUSH_SRC = readFileSync(
-  fileURLToPath(new URL("../../fulfillment-push.service.ts", import.meta.url)),
+  fileURLToPath(new URL("../../application/fulfillment-push.service.ts", import.meta.url)),
   "utf8",
 );
 
 const WEBHOOK_RETRY_SRC = readFileSync(
-  fileURLToPath(new URL("../../webhook-retry.worker.ts", import.meta.url)),
+  fileURLToPath(new URL("../../application/webhook-retry.worker.ts", import.meta.url)),
   "utf8",
 );
 const AUTHORITY_SERVICE_SRC = readFileSync(
-  fileURLToPath(new URL("../../channel-fulfillment-authority.service.ts", import.meta.url)),
+  fileURLToPath(new URL("../../application/channel-fulfillment-authority.service.ts", import.meta.url)),
   "utf8",
 );
 const AUTHORITY_REPOSITORY_SRC = readFileSync(
-  fileURLToPath(new URL("../../channel-fulfillment-authority.repository.ts", import.meta.url)),
+  fileURLToPath(new URL("../../infrastructure/channel-fulfillment-authority.repository.ts", import.meta.url)),
   "utf8",
 );
 const AUTHORITY_MIGRATION_SRC = readFileSync(
@@ -97,7 +97,7 @@ describe("D-SINGLEWRITER: physical shipment projection has one authority", () =>
   it("does not infer WMS shipped state from an OMS aggregate", () => {
     const omsWmsCancelReconcileSrc = readFileSync(
       fileURLToPath(
-        new URL("../../../orders/oms-wms-cancel-reconcile.scheduler.ts", import.meta.url),
+        new URL("../../../orders/application/oms-wms-cancel-reconcile.scheduler.ts", import.meta.url),
       ),
       "utf8",
     );
@@ -119,7 +119,7 @@ describe("D-SINGLEWRITER: physical shipment projection has one authority", () =>
   it("always uses physical-shipment reconciliation without a legacy flag fallback", () => {
     const wmsReconcileSrc = readFileSync(
       fileURLToPath(
-        new URL("../../../shipping/wms-shipstation-reconcile.scheduler.ts", import.meta.url),
+        new URL("../../../shipping/application/wms-shipstation-reconcile.scheduler.ts", import.meta.url),
       ),
       "utf8",
     );
@@ -198,7 +198,7 @@ describe("D-PUSHIDEM: legacy fulfillment handle persistence", () => {
     expect(persistBlock).toContain("rowCount");
 
     const wmsShipmentsRepoSrc = readFileSync(
-      fileURLToPath(new URL("../../../wms/outbound-shipments-mutations.repository.ts", import.meta.url)),
+      fileURLToPath(new URL("../../../wms/infrastructure/outbound-shipments-mutations.repository.ts", import.meta.url)),
       "utf8",
     );
     const repoBlock = wmsShipmentsRepoSrc.substring(

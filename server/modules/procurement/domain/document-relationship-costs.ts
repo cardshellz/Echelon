@@ -1,5 +1,5 @@
 import type { RelationshipSnapshot } from "@shared/procurement/document-relationships";
-import { costInteger } from "../../inventory/infrastructure/cost-evidence-values";
+import { costInteger } from "../../inventory/cost-evidence-values.api";
 import { resolveShipmentSupplierCredits } from "./shipment-supplier-credits";
 import { isUnresolvedPhysicalAllocation } from "@shared/procurement/shipment-allocation";
 

@@ -1,17 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import type pg from "pg";
-import type { AmendmentDatabase, AmendmentTransaction } from "../../po-quantity-amendment.repository";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
-import { createShipmentMeasurementCorrectionService } from "../../shipment-measurement-correction.service";
-import { createShipmentCostUpdateCommands, shipmentCostUpdateScope } from "../../shipment-cost-update.commands";
+import type { AmendmentDatabase, AmendmentTransaction } from "../../infrastructure/po-quantity-amendment.repository";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
+import { createShipmentMeasurementCorrectionService } from "../../application/shipment-measurement-correction.service";
+import { createShipmentCostUpdateCommands, shipmentCostUpdateScope } from "../../application/shipment-cost-update.commands";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
 import type { ShipmentMeasurementApproval, ShipmentMeasurementReviewRequest } from "@shared/procurement/shipment-measurement-correction";
-import { createShipmentCostReconciliationService, shipmentReconciliationScope } from "../../shipment-cost-reconciliation.service";
+import { createShipmentCostReconciliationService, shipmentReconciliationScope } from "../../application/shipment-cost-reconciliation.service";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import type { ReconciliationDestination } from "@shared/procurement/cost-reconciliation";
-import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
+import { readPoShipmentCosts } from "../../infrastructure/po-shipment-cost-summary.repository";
 
 export function registerShipmentMeasurementCorrectionCases(fixture: {
   pool: () => pg.Pool; database: () => AmendmentDatabase & Pick<AmendmentTransaction, "execute">; shipments: () => ShipmentTrackingService; at: Date;

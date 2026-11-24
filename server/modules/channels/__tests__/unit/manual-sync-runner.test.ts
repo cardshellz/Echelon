@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createManualSyncRunner, type ManualSyncServices } from "../../manual-sync-runner";
+import { createManualSyncRunner, type ManualSyncServices } from "../../application/manual-sync-runner";
 
 function makeServices(overrides: Partial<Record<string, any>> = {}): ManualSyncServices {
   return {

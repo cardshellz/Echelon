@@ -3,10 +3,10 @@ import express from "express";
 import type { PoolClient } from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAdvisoryLockRunner } from "../../../infrastructure/scheduler-lock";
-import type { ChannelFulfillmentAuthorityService } from "../../../modules/oms/channel-fulfillment-authority.service";
+import type { ChannelFulfillmentAuthorityService } from "../../../modules/oms/application/channel-fulfillment-authority.service";
 import { resetChannelFulfillmentCommandWorkerForTest, runChannelFulfillmentCommandWorkerOnce,
-  runChannelLabelLifecycleWorkerOnce } from "../../../modules/oms/channel-fulfillment-command.worker";
-import { startShipStationLabelReconciliationScheduler } from "../../../modules/oms/shipstation-label-reconciliation.scheduler";
+  runChannelLabelLifecycleWorkerOnce } from "../../../modules/oms/application/channel-fulfillment-command.worker";
+import { startShipStationLabelReconciliationScheduler } from "../../../modules/oms/application/shipstation-label-reconciliation.scheduler";
 import { observeRuntimeRequests, startRuntimeMemoryTelemetry } from "../runtime-memory";
 
 let stop: () => void = () => undefined;

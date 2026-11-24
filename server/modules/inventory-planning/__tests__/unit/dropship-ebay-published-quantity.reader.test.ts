@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { describe, expect, it } from "vitest";
-import { readDropshipEbayPublishedQuantities } from "../../quantity-publication";
+import { readDropshipEbayPublishedQuantities } from "../../application/quantity-publication";
 
 /**
  * What inventory planning last published to a Dropship eBay store (eBay

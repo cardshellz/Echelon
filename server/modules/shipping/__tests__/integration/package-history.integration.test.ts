@@ -23,11 +23,11 @@ import { PostgresCustomerReturnBoxMeasurements } from "../../../returns/infrastr
 import {
   createPackageHistorySource,
   createPackageHistoryShipStationRequester,
-} from "../../package-history.source";
-import { PostgresPackageHistoryStore } from "../../package-history.repository";
-import { PackageHistoryBackfillRepository } from "../../package-history-backfill.repository";
-import { PackageHistoryWorker } from "../../package-history.worker";
-import { buildPackageHistory } from "../../package-history.domain";
+} from "../../application/package-history.source";
+import { PostgresPackageHistoryStore } from "../../infrastructure/package-history.repository";
+import { PackageHistoryBackfillRepository } from "../../infrastructure/package-history-backfill.repository";
+import { PackageHistoryWorker } from "../../application/package-history.worker";
+import { buildPackageHistory } from "../../domain/package-history.domain";
 
 const url = resolveReturnsTestDatabase(process.env, "inspection");
 const integration = url ? describe.sequential : describe.skip;

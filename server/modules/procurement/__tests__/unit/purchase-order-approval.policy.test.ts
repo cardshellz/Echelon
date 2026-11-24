@@ -4,7 +4,7 @@ import {
   assertUniqueHighestApprovalTier,
   buildPurchaseApprovalSnapshot,
   purchaseApprovalSnapshotCovers,
-} from "../../purchase-order-approval.policy";
+} from "../../domain/purchase-order-approval.policy";
 
 const actor = (overrides: Partial<PurchaseApprovalActor> = {}): PurchaseApprovalActor => ({
   userId: "approver", active: true, roles: [{ id: 3, name: "Team Lead", isSystem: true }],

@@ -7,10 +7,10 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { receiptReversalCommandResultSchema, type ReceiptReversalAction } from "@shared/procurement/receipt-reversal-command";
-import { readClosedShipmentReceivedBaseQtyByLine } from "../../receiving-shipment-coverage";
+import { readClosedShipmentReceivedBaseQtyByLine } from "../../application/receiving-shipment-coverage";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { resetFixtureWithEmptyReceivingCustody } from "./receiving-custody-fixture";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
@@ -26,7 +26,7 @@ const TABLES = [schema.products, schema.productVariants, schema.vendors,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
   schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.poStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.inventoryLevels, schema.inventoryLots, schema.inventoryTransactions] as const;
-type ReceivingService = import("../../receiving.service").ReceivingService;
+type ReceivingService = import("../../application/receiving.service").ReceivingService;
 type Outcome = { ok: true; value: unknown } | { ok: false; error: unknown };
 const outcome = (work: Promise<unknown>): Promise<Outcome> => work.then(
   (value) => ({ ok: true, value }), (error: unknown) => ({ ok: false, error }));
@@ -35,8 +35,8 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
   const actorId = `receiving-unit-test-${randomUUID()}`;
   let pool: pg.Pool;
   let database: ReturnType<typeof drizzle<typeof schema>>;
-  let Receiving: typeof import("../../receiving.service").ReceivingService;
-  let Reversal: typeof import("../../receipt-reversal.service").ReceiptReversalService;
+  let Receiving: typeof import("../../application/receiving.service").ReceivingService;
+  let Reversal: typeof import("../../application/receipt-reversal.service").ReceiptReversalService;
   let inventory: import("../../../inventory/application/inventory.use-cases").InventoryUseCases;
   let service: ReceivingService;
   let reversal: InstanceType<typeof Reversal>;
@@ -46,7 +46,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
   let ownsAudit = false;
   let auditReady = false;
   let commandsReady = false;
-  let reversalCommands: typeof import("../../receipt-reversal.commands");
+  let reversalCommands: typeof import("../../application/receipt-reversal.commands");
   let commandRepository: typeof import("../../../../platform/commands/command-results.repository").createDrizzleFinancialCommandRepository;
   const commandKeys = new Set<string>();
   let migrationEvidence: { before: unknown; after: unknown; replay: unknown };
@@ -234,9 +234,9 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
     delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [receivingModule, reversalModule, procurementModule, inventoryModule, repositoryModule, lotsModule, dbModule] = await Promise.all([
-        import("../../receiving.service"), import("../../receipt-reversal.service"), import("../../procurement.storage"),
+        import("../../application/receiving.service"), import("../../application/receipt-reversal.service"), import("../../infrastructure/procurement.storage"),
         import("../../../inventory/application/inventory.use-cases"), import("../../../inventory/infrastructure/inventory.repository"),
-        import("../../../inventory/lots.service"), import("../../../../db"),
+        import("../../../inventory/application/lots.service"), import("../../../../db"),
       ]);
       Receiving = receivingModule.ReceivingService;
       Reversal = reversalModule.ReceiptReversalService;
@@ -261,7 +261,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       inventory = new inventoryModule.InventoryUseCases(inventoryDatabase, repositoryModule.createInventoryMethods(database), new lotsModule.InventoryLotService(database));
       service = createService();
       reversal = new Reversal(database, inventory);
-      reversalCommands = await import("../../receipt-reversal.commands");
+      reversalCommands = await import("../../application/receipt-reversal.commands");
       commandRepository = (await import("../../../../platform/commands/command-results.repository")).createDrizzleFinancialCommandRepository;
     } finally {
       if (oldDatabase === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = oldDatabase;
@@ -759,7 +759,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       const prefix = `${actorId}:percent`;
       await reversal.reverseReceivingLine({ receivingLineId: 51, qty: 1, reason: "Different historical request",
         idempotencyKey: `${prefix}x:line:51`, userId: actorId });
-      const { readReversalKeyEvidence } = await import("../../receipt-reversal.repository");
+      const { readReversalKeyEvidence } = await import("../../infrastructure/receipt-reversal.repository");
       expect(await database.transaction((tx) => readReversalKeyEvidence(tx, `${prefix}%`))).toEqual([]);
       expect(await database.transaction((tx) => readReversalKeyEvidence(tx, `${prefix}x`))).toHaveLength(1);
     });

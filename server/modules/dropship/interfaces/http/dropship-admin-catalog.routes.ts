@@ -3,7 +3,8 @@ import { requirePermission } from "../../../../routes/middleware";
 import { DropshipCatalogExposureService, makeDropshipCatalogExposureLogger, systemDropshipCatalogExposureClock } from "../../application/dropship-catalog-exposure-service";
 import { PgDropshipCatalogExposureRepository } from "../../infrastructure/dropship-catalog-exposure.repository";
 import { DropshipError } from "../../domain/errors";
-import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work.api";
+import { logger as platformLogger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -177,7 +178,7 @@ function sendDropshipCatalogError(res: Response, error: unknown) {
     });
   }
 
-  console.error("[DropshipAdminCatalogRoutes] Unexpected catalog exposure error:", error);
+  platformLogger.error("dropship.admin_catalog_routes", { message: "[DropshipAdminCatalogRoutes] Unexpected catalog exposure error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_CATALOG_EXPOSURE_INTERNAL_ERROR",

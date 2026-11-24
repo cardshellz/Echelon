@@ -1,10 +1,11 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { transitionOrderStatus } from "../../../orders/order-status-core";
-import { createOrderCombiningService } from "../../../orders/combining.service";
-import { startPickingFollowupWorker } from "../../picking-followup.worker";
-import { pendingPickingCommandKeys } from "../../picking-command.repository";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
+import { transitionOrderStatus } from "../../../orders/application/order-status-core";
+import { createOrderCombiningService } from "../../../orders/application/combining.service";
+import { startPickingFollowupWorker } from "../../application/picking-followup.worker";
+import { pendingPickingCommandKeys } from "../../infrastructure/picking-command.repository";
 import {
   cartonize,
   MAX_CARTONIZE_TOTAL_UNITS,
@@ -36,8 +37,8 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
     });
 
     it("removes dead setClauses string construction from order-status-core.ts", () => {
-      const src = readRepoFile("server/modules/orders/order-status-core.ts");
-      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/wms-order-mutations.repository.ts");
+      const src = readRepoFile("server/modules/orders/application/order-status-core.ts");
+      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/infrastructure/wms-order-mutations.repository.ts");
       expect(src).toContain("executeGuardedWmsOrderStatusTransitionInWms(");
       expect(wmsOrderMutationsSrc).toContain("WITH prior AS (");
       expect(wmsOrderMutationsSrc).toContain("RETURNING prior.warehouse_status AS previous_status");
@@ -47,8 +48,8 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
 
   describe("PK-01 / OP-01 & PK-05: resolveException and terminal order status guards", () => {
     it("reopens short lines and returns 'resolved' exceptions to the pick queue while guarding terminal orders", () => {
-      const storageSrc = readRepoFile("server/modules/orders/orders.storage.ts");
-      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/wms-order-mutations.repository.ts");
+      const storageSrc = readRepoFile("server/modules/orders/infrastructure/orders.storage.ts");
+      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/infrastructure/wms-order-mutations.repository.ts");
       const start = storageSrc.indexOf("async resolveException(");
       const nextAsync = storageSrc.indexOf("\n  async ", start + 1);
       const resolveBlock = storageSrc.slice(start, nextAsync);
@@ -60,14 +61,14 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
       expect(resolveBlock).toContain('newStatus = allCompleted ? "ready_to_ship" : hasProgress ? "in_progress" : "ready"');
       expect(resolveBlock).toContain("updates.warehouseStatus = newStatus");
 
-      const itemCommandsSrc = readRepoFile("server/modules/wms/order-item-commands.ts");
+      const itemCommandsSrc = readRepoFile("server/modules/wms/application/order-item-commands.ts");
       expect(itemCommandsSrc).toContain("export async function reopenShortWmsOrderItemsForRepick(");
       expect(itemCommandsSrc).toContain("AND status = 'short'");
     });
 
     it("guards updateOrderStatus and PUT /api/wms/orders/:id against regressing shipped or cancelled orders", () => {
-      const storageSrc = readRepoFile("server/modules/orders/orders.storage.ts");
-      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/wms-order-mutations.repository.ts");
+      const storageSrc = readRepoFile("server/modules/orders/infrastructure/orders.storage.ts");
+      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/infrastructure/wms-order-mutations.repository.ts");
       const updateStart = storageSrc.indexOf("async updateOrderStatus(");
       const updateEnd = storageSrc.indexOf("async resolveException(", updateStart);
       const updateBlock = storageSrc.slice(updateStart, updateEnd);
@@ -75,7 +76,7 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
       expect(wmsOrderMutationsSrc).toContain("inArray(orders.warehouseStatus, legalStates)");
       expect(wmsOrderMutationsSrc).toContain('notInArray(orders.warehouseStatus, ["shipped", "cancelled"])');
 
-      const channelsRoutesSrc = readRepoFile("server/modules/channels/channels.routes.ts");
+      const channelsRoutesSrc = readRepoFile("server/modules/channels/interfaces/http/channels.routes.ts");
       const putStart = channelsRoutesSrc.indexOf('app.put("/api/wms/orders/:id"');
       const putBlock = channelsRoutesSrc.slice(putStart, putStart + 800);
       expect(putBlock).toContain('order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled"');
@@ -120,7 +121,7 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
 
   describe("PK-04, PK-06, PK-07 & REPL-R1 / REPL-R2: picking and replenishment execution safeguards", () => {
     it("re-checks locked order_items.on_hold inside applyLegacyPickProgressTransaction and persistWmsOnlyPickProgress", () => {
-      const pickingSrc = readRepoFile("server/modules/orders/picking.use-cases.ts");
+      const pickingSrc = readRepoFile("server/modules/orders/application/picking.use-cases.ts");
       const legacyStart = pickingSrc.indexOf("private async applyLegacyPickProgressTransaction(");
       const wmsOnlyStart = pickingSrc.indexOf("private async persistWmsOnlyPickProgress(");
       const resolveTargetStart = pickingSrc.indexOf("private async resolvePickTarget(");
@@ -135,7 +136,7 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
     });
 
     it("guards resolveAllocationWithBin against terminal orders, holds, and partial-pick bin reassignment", () => {
-      const pickingSrc = readRepoFile("server/modules/orders/picking.use-cases.ts");
+      const pickingSrc = readRepoFile("server/modules/orders/application/picking.use-cases.ts");
       const start = pickingSrc.indexOf("async resolveAllocationWithBin(");
       const end = pickingSrc.indexOf("async reportReplenSourceEmpty(", start);
       const block = pickingSrc.slice(start, end);
@@ -147,7 +148,7 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
     });
 
     it("scopes reportReplenSourceEmpty and recordSourceEmptyBlocker location lookups by warehouseId and wraps blocker creation in a transaction", () => {
-      const pickingSrc = readRepoFile("server/modules/orders/picking.use-cases.ts");
+      const pickingSrc = readRepoFile("server/modules/orders/application/picking.use-cases.ts");
       const reportStart = pickingSrc.indexOf("async reportReplenSourceEmpty(");
       const reportEnd = pickingSrc.indexOf("private async getPickSettings(", reportStart);
       const reportBlock = pickingSrc.slice(reportStart, reportEnd);
@@ -165,7 +166,7 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
   describe("PK-08 / REC-01 / REC-02: followup worker timeout and retry fairness", () => {
     it("times out a hung followup operation and still executes remaining recovery families", async () => {
       const calls: string[] = [];
-      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const errSpy = spyLoggerJson("error");
 
       const worker = startPickingFollowupWorker(
         {

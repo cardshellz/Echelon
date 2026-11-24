@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { rfqCreateIntent, rfqCreateReceipt } from "../../../../../test/fixtures/rfq-create-command";
-import { createRfqCreateCommands, hashRfqCreateIdentity, rfqCreateCommandScope, RFQ_CREATE_COMMAND_PRINCIPAL } from "../../rfq-create.commands";
-import { buildRfqCreationRequestHash } from "../../purchasing-rfq-allocation";
-import { PurchasingError } from "../../purchasing.service";
+import { createRfqCreateCommands, hashRfqCreateIdentity, rfqCreateCommandScope, RFQ_CREATE_COMMAND_PRINCIPAL } from "../../application/rfq-create.commands";
+import { buildRfqCreationRequestHash } from "../../application/purchasing-rfq-allocation";
+import { PurchasingError } from "../../application/purchasing.service";
 import type { FinancialCommandRepository } from "../../../../platform/commands/transactional-command.service";
-import type { RfqWorkflowTransaction } from "../../rfq-workflow.service";
+import type { RfqWorkflowTransaction } from "../../application/rfq-workflow.service";
 
 const actor = "operator-a", key = "initial-rfq-command";
 function fixture() {

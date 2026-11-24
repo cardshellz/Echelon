@@ -3,14 +3,15 @@ import express, { type Request } from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ permission: vi.fn() }));
 vi.mock("../../../identity", () => ({ hasPermission: mocks.permission }));
-vi.mock("../../supplier-return.service", () => ({ supplierReturnReader: {} }));
-vi.mock("../../supplier-return.commands", () => ({ supplierReturnCommands: {}, SUPPLIER_RETURN_COMMAND_SCOPE: { method: "POST", routeTemplate: "/api/supplier-returns", resourceKey: "supplier-return:new", commandName: "supplier_return.record" } }));
-vi.mock("../../supplier-return-difference.service", () => ({ supplierReturnDifferenceReader: {} }));
-vi.mock("../../supplier-return-difference.commands", () => ({ supplierReturnReviewCommands: {}, SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE: { method: "POST", routeTemplate: "/api/supplier-return-entitlements/:id/review", resourceKey: "supplier-return-credit-review", commandName: "supplier_return.review_credit_difference" } }));
-import { registerSupplierReturnRoutes } from "../../supplier-return.routes";
-import { SupplierReturnError } from "../../supplier-return.errors";
+vi.mock("../../application/supplier-return.service", () => ({ supplierReturnReader: {} }));
+vi.mock("../../application/supplier-return.commands", () => ({ supplierReturnCommands: {}, SUPPLIER_RETURN_COMMAND_SCOPE: { method: "POST", routeTemplate: "/api/supplier-returns", resourceKey: "supplier-return:new", commandName: "supplier_return.record" } }));
+vi.mock("../../application/supplier-return-difference.service", () => ({ supplierReturnDifferenceReader: {} }));
+vi.mock("../../application/supplier-return-difference.commands", () => ({ supplierReturnReviewCommands: {}, SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE: { method: "POST", routeTemplate: "/api/supplier-return-entitlements/:id/review", resourceKey: "supplier-return-credit-review", commandName: "supplier_return.review_credit_difference" } }));
+import { registerSupplierReturnRoutes } from "../../interfaces/http/supplier-return.routes";
+import { SupplierReturnError } from "../../domain/supplier-return.errors";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 import { returnPreview, returnRequest, returnResult } from "../../../../../test/fixtures/supplier-return";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 describe("supplier return HTTP boundary", () => {
   let server: Server, base: string;
@@ -126,7 +127,7 @@ describe("supplier return HTTP boundary", () => {
     expect(response.headers["retry-after"]).toBe("2"); expect(response.body.details.supplierReturnCommandOutcome).toBeUndefined();
   });
   it("logs infrastructure failure and returns recovery guidance without database details", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       commands.record.mockRejectedValue(new Error("private database diagnostic"));
       const response = await request("POST", "/api/supplier-returns", returnRequest());

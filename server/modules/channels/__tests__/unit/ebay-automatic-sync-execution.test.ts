@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { EbayExistingListingSyncExecution, EbayListingSyncService, type EbayListingExecutionContext,
-  type EbayListingSyncStore } from "../../ebay-listing-sync.service";
-import { storedEbayListingSyncJobSchema, syncFailure } from "../../ebay-listing-sync.domain";
+  type EbayListingSyncStore } from "../../application/ebay-listing-sync.service";
+import { storedEbayListingSyncJobSchema, syncFailure } from "../../domain/ebay-listing-sync.domain";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import { syncIdentity, syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const jobId = "00000000-0000-4000-8000-000000000017";
 const clock = () => new Date("2026-10-15T16:00:00.000Z");
@@ -122,7 +123,7 @@ describe("listing status with independent stock evidence", () => {
     expect(readStatuses).toHaveBeenCalledWith([jobId]);
   });
   it("keeps the listing feed available and marks stock evidence unavailable when its reader fails", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = spyLoggerJson("error");
     try {
       const service = setup(async () => { throw new Error("private database details"); });
       const jobs = await service.list(1);

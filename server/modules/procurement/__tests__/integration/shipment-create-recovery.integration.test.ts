@@ -11,7 +11,7 @@ import * as schema from "@shared/schema";
 import { shipmentCreateResultSchema } from "@shared/procurement/shipment-create-command";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -35,7 +35,7 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
   let pool: pg.Pool;
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let service: ShipmentTrackingService;
-  let commands: typeof import("../../shipment-create.commands");
+  let commands: typeof import("../../application/shipment-create.commands");
   let repositoryFactory: typeof import("../../../../platform/commands/command-results.repository").createDrizzleFinancialCommandRepository;
   let defaultPool: pg.Pool | undefined;
   const ownedSchemas: string[] = [];
@@ -134,8 +134,8 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
     delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [tracking, storageModule, catalogModule, commandModule, repository, dbModule] = await Promise.all([
-        import("../../shipment-tracking.service"), import("../../procurement.storage"), import("../../../catalog/catalog.storage"),
-        import("../../shipment-create.commands"), import("../../../../platform/commands/command-results.repository"), import("../../../../db"),
+        import("../../application/shipment-tracking.service"), import("../../infrastructure/procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
+        import("../../application/shipment-create.commands"), import("../../../../platform/commands/command-results.repository"), import("../../../../db"),
       ]);
       commands = commandModule;
       repositoryFactory = repository.createDrizzleFinancialCommandRepository;

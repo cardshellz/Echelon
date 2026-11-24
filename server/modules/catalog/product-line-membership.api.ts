@@ -10,4 +10,4 @@ export {
   addProductsToProductLineInCatalog,
   removeProductsFromLineInCatalog,
   removeProductsFromAllLinesInCatalog,
-} from "./product-line-membership.command";
+} from "./application/product-line-membership.command";

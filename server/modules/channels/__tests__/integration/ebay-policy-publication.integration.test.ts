@@ -34,7 +34,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
 vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
   ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(), resolveChannelPriceResolution: async (_db: unknown, _channelId: number, _productId: number, variantId: number) => ({ priceCents: 1149, basePriceCents: 1149, source: "catalog_variant", provenance: { kind: "catalog_variant", variantId }, appliedRule: null }),
 }));
-vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn(() => {
+vi.mock("../../ebay-listing-sync.api", () => ({ readExistingEbayListingIdentityForProduct: vi.fn(() => {
   throw new Error("Unpublished policy test must use the publication owner");
 }) }));
 // This policy suite uses a stateful fake provider rather than eBay's Trading
@@ -53,10 +53,10 @@ vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () =>
 });
 
 import { readEbayPublicationSource, prepareEbayPublicationCompletion } from "../../infrastructure/ebay-listing-push";
-import { ebayBusinessPolicies } from "../../ebay-business-policies";
+import { ebayBusinessPolicies } from "../../application/ebay-business-policies";
 import { PostgresEbayListingSyncRepository } from "../../infrastructure/ebay-listing-sync.repository";
-import { EbayListingSyncService } from "../../ebay-listing-sync.service";
-import { EbayPublicationCompletionExecution } from "../../ebay-publication-completion.service";
+import { EbayListingSyncService } from "../../application/ebay-listing-sync.service";
+import { EbayPublicationCompletionExecution } from "../../application/ebay-publication-completion.service";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import { PgMarketplaceListingRegistrationRepository } from "../../../marketplace-listings/infrastructure/pg-listing-registration.repository";
 import { PostgresQuantityProviderResponseRecovery } from "../../../inventory-planning/infrastructure/quantity-provider-response-recovery.repository";

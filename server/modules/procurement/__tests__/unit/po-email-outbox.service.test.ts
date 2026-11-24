@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "crypto";
-import { poEmailDocumentHash } from "../../po-email-document-contract";
+import { poEmailDocumentHash } from "../../application/po-email-document-contract";
 import {
   enqueuePurchaseOrderEmail,
   type PoEmailOutboxDbPool,
   replayDeadLetterPurchaseOrderEmail,
-} from "../../po-email-outbox.service";
+} from "../../application/po-email-outbox.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 function makePool(query: PoEmailOutboxDbPool["query"]): PoEmailOutboxDbPool {
   return { query, connect: vi.fn() };
@@ -219,7 +220,7 @@ describe("PO email verified document gate", () => {
 
 describe("PO document rejection observability and hold races", () => {
   it("logs rejection identity without the supplier message or snapshot", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warning = spyLoggerJson("warn");
     try {
       const failure = Object.assign(new Error("Sensitive snapshot content"), { code: "PURCHASE_ORDER_DOCUMENT_CANCELLED" });
       await expect(enqueuePurchaseOrderEmail({
@@ -227,7 +228,8 @@ describe("PO document rejection observability and hold races", () => {
         idempotencyKey: "rejected", createdBy: "actor-7",
       }, { dbPool: makePool(vi.fn().mockResolvedValue({ rows: [] })), buildSnapshot: vi.fn().mockRejectedValue(failure) }))
         .rejects.toBe(failure);
-      expect(warning).toHaveBeenCalledWith("[PO Email Outbox] Enqueue rejected", {
+      expect(JSON.parse(warning.mock.calls[0][0])).toMatchObject({
+        message: "[PO Email Outbox] Enqueue rejected",
         code: "PURCHASE_ORDER_DOCUMENT_CANCELLED", purchaseOrderId: 7, actorId: "actor-7",
       });
       expect(JSON.stringify(warning.mock.calls)).not.toMatch(/Sensitive snapshot|Private note|private@example/);

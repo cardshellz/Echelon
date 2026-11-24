@@ -19,7 +19,7 @@ function readShipStationSource(): string {
         .sort()
         .map((f) => readFileSync(resolve(subDir, f), "utf8"))
     : [];
-  return [readSource("../../shipstation.service.ts"), ...subFiles].join("\n");
+  return [readSource("../../application/shipstation.service.ts"), ...subFiles].join("\n");
 }
 
 function sourceBlock(source: string, startMarker: string, endMarker?: string): string {
@@ -35,9 +35,9 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
 }
 
 const SHIPSTATION_SRC = readShipStationSource();
-const FULFILLMENT_PUSH_SRC = readSource("../../fulfillment-push.service.ts");
-const WMS_SHIPMENTS_REPO_SRC = readSource("../../../wms/outbound-shipments-mutations.repository.ts");
-const WMS_SHIPMENT_ITEMS_REPO_SRC = readSource("../../../wms/outbound-shipment-items-mutations.repository.ts");
+const FULFILLMENT_PUSH_SRC = readSource("../../application/fulfillment-push.service.ts");
+const WMS_SHIPMENTS_REPO_SRC = readSource("../../../wms/infrastructure/outbound-shipments-mutations.repository.ts");
+const WMS_SHIPMENT_ITEMS_REPO_SRC = readSource("../../../wms/infrastructure/outbound-shipment-items-mutations.repository.ts");
 const SHIP_NOTIFY_TEST_SRC = readSource("ship-notify-v2.test.ts");
 const WRITEBACK_GUARDS_TEST_SRC = readSource("c7-writeback-guards.test.ts");
 const PUSH_SHOPIFY_FULFILLMENT_TEST_SRC = readSource(

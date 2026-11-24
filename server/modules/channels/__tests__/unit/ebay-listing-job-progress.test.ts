@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ebayListingPhaseFromStage } from "../../ebay-listing-job-progress";
+import { ebayListingPhaseFromStage } from "../../application/ebay-listing-job-progress";
 
 describe("publication rejection progress", () => {
   it("describes a recorded publication rejection as publication work", () => {

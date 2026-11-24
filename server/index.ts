@@ -11,10 +11,10 @@ import { createChannelSyncBatchService } from "./channel-sync-batch.composition"
 import { registerChannelSyncBatchRoutes } from "./modules/marketplace-listings/infrastructure/channel-sync-batch.routes";
 import { createListingIntentPropagationService } from "./listing-intent-propagation.composition";
 import { registerListingIntentPropagationRoutes } from "./modules/marketplace-listings/infrastructure/listing-intent-propagation.routes";
-import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
+import { ebayListingSyncService } from './modules/channels/ebay-listing-sync.api';
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
-import { startShopifyProductConnectionWorker } from "./modules/catalog/shopify-product-connection.worker";
+import { startShopifyProductConnectionWorker } from "./modules/catalog/application/shopify-product-connection.worker";
 import { createDefaultShopifyProductConnectionService } from "./services/shopify-product-connection";
 import {
   createOrderEditService,
@@ -87,7 +87,7 @@ import {
   startDropshipUsdcWatcherWorker,
 } from "./modules/dropship/runtime-workers.api";
 import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-order-authority.api";
-import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
+import { startCycleCountFreezeGuard } from "./modules/inventory/application/cycle-count-freeze-guard.scheduler";
 import {
   startOmsFlowReconciliationScheduler,
   startOmsOpsAlertScheduler,
@@ -100,7 +100,7 @@ import {
   startPoEmailOutboxWorker,
   startReceiptCostRecoveryWorker,
 } from "./modules/procurement/runtime-workers.api";
-import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
+import { startVariantAvailabilitySyncWorker } from "./modules/channels/application/variant-availability-sync.worker";
 import {
   startEchelonSyncScheduler,
   startEbayListingReconciliationScheduler,
@@ -149,6 +149,7 @@ import {
   schedulerIsDisabled,
 } from "./infrastructure/scheduler-config";
 import { registerScheduledJob } from "./infrastructure/job-registry";
+import { registerExternalRuntimeJobs } from "./infrastructure/runtime-job-catalog";
 import {
   installStructuredConsoleBridge,
   reportError,
@@ -224,7 +225,7 @@ const sessionPool = new Pool({
 });
 
 sessionPool.on("error", (error) => {
-  console.error("[SessionDatabasePool] Unexpected idle client error:", error);
+  logger.error("server.index", { message: "[SessionDatabasePool] Unexpected idle client error:", error: error });
 });
 
 const sessionMiddleware = session({
@@ -259,7 +260,7 @@ export function log(message: string, source = "express") {
     hour12: true,
   });
 
-  console.log(`${formattedTime} [${source}] ${message}`);
+  logger.info("server.index", { message: `${formattedTime} [${source}] ${message}` });
 }
 
 function schedulersDisabled(disableEnvName?: string): boolean {
@@ -328,9 +329,7 @@ function verifyShipStationWebhook(req: Request): { ok: boolean; status: number; 
 
     if (!warnedMissingShipStationWebhookSecret) {
       warnedMissingShipStationWebhookSecret = true;
-      console.warn(
-        "[ShipStation Webhook] SHIPSTATION_WEBHOOK_SECRET is not configured; accepting webhook only because production verification is not required",
-      );
+      logger.warn("server.index", { message: "[ShipStation Webhook] SHIPSTATION_WEBHOOK_SECRET is not configured; accepting webhook only because production verification is not required" });
     }
     return { ok: true, status: 200, reason: "secret not configured outside production" };
   }
@@ -405,7 +404,7 @@ app.use(createHttpRequestLogger());
     const { resource_url, resource_type } = req.body || {};
     const verification = verifyShipStationWebhook(req);
     if (!verification.ok) {
-      console.warn(`[ShipStation Webhook] Rejected SHIP_NOTIFY: ${verification.reason}`);
+      logger.warn("server.index", { message: `[ShipStation Webhook] Rejected SHIP_NOTIFY: ${verification.reason}` });
       return res.status(verification.status).json({ error: "Unauthorized webhook" });
     }
 
@@ -413,7 +412,7 @@ app.use(createHttpRequestLogger());
       return res.status(400).json({ error: "Invalid webhook payload" });
     }
     if (!isAllowedShipStationResourceUrl(resource_url)) {
-      console.warn("[ShipStation Webhook] Rejected invalid resource_url host");
+      logger.warn("server.index", { message: "[ShipStation Webhook] Rejected invalid resource_url host" });
       return res.status(400).json({ error: "Invalid webhook resource_url" });
     }
 
@@ -424,13 +423,13 @@ app.use(createHttpRequestLogger());
         buildShipStationWebhookInboxInput(req, resource_url, req.body),
       );
       if (!receipt.inserted && (receipt.status === "succeeded" || receipt.status === "processing")) {
-        console.log(`[ShipStation Webhook] Duplicate SHIP_NOTIFY (inbox=${receipt.id}, status=${receipt.status}), skipping`);
+        logger.info("server.index", { message: `[ShipStation Webhook] Duplicate SHIP_NOTIFY (inbox=${receipt.id}, status=${receipt.status}), skipping` });
         return res.status(200).json({ status: "ok", duplicate: true, inboxId: receipt.id });
       }
       inboxReceiptId = receipt.id;
       await markWebhookProcessing(db, inboxReceiptId);
     } catch (inboxErr: any) {
-      console.error(`[ShipStation Webhook] Failed to persist SHIP_NOTIFY to webhook_inbox: ${inboxErr?.message || inboxErr}`);
+      logger.error("server.index", { message: `[ShipStation Webhook] Failed to persist SHIP_NOTIFY to webhook_inbox: ${inboxErr?.message || inboxErr}` });
       return res.status(500).json({ error: "Webhook inbox unavailable" });
     }
 
@@ -438,20 +437,16 @@ app.use(createHttpRequestLogger());
     res.status(200).json({ status: "accepted", inboxId: inboxReceiptId });
 
     try {
-      console.log(`[ShipStation Webhook] Processing SHIP_NOTIFY (inbox=${inboxReceiptId})`);
+      logger.info("server.index", { message: `[ShipStation Webhook] Processing SHIP_NOTIFY (inbox=${inboxReceiptId})` });
       const processed = await services.shippingEngine.processWebhook(resource_url);
       await markWebhookSucceeded(db, inboxReceiptId);
-      console.log(`[ShipStation Webhook] Processed ${processed} shipment(s) (inbox=${inboxReceiptId})`);
+      logger.info("server.index", { message: `[ShipStation Webhook] Processed ${processed} shipment(s) (inbox=${inboxReceiptId})` });
     } catch (err: any) {
-      console.error(
-        `[ShipStation Webhook] processShipNotify failed (inbox=${inboxReceiptId}), enqueueing for retry: ${err.message}`
-      );
+      logger.error("server.index", { message: `[ShipStation Webhook] processShipNotify failed (inbox=${inboxReceiptId}), enqueueing for retry: ${err.message}` });
       try {
         await markWebhookFailed(db, inboxReceiptId, err);
       } catch (markErr: any) {
-        console.error(
-          `[ShipStation Webhook] failed to mark inbox ${inboxReceiptId} failed: ${markErr?.message || markErr}`
-        );
+        logger.error("server.index", { message: `[ShipStation Webhook] failed to mark inbox ${inboxReceiptId} failed: ${markErr?.message || markErr}` });
       }
 
       try {
@@ -460,9 +455,7 @@ app.use(createHttpRequestLogger());
           lastError: err?.message || String(err),
         });
       } catch (enqueueErr: any) {
-        console.error(
-          `[ShipStation Webhook] retry-queue enqueue failed: ${enqueueErr?.message || enqueueErr}`
-        );
+        logger.error("server.index", { message: `[ShipStation Webhook] retry-queue enqueue failed: ${enqueueErr?.message || enqueueErr}` });
       }
     }
   });
@@ -564,7 +557,7 @@ app.use(createHttpRequestLogger());
         const result = await reingestEbayOrder(orderId, services.oms, ebayApiClient);
         res.json(result);
       } catch (err: any) {
-        console.error(`[eBay Reingest] ${err.message}`);
+        logger.error("server.index", { message: `[eBay Reingest] ${err.message}` });
         res.status(500).json({ error: err.message });
       }
     });
@@ -599,15 +592,15 @@ app.use(createHttpRequestLogger());
             buildShipStationWebhookTargetUrl(webhookUrl),
           );
         } else if (services.shippingEngine.isConfigured() && !webhookUrl) {
-          console.log(`[ShipStation] Skipping webhook registration - SHIPSTATION_WEBHOOK_URL unset.`);
+          logger.info("server.index", { message: `[ShipStation] Skipping webhook registration - SHIPSTATION_WEBHOOK_URL unset.` });
         }
       } catch (err: any) {
-        console.error(`[ShipStation] Webhook registration error: ${err.message}`);
+        logger.error("server.index", { message: `[ShipStation] Webhook registration error: ${err.message}` });
       }
     }, 15_000);
   } else {
     const reason = getSchedulerDisableReason("SHIPSTATION_WEBHOOK_REGISTRATION_DISABLED");
-    console.log(`[ShipStation] Webhook registration disabled (${reason}).`);
+    logger.info("server.index", { message: `[ShipStation] Webhook registration disabled (${reason}).` });
   }
 
   // Sync Recovery — unified gap-recovery orchestrator. Runs every 10 min and
@@ -620,7 +613,7 @@ app.use(createHttpRequestLogger());
     );
   } else if (schedulersDisabled("SYNC_RECOVERY_SCHEDULER_DISABLED")) {
     const reason = getSchedulerDisableReason("SYNC_RECOVERY_SCHEDULER_DISABLED");
-    console.log(`[SyncRecovery] Scheduled recovery disabled (${reason}).`);
+    logger.info("server.index", { message: `[SyncRecovery] Scheduled recovery disabled (${reason}).` });
   }
 
   const orderEdits = createOrderEditService(dbPool, services);
@@ -639,7 +632,7 @@ app.use(createHttpRequestLogger());
     }
     try {
       const reportReturns: ReturnWorkflowReport = event =>
-        console.info(JSON.stringify(event));
+        logger.info("server.index", { detail: JSON.stringify(event) });
       const returnWorkflow = await createCustomerReturnWorkflowWorker(reportReturns);
       httpServer.once("close", startCustomerReturnWorkflowScheduler(returnWorkflow, reportReturns));
     } catch {
@@ -664,15 +657,15 @@ app.use(createHttpRequestLogger());
   // Register the exact account suffix before the existing returns proxy's 404.
   // Its default-off gate does not change staff APIs or public return access.
   registerCustomerAccountRoutes(app, { services: customerAccountServices(dbPool, orderEdits),
-    report: event => console.error(JSON.stringify({ event: "customer_account_request_failed", ...event })) });
+    report: event => logger.error("customer_account_request_failed", { event: "customer_account_request_failed", ...event }) });
   await registerRoutes(httpServer, app);
   registerProductSyncWorkflowRoutes(app, services.productInventorySync);
 
   registerOrderEditRoutes(app, { service: orderEdits, hasPermission,
-    report: event => console.error(JSON.stringify({ event: "order_edit_request_failed", ...event })) });
+    report: event => logger.error("order_edit_request_failed", { event: "order_edit_request_failed", ...event }) });
   if (!schedulersDisabled("ORDER_EDIT_SCHEDULER_DISABLED")) {
     httpServer.once("close", startOrderEditScheduler(orderEdits,
-      event => console.error(JSON.stringify({ event: "order_edit_worker_failed", ...event }))));
+      event => logger.error("order_edit_worker_failed", { event: "order_edit_worker_failed", ...event })));
   } else {
     logSchedulerDisabled("scheduler", "Order edit recovery", "ORDER_EDIT_SCHEDULER_DISABLED");
   }
@@ -705,7 +698,7 @@ app.use(createHttpRequestLogger());
 
     // P1-18 extracted: Startup fix for dangling completed items has been moved to scripts/backfill/fix-dangling-order-items.ts
   } catch (err) {
-    console.error("[Startup Fix] Failed to check negative inventory balances", err);
+    logger.error("server.index", { message: "[Startup Fix] Failed to check negative inventory balances", error: err });
   }
 
   // Crash handlers — surface unhandled errors instead of silent death.
@@ -815,7 +808,7 @@ app.use(createHttpRequestLogger());
         const wakeListener = startPublicationWakeListener(dbPool, requestInventoryPublicationWorkerRun);
         httpServer.once("close", () => {
           void wakeListener.stop().catch(() => {
-            console.error(JSON.stringify({ event: "publication_wake_listener_shutdown_failed", code: "PUBLICATION_WAKE_LISTENER_SHUTDOWN_FAILED" }));
+            logger.error("publication_wake_listener_shutdown_failed", { event: "publication_wake_listener_shutdown_failed", code: "PUBLICATION_WAKE_LISTENER_SHUTDOWN_FAILED" });
           });
         });
         const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup, {
@@ -823,7 +816,7 @@ app.use(createHttpRequestLogger());
         });
         httpServer.once("close", () => {
           void catchupWorker.stop().catch(() => {
-            console.error(JSON.stringify({ event: "quantity_publication_catchup_shutdown_failed", code: "PUBLICATION_CATCHUP_SHUTDOWN_FAILED" }));
+            logger.error("quantity_publication_catchup_shutdown_failed", { event: "quantity_publication_catchup_shutdown_failed", code: "PUBLICATION_CATCHUP_SHUTDOWN_FAILED" });
           });
         });
       } else {
@@ -865,7 +858,7 @@ app.use(createHttpRequestLogger());
         const stopCostReporting = startCostReportingWorker(services.costReporting);
         httpServer.once("close", () => {
           void stopCostReporting().catch(() => {
-            console.error(JSON.stringify({ event: "cost_reporting_shutdown_failed", code: "COST_REPORT_SHUTDOWN_FAILED" }));
+            logger.error("cost_reporting_shutdown_failed", { event: "cost_reporting_shutdown_failed", code: "COST_REPORT_SHUTDOWN_FAILED" });
           });
         });
       } else {
@@ -978,6 +971,9 @@ app.use(createHttpRequestLogger());
     }
   );
 
+  // Register all externally-driven background workers & schedulers in the canonical job registry (P1.5)
+  registerExternalRuntimeJobs();
+
   startEbayFulfillmentStuckOrderScheduler({
     db,
     shippingEngine: services.shippingEngine,
@@ -1013,13 +1009,10 @@ app.use(createHttpRequestLogger());
           reservation: services.reservation,
         });
         if (zombieFixed.length > 0) {
-          console.warn(
-            `[Data Repair] Transitioned ${zombieFixed.length} zombie order(s) with no pending items:`,
-            zombieFixed.join(", "),
-          );
+          logger.warn("server.index", { message: `[Data Repair] Transitioned ${zombieFixed.length} zombie order(s) with no pending items:`, detail: zombieFixed.join(", ") });
         }
       } catch (err: any) {
-        console.warn("[Data Repair] Zombie-order reconciliation error:", err?.message);
+        logger.warn("server.index", { message: "[Data Repair] Zombie-order reconciliation error:", error: err?.message });
       }
     },
   });

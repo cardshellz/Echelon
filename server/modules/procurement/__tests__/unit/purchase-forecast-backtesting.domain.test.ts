@@ -5,7 +5,7 @@ import {
   buildPurchaseForecastEvaluationSummariesFromAggregates,
   PIECE_MICRO_SCALE,
   type PurchaseForecastEvaluationCandidate,
-} from "../../purchase-forecast-backtesting.domain";
+} from "../../domain/purchase-forecast-backtesting.domain";
 
 function candidate(overrides: Partial<PurchaseForecastEvaluationCandidate> = {}): PurchaseForecastEvaluationCandidate {
   return {

@@ -5,12 +5,12 @@ import {
   previewChannelFulfillmentReceiptRetry,
   receiptRetryIdempotencyKey,
   type ChannelFulfillmentReceiptRetrySnapshot,
-} from "../../channel-fulfillment-receipt-retry.domain";
-import { createChannelFulfillmentReceiptRetryService } from "../../channel-fulfillment-receipt-retry.service";
-import type { ChannelFulfillmentReceiptRetryRepository } from "../../channel-fulfillment-receipt-retry.repository";
-import { createChannelFulfillmentReceiptRetryRepository } from "../../channel-fulfillment-receipt-retry.repository";
-import { remediateOmsFlowIssue } from "../../oms-flow-reconciliation.service";
-import { CHANNEL_FULFILLMENT_RECEIPT_RETRY } from "../../channel-fulfillment-receipt-retry.domain";
+} from "../../domain/channel-fulfillment-receipt-retry.domain";
+import { createChannelFulfillmentReceiptRetryService } from "../../application/channel-fulfillment-receipt-retry.service";
+import type { ChannelFulfillmentReceiptRetryRepository } from "../../infrastructure/channel-fulfillment-receipt-retry.repository";
+import { createChannelFulfillmentReceiptRetryRepository } from "../../infrastructure/channel-fulfillment-receipt-retry.repository";
+import { remediateOmsFlowIssue } from "../../application/oms-flow-reconciliation.service";
+import { CHANNEL_FULFILLMENT_RECEIPT_RETRY } from "../../domain/channel-fulfillment-receipt-retry.domain";
 
 const NOW = new Date("2026-09-14T12:00:00.000Z");
 

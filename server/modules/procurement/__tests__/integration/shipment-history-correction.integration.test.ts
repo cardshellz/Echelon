@@ -6,8 +6,8 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { beforeAll, beforeEach, afterAll, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { createShipmentHistoryCorrectionService, shipmentHistoryScope } from "../../shipment-history-correction.service";
-import { historyFingerprint } from "../../shipment-history-correction.repository";
+import { createShipmentHistoryCorrectionService, shipmentHistoryScope } from "../../application/shipment-history-correction.service";
+import { historyFingerprint } from "../../infrastructure/shipment-history-correction.repository";
 import { historyInput } from "../../../../../test/fixtures/shipment-history-correction";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

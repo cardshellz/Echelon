@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createReservationService } from "../../reservation.service";
+import { createReservationService } from "../../application/reservation.service";
 import { InventoryQuantityError } from "../../../inventory/domain/quantity-ledger";
 
 const OCCURRED_AT = new Date("2026-09-03T12:00:00.000Z");

@@ -80,8 +80,8 @@ export async function createControlledRfqDatabase(url: string, at: Date) {
     delete process.env.DATABASE_URL; delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [dbModule, procurement, catalog, purchasing, warehouse] = await Promise.all([
-        import("../../../../db"), import("../../procurement.storage"),
-        import("../../../catalog/catalog.storage"), import("../../purchasing.service"),
+        import("../../../../db"), import("../../infrastructure/procurement.storage"),
+        import("../../../catalog/infrastructure/catalog.storage"), import("../../application/purchasing.service"),
         import("../../../warehouse/infrastructure/warehouse.repository"),
       ]);
       // Existing legacy storage imports the module pool. Redirect its transport

@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vendorInvoiceAttachments } from "@shared/schema";
-import { readInvoiceSourceCapabilities } from "../../shipment-billing-ownership.repository";
-import { readInvoiceReplacementDetail, replaceVoidedInvoiceInTransaction } from "../../ap-invoice-replacement.service";
+import { readInvoiceSourceCapabilities } from "../../infrastructure/shipment-billing-ownership.repository";
+import { readInvoiceReplacementDetail, replaceVoidedInvoiceInTransaction } from "../../application/ap-invoice-replacement.service";
 import { fixtureTable } from "./shipment-line-fixture";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_ACTOR, FLOW_AT, type FlowCostHarness } from "./procurement-flow-cost.fixture";
 

@@ -16,16 +16,16 @@ const {
   recomputeOrderStatusFromShipments,
 } = mocks;
 
-vi.mock("../../oms-line-authority-ledger", () => ({
+vi.mock("../../application/oms-line-authority-ledger", () => ({
   recordOmsLineAuthorityEvent: mocks.recordAuthorityEvent,
 }));
 
-vi.mock("../../../orders/shipment-rollup", () => ({
+vi.mock("../../../orders/application/shipment-rollup", () => ({
   markShipmentCancelled: mocks.markShipmentCancelled,
   recomputeOrderStatusFromShipments: mocks.recomputeOrderStatusFromShipments,
 }));
 
-vi.mock("../../../wms/oms-wms-authority-cleanup-audit.repository", () => ({
+vi.mock("../../../wms/infrastructure/oms-wms-authority-cleanup-audit.repository", () => ({
   recordOmsWmsAuthorityCleanupAudit: mocks.recordCleanupAudit,
 }));
 
@@ -34,7 +34,7 @@ import {
   reconcilePersistedShopifyRefundAuthority,
   RefundsCreateBadPayloadError,
   __test__ as refundCascadeTest,
-} from "../../shopify-refund-cascade.service";
+} from "../../application/shopify-refund-cascade.service";
 
 const NOW = new Date("2026-07-10T16:00:00.000Z");
 
@@ -1077,7 +1077,7 @@ describe("reconcilePersistedShopifyRefundAuthority", () => {
   });
 });
 
-const OMS_WEBHOOKS_SRC = readFileSync(resolve(__dirname, "../../oms-webhooks.ts"), "utf8");
+const OMS_WEBHOOKS_SRC = readFileSync(resolve(__dirname, "../../application/oms-webhooks.ts"), "utf8");
 
 describe("refunds/create financial idempotency", () => {
   it("guards the financial increment with a refund-id event marker", () => {

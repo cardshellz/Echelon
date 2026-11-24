@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Keep the COGS dependency without importing unrelated inventory repository owners.
 vi.mock("../../../inventory", async () => ({
-  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+  COGSService: (await import("../../../inventory/application/cogs.service")).COGSService,
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ vi.mock("drizzle-orm", () => ({
 import {
   createInvoiceFromShipmentCosts,
   ApLedgerError,
-} from "../../ap-ledger.service";
+} from "../../application/ap-ledger.service";
 
 // ── Reset helper ──
 function resetMocks() {

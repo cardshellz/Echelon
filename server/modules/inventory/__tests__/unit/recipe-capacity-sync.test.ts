@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { RecipeCapacityService } from "../../recipe-capacity.service";
+import { RecipeCapacityService } from "../../application/recipe-capacity.service";
 
 describe("recipe-derived ATP invalidation", () => {
   it("returns every affected recipe-managed output product for a changed component", async () => {

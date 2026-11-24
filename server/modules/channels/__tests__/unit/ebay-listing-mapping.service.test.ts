@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { EbayListingMappingService, type EbayListingMappingSource, type EbayListingMappingRepairPlan, type EbayListingMappingRejectedCommand } from "../../ebay-listing-mapping.service";
+import { EbayListingMappingService, type EbayListingMappingSource, type EbayListingMappingRepairPlan, type EbayListingMappingRejectedCommand } from "../../application/ebay-listing-mapping.service";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 import type { EbayRegistrationReadRequest, EbayRegistrationReadResponse } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
 import { ebayListingMappingResultSchema } from "@shared/types/ebay-listing-mapping";
 
 const now = new Date("2026-10-10T12:00:00Z");

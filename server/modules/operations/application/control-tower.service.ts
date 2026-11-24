@@ -10,6 +10,7 @@ import {
   type OmsOpsIssue,
 } from "../../oms/operations-observability.api";
 import { loadProcurementHealthSummary } from "../../procurement/health-and-observability.api";
+import { logger } from "../../../platform/observability/logger";
 
 export const CONTROL_TOWER_DOMAINS = [
   "oms",
@@ -353,7 +354,7 @@ async function loadOms(deps: ControlTowerDependencies, includeOverview = true): 
       waterfall = await getFlowWaterfall(deps.db, { windowDays: 30 });
     } catch (error) {
       waterfallError = error instanceof Error ? error.message : String(error);
-      console.error("[Operations Control Tower] OMS waterfall snapshot failed:", error);
+      logger.error("operations.control_tower_service", { message: "[Operations Control Tower] OMS waterfall snapshot failed:", error: error });
     }
   }
   const items = health.issues

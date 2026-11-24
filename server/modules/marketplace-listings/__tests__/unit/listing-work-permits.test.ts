@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
-import { withListingWorkPermit } from "../../listing-work-permits";
+import { withListingWorkPermit } from "../../listing-work-permits.api";
 
 describe("shared listing work permit cleanup", () => {
   function fixture() {

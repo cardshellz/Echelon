@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds, PROVIDER_REQUEST_TIMEOUT_MS } from "../../provider-request-limits";
+import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds, PROVIDER_REQUEST_TIMEOUT_MS } from "../../application/provider-request-limits";
 import { EbayApiClient } from "../../adapters/ebay/ebay-api.client";
-import type { EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
 
 describe("bounded quantity provider request ownership", () => {
   afterEach(() => { vi.useRealTimers(); });

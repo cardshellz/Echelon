@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { PickingUseCases, withScanDisplay } from "../../picking.use-cases";
+import { PickingUseCases, withScanDisplay } from "../../application/picking.use-cases";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // 2026-10-05: after the picking ownership rewrite (#1672) the gun received no
 // barcode or photo for any line. Scans of product barcodes stopped matching
@@ -98,7 +99,7 @@ describe("picker payloads carry barcode and photo", () => {
     storage.getPickQueueOrders.mockResolvedValue([{ id: 63776, orderNumber: "#63776", warehouseId: 1,
       warehouseStatus: "ready", onHold: 0, assignedPickerId: null, startedAt: null, items: [line()] }]);
     storage.getScanDisplayBySkus.mockRejectedValueOnce(new Error("statement timeout"));
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const warn = spyLoggerJson("warn");
     const queue = await service.getPickQueue();
     expect((queue as any[])[0].items[0]).toMatchObject({ location: "C-11", barcode: null, imageUrl: null });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("\"action\":\"picker_scan_display\""));
@@ -113,7 +114,7 @@ describe("picker payloads carry barcode and photo", () => {
   });
 
   it("adds them to the claim response the gun builds its picking screen from", () => {
-    const source = readFileSync(resolve(process.cwd(), "server/modules/orders/picking.use-cases.ts"), "utf8");
+    const source = readFileSync(resolve(process.cwd(), "server/modules/orders/application/picking.use-cases.ts"), "utf8");
     const claimResponse = source.slice(source.indexOf('actionType: "order_claimed"'), source.indexOf("return { order, items: plannedItems };"));
     expect(claimResponse).toContain("withScanDisplay(item, scanDisplay)");
   });

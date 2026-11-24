@@ -20,7 +20,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ShopifyRefundLineAdjustment } from "../server/modules/oms/refund-line-disposition";
+import type { ShopifyRefundLineAdjustment } from "../server/modules/oms/application/refund-line-disposition";
 
 type Mode = "dry-run" | "execute";
 
@@ -552,9 +552,9 @@ async function main(): Promise<void> {
     refundModule,
   ] = await Promise.all([
     import("../server/db"),
-    import("../server/modules/oms/channel-fulfillment-authority.repository"),
-    import("../server/modules/oms/channel-fulfillment-projection.repository"),
-    import("../server/modules/oms/shopify-refund-cascade.service"),
+    import("../server/modules/oms/infrastructure/channel-fulfillment-authority.repository"),
+    import("../server/modules/oms/infrastructure/channel-fulfillment-projection.repository"),
+    import("../server/modules/oms/application/shopify-refund-cascade.service"),
   ]);
   const repository = repositoryModule.createChannelFulfillmentAuthorityRepository(
     databaseModule.db,

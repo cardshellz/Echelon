@@ -22,7 +22,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createOmsService } from "../../oms.service";
+import { createOmsService } from "../../application/oms.service";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
 
 // ─── Fixtures ────────────────────────────────────────────────────────

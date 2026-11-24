@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from "vitest";
 
-import { extractMarketingConsent } from "../../marketing-consent";
+import { extractMarketingConsent } from "../../application/marketing-consent";
 
 describe("extractMarketingConsent", () => {
   it("reads Shopify's structured email consent object", () => {

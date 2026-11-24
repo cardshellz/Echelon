@@ -6,11 +6,11 @@ import {
   deriveOmsLineAuthority,
   getOmsLineDropshipStagingQuantity,
   getOmsLineRemainingDropshipStagingQuantity,
-} from "../../oms-line-authority";
+} from "../../application/oms-line-authority";
 import {
   omsLineQuantityToMaterialize,
   omsLineRemainingQuantityToMaterialize,
-} from "../../wms-sync.service";
+} from "../../application/wms-sync.service";
 
 const ACCEPTED_AT = new Date("2026-10-03T15:42:09.000Z");
 

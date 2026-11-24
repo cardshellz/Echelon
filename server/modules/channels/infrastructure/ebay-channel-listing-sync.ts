@@ -2,16 +2,17 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { pool } from "../../../db";
 import { ebayProductSyncResultSchema, type EbayProductSyncResult } from "@shared/types/ebay-listing-sync";
-import { ChannelListingSyncService } from "../../marketplace-listings/application/channel-listing-sync.service";
+import { ChannelListingSyncService } from "../../marketplace-listings/channel-listing-sync.service.api";
 import { EbayChannelListingSyncAdapter } from "../adapters/ebay/ebay-channel-listing-sync.adapter";
 import { EbaySyncSelectionReader } from "./ebay-sync-selection.reader";
 import { EBAY_CHANNEL_ID } from "./ebay-api-runtime";
 import { ebayListingSyncService, ebayListingSyncRepository, syncActiveListings as updateExisting,
   readEbaySyncDestination, syncFilterSchema, type SyncFilter } from "./ebay-active-listing-sync";
-import { admitEbayPublication } from "../ebay-publication-admission.service";
+import { admitEbayPublication } from "../application/ebay-publication-admission.service";
 import { readEbayPublicationSource } from "./ebay-listing-push";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
-import type { SyncDestination } from "../../marketplace-listings/domain/channel-sync-batch";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
+import type { SyncDestination } from "../../marketplace-listings/domain-channel-sync-batch.api";
+import { logger } from "../../../platform/observability/logger";
 
 const selection = new EbaySyncSelectionReader(pool, EBAY_CHANNEL_ID);
 type ExpectedDestination = { connectionId: number; accountId: string; environment?: "production" | "sandbox"; marketplaceId?: string };
@@ -91,7 +92,7 @@ export async function syncChannelListings(filter: SyncFilter | null, actor = "eb
       // No refusal is persisted for an unconfirmed read/commit. The durable batch
       // keeps this exact key outstanding while unrelated products can progress.
       const code = error instanceof EbayListingSyncError ? error.code : "EBAY_SYNC_ADMISSION_UNSAVED";
-      console.error(JSON.stringify({ event: "channel_sync_admission_unconfirmed", productId: product.productId, commandKey: key, code }));
+      logger.error("channel_sync_admission_unconfirmed", { event: "channel_sync_admission_unconfirmed", productId: product.productId, commandKey: key, code });
       result.errors++;
       result.details.push({ success: false, productId: product.productId, code,
         error: error instanceof EbayListingSyncError ? error.message : "This sync request could not be confirmed. Retry the same saved request to check its result." });

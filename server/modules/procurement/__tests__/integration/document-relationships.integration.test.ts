@@ -5,7 +5,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { inboundShipments, inboundShipmentLines, purchaseOrders, purchaseOrderLines, receivingOrders, receivingLines,
   inboundFreightCosts, inboundFreightAllocations, supplierCreditLines, supplierCredits, vendorInvoiceLines, vendorInvoices } from "@shared/schema";
-import { createDocumentRelationshipRepository } from "../../document-relationships.repository";
+import { createDocumentRelationshipRepository } from "../../infrastructure/document-relationships.repository";
 import { projectDocumentRelationships } from "@shared/procurement/document-relationships";
 import { projectPurchaseLineShipping } from "@shared/procurement/purchase-line-shipping";
 

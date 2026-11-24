@@ -7,7 +7,7 @@ vi.mock("../../../warehouse/infrastructure/warehouse.repository", () => ({
   getDefaultFulfillmentWarehouse: h.getDefaultFulfillmentWarehouse,
 }));
 
-import { createFulfillmentRouterService } from "../../fulfillment-router.service";
+import { createFulfillmentRouterService } from "../../application/fulfillment-router.service";
 
 // Minimal chainable drizzle stub. orderBy resolves the rules query; limit
 // resolves the getWarehouse() lookup.
@@ -59,7 +59,7 @@ describe("FulfillmentRouterService — default fallback", () => {
 // ordering is the regression we're guarding against).
 describe("routing-at-ingestion — structural guards", () => {
   const REPO_SRC = readFileSync(resolve(__dirname, "../../../warehouse/infrastructure/warehouse.repository.ts"), "utf-8");
-  const WMS_SRC = readFileSync(resolve(__dirname, "../../../oms/wms-sync.service.ts"), "utf-8");
+  const WMS_SRC = readFileSync(resolve(__dirname, "../../../oms/application/wms-sync.service.ts"), "utf-8");
 
   it("default fulfillment warehouse excludes storage hubs and is deterministic", () => {
     expect(REPO_SRC).toMatch(/getDefaultFulfillmentWarehouse/);

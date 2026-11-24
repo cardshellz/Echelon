@@ -10,8 +10,8 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({
   EBAY_CHANNEL_ID: 67,
 }));
 import { createEbayRouteListingLifecycleClient, normalizeEbayObservedInventoryItemGroup, normalizeEbayObservedOffers } from "../../infrastructure/ebay-listing-client";
-import { ebayListingPushFailure } from "../../ebay-listing-push.service";
-import type { EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import { ebayListingPushFailure } from "../../application/ebay-listing-push.service";
+import type { EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
 
 describe("eBay inventory group read response contract", () => {
   beforeEach(() => api.request.mockReset());

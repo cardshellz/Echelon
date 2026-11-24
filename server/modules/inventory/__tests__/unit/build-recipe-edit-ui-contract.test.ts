@@ -15,7 +15,7 @@ const appSource = fs.readFileSync(
   "utf8",
 );
 const routeSource = fs.readFileSync(
-  path.resolve(process.cwd(), "server/modules/inventory/build.routes.ts"),
+  path.resolve(process.cwd(), "server/modules/inventory/interfaces/http/build.routes.ts"),
   "utf8",
 );
 

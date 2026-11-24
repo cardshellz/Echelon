@@ -11,6 +11,7 @@ import {
 import { DropshipError } from "../../domain/errors";
 import { createDropshipStoreConnectionServiceFromEnv } from "../../infrastructure/dropship-store-connection.factory";
 import { createDropshipStoreWebhookRepairServiceFromEnv } from "../../infrastructure/dropship-store-webhook-repair.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -139,7 +140,7 @@ function sendDropshipAdminStoreConnectionError(res: Response, error: unknown): R
     });
   }
 
-  console.error("[DropshipAdminStoreConnectionRoutes] Unexpected store connection error:", error);
+  logger.error("dropship.admin_store_connection_routes", { message: "[DropshipAdminStoreConnectionRoutes] Unexpected store connection error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_STORE_CONNECTION_INTERNAL_ERROR",

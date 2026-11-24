@@ -5,7 +5,7 @@ import { invoiceCostComponentEvidenceSchema, invoiceGoodsAmounts } from "@shared
 import { receiptCreditAttributionSchema, receiptCreditAttributionKey } from "@shared/procurement/receipt-credit-attribution";
 import { allocateIntegerCostInterval } from "@shared/utils/integer-cost-interval";
 import { supplierCreditDispositionSchema, type SourceLineInput } from "@shared/procurement/supplier-credit";
-import { costFingerprint, costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { costFingerprint, costInteger, CostEvidenceError } from "../../inventory/cost-evidence-values.api";
 import { supplierInvoiceAmounts, supplierInvoiceTaxSource } from "./supplier-invoice-amounts";
 import { supplierHeaderEconomicShareSchema } from "@shared/procurement/supplier-header-costs";
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSharedProductPhotoImporter } from "../../shared-product-photos.service";
+import { createSharedProductPhotoImporter } from "../../application/shared-product-photos.service";
 vi.mock("../../../../db", () => ({ db: {} }));
 afterEach(() => vi.restoreAllMocks());
 describe("shared photo import validation", () => {

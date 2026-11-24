@@ -7,10 +7,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { invoiceQuantityContextSchema, invoiceQuantityPreviewSchema, invoiceQuantityResultSchema,
   type InvoiceQuantityApprovalRequest, type InvoiceQuantityPreviewRequest } from "@shared/procurement/invoice-quantity-correction";
-import { createInvoiceQuantityCorrectionService } from "../../invoice-quantity-correction.service";
-import { registerInvoiceQuantityCorrectionRoutes } from "../../invoice-quantity-correction.routes";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
+import { createInvoiceQuantityCorrectionService } from "../../application/invoice-quantity-correction.service";
+import { registerInvoiceQuantityCorrectionRoutes } from "../../interfaces/http/invoice-quantity-correction.routes";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import { runTransactionalFinancialCommand } from "../../../../platform/commands/transactional-command.service";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
@@ -36,7 +36,7 @@ export function registerInvoiceCorrectionCostCases(fixture: {
       INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id,allocated_amount_cents) VALUES(71,10,13000);
       INSERT INTO inventory.warehouse_settings(warehouse_code,require_approval) VALUES('DEFAULT',false)`);
     if (paid) {
-      const { recordPayment } = await import("../../ap-ledger.service");
+      const { recordPayment } = await import("../../application/ap-ledger.service");
       await recordPayment({ vendorId: 5, currency: "USD", status: "completed", totalAmountCents: 13000,
         paymentDate: fixture.at, paymentMethod: "wire", createdBy: actorId,
         allocations: [{ vendorInvoiceId: 71, appliedAmountCents: 13000 }] }, { now: fixture.at });

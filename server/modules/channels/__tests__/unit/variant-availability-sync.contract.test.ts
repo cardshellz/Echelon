@@ -20,7 +20,7 @@ describe("inactive variant availability contracts", () => {
   });
 
   it("preserves inventory, bins, and listing mappings during a normal archive", () => {
-    const routes = repoFile("server/modules/catalog/catalog.routes.ts");
+    const routes = repoFile("server/modules/catalog/interfaces/http/catalog.routes.ts");
     const productArchive = routes.slice(
       routes.indexOf('app.post("/api/products/:id/archive"'),
       routes.indexOf('app.delete("/api/products/:id"'),
@@ -57,7 +57,7 @@ describe("inactive variant availability contracts", () => {
 
   it("uses a lease and row locking so multiple app instances cannot own the same transition", () => {
     const repository = repoFile(
-      "server/modules/channels/variant-availability-sync.repository.ts",
+      "server/modules/channels/infrastructure/variant-availability-sync.repository.ts",
     );
 
     expect(repository).toContain("FOR UPDATE SKIP LOCKED");

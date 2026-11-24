@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "express";
 const ports = vi.hoisted(() => ({ query: vi.fn(), release: vi.fn(), setIntent: vi.fn(), saveMappings: vi.fn(), remote: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { connect: async () => ({ query: ports.query, release: ports.release }) } }));
-vi.mock("../../../../modules/channels/ebay-connection-health", () => ({ readEbayConnectionHealth: vi.fn() }));
-vi.mock("../../../../modules/channels/ebay-listing-sync", () => ({ syncActiveListings: vi.fn(), triggerPricingRuleSync: vi.fn() }));
-vi.mock("../../../../modules/channels/ebay-business-policies", () => ({ ebayBusinessPolicies: { saveCategoryMappings: ports.saveMappings } }));
+vi.mock("../../../../modules/channels/application/ebay-connection-health", () => ({ readEbayConnectionHealth: vi.fn() }));
+vi.mock("../../../../modules/channels/ebay-listing-sync.api", () => ({ syncActiveListings: vi.fn(), triggerPricingRuleSync: vi.fn() }));
+vi.mock("../../../../modules/channels/application/ebay-business-policies", () => ({ ebayBusinessPolicies: { saveCategoryMappings: ports.saveMappings } }));
 vi.mock("../../../middleware", () => ({ requireAuth: vi.fn(), requirePermission: () => vi.fn(), requireInternalApiKey: vi.fn() }));
 vi.mock("../../ebay-utils", () => ({ EBAY_CHANNEL_ID: 36 }));
 vi.mock("../../ebay-listing-state", () => ({ setEbayVariantListingIntent: ports.setIntent,

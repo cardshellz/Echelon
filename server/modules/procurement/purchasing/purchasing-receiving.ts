@@ -14,30 +14,30 @@ import {
   summarizeShipmentReceiptCustodyCoverage,
   type ShipmentReceiptCustodyCoverage,
 } from "../domain/shipment-receipt-custody";
-import { readPoDirectCustodySources } from "../po-direct-receipt-custody.repository";
-import { detectQtyVariance } from "../po-exceptions.service";
+import { readPoDirectCustodySources } from "../infrastructure/po-direct-receipt-custody.repository";
+import { detectQtyVariance } from "../application/po-exceptions.service";
 import {
   findOpenPoLineByProduct as findOpenPoLineByProductWithStorage,
   reconcilePurchaseOrderReceipt,
   type ReceiptReconciliationResult,
   type ReceivingReconciliationLine,
-} from "../purchase-order-receipt-reconciliation.service";
-import { RECEIVABLE_SHIPMENT_STATUSES } from "../receiving-close-integrity.domain";
+} from "../application/purchase-order-receipt-reconciliation.service";
+import { RECEIVABLE_SHIPMENT_STATUSES } from "../domain/receiving-close-integrity.domain";
 import {
   readPrimaryReceivingLocations,
   type ReceivingIntegrityTransaction,
-} from "../receiving-close-integrity.repository";
-import { readReceiptCustodyPresence } from "../receiving-quarantine.repository";
-import { ShipmentReceiptCoverageError } from "../receiving-shipment-coverage";
+} from "../infrastructure/receiving-close-integrity.repository";
+import { readReceiptCustodyPresence } from "../infrastructure/receiving-quarantine.repository";
+import { ShipmentReceiptCoverageError } from "../application/receiving-shipment-coverage";
 import {
   planReceiptUnits,
   ReceivingUnitError,
   type ReceiptUnitPlan,
   type ReceiptVariant,
-} from "../receiving-unit-contract";
-import { ReceivingUnitSnapshotError } from "../receiving-unit-snapshot";
-import { readShipmentReceiptCustodyCoverage } from "../shipment-receipt-custody.repository";
-import { shipmentReceiptSourceVersion } from "../shipment-receipt-source-version";
+} from "../application/receiving-unit-contract";
+import { ReceivingUnitSnapshotError } from "../application/receiving-unit-snapshot";
+import { readShipmentReceiptCustodyCoverage } from "../infrastructure/shipment-receipt-custody.repository";
+import { shipmentReceiptSourceVersion } from "../application/shipment-receipt-source-version";
 import type { PurchasingCosting } from "./purchasing-costing";
 import {
   ACTIVE_RECEIPT_STATUSES,
@@ -45,6 +45,7 @@ import {
   PurchasingError,
   type PurchasingBaseContext,
 } from "./purchasing.types";
+import { logger } from "../../../platform/observability/logger";
 
 export type ShipmentReceiptExistingState =
   | { kind: "none" }
@@ -157,8 +158,7 @@ export function createPurchasingReceiving(
         });
       }
       if (error instanceof PoDirectCustodySourceError || error instanceof ShipmentReceiptCoverageError) {
-        console.warn(JSON.stringify({ event: "procurement.receiving.custody_admission_rejected", command: "create_po_receipt",
-          actorId: userId ?? null, purchaseOrderId, code: error.details.code }));
+        logger.warn("procurement.receiving.custody_admission_rejected", { event: "procurement.receiving.custody_admission_rejected", command: "create_po_receipt", actorId: userId ?? null, purchaseOrderId, code: error.details.code });
         // Lifecycle HTTP commands forward the purchasing owner's typed error.
         throw new PurchasingError(error.message, error.statusCode, error.details);
       }
@@ -353,10 +353,7 @@ export function createPurchasingReceiving(
         postingStateKnown: true,
       };
     } catch (error) {
-      console.warn("[Procurement] Failed to inspect shipment receipt posting summary", {
-        receivingOrderId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      logger.warn("procurement.purchasing_receiving", { message: "[Procurement] Failed to inspect shipment receipt posting summary", receivingOrderId, error: error instanceof Error ? error.message : String(error) });
       return fallback;
     }
   }
@@ -1308,7 +1305,7 @@ export function createPurchasingReceiving(
       try {
         await detectQtyVariance(result.purchaseOrderId);
       } catch (error) {
-        console.error("[po-exceptions] qty variance detection failed after receiving close:", error);
+        logger.error("procurement.purchasing_receiving", { message: "[po-exceptions] qty variance detection failed after receiving close:", error: error });
       }
     }
   }

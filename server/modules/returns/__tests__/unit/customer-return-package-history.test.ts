@@ -7,7 +7,7 @@ import { historyFixture } from "../../../shipping/__tests__/support/package-hist
 import {
   buildPackageHistory,
   packageHistoryNativeFromShopify,
-} from "../../../shipping/package-history.domain";
+} from "../../../shipping/domain/package-history.domain";
 import { projectHistoricalReturnBoxes } from "../../application/customer-return-package-history";
 
 function fixture() {

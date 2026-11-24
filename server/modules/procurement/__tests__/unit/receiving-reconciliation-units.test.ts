@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { reconcilePurchaseOrderReceipt, type ReceivingReconciliationLine } from "../../purchase-order-receipt-reconciliation.service";
+import { reconcilePurchaseOrderReceipt, type ReceivingReconciliationLine } from "../../application/purchase-order-receipt-reconciliation.service";
 
 function harness(recorded = { receivedQty: 2, damagedQty: 1 }) {
   const poLine = { id: 21, purchaseOrderId: 10, lineType: "product", productId: 100,

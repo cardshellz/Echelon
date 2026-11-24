@@ -3,11 +3,11 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ingressSource = fs.readFileSync(
-  path.resolve(process.cwd(), "server/modules/oms/channel-fulfillment-ingress.repository.ts"),
+  path.resolve(process.cwd(), "server/modules/oms/infrastructure/channel-fulfillment-ingress.repository.ts"),
   "utf8",
 );
 const pushSource = fs.readFileSync(
-  path.resolve(process.cwd(), "server/modules/oms/fulfillment-push.service.ts"),
+  path.resolve(process.cwd(), "server/modules/oms/application/fulfillment-push.service.ts"),
   "utf8",
 );
 

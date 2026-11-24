@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
-import { syncContentIntentHash } from "../../ebay-listing-sync-content";
+import { EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
+import { syncContentIntentHash } from "../../application/ebay-listing-sync-content";
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
-import { QuantityProviderRequestTimeoutError } from "../../provider-request-limits";
+import { QuantityProviderRequestTimeoutError } from "../../application/provider-request-limits";
 
 import { publicationCompletionFixture as fixture } from "../fixtures/ebay-publication-completion.fixture";
 

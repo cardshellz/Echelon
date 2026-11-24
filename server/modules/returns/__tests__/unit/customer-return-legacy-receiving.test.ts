@@ -5,7 +5,7 @@ vi.mock("../../../inventory/application/return-restock.use-case",async importOri
   ...await importOriginal<typeof import("../../../inventory/application/return-restock.use-case")>(), applyReturnedStock: physicalOwners.restock,
 }));
 vi.mock("../../../inventory/application/quarantine-returned-stock",()=>({ quarantineReturnedStock: physicalOwners.quarantine }));
-import { createReturnsService, type ProcessReturnParams } from "../../../orders/returns.service";
+import { createReturnsService, type ProcessReturnParams } from "../../../orders/application/returns.service";
 
 const dialect = new PgDialect();
 const input = (): ProcessReturnParams => ({ orderId: 201, warehouseLocationId: 1, userId: "admin:test", items: [{ orderItemId: 301, productVariantId: 501, qty: 1, condition: "sellable" }] });

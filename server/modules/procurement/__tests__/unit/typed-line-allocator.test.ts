@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createPurchasingService } from "../../purchasing.service";
+import { createPurchasingService } from "../../application/purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Typed-line cost allocator (Option C, 2026-04-28).

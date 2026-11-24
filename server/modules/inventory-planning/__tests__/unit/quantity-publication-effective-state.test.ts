@@ -32,7 +32,7 @@ describe("quantity publication effective-state boundary", () => {
   });
 
   it("fails closed instead of creating a missing global control from a read path", () => {
-    const source = readFileSync("server/modules/channels/sync-settings.service.ts", "utf8");
+    const source = readFileSync("server/modules/channels/application/sync-settings.service.ts", "utf8");
     expect(source).toContain("settingsRows.length !== 1");
     expect(source).not.toContain(".values({ globalEnabled: false, sweepIntervalMinutes: 15 })");
   });

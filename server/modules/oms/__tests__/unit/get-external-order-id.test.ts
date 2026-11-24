@@ -18,7 +18,7 @@ vi.hoisted(() => {
   process.env.DATABASE_URL ??= "postgres://stub:stub@localhost:5432/stub";
 });
 
-import { getExternalOrderId } from "../../oms-webhooks";
+import { getExternalOrderId } from "../../application/oms-webhooks";
 
 describe("getExternalOrderId", () => {
   it("strips GID prefix from admin_graphql_api_id", () => {

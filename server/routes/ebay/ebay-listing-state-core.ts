@@ -1,1 +1,1 @@
-export * from "../../modules/channels/ebay-listing-eligibility";
+export * from "../../modules/channels/application/ebay-listing-eligibility";

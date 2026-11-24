@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type pg from "pg";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
-import { recordPurchaseCostRevisions } from "../../purchase-cost-application.service";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import { readPoShipmentCosts, type PoShipmentCostSummaryDatabase } from "../../po-shipment-cost-summary.repository";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
+import { recordPurchaseCostRevisions } from "../../application/purchase-cost-application.service";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import { readPoShipmentCosts, type PoShipmentCostSummaryDatabase } from "../../infrastructure/po-shipment-cost-summary.repository";
 
 const PO_ID = 10;
 const PO_LINE_ID = 21;
@@ -59,7 +59,7 @@ export function registerCostSourceCompatibilityCases(fixture: {
     await fixture.shipment().pushLandedCostsToLots(SHIPMENT_ID, fixture.actorId);
   }
   async function payFreight(amount: number) {
-    const { recordPayment } = await import("../../ap-ledger.service");
+    const { recordPayment } = await import("../../application/ap-ledger.service");
     return recordPayment({ vendorId: 5, currency: "USD", status: "completed", totalAmountCents: amount,
       paymentDate: fixture.at, paymentMethod: "wire", createdBy: fixture.actorId,
       allocations: [{ vendorInvoiceId: FREIGHT_INVOICE_ID, appliedAmountCents: amount }] }, { now: fixture.at });

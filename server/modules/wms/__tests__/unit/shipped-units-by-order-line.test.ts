@@ -5,7 +5,7 @@ import {
   shippedUnitsByOrderLine,
   shippedUnitsByOrderLineQuery,
   wmsShippingProgressQuery,
-} from "../../shipping-progress.query";
+} from "../../infrastructure/shipping-progress.query";
 
 const dialect = new PgDialect();
 const render = (query: Parameters<PgDialect["sqlToQuery"]>[0]) => dialect.sqlToQuery(query);

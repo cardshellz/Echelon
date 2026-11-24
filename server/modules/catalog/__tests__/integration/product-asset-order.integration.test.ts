@@ -2,8 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { reorderCatalogAssets } from "../../product-asset-order.repository";
-import { readProductImageDownload } from "../../product-image-download.repository";
+import { reorderCatalogAssets } from "../../infrastructure/product-asset-order.repository";
+import { readProductImageDownload } from "../../infrastructure/product-image-download.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

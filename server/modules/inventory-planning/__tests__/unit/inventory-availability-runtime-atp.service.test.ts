@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { InventoryAtpServiceContract } from "../../../inventory/atp.service";
+import type { InventoryAtpServiceContract } from "../../../inventory/application/atp.service";
 import type { SupplySnapshotContentDto } from "@shared/types/inventory-availability-planner";
 import { sealSupplySnapshot } from "../../domain/inventory-availability-planner";
 import { hubReserveSupply } from "../fixtures/inventory-hub-reserve.fixture";

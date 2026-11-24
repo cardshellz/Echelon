@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { productMethods } from "../../catalog.storage";
-import { ProductAssetError } from "../../product-asset-errors";
-import { MAX_CATALOG_BATCH_SIZE } from "../../catalog.routes";
+import { productMethods } from "../../infrastructure/catalog.storage";
+import { ProductAssetError } from "../../domain/product-asset-errors";
+import { MAX_CATALOG_BATCH_SIZE } from "../../interfaces/http/catalog.routes";
 
 function createFakeAssetExecutor(existingAssetIdsForProduct: number[]) {
   const updates: Array<{ values: Record<string, unknown> }> = [];
@@ -87,7 +87,7 @@ describe("Catalog Primary Asset & Atomic Mutation Guards (CAT-1: CWF-F01, CWF-F0
 
   describe("Catalog route transactional and batch-bound invariants (CWF-F01, CWF-F02, CWF-F04)", () => {
     const routesSource = readFileSync(
-      resolve(process.cwd(), "server/modules/catalog/catalog.routes.ts"),
+      resolve(process.cwd(), "server/modules/catalog/interfaces/http/catalog.routes.ts"),
       "utf8",
     );
 

@@ -69,9 +69,9 @@ import {
   countOpenExceptions,
   detectQtyVariance,
   recordReceiveValidationWarnings,
-} from "../../po-exceptions.service";
+} from "../../application/po-exceptions.service";
 import { db } from "../../../../db";
-import { RETIRED_RECEIVE_EXCEPTION_KINDS, RETIRED_RECEIVE_WARNING_KINDS } from "../../receive-warning-policy";
+import { RETIRED_RECEIVE_EXCEPTION_KINDS, RETIRED_RECEIVE_WARNING_KINDS } from "../../application/receive-warning-policy";
 import type { ExceptionKind } from "@shared/schema";
 
 beforeEach(() => {

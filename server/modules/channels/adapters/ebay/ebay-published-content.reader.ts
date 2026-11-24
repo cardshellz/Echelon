@@ -2,14 +2,14 @@ import { z } from "zod";
 import {
   createCatalogImageInspector,
   type CatalogImageInspector,
-} from "../../../catalog/catalog-image-inspection";
-import type { ChannelPublishedContent } from "../../../marketplace-listings/domain/channel-publication-content";
+} from "../../../catalog/catalog-image-inspection.api";
+import type { ChannelPublishedContent } from "../../../marketplace-listings/channel-publication-content.api";
 import { ebayOriginalPhotoUrl } from "./ebay-photo-requirements";
 import {
   nativeListingReadFailure,
   readEbayNativeListing,
 } from "./ebay-native-listing.transport";
-import { ProductAssetError } from "../../../catalog/product-asset-errors";
+import { ProductAssetError } from "../../../catalog/product-asset-errors.api";
 
 const text = z
   .string()

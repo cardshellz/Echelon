@@ -7,9 +7,9 @@ import { beforeAll, beforeEach, afterAll, describe, it, expect } from "vitest";
 import * as schema from "@shared/schema";
 import { DEFAULT_SUPPLIER_SOURCING_POLICY, type SupplierSourcingPolicy } from "@shared/procurement/supplier-sourcing";
 import { fixtureTable, fixtureForeignKeys } from "./shipment-line-fixture";
-import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../supplier-sourcing.repository";
-import { SupplierSourcingService } from "../../supplier-sourcing.service";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../infrastructure/supplier-sourcing.repository";
+import { SupplierSourcingService } from "../../application/supplier-sourcing.service";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
 
 const url=process.env.ECHELON_TEST_DATABASE_URL;
 const integration=url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

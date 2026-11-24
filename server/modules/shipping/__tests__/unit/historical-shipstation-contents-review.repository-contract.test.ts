@@ -6,11 +6,11 @@ import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repositorySource = readFileSync(
-  join(here, "..", "..", "historical-shipstation-contents-review.repository.ts"),
+  join(here, "..", "..", "infrastructure/historical-shipstation-contents-review.repository.ts"),
   "utf8",
 );
 const omsMutationsSource = readFileSync(
-  join(here, "..", "..", "..", "oms", "reconciliation-exceptions-mutations.repository.ts"),
+  join(here, "..", "..", "..", "oms", "infrastructure/reconciliation-exceptions-mutations.repository.ts"),
   "utf8",
 );
 

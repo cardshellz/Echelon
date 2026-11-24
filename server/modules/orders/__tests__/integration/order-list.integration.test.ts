@@ -5,11 +5,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import * as schema from "@shared/schema";
 import { buildWmsOrderBucketCounts, orderMatchesBucket, WMS_ORDER_BUCKETS } from "@shared/wms-order-listing";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { OrderListRepository, ORDER_LIST_STATEMENT_TIMEOUT_MS } from "../../order-list.repository";
-import { PickingHistoryRepository } from "../../picking-history.repository";
+import { OrderListRepository, ORDER_LIST_STATEMENT_TIMEOUT_MS } from "../../infrastructure/order-list.repository";
+import { PickingHistoryRepository } from "../../infrastructure/picking-history.repository";
 import express, { type Request } from "express";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -53,8 +54,8 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
   let database: InventoryCutoverTestDatabase;
   let orm: ReturnType<typeof drizzle<typeof schema>>;
   let repository: OrderListRepository;
-  let history: typeof import("../../order-history.storage").orderHistoryMethods;
-  let orderStorage: typeof import("../../orders.storage").orderMethods;
+  let history: typeof import("../../infrastructure/order-history.storage").orderHistoryMethods;
+  let orderStorage: typeof import("../../infrastructure/orders.storage").orderMethods;
   const queries: { query: string; parameters: unknown[] }[] = [];
 
   beforeAll(async () => {
@@ -64,7 +65,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     vi.doMock("../../../../storage/base", async importOriginal => ({
       ...await importOriginal<typeof import("../../../../storage/base")>(), db: orm,
     }));
-    history = (await import("../../order-history.storage")).orderHistoryMethods;
+    history = (await import("../../infrastructure/order-history.storage")).orderHistoryMethods;
     vi.doMock("../../../../db", () => ({ db: orm, pool: database.pool }));
     // This suite proves WMS listing SQL/DTO behavior. Keep the real HTTP gate,
     // supplying its current Identity authority through an explicit test port;
@@ -83,7 +84,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
       hasPermission: async (userId: string, resource: string, action: string) =>
         userId === "fixture-operator" && `${resource}:${action}` === "picking:view",
     }));
-    orderStorage = (await import("../../orders.storage")).orderMethods;
+    orderStorage = (await import("../../infrastructure/orders.storage")).orderMethods;
   });
   beforeEach(async () => {
     await database.pool.query("TRUNCATE wms.order_items, wms.orders, wms.picking_logs, oms.oms_orders, oms.oms_order_lines, channels.channels RESTART IDENTITY");
@@ -157,8 +158,8 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     { status: "ready", startedAt: null, pickerId: null },
     { status: "in_progress", startedAt: new Date("2026-10-05T05:14:15.123-04:00"), pickerId: "fixture-picker" },
   ])("serves the actual HTTP queue from PostgreSQL for a $status order without changing recorded work", async ({ status, startedAt, pickerId }) => {
-    const { PickingUseCases } = await import("../../picking.use-cases");
-    const { registerPickingRoutes } = await import("../../picking.routes");
+    const { PickingUseCases } = await import("../../application/picking.use-cases");
+    const { registerPickingRoutes } = await import("../../interfaces/http/picking.routes");
     const order = await seed(status, { startedAt, assignedPickerId: pickerId, channelId: null });
     await orm.update(schema.wmsOrderItems).set({ catalogProductId: 33, inventoryTracking: false,
       productId: null, barcode: "FIXTURE", imageUrl: "/fixture.png" }).where(eq(schema.wmsOrderItems.orderId, order.id));
@@ -181,7 +182,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     const server: Server = createServer(app);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/picking/queue`;
-    const logging = vi.spyOn(console, "error");
+    const logging = spyLoggerJson("error");
     try {
       expect((await fetch(url)).status).toBe(401);
       expect((await fetch(url, { headers: { authorization: "fixture-without-picking" } })).status).toBe(403);

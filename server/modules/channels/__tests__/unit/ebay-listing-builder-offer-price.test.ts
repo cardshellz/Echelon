@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { EbayListingBuilder } from "../../adapters/ebay/ebay-listing-builder";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
-import type { ChannelListingPayload, ChannelVariantPayload } from "../../channel-adapter.interface";
+import type { ChannelListingPayload, ChannelVariantPayload } from "../../domain/channel-adapter.interface";
 
 const CONFIG = {
   merchantLocationKey: "test-warehouse",

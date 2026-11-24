@@ -16,7 +16,7 @@ import { createDrizzleFinancialCommandRepository } from "../../../platform/comma
 import {
   recomputePoFinancialAggregates,
   recomputePurchaseOrderInvoiceMatchesInTransaction,
-} from "../ap-ledger.service";
+} from "../application/ap-ledger.service";
 import {
   assertPurchaseOrderCancellationAuthority,
   getPurchaseOrderCancellationPermission,
@@ -26,28 +26,28 @@ import {
   detectMatchMismatch,
   detectPastDue,
   detectQtyVariance,
-} from "../po-exceptions.service";
-import { createPurchaseApprovalCommands } from "../purchase-approval.commands";
-import { purchaseApprovalLinesFingerprint } from "../purchase-approval-review";
+} from "../application/po-exceptions.service";
+import { createPurchaseApprovalCommands } from "../application/purchase-approval.commands";
+import { purchaseApprovalLinesFingerprint } from "../application/purchase-approval-review";
 import {
   assertPurchaseApprovalPermission,
   buildPurchaseApprovalSnapshot,
   PurchaseApprovalAuthorityError,
   purchaseApprovalSnapshotCovers,
-} from "../purchase-order-approval.policy";
+} from "../domain/purchase-order-approval.policy";
 import {
   buildPoCloseChange,
   buildPoCloseShortChange,
   buildPoCloseShortLinePatch,
   normalizePoCloseShortReason,
-} from "../purchase-order-close.service";
-import { validateDeliverySchedulePatch } from "../purchase-order-delivery-schedule";
-import type { PurchaseOrderEntryTransaction } from "../purchase-order-entry.repository";
+} from "../application/purchase-order-close.service";
+import { validateDeliverySchedulePatch } from "../application/purchase-order-delivery-schedule";
+import type { PurchaseOrderEntryTransaction } from "../infrastructure/purchase-order-entry.repository";
 import {
   buildPhysicalTransitionChange,
   type PoLifecycleCommand,
-} from "../purchase-order-lifecycle.service";
-import { purchaseOrderUpdatedAtMatchesApplicationVersion } from "../purchase-order-lifecycle-version";
+} from "../application/purchase-order-lifecycle.service";
+import { purchaseOrderUpdatedAtMatchesApplicationVersion } from "../application/purchase-order-lifecycle-version";
 import type { PurchasingCatalog } from "./purchasing-catalog";
 import type { PurchasingLifecycleLocks } from "./purchasing-lifecycle-locks";
 import type { PurchasingReceiving } from "./purchasing-receiving";
@@ -63,6 +63,7 @@ import {
   type PoLifecycleCommandInput,
   type PurchasingBaseContext,
 } from "./purchasing.types";
+import { logger } from "../../../platform/observability/logger";
 
 export function createPurchasingLifecycleActions(
   ctx: PurchasingBaseContext,
@@ -190,7 +191,7 @@ export function createPurchasingLifecycleActions(
       await detectPastDue(poId);
     } catch (detectionErr) {
       // Log but don't throw — detection is best-effort, not transactional.
-      console.error("[po-exceptions] detection hook failed in transitionPhysical:", detectionErr);
+      logger.error("procurement.purchasing_lifecycle_actions", { message: "[po-exceptions] detection hook failed in transitionPhysical:", error: detectionErr });
     }
 
     return result;
@@ -444,7 +445,7 @@ export function createPurchasingLifecycleActions(
 
   async function approveInTransaction(tx: any, id: number, userId: string | undefined, input: unknown) {
     if (!userId?.trim()) {
-      console.warn(JSON.stringify({ event: "procurement.approval.denied", purchaseOrderId: id, code: "PO_APPROVAL_ACTOR_REQUIRED" }));
+      logger.warn("procurement.approval.denied", { event: "procurement.approval.denied", purchaseOrderId: id, code: "PO_APPROVAL_ACTOR_REQUIRED" });
       throw new PurchasingError("An authenticated user is required to approve this purchase order.", 403, { code: "PO_APPROVAL_ACTOR_REQUIRED" });
     }
     try {
@@ -525,11 +526,10 @@ export function createPurchasingLifecycleActions(
       return { ...updated, reviewedUpdatedAt: expectedUpdatedAt, reviewedLinesFingerprint: expectedLinesFingerprint };
     } catch (error: unknown) {
       if (error instanceof PurchaseApprovalAuthorityError) {
-        console.warn(JSON.stringify({ event: "procurement.approval.denied", purchaseOrderId: id, actorId: userId, ...error.details }));
+        logger.warn("procurement.approval.denied", { event: "procurement.approval.denied", purchaseOrderId: id, actorId: userId, ...error.details });
         throw new PurchasingError(error.message, error.statusCode, error.details);
       }
-      console.error(JSON.stringify({ event: "procurement.approval.failed", purchaseOrderId: id, actorId: userId,
-        code: error instanceof PurchasingError ? error.details?.code ?? "PO_APPROVAL_REJECTED" : "PO_APPROVAL_TRANSACTION_FAILED" }));
+      logger.error("procurement.approval.failed", { event: "procurement.approval.failed", purchaseOrderId: id, actorId: userId, code: error instanceof PurchasingError ? error.details?.code ?? "PO_APPROVAL_REJECTED" : "PO_APPROVAL_TRANSACTION_FAILED" });
       throw error;
     }
   }
@@ -606,7 +606,7 @@ export function createPurchasingLifecycleActions(
   async function cancel(id: number, reason: string, userId?: string) {
     if (typeof reason !== "string" || !reason.trim()) throw new PurchasingError("Cancel reason is required", 400);
     if (!userId?.trim()) {
-      console.warn(JSON.stringify({ event: "procurement.cancellation.denied", purchaseOrderId: id, code: "PO_CANCEL_ACTOR_REQUIRED" }));
+      logger.warn("procurement.cancellation.denied", { event: "procurement.cancellation.denied", purchaseOrderId: id, code: "PO_CANCEL_ACTOR_REQUIRED" });
       throw new PurchasingError("An authenticated user is required to cancel this purchase order.", 403, { code: "PO_CANCEL_ACTOR_REQUIRED" });
     }
     reason = reason.trim();
@@ -620,7 +620,7 @@ export function createPurchasingLifecycleActions(
         assertPurchaseOrderCancellationAuthority(po, actor);
       } catch (error) {
         if (error instanceof PurchaseOrderCancellationAuthorityError) {
-          console.warn(JSON.stringify({ event: "procurement.cancellation.denied", purchaseOrderId: id, ...error.details }));
+          logger.warn("procurement.cancellation.denied", { event: "procurement.cancellation.denied", purchaseOrderId: id, ...error.details });
           throw new PurchasingError(error.message, error.statusCode, error.details);
         }
         throw error;
@@ -700,7 +700,7 @@ export function createPurchasingLifecycleActions(
     try {
       await detectPastDue(id);
     } catch (detectionErr) {
-      console.error("[po-exceptions] detection hook failed in cancel:", detectionErr);
+      logger.error("procurement.purchasing_lifecycle_actions", { message: "[po-exceptions] detection hook failed in cancel:", error: detectionErr });
     }
 
     return result;
@@ -841,7 +841,7 @@ export function createPurchasingLifecycleActions(
       try {
         await detectMatchMismatch(invoiceId);
       } catch (detectionError) {
-        console.error("[po-exceptions] close match detection failed:", detectionError);
+        logger.error("procurement.purchasing_lifecycle_actions", { message: "[po-exceptions] close match detection failed:", error: detectionError });
       }
     }
     const nextAction = "Correct missing mappings and resolve or accept current variances before closing the PO.";

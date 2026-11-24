@@ -5,7 +5,7 @@ import {
   getPurchaseOrderCancellationPermission,
   type PurchaseOrderCancellationState,
 } from "../../domain/purchase-order-cancellation-authority";
-import { buildPoLifecycleSummary } from "../../purchase-order-lifecycle.service";
+import { buildPoLifecycleSummary } from "../../application/purchase-order-lifecycle.service";
 
 const actor = (permissions: string[], overrides: Partial<CommandAuthorityActor> = {}): CommandAuthorityActor => ({
   userId: "buyer", active: true, permissions, scopedPermissions: [], ...overrides,

@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 const root = join(dirname(fileURLToPath(import.meta.url)),"../../../../..");
-const participant = "server/modules/orders/shipment-order-context.query.ts";
-const owner = "server/modules/shipping/outbound-shipment-access.query.ts";
+const participant = "server/modules/orders/infrastructure/shipment-order-context.query.ts";
+const owner = "server/modules/shipping/infrastructure/outbound-shipment-access.query.ts";
 /** A same-transaction projection is private, not an arbitrary-order API.
  * Parsed literal edges cover aliases/re-exports and require/import expressions.
  * Reflection/computed names and SQL/business semantics still require review.
@@ -47,23 +47,23 @@ describe("private shipment order-context participant", () => {
     expect([...rootEntries,...["server","client/src","scripts","script"].flatMap(files)].flatMap(file => forbiddenEdges(file,readFileSync(join(root,file),"utf8")).map(target => ({ file,target })))).toEqual([]);
   });
   it.each([
-    'import { readShipmentLinkedOrderSummary as alias } from "../modules/orders/shipment-order-context.query";',
-    'export * from "../modules/orders/shipment-order-context.query.js";',
-    'const alias = await import("../modules/orders/shipment-order-context.query");',
-    'const alias = require("../modules/orders/shipment-order-context.query");',
-    'type Alias = typeof import("../modules/orders/shipment-order-context.query");',
-    'import Alias = require("../modules/orders/shipment-order-context.query");',
-    'import "@/../../server/modules/orders/shipment-order-context.query";',
-    'import "@shared/../server/modules/orders/shipment-order-context.query";',
+    'import { readShipmentLinkedOrderSummary as alias } from "../modules/orders/infrastructure/shipment-order-context.query";',
+    'export * from "../modules/orders/infrastructure/shipment-order-context.query.js";',
+    'const alias = await import("../modules/orders/infrastructure/shipment-order-context.query");',
+    'const alias = require("../modules/orders/infrastructure/shipment-order-context.query");',
+    'type Alias = typeof import("../modules/orders/infrastructure/shipment-order-context.query");',
+    'import Alias = require("../modules/orders/infrastructure/shipment-order-context.query");',
+    'import "@/../../server/modules/orders/infrastructure/shipment-order-context.query";',
+    'import "@shared/../server/modules/orders/infrastructure/shipment-order-context.query";',
   ])("rejects an alternate entrypoint or re-export %#", text => {
     expect(forbiddenEdges("server/routes/new-order-route.ts",text)).toEqual([participant]);
   });
   it.each(["script/renamed-helper.ts","new-root-entry.cjs"])("rejects literal private access from alternate executable root %s",file => {
-    const specifier = file.includes("/") ? "../server/modules/orders/shipment-order-context.query" : "./server/modules/orders/shipment-order-context.query";
+    const specifier = file.includes("/") ? "../server/modules/orders/infrastructure/shipment-order-context.query" : "./server/modules/orders/infrastructure/shipment-order-context.query";
     expect(forbiddenEdges(file,`import "${specifier}";`)).toEqual([participant]);
   });
   it("allows the verified caller, unrelated code and comments", () => {
-    expect(forbiddenEdges(owner,'import { readShipmentLinkedOrderSummary } from "../orders/shipment-order-context.query";')).toEqual([]);
-    expect(forbiddenEdges("server/jobs/other.ts",'// import "../modules/orders/shipment-order-context.query";')).toEqual([]);
+    expect(forbiddenEdges(owner,'import { readShipmentLinkedOrderSummary } from "../../orders/infrastructure/shipment-order-context.query";')).toEqual([]);
+    expect(forbiddenEdges("server/jobs/other.ts",'// import "../modules/orders/infrastructure/shipment-order-context.query";')).toEqual([]);
   });
 });

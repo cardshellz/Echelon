@@ -14,7 +14,7 @@ import type {
   CanonicalClaimLotAllocation,
   CanonicalClaimProducedLotAllocation,
   CanonicalClaimTransactionClient,
-} from "../../inventory-planning/application/canonical-claim-inventory.port";
+} from "../../inventory-planning/canonical-claim-inventory.port.api";
 import { allocateBuildCostLayers } from "../domain/build.domain";
 import { roundedMillsToCents as buildMillsToRoundedCents, normalizeLotCosts as normalizeBuildLotCosts, lotCostNeedsReview, hasExactLotCostTotals, unitCostMirrorsFromTotals } from "../domain/lot-cost";
 import { recordLotCostFollowUp } from "./lot-cost-follow-up.repository";

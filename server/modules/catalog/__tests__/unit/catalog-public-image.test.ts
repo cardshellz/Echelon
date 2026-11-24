@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createCatalogPublicImageUrl } from "../../catalog-public-image";
-import { resolveCatalogPublicationImage, resolveCatalogPublicationImages, type CatalogPublicationImage } from "../../catalog-publication-images.reader";
-import { MAX_PRODUCT_IMAGE_BYTES } from "../../product-image-download.service";
+import { createCatalogPublicImageUrl } from "../../domain/catalog-public-image";
+import { resolveCatalogPublicationImage, resolveCatalogPublicationImages, type CatalogPublicationImage } from "../../infrastructure/catalog-publication-images.reader";
+import { MAX_PRODUCT_IMAGE_BYTES } from "../../application/product-image-download.service";
 
 const hash = "ab".repeat(32);
 const image: CatalogPublicationImage = {

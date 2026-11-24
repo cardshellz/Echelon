@@ -8,12 +8,12 @@ import * as schema from "@shared/schema";
 import { createQuantityLedgerTestContext, QUANTITY_TEST_TIME, type QuantityLedgerTestContext } from "../fixtures/quantity-ledger-database";
 import { fixtureTable, fixtureColumnDefinitions, qualifiedTable } from "../../../procurement/__tests__/integration/shipment-line-fixture";
 import { installSupplierReturnCompletionFixture } from "../../../procurement/__tests__/integration/supplier-return-fixture";
-import { recordSupplierReturn } from "../../../procurement/supplier-return.service";
+import { recordSupplierReturn } from "../../../procurement/application/supplier-return.service";
 import { previewSupplierReturnStock, readSupplierReturnInventoryEvidence } from "../../application/supplier-return-stock";
 import { ensureLotCostQuantityBasis, allocateLotQuantityCost, readUnallocatedLotCosts } from "../../infrastructure/cost-quantity.repository";
 import { recordReceiptCostOrigin } from "../../infrastructure/cost-evidence.repository";
 import { openOperationalQuantityPosting } from "../../infrastructure/operational-quantity-posting";
-import { COGSService } from "../../cogs.service";
+import { COGSService } from "../../application/cogs.service";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

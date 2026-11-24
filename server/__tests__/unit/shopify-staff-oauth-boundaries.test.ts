@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { scanWriterTopology } from "../../../scripts/writer-ratchet/scan";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const composition = "server/modules/channels/shopify-staff-oauth.ts";
+const composition = "server/modules/channels/application/shopify-staff-oauth.ts";
 const provider = "server/modules/channels/adapters/shopify/shopify-staff-oauth.provider.ts";
 const repository = "server/modules/channels/infrastructure/shopify-staff-oauth.repository.ts";
 const vendorProvider = "server/modules/dropship/infrastructure/dropship-marketplace-oauth.providers.ts";
@@ -110,7 +110,7 @@ describe("staff Shopify OAuth private adapter and writer boundaries", () => {
     expect(boundaryViolations(composition,
       'import { exchangeShopifyStaffOAuthCode } from "./adapters/shopify/shopify-staff-oauth.provider";')).toEqual([]);
     expect(boundaryViolations("server/routes/shopify-oauth.routes.ts",
-      'import { getShopifyStaffOAuthService } from "../modules/channels/shopify-staff-oauth";')).toEqual([]);
+      'import { getShopifyStaffOAuthService } from "../modules/channels/application/shopify-staff-oauth";')).toEqual([]);
     expect(boundaryViolations("server/jobs/shopify-refresh.ts",
       'fetch(`https://${shop}/admin/api/2026-10/graphql.json`);')).toEqual([]);
   });

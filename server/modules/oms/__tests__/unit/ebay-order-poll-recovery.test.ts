@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   pollEbayOrders,
   setWmsSyncService,
-} from "../../ebay-order-ingestion";
+} from "../../application/ebay-order-ingestion";
 import {
   getEbayOrderPollHeartbeat,
   resetEbayOrderPollHeartbeatForTests,
-} from "../../ebay-order-poll-heartbeat";
+} from "../../application/ebay-order-poll-heartbeat";
 
 function queryText(query: any): string {
   return (query?.queryChunks ?? [])

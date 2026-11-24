@@ -1,5 +1,6 @@
 import type { ListingPublicationService } from "./listing-publication.service";
 import { getSchedulerDisableReason } from "../../../infrastructure/scheduler-config";
+import { logger } from "../../../platform/observability/logger";
 
 const WORKER_INTERVAL_MS = 30_000;
 /** Database leases coordinate instances; this guard avoids overlapping local ticks. */
@@ -9,12 +10,7 @@ export function startListingPublicationWorker(
 ): (() => void) | undefined {
   const disabled = getSchedulerDisableReason("LISTING_PUBLICATION_DISABLED");
   if (disabled) {
-    console.info(
-      JSON.stringify({
-        operation: `${operation}_disabled`,
-        reason: disabled,
-      }),
-    );
+    logger.info("marketplace-listings.listing_publication_worker", { operation: `${operation}_disabled`, reason: disabled });
     return;
   }
   let running = false;
@@ -24,12 +20,7 @@ export function startListingPublicationWorker(
     try {
       await service.processDue();
     } catch {
-      console.error(
-        JSON.stringify({
-          operation,
-          code: "LISTING_WORKER_FAILED",
-        }),
-      );
+      logger.error("LISTING_WORKER_FAILED", { operation, code: "LISTING_WORKER_FAILED" });
     } finally {
       running = false;
     }

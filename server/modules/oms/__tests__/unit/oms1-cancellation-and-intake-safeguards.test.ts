@@ -5,12 +5,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleCustomerCancelOnShipment,
   markShipmentCancelled,
-} from "../../../orders/shipment-rollup";
-import { createChannelFulfillmentIngressService } from "../../channel-fulfillment-ingress.service";
-import { cancelOrderCascade } from "../../oms-webhooks";
-import { createOmsService, recordOmsReconcileReviewEvent } from "../../oms.service";
-import { createShipStationService } from "../../shipstation.service";
-import { buildShopifyWebhookInboxInput } from "../../webhook-inbox.service";
+} from "../../../orders/application/shipment-rollup";
+import { createChannelFulfillmentIngressService } from "../../application/channel-fulfillment-ingress.service";
+import { cancelOrderCascade } from "../../application/oms-webhooks";
+import { createOmsService, recordOmsReconcileReviewEvent } from "../../application/oms.service";
+import { createShipStationService } from "../../application/shipstation.service";
+import { buildShopifyWebhookInboxInput } from "../../application/webhook-inbox.service";
 
 const REPO_ROOT = resolve(__dirname, "../../../../..");
 

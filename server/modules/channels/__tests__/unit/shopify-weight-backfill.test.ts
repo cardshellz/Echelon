@@ -14,7 +14,7 @@ import {
   type ShopifyWeightBackfillDeps,
   type WeightBackfillCandidate,
   type ShopifyWeightMeasurement,
-} from "../../shopify-weight-backfill.service";
+} from "../../application/shopify-weight-backfill.service";
 
 // ---------------------------------------------------------------------------
 // Fake deps builder

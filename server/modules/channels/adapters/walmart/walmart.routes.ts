@@ -4,10 +4,11 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { WalmartChannelService } from "./walmart-channel.service";
 import type { WalmartOrderPollService } from "./walmart-order-poll.service";
 import { WalmartApiError } from "./walmart-client";
-import type { ChannelCatalogDirectory } from "../../channel-catalog.routes";
-import { sendCatalogError } from "../../channel-catalog.routes";
-import { ChannelIdentityError } from "../../channel-identity.domain";
+import type { ChannelCatalogDirectory } from "../../interfaces/http/channel-catalog.routes";
+import { sendCatalogError } from "../../interfaces/http/channel-catalog.routes";
+import { ChannelIdentityError } from "../../domain/channel-identity.domain";
 import { walmartMappingSchema } from "@shared/types/walmart-channel";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerWalmartChannelRoutes(app: Express): void {
   const catalog = async (channelId: number) => {
@@ -53,7 +54,7 @@ function sendError(res: Response, error: unknown): void {
   const known = error instanceof WalmartApiError;
   const conflict = typeof error === "object" && error !== null && "code" in error && error.code === "23505";
   const code = known ? error.code : error instanceof z.ZodError ? "WALMART_INPUT_INVALID" : conflict ? "WALMART_ACCOUNT_CONFLICT" : "WALMART_OPERATION_FAILED";
-  console.error(JSON.stringify({ code, operation: "walmart_channel_request" }));
+  logger.error("channels.walmart_routes", { code, operation: "walmart_channel_request" });
   res.status(known ? error.retryable ? 503 : 409 : error instanceof z.ZodError ? 400 : conflict ? 409 : 500)
     .json({ code, error: known ? error.message : conflict ? "This Walmart account or SKU is already connected" : "Walmart operation could not be completed; review the connection and retry" });
 }

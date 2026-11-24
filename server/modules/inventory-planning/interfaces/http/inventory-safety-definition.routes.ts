@@ -5,6 +5,7 @@ import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-ava
 import { InventoryCutoverManifestError } from "../../domain/inventory-cutover-manifest";
 import { PostgresSafetyDefinitionStore } from "../../infrastructure/inventory-safety-definition.repository";
 import { sendError } from "./inventory-product-definition.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerSafetyDefinitionRoutes(app: Express,
   service: Pick<SafetyDefinitionService, "review" | "apply" | "progress" | "set" | "overview"> = new SafetyDefinitionService(new PostgresSafetyDefinitionStore()),
@@ -12,7 +13,7 @@ export function registerSafetyDefinitionRoutes(app: Express,
   const respondToSet = (res: Parameters<typeof sendError>[0], error: unknown) => {
     // Set runs the version writers, which report a moved head or an unusable SKU with their own typed error.
     if (error instanceof InventoryAvailabilityMasterDataError) {
-      if (error.status >= 500) console.error(JSON.stringify({ level: "error", event: "safety_definition_set_failed", error_code: error.code }));
+      if (error.status >= 500) logger.error("safety_definition_set_failed", { event: "safety_definition_set_failed", error_code: error.code });
       res.status(error.status).json({ error: { code: error.code, message: error.message,
         ...(error.details.length > 0 ? { details: [...error.details] } : {}) } });
       return;

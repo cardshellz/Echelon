@@ -1,5 +1,5 @@
 import { db, pool } from "../../../db";
-import { createAllocationEngine } from "../../channels/allocation-engine.service";
+import { createAllocationEngine } from "../../channels/allocation-engine.service.api";
 import {
   createAuthorityAwareInventoryAtpService,
   createInventoryChannelQuantityRuntimeService,

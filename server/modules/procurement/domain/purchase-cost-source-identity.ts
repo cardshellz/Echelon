@@ -4,7 +4,7 @@ import { readIntegerMills } from "@shared/money-read";
 import { MILLS_PER_CENT } from "@shared/utils/po-line-pricing";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
 import { isApprovedCostInvoiceStatus, purchaseCostAuthorityInputSchema, type PurchaseCostAuthorityInput } from "@shared/procurement/purchase-cost-authority";
-import { costFingerprint } from "../../inventory/domain/cost-fingerprint";
+import { costFingerprint } from "../../inventory/cost-fingerprint.api";
 import { projectPurchaseCostAuthority } from "./purchase-cost-authority";
 import { resolvePurchaseCostSource } from "./purchase-cost-source";
 import { verifiedStoredCostSource, type CostSourceProposal, type StoredCostSource } from "./cost-source-compatibility";

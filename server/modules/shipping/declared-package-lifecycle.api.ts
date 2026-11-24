@@ -6,7 +6,7 @@ export {
   type PersistedConfirmedCarrierEvidenceRow,
   type PersistedDeclaredPackageEvidence,
   type PersistedShippingProviderLabelEventRow,
-} from "./declared-package-lifecycle-shadow.domain";
+} from "./domain/declared-package-lifecycle-shadow.domain";
 
 export {
   SHIPMENT_LIFECYCLE_SHADOW_AUDIT_LIMITS,
@@ -16,4 +16,4 @@ export {
   type NormalizedShipmentLifecycleShadowAuditRepositoryOptions,
   type ShipmentLifecycleShadowAuditBatch,
   type ShipmentLifecycleShadowAuditRepositoryOptions,
-} from "./shipment-lifecycle-shadow-audit.repository";
+} from "./infrastructure/shipment-lifecycle-shadow-audit.repository";

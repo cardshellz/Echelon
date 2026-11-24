@@ -222,6 +222,17 @@ const variant = (
   membershipVariant: null,
   planPrices: planPrices === null ? null : { value: planPrices },
 });
+/** Shopify's answer to the minimum-purchase lookup for a code already on the order. */
+const codeMinimum = (minimumRequirement: unknown = null) => ({
+  codeDiscountNodeByCode: {
+    id: id("DiscountCodeNode", 1),
+    codeDiscount: { __typename: "DiscountCodeBasic", minimumRequirement },
+  },
+});
+const minimumSubtotal = (amount: string) => ({
+  __typename: "DiscountMinimumSubtotal",
+  greaterThanOrEqualToSubtotal: { amount, currencyCode: "USD" },
+});
 const refundCapacity = (amount = "20.00", gateway = "shopify_payments") => ({
   order: {
     id: id("Order", 100),
@@ -2671,6 +2682,7 @@ describe("ShopifyOrderEditProvider", () => {
       fixedOrder(),
       begin(fixedCalculated()),
       quantity(fixedCalculated(0, "0.00", "10.00")),
+      codeMinimum(),
       refundCapacity("80.00"),
     ]);
     const snapshot = await h.provider.readOrder(4, "100");
@@ -3129,7 +3141,38 @@ describe("ShopifyOrderEditProvider", () => {
     ).toBe(false);
   });
 
-  it("rejects an edit baseline that reallocates a cent between items before any requested change", async () => {
+  it("quotes an order whose percentage code shares are a cent away from each item's own rounding", async () => {
+    // 10% of $19.96 is $1.99 or $2.00 and of $99.99 is $9.99 or $10.00, yet
+    // Shopify may record $2.01 and $9.98: the order total ($11.99) is what it
+    // rounds. The order and its edit session agree, so the edit proceeds.
+    const order = () => codeOrder(4, "17.95", "107.96", "90.01");
+    const session = codeCalculated(4, "2.01");
+    session.lineItems.nodes[1].calculatedDiscountAllocations[0].allocatedAmountSet =
+      bag("9.98");
+    const h = harness([
+      order(),
+      order(),
+      { nodes: [variant(10, "4.99")] },
+      begin(session),
+      quantity(codeCalculated(5, "2.50", "112.45")),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 11245,
+      deltaCents: 449,
+      financials: { itemsDiscountCents: 1249, itemsNetCents: 11245 },
+    });
+  });
+
+  it("rejects an edit session whose item discounts differ from the order before any requested change", async () => {
+    // The order recorded $2.00 and $9.99; this session opens with $2.01 and
+    // $9.98. That is two Shopify reads of one order disagreeing, not rounding.
     const calculatedBaseline = codeCalculated();
     calculatedBaseline.lineItems.nodes[0].calculatedDiscountAllocations[0].allocatedAmountSet =
       bag("2.01");
@@ -3149,9 +3192,7 @@ describe("ShopifyOrderEditProvider", () => {
         { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
         "edit-1",
       ),
-    ).rejects.toMatchObject({
-      code: "ORDER_EDIT_PERCENTAGE_DISCOUNT_MISMATCH",
-    });
+    ).rejects.toMatchObject({ code: "QUOTE_BASELINE_MISMATCH" });
     expect(
       h.requests.some((request) =>
         request.query.includes("orderEditSetQuantity"),
@@ -3437,12 +3478,115 @@ describe("ShopifyOrderEditProvider", () => {
     ).toBe(false);
   });
 
+  describe("minimum purchase of a checkout code", () => {
+    // codeOrder(): 4 x $4.99 + $99.99 = $119.95 of items before discounts.
+    // Reducing the first item to 3 leaves $114.96 and 4 items.
+    const reduce = async (minimum: unknown, tail: unknown[] = []) => {
+      const h = harness([
+        codeOrder(),
+        codeOrder(),
+        begin(codeCalculated()),
+        quantity(codeCalculated(3, "1.50", "103.47")),
+        minimum,
+        ...tail,
+      ]);
+      const snapshot = await h.provider.readOrder(4, "100");
+      return {
+        h,
+        quote: h.provider.quote(
+          4,
+          snapshot,
+          { changes: [{ lineItemId: "1", quantity: 3 }], additions: [] },
+          "edit-1",
+        ),
+      };
+    };
+
+    it("refuses an edit that takes the order below the code's minimum spend", async () => {
+      const { h, quote } = await reduce(codeMinimum(minimumSubtotal("115.00")));
+      await expect(quote).rejects.toMatchObject({
+        code: "ORDER_EDIT_CODE_MINIMUM_NOT_MET",
+        status: 409,
+        message: expect.stringMatching(/at least \$115\.00.*would leave \$114\.96/),
+      });
+      expect(h.reports).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "ORDER_EDIT_CODE_MINIMUM_NOT_MET",
+          phase: "verify_code_minimum",
+        }),
+      );
+      const lookup = h.requests.find((request) =>
+        request.query.includes("query EchelonEditCodeMinimum("),
+      );
+      expect(lookup?.variables).toEqual({ code: "AMAZZIN'" });
+      expect(
+        h.requests.some((request) =>
+          /orderEditCommit|refundCreate/.test(request.query),
+        ),
+      ).toBe(false);
+    });
+
+    it("allows an edit that leaves the order exactly at the minimum spend", async () => {
+      const { quote } = await reduce(codeMinimum(minimumSubtotal("114.96")), [
+        refundCapacity("107.96"),
+      ]);
+      await expect(quote).resolves.toMatchObject({ totalCents: 10347 });
+    });
+
+    it("refuses an edit that takes the order below the code's minimum quantity", async () => {
+      const { quote } = await reduce(
+        codeMinimum({
+          __typename: "DiscountMinimumQuantity",
+          greaterThanOrEqualToQuantity: "5",
+        }),
+      );
+      await expect(quote).rejects.toMatchObject({
+        code: "ORDER_EDIT_CODE_MINIMUM_NOT_MET",
+        message: expect.stringContaining("at least 5 items"),
+      });
+    });
+
+    it.each([
+      ["has been deleted since checkout", { codeDiscountNodeByCode: null }],
+      [
+        "is a kind of discount with no minimum-purchase field",
+        {
+          codeDiscountNodeByCode: {
+            id: id("DiscountCodeNode", 1),
+            codeDiscount: { __typename: "DiscountCodeApp" },
+          },
+        },
+      ],
+    ])("allows the edit when the code %s", async (_label, response) => {
+      const { quote } = await reduce(response, [refundCapacity("107.96")]);
+      await expect(quote).resolves.toMatchObject({ totalCents: 10347 });
+    });
+
+    it("refuses the edit when the code's minimum cannot be read", async () => {
+      const { h, quote } = await reduce(
+        codeMinimum({ __typename: "DiscountMinimumSubtotal" }),
+      );
+      await expect(quote).rejects.toMatchObject({
+        code: "ORDER_EDIT_CODE_MINIMUM_UNAVAILABLE",
+      });
+      expect(
+        h.requests.some((request) => /orderEditCommit/.test(request.query)),
+      ).toBe(false);
+    });
+
+    it("refuses a minimum amount that is not exact cents", async () => {
+      const { quote } = await reduce(codeMinimum(minimumSubtotal("115.005")));
+      await expect(quote).rejects.toMatchObject({ code: "MONEY_INVALID" });
+    });
+  });
+
   it("quotes a discounted reduction and prepares a refund for the net difference", async () => {
     const h = harness([
       codeOrder(),
       codeOrder(),
       begin(codeCalculated()),
       quantity(codeCalculated(3, "1.50", "103.47")),
+      codeMinimum(),
       refundCapacity("107.96"),
     ]);
     const snapshot = await h.provider.readOrder(4, "100");

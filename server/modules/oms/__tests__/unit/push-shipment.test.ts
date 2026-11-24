@@ -21,6 +21,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 import {
   createShipStationService,
   validateShipmentForPush,
@@ -30,7 +31,7 @@ import {
   type WmsShipmentRow,
   type WmsOrderRow,
   type WmsShipmentItemRow,
-} from "../../shipstation.service";
+} from "../../application/shipstation.service";
 
 // ─── Fixtures ────────────────────────────────────────────────────────
 
@@ -289,7 +290,7 @@ describe("validateShipmentForPush :: header-level violations", () => {
     // The line-sum vs total_cents reconciliation was removed (#58276): it was
     // warn-only and structurally wrong. A totals mismatch must neither throw
     // nor warn now — ShipStation accepts whatever totals we send.
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     expect(() =>
       validateShipmentForPush(
         okShipment(),
@@ -527,6 +528,12 @@ function makeDb(
       return { rows: [] };
     }
     calls.push({ kind: "execute" });
+    // The queued write-back is status-guarded and RETURNs the row it moved.
+    // A real pushable row matches, so answer like Postgres does unless a test
+    // overrides it to simulate a cancel landing mid-push.
+    if (/status = 'queued'/.test(text) && /RETURNING id/.test(text)) {
+      return { rows: [{ id: 9001 }] };
+    }
     if (remaining.length === 0) {
       return { rows: [] };
     }
@@ -1522,7 +1529,11 @@ describe("pushShipment :: sibling-shipment dedup", () => {
       if (text.includes("is_self")) {
         return { rows: opts.sibling ? [{ ...opts.sibling, is_self: false }] : [] };
       }
-      // routing lookups, UPDATE, recompute reads → empty
+      // The status-guarded queued write-back RETURNs the row it moved.
+      if (/status = 'queued'/.test(text) && /RETURNING id/.test(text)) {
+        return { rows: [{ id: opts.shipment.id }] };
+      }
+      // routing lookups, other UPDATEs, recompute reads → empty
       return { rows: [] };
     });
 
@@ -1890,7 +1901,7 @@ describe("pushShipment :: error cases", () => {
   });
 
   it("warns but pushes when the owning WMS order is already shipped (multi-shipment)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const shipmentRow = okShipment({ status: "queued" });
     const mock = makeDb([
       { rows: [shipmentRow] },
@@ -2078,10 +2089,111 @@ describe("pushShipment :: never sends a zeroed line to ShipStation", () => {
           .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
       : [];
     const src = [
-      readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf-8"),
+      readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf-8"),
       ...subFiles,
     ].join("\n");
     expect(src).toMatch(/COALESCE\(\$\{wmsOrderItems\.requiresShipping\}, 1\) = 1/);
     expect(src).toMatch(/COALESCE\(\$\{outboundShipmentItems\.commercialRequestedQty\}, \$\{outboundShipmentItems\.qty\}\) > 0/);
+  });
+});
+
+// ─── #65805: a cancel lands while the push is in flight ────────────────
+// The status-guarded write-back matches zero rows once the shipment is
+// cancelled. Before the fix that silently dropped the new ShipStation id and
+// left the order live in ShipStation. Now the id is saved and the provider
+// order is cancelled, or the shipment is flagged for review.
+describe("pushShipment :: shipment cancelled while the push was in flight", () => {
+  const PROVIDER_ID = 555000;
+
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+  });
+
+  function providerFetch(liveOrderStatus: string) {
+    let posts = 0;
+    return vi.fn(async (url: string, init: any) => {
+      const method = init?.method ?? "GET";
+      let json: any;
+      if (method === "POST") {
+        posts += 1;
+        json = { orderId: PROVIDER_ID, orderStatus: posts === 1 ? "awaiting_shipment" : "cancelled" };
+      } else if (String(url).includes(`/orders/${PROVIDER_ID}`)) {
+        json = { orderId: PROVIDER_ID, orderKey: "echelon-wms-shp-9001", orderStatus: liveOrderStatus };
+      } else {
+        json = { orders: [], page: 1, pages: 1 };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => json,
+        text: async () => JSON.stringify(json),
+        headers: new Map<string, string>() as any,
+      };
+    });
+  }
+
+  function cancelledMidFlightDb(sharingOpenShipments = 0) {
+    const sqlSeen: string[] = [];
+    const mock = makeDb(
+      [{ rows: [okShipment()] }, { rows: [okOrder()] }, { rows: [{ non_shipping_total_cents: 0 }] }, { rows: [okItem()] }],
+      {
+        executeOverride: (text) => {
+          sqlSeen.push(text);
+          if (/status = 'queued'/.test(text) && /RETURNING id/.test(text)) return { rows: [] };
+          if (/shipstation_order_id IS NULL OR shipstation_order_id =/.test(text)) return { rows: [{ status: "cancelled" }] };
+          if (/SELECT status FROM wms\.outbound_shipments/.test(text)) return { rows: [{ status: "cancelled" }] };
+          if (/COUNT\(\*\)::int AS n/.test(text)) return { rows: [{ n: sharingOpenShipments }] };
+          if (/requires_review = true/.test(text)) return { rows: [] };
+          return undefined;
+        },
+      },
+    );
+    return { mock, sqlSeen };
+  }
+
+  it("saves the provider id without reviving the shipment, then cancels the ShipStation order", async () => {
+    const { mock, sqlSeen } = cancelledMidFlightDb();
+    const fetchMock = providerFetch("awaiting_shipment");
+    globalThis.fetch = fetchMock as any;
+
+    const result = await createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock }).pushShipment(9001);
+
+    expect(result).toEqual({ shipstationOrderId: PROVIDER_ID, orderKey: "echelon-wms-shp-9001" });
+    const link = sqlSeen.find((t) => /shipstation_order_id IS NULL OR shipstation_order_id =/.test(t))!;
+    expect(link).toBeDefined();
+    expect(link).not.toMatch(/status =/);
+    const posts = fetchMock.mock.calls.filter(([, init]: any) => init?.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(JSON.parse((posts[1] as any)[1].body).orderStatus).toBe("cancelled");
+    expect(sqlSeen.some((t) => /requires_review = true/.test(t))).toBe(false);
+  });
+
+  it("flags for review instead of cancelling when another open shipment shares the order", async () => {
+    const { mock, sqlSeen } = cancelledMidFlightDb(1);
+    const fetchMock = providerFetch("awaiting_shipment");
+    globalThis.fetch = fetchMock as any;
+
+    await createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock }).pushShipment(9001);
+
+    expect(fetchMock.mock.calls.filter(([, init]: any) => init?.method === "POST")).toHaveLength(1);
+    expect(sqlSeen.some((t) => /requires_review = true/.test(t))).toBe(true);
+  });
+
+  it("flags for review when ShipStation says the order already shipped", async () => {
+    const { mock, sqlSeen } = cancelledMidFlightDb();
+    globalThis.fetch = providerFetch("shipped") as any;
+
+    await createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock }).pushShipment(9001);
+
+    expect(sqlSeen.some((t) => /requires_review = true/.test(t))).toBe(true);
   });
 });
