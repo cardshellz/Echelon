@@ -152,7 +152,7 @@ describe("D-NOENGINE: reconciler cancel/markShipped uses engine", () => {
 
   it("imports engineRefFromRow from shipping module in extracted reconcilers", () => {
     expect(omsWmsReconcileSrc).toContain("engineRefFromRow");
-    expect(omsWmsReconcileSrc).toContain('from "../shipping/engine-and-reconcile.api"');
+    expect(omsWmsReconcileSrc).toContain('from "../../shipping/engine-and-reconcile.api"');
     expect(wmsShipStationReconcileSrc).toContain('import { engineRefFromRow } from "./adapters/shipstation.adapter"');
   });
 
