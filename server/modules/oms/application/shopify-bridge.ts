@@ -13,6 +13,7 @@ import { normalizeShopifyCustomerId } from "./shopify-customer-identity";
 import { envPositiveInteger } from "../../../infrastructure/scheduler-config";
 import { buildChannelLineDisplayName } from "./line-display-name";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
+import { logger } from "../../../platform/observability/logger";
 
 let notificationBackfillRunning = false;
 let lastNotificationBackfillStartedAt = 0;
@@ -262,9 +263,7 @@ export async function bridgeShopifyOrderToOms(
       } catch (syncErr: any) {
         // Non-fatal: the order is safely in OMS. Log loudly so the missed
         // sync is diagnosable; backfillUnsynced is the secondary net.
-        console.error(
-          `[Shopify Bridge] Failed to enqueue OMS→WMS sync for OMS order ${omsOrder.id} (shopify ${shopifyOrderId}): ${syncErr?.message ?? String(syncErr)}`,
-        );
+        logger.error("oms.shopify_bridge", { message: `[Shopify Bridge] Failed to enqueue OMS→WMS sync for OMS order ${omsOrder.id} (shopify ${shopifyOrderId}): ${syncErr?.message ?? String(syncErr)}` });
       }
     }
     return {
@@ -274,11 +273,9 @@ export async function bridgeShopifyOrderToOms(
     };
   } catch (error: any) {
     if (error instanceof CountryCodeValidationError) {
-      console.error(JSON.stringify({ event: "oms_country_validation_failed", operation: "shopify_bridge", code: error.code, shopifyOrderId }));
+      logger.error("oms_country_validation_failed", { event: "oms_country_validation_failed", operation: "shopify_bridge", code: error.code, shopifyOrderId });
     } else {
-      console.error(
-        `[Shopify Bridge] Failed to bridge ${shopifyOrderId}: ${error?.message ?? String(error)}`,
-      );
+      logger.error("oms.shopify_bridge", { message: `[Shopify Bridge] Failed to bridge ${shopifyOrderId}: ${error?.message ?? String(error)}` });
     }
     throw error;
   }
@@ -335,7 +332,7 @@ export async function backfillShopifyOrders(
       const message = error?.message ?? String(error);
       const identity = row.order_number ?? row.id;
       failures.push(`${identity}: ${message}`);
-      console.error(`[Shopify Bridge] Backfill failed for ${identity}: ${message}`);
+      logger.error("oms.shopify_bridge", { message: `[Shopify Bridge] Backfill failed for ${identity}: ${message}` });
     }
   }
 
@@ -359,9 +356,7 @@ export async function backfillShopifyOrders(
   `);
 
   if (bridged > 0 || failed > 0) {
-    console.log(
-      `[Shopify Bridge] Backfill attempted=${attempted} bridged=${bridged} failed=${failed}`,
-    );
+    logger.info("oms.shopify_bridge", { message: `[Shopify Bridge] Backfill attempted=${attempted} bridged=${bridged} failed=${failed}` });
   }
 
     return { attempted, bridged, failed, failures };
@@ -376,9 +371,7 @@ export async function backfillShopifyOrders(
         WHERE id = 1
       `);
     } catch (checkpointError: any) {
-      console.error(
-        `[Shopify Bridge] Could not record sweep failure: ${checkpointError?.message ?? String(checkpointError)}`,
-      );
+      logger.error("oms.shopify_bridge", { message: `[Shopify Bridge] Could not record sweep failure: ${checkpointError?.message ?? String(checkpointError)}` });
     }
     throw error;
   }
@@ -395,13 +388,13 @@ export function startShopifyBridgeListener(db: any, omsService: OmsService): voi
   const pool = db.$client; // This assumes drizzle was initialized with a pg pool
 
   if (!pool || typeof pool.connect !== 'function') {
-    console.warn("[Shopify Bridge] Cannot hook LISTEN/NOTIFY: db.$client is not a standard pg pool");
+    logger.warn("oms.shopify_bridge", { message: "[Shopify Bridge] Cannot hook LISTEN/NOTIFY: db.$client is not a standard pg pool" });
     return;
   }
 
   pool.connect((err: Error | null, client: any, done: () => void) => {
     if (err) {
-      console.error("[Shopify Bridge] Error acquiring client for listener:", err.message);
+      logger.error("oms.shopify_bridge", { message: "[Shopify Bridge] Error acquiring client for listener:", error: err.message });
       return;
     }
 
@@ -426,7 +419,7 @@ export function startShopifyBridgeListener(db: any, omsService: OmsService): voi
             envPositiveInteger("SHOPIFY_BRIDGE_NOTIFY_BACKFILL_LIMIT", 10),
           );
         } catch (error: any) {
-          console.error(`[Shopify Bridge] Error running continuous backfill: ${error.message}`);
+          logger.error("oms.shopify_bridge", { message: `[Shopify Bridge] Error running continuous backfill: ${error.message}` });
         } finally {
           notificationBackfillRunning = false;
         }
@@ -434,9 +427,9 @@ export function startShopifyBridgeListener(db: any, omsService: OmsService): voi
     });
 
     client.query('LISTEN shopify_order_ingested')
-      .then(() => console.log("[Shopify Bridge] Real-time continuous order bridge active!"))
+      .then(() => logger.info("oms.shopify_bridge", { message: "[Shopify Bridge] Real-time continuous order bridge active!" }))
       .catch((err: Error) => {
-        console.error("[Shopify Bridge] Error listening to bridge channel:", err.message);
+        logger.error("oms.shopify_bridge", { message: "[Shopify Bridge] Error listening to bridge channel:", error: err.message });
         done();
       });
   });

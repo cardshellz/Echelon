@@ -6,13 +6,14 @@
  */
 
 import { runAutoDraftJob } from "./auto-draft.job";
+import { logger } from "../platform/observability/logger";
 
 runAutoDraftJob({ triggeredBy: "scheduler" })
   .then(() => {
-    console.log("[Auto-draft] Scheduler run completed successfully");
+    logger.info("jobs.run_auto_draft", { message: "[Auto-draft] Scheduler run completed successfully" });
     process.exit(0);
   })
   .catch((err) => {
-    console.error("[Auto-draft] Scheduler run failed:", err);
+    logger.error("jobs.run_auto_draft", { message: "[Auto-draft] Scheduler run failed:", error: err });
     process.exit(1);
   });

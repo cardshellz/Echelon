@@ -25,6 +25,7 @@ import {
   requireChannelFulfillmentAuthority,
 } from "./channel-fulfillment-authority.handoff";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
+import { logger } from "../../../platform/observability/logger";
 
 const MAX_ATTEMPTS = 5;
 const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
@@ -144,7 +145,7 @@ export async function runWebhookRetryWorkerTick(
 ): Promise<"success" | "error" | "skipped"> {
   if (retryWorkerRunInFlight) {
     retryWorkerLastSkippedAt = new Date();
-    console.warn(`${LOG_PREFIX} Skipping retry tick because previous run is still in flight`);
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Skipping retry tick because previous run is still in flight` });
     return "skipped";
   }
 
@@ -158,7 +159,7 @@ export async function runWebhookRetryWorkerTick(
     return "success";
   } catch (err) {
     retryWorkerLastError = err instanceof Error ? err.message : String(err);
-    console.error(`${LOG_PREFIX} Error in worker loop:`, err);
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Error in worker loop:`, error: err });
     return "error";
   } finally {
     retryWorkerRunInFlight = false;
@@ -176,12 +177,12 @@ export async function startWebhookRetryWorker(
   dependencies: WebhookRetryWorkerDependencies,
 ) {
   if (retryWorkerTimer) {
-    console.warn(`${LOG_PREFIX} Worker already started; ignoring duplicate start`);
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Worker already started; ignoring duplicate start` });
     return;
   }
 
   retryWorkerStartedAt = new Date();
-  console.log(`${LOG_PREFIX} Started background webhook retry worker`);
+  logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Started background webhook retry worker` });
 
   const authority = requireChannelFulfillmentAuthority(
     dependencies.channelFulfillmentAuthority,
@@ -1129,9 +1130,7 @@ export async function dispatchOmsWmsSyncRetry(
       item,
       "malformed payload: omsOrderId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed oms_wms_sync payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed oms_wms_sync payload)` });
     return "malformed";
   }
 
@@ -1142,9 +1141,7 @@ export async function dispatchOmsWmsSyncRetry(
       item.id,
       "WMS sync service not available on db.__wmsSyncService",
     );
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) deferred - WMS sync service unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) deferred - WMS sync service unavailable` });
     return "pending";
   }
 
@@ -1154,13 +1151,9 @@ export async function dispatchOmsWmsSyncRetry(
     // needed) — a no-op success, NOT a failure. A genuine error THROWS (handled below).
     await markRowSuccess(dbArg, item);
     if (!wmsOrderId) {
-      console.log(
-        `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) skipped — order already final/fulfilled, no WMS order needed (no-op success)`,
-      );
+      logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) skipped — order already final/fulfilled, no WMS order needed (no-op success)` });
     } else {
-      console.log(
-        `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}, wms=${wmsOrderId}) succeeded`,
-      );
+      logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}, wms=${wmsOrderId}) succeeded` });
     }
     return "success";
   } catch (err: any) {
@@ -1171,13 +1164,9 @@ export async function dispatchOmsWmsSyncRetry(
       { topic: "oms_wms_sync", orderId: omsOrderId },
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -1200,9 +1189,7 @@ export async function dispatchWmsShipmentCreateRetry(
       item,
       "malformed payload: wmsOrderId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed wms_shipment_create payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed wms_shipment_create payload)` });
     return "malformed";
   }
 
@@ -1223,9 +1210,7 @@ export async function dispatchWmsShipmentCreateRetry(
     const orderRow = Array.isArray(orderResult?.rows) ? orderResult.rows[0] : null;
     if (!orderRow) {
       await markRowSuccess(dbArg, item);
-      console.log(
-        `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) no longer needs remediation`,
-      );
+      logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) no longer needs remediation` });
       return "success";
     }
 
@@ -1252,9 +1237,7 @@ export async function dispatchWmsShipmentCreateRetry(
       shipmentItems,
     );
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}, shipment=${created.shipmentId}) succeeded`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}, shipment=${created.shipmentId}) succeeded` });
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -1264,13 +1247,9 @@ export async function dispatchWmsShipmentCreateRetry(
       { topic: "wms_shipment_create", orderId: wmsOrderId },
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (wms_shipment_create, wms=${wmsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -1333,9 +1312,7 @@ export async function dispatchShipStationShipmentPushRetry(
       item,
       "malformed payload: shipmentId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_shipment_push payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_shipment_push payload)` });
     return "malformed";
   }
 
@@ -1348,9 +1325,7 @@ export async function dispatchShipStationShipmentPushRetry(
       item.id,
       "shipping engine not available on db.__shippingEngine",
     );
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) deferred - engine unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) deferred - engine unavailable` });
     return "pending";
   }
 
@@ -1361,9 +1336,7 @@ export async function dispatchShipStationShipmentPushRetry(
       await ssSvc!.pushShipment!(shipmentId);
     }
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) succeeded`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) succeeded` });
     return "success";
   } catch (err: any) {
     // Permanent, deterministic validation failure (bad address/total/country,
@@ -1372,9 +1345,7 @@ export async function dispatchShipStationShipmentPushRetry(
     if (err?.context?.code === SS_PUSH_INVALID_SHIPMENT) {
       const reason = err?.message || String(err);
       await markShipmentPushPermanentlyFailed(dbArg, item, shipmentId, reason);
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) PERMANENT — flagged requires_review, not retrying: ${reason}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) PERMANENT — flagged requires_review, not retrying: ${reason}` });
       return "dead";
     }
     const { status, attempts, nextRetryAt } = await recordShipStationPushRetryFailure(
@@ -1384,13 +1355,9 @@ export async function dispatchShipStationShipmentPushRetry(
       err?.message || String(err),
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -1413,9 +1380,7 @@ export async function dispatchShipStationShipmentCancelRetry(
       item,
       "malformed payload: shipmentId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_shipment_cancel payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_shipment_cancel payload)` });
     return "malformed";
   }
 
@@ -1428,9 +1393,7 @@ export async function dispatchShipStationShipmentCancelRetry(
       item.id,
       "shipping engine not available on db.__shippingEngine",
     );
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) deferred - engine unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) deferred - engine unavailable` });
     return "pending";
   }
 
@@ -1491,9 +1454,7 @@ export async function dispatchShipStationShipmentCancelRetry(
     }
 
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}, state=${cancelOutcome.state}) succeeded`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}, state=${cancelOutcome.state}) succeeded` });
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -1508,13 +1469,9 @@ export async function dispatchShipStationShipmentCancelRetry(
         shipmentId,
         "shipstation_cancel_retry_exhausted",
       );
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -1549,9 +1506,7 @@ export async function dispatchShippingEngineShipmentAmendRetry(
       item,
       "malformed payload: shipmentId, shipmentItemIds, or amendmentKey invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipping_engine_shipment_amend payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipping_engine_shipment_amend payload)` });
     return "malformed";
   }
 
@@ -1567,9 +1522,7 @@ export async function dispatchShippingEngineShipmentAmendRetry(
       item.id,
       "shipping engine amendment API is unavailable",
     );
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) deferred - engine unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) deferred - engine unavailable` });
     return "pending";
   }
 
@@ -1608,16 +1561,12 @@ export async function dispatchShippingEngineShipmentAmendRetry(
         await markRowSuccess(tx, item);
         return moveResult;
       });
-      console.log(
-        `${LOG_PREFIX} Item ${item.id} moved ${moved.shipmentItemIds.length} late item row(s) from locked shipment ${shipmentId} to residual shipment ${moved.residualShipmentId}`,
-      );
+      logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved ${moved.shipmentItemIds.length} late item row(s) from locked shipment ${shipmentId} to residual shipment ${moved.residualShipmentId}` });
       return "success";
     }
 
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} amended shipment ${shipmentId} (${result.state}, providerStatus=${result.providerStatus})`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} amended shipment ${shipmentId} (${result.state}, providerStatus=${result.providerStatus})` });
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -1630,13 +1579,9 @@ export async function dispatchShippingEngineShipmentAmendRetry(
       },
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -1669,9 +1614,7 @@ export async function dispatchShippingEngineShipmentQuantityAmendRetry(
     payload?.amendmentKey !== `${shipmentId}:${shipmentItemId}`
   ) {
     await markRowDead(dbArg, item, "malformed payload: shipmentId, shipmentItemId, or amendmentKey invalid");
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed ${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC} payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed ${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC} payload)` });
     return "malformed";
   }
 
@@ -1683,9 +1626,7 @@ export async function dispatchShippingEngineShipmentQuantityAmendRetry(
     (!ssSvc || typeof ssSvc.setShipmentItemQuantity !== "function")
   ) {
     await keepPending(dbArg, item.id, "shipping engine quantity amendment API is unavailable");
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) deferred - engine unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) deferred - engine unavailable` });
     return "pending";
   }
 
@@ -1731,32 +1672,19 @@ export async function dispatchShippingEngineShipmentQuantityAmendRetry(
         await markRowSuccess(tx, item);
         return created;
       });
-      console.log(
-        `${LOG_PREFIX} Item ${item.id} routed ${residual.addedQuantity} unit(s) from locked shipment ${shipmentId} to residual shipment ${residual.shipmentId}`,
-      );
+      logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} routed ${residual.addedQuantity} unit(s) from locked shipment ${shipmentId} to residual shipment ${residual.shipmentId}` });
       return "success";
     }
 
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} amended quantity of shipment item ${shipmentItemId} on shipment ${shipmentId} (${result.state}, providerStatus=${result.providerStatus})`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} amended quantity of shipment item ${shipmentItemId} on shipment ${shipmentId} (${result.state}, providerStatus=${result.providerStatus})` });
     return "success";
   } catch (err: any) {
     // ShipStationPushError carries its code on context; plain errors on .code.
     const errorCode = err?.context?.code ?? err?.code;
     if (PERMANENT_QUANTITY_AMEND_ERROR_CODES.has(errorCode)) {
       await markRowDead(dbArg, item, `${errorCode}: ${err?.message || String(err)}`);
-      console.error(JSON.stringify({
-        level: "error",
-        action: "shipping_engine_quantity_amend",
-        outcome: "dead_lettered",
-        error_code: errorCode,
-        shipment_id: shipmentId,
-        shipment_item_id: shipmentItemId,
-        retry_item_id: item.id,
-        message: err?.message || String(err),
-      }));
+      logger.error("shipping_engine_quantity_amend", { outcome: "dead_lettered", error_code: errorCode, shipment_id: shipmentId, shipment_item_id: shipmentItemId, retry_item_id: item.id, message: err?.message || String(err) });
       return "dead";
     }
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -1766,13 +1694,9 @@ export async function dispatchShippingEngineShipmentQuantityAmendRetry(
       { topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC, shipmentId },
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -1798,9 +1722,7 @@ export async function dispatchShipStationHoldSyncRetry(
       item,
       "malformed payload: wmsOrderId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_hold_sync payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_hold_sync payload)` });
     return "malformed";
   }
 
@@ -1813,9 +1735,7 @@ export async function dispatchShipStationHoldSyncRetry(
       item.id,
       "shipping engine not available for hold sync",
     );
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) deferred - engine unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) deferred - engine unavailable` });
     return "pending";
   }
 
@@ -1832,9 +1752,7 @@ export async function dispatchShipStationHoldSyncRetry(
       item,
       `WMS order ${wmsOrderId} not found for hold sync`,
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) moved to DLQ - WMS order not found`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}) moved to DLQ - WMS order not found` });
     return "dead";
   }
 
@@ -1852,9 +1770,7 @@ export async function dispatchShipStationHoldSyncRetry(
       touched = result?.touched ?? 0;
     }
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}, touched=${touched}) succeeded`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}, touched=${touched}) succeeded` });
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -1864,13 +1780,9 @@ export async function dispatchShipStationHoldSyncRetry(
       { topic: "shipstation_hold_sync", orderId: wmsOrderId },
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_hold_sync, wms=${wmsOrderId}, mode=${mode}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -1893,9 +1805,7 @@ export async function dispatchShipStationSortRankSyncRetry(
       item,
       "malformed payload: wmsOrderId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_sort_rank_sync payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_sort_rank_sync payload)` });
     return "malformed";
   }
 
@@ -1907,9 +1817,7 @@ export async function dispatchShipStationSortRankSyncRetry(
       item.id,
       "shipping engine not available for sort-rank sync",
     );
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) deferred - engine unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) deferred - engine unavailable` });
     return "pending";
   }
 
@@ -1926,9 +1834,7 @@ export async function dispatchShipStationSortRankSyncRetry(
       item,
       `WMS order ${wmsOrderId} not found for sort-rank sync`,
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ - WMS order not found`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ - WMS order not found` });
     return "dead";
   }
 
@@ -1940,13 +1846,9 @@ export async function dispatchShipStationSortRankSyncRetry(
       { topic: "shipstation_sort_rank_sync", orderId: wmsOrderId },
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts - missing sort_rank`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts - missing sort_rank` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) missing sort_rank. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) missing sort_rank. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -1963,9 +1865,7 @@ export async function dispatchShipStationSortRankSyncRetry(
       touched2 = result?.touched ?? 0;
     }
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}, touched=${touched2}) succeeded`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}, touched=${touched2}) succeeded` });
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -1975,13 +1875,9 @@ export async function dispatchShipStationSortRankSyncRetry(
       { topic: "shipstation_sort_rank_sync", orderId: wmsOrderId },
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation_sort_rank_sync, wms=${wmsOrderId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -2016,9 +1912,7 @@ export async function dispatchShopifyFulfillmentRetry(
       item,
       "malformed payload: shipmentId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shopify_fulfillment_push payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shopify_fulfillment_push payload)` });
     return "malformed";
   }
 
@@ -2031,9 +1925,7 @@ export async function dispatchShopifyFulfillmentRetry(
       item.id,
       "canonical fulfillment authority not available",
     );
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push) deferred — fulfillment push service unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push) deferred — fulfillment push service unavailable` });
     return "pending";
   }
   const authority = requireChannelFulfillmentAuthority(fulfillmentAuthority);
@@ -2044,9 +1936,7 @@ export async function dispatchShopifyFulfillmentRetry(
       source: "legacy_shopify_fulfillment_retry",
     });
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) handed off to canonical fulfillment authority`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) handed off to canonical fulfillment authority` });
     return "success";
   } catch (err: any) {
     if (isShopifyClientNotReadyError(err)) {
@@ -2055,9 +1945,7 @@ export async function dispatchShopifyFulfillmentRetry(
         item.id,
         "shopify fulfillment push client not initialized",
       );
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) deferred - Shopify client not initialized`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) deferred - Shopify client not initialized` });
       return "pending";
     }
 
@@ -2079,9 +1967,7 @@ export async function dispatchShopifyFulfillmentRetry(
         shipmentId,
         err?.message || String(err),
       );
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) PERMANENT failure — dead-lettered + requires_review: ${err?.message}`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) PERMANENT failure — dead-lettered + requires_review: ${err?.message}` });
       return "dead";
     }
 
@@ -2095,13 +1981,9 @@ export async function dispatchShopifyFulfillmentRetry(
       // recordRetryFailure already emitted the CRITICAL: line; add a
       // worker-level summary at the same severity for log drains that
       // grep on the `[Webhook DLQ Worker]` prefix.
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) failed again. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) failed again. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -2129,9 +2011,7 @@ export async function dispatchDelayedTrackingPush(
       item,
       "malformed payload: orderId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed delayed_tracking_push payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed delayed_tracking_push payload)` });
     return "malformed";
   }
   if (
@@ -2145,9 +2025,7 @@ export async function dispatchDelayedTrackingPush(
       item,
       "malformed payload: shipmentId invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed delayed_tracking_push shipmentId)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed delayed_tracking_push shipmentId)` });
     return "malformed";
   }
 
@@ -2168,9 +2046,7 @@ export async function dispatchDelayedTrackingPush(
         source: "legacy_delayed_tracking_retry",
       });
       await markRowSuccess(dbArg, item);
-      console.log(
-        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId}) handed off to canonical fulfillment authority`,
-      );
+      logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId}) handed off to canonical fulfillment authority` });
       return "success";
     } catch (err: any) {
       const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -2179,9 +2055,7 @@ export async function dispatchDelayedTrackingPush(
         err?.message || String(err),
         { topic: "delayed_tracking_push", orderId, shipmentId },
       );
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} canonical handoff failed (status=${status}, attempts=${attempts}, next=${nextRetryAt.toISOString()})`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} canonical handoff failed (status=${status}, attempts=${attempts}, next=${nextRetryAt.toISOString()})` });
       return status;
     }
   }
@@ -2202,9 +2076,7 @@ export async function dispatchDelayedTrackingPush(
       );
     }
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) handed off ${handoff.shipmentIds.length} physical package(s) and ${handoff.commandCount} channel command(s)`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) handed off ${handoff.shipmentIds.length} physical package(s) and ${handoff.commandCount} channel command(s)` });
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -2214,13 +2086,9 @@ export async function dispatchDelayedTrackingPush(
       { topic: "delayed_tracking_push", orderId, shipmentId },
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) moved to DLQ after ${attempts} attempts`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -2236,9 +2104,7 @@ export async function dispatchEbayWebhookRetry(
       item,
       `unsupported eBay webhook replay topic: ${item.topic || "unknown"}`,
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (unsupported ebay webhook topic ${item.topic || "unknown"})`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (unsupported ebay webhook topic ${item.topic || "unknown"})` });
     return "malformed";
   }
 
@@ -2249,9 +2115,7 @@ export async function dispatchEbayWebhookRetry(
       item,
       "malformed payload: notification.data.orderId missing or invalid",
     );
-    console.error(
-      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed ebay webhook payload)`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed ebay webhook payload)` });
     return "malformed";
   }
 
@@ -2262,9 +2126,7 @@ export async function dispatchEbayWebhookRetry(
       item.id,
       "eBay replay service not available on db.__ebayWebhookReplay",
     );
-    console.warn(
-      `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) deferred - eBay replay service unavailable`,
-    );
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) deferred - eBay replay service unavailable` });
     return "pending";
   }
 
@@ -2275,9 +2137,7 @@ export async function dispatchEbayWebhookRetry(
       ebayReplay.ebayApiClient,
     );
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) succeeded via eBay reingest (${result.status}, oms=${result.omsOrderId})`,
-    );
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) succeeded via eBay reingest (${result.status}, oms=${result.omsOrderId})` });
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -2287,13 +2147,9 @@ export async function dispatchEbayWebhookRetry(
       { topic: "eBay Webhook" },
     );
     if (status === "dead") {
-      console.error(
-        `CRITICAL: eBay Webhook Dead-Lettered\nTopic: ${item.topic}\nOrder: ${orderId}\nLast Error: ${err?.message || String(err)}\nAttempts: ${attempts}\nQueue Row ID: ${item.id}`,
-      );
+      logger.error("oms.webhook_retry_worker", { message: `CRITICAL: eBay Webhook Dead-Lettered\nTopic: ${item.topic}\nOrder: ${orderId}\nLast Error: ${err?.message || String(err)}\nAttempts: ${attempts}\nQueue Row ID: ${item.id}` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (${item.topic}, order=${orderId}) failed. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -2394,9 +2250,7 @@ export async function recordRetryFailure(
     // Format chosen to be greppable by the existing log drain →
     // Discord alerter. Keep newlines literal so multi-line context
     // arrives intact (do not JSON.stringify).
-    console.error(
-      `${headline}\n${idLine}\nQueue Row ID: ${item.id}\nAttempts: ${attempts}\nLast Error: ${errMessage}`,
-    );
+    logger.error("oms.webhook_retry_worker", { message: `${headline}\n${idLine}\nQueue Row ID: ${item.id}\nAttempts: ${attempts}\nLast Error: ${errMessage}` });
   }
 
   return { attempts, status, nextRetryAt, applied: true };
@@ -2575,7 +2429,7 @@ export async function dispatchShipStationRetry(
     // Malformed row — dead-letter immediately. Retrying a missing
     // resource_url will never succeed, so burning attempts is wasteful.
     await markRowDead(dbArg, item, "malformed payload: missing resource_url");
-    console.error(`${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation payload)`);
+    logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation payload)` });
     return "malformed";
   }
 
@@ -2587,14 +2441,14 @@ export async function dispatchShipStationRetry(
       item,
       "shipping engine not available on db.__shippingEngine"
     );
-    console.warn(`${LOG_PREFIX} Item ${item.id} deferred — engine unavailable (status=${status})`);
+    logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} deferred — engine unavailable (status=${status})` });
     return status;
   }
 
   try {
     await (engine ? engine.processWebhook(resourceUrl) : shipStationService.processShipNotify(resourceUrl));
     await markRowSuccess(dbArg, item);
-    console.log(`${LOG_PREFIX} Item ${item.id} (shipstation SHIP_NOTIFY) succeeded`);
+    logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation SHIP_NOTIFY) succeeded` });
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
@@ -2603,13 +2457,9 @@ export async function dispatchShipStationRetry(
       err?.message || String(err)
     );
     if (status === "dead") {
-      console.error(
-        `${LOG_PREFIX} Item ${item.id} (shipstation SHIP_NOTIFY) moved to DLQ after ${attempts} attempts`
-      );
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation SHIP_NOTIFY) moved to DLQ after ${attempts} attempts` });
     } else {
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (shipstation SHIP_NOTIFY) failed again. Next retry at ${nextRetryAt.toISOString()}`
-      );
+      logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (shipstation SHIP_NOTIFY) failed again. Next retry at ${nextRetryAt.toISOString()}` });
     }
     return status;
   }
@@ -2687,7 +2537,7 @@ async function processPendingWebhooksBatch(
 
   if (pending.length === 0) return;
 
-  console.log(`${LOG_PREFIX} Found ${pending.length} pending webhook(s) to retry`);
+  logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Found ${pending.length} pending webhook(s) to retry` });
 
   const secret = process.env.SESSION_SECRET;
 
@@ -2699,9 +2549,7 @@ async function processPendingWebhooksBatch(
       } catch (branchErr: any) {
         // Defensive: the helper already records failures; this catch only
         // fires if the bookkeeping itself throws. Log + move on.
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} shipstation dispatch threw: ${branchErr?.message || branchErr}`
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} shipstation dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2710,9 +2558,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchEbayWebhookRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} ebay dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} ebay dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2724,9 +2570,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchOmsWmsSyncRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} oms_wms_sync dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} oms_wms_sync dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2738,9 +2582,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchWmsShipmentCreateRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} wms_shipment_create dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} wms_shipment_create dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2753,9 +2595,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchShipStationShipmentPushRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2768,9 +2608,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchShipStationShipmentCancelRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2782,9 +2620,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchShippingEngineShipmentAmendRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} shipping_engine_shipment_amend dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} shipping_engine_shipment_amend dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2796,9 +2632,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchShippingEngineShipmentQuantityAmendRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} ${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC} dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} ${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC} dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2811,9 +2645,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchShipStationHoldSyncRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2826,9 +2658,7 @@ async function processPendingWebhooksBatch(
       try {
         await dispatchShipStationSortRankSyncRetry(defaultDb, item as any);
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2846,9 +2676,7 @@ async function processPendingWebhooksBatch(
           dependencies.channelFulfillmentAuthority,
         );
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} shopify_fulfillment_push dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} shopify_fulfillment_push dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2864,9 +2692,7 @@ async function processPendingWebhooksBatch(
           dependencies.channelFulfillmentAuthority,
         );
       } catch (branchErr: any) {
-        console.error(
-          `${LOG_PREFIX} Item ${item.id} delayed_tracking_push dispatch threw: ${branchErr?.message || branchErr}`,
-        );
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} delayed_tracking_push dispatch threw: ${branchErr?.message || branchErr}` });
       }
       continue;
     }
@@ -2876,7 +2702,7 @@ async function processPendingWebhooksBatch(
     // /api/shopify/webhooks/*, everything else on /api/oms/webhooks/*.
     if (item.provider === "shopify") {
       if (!secret) {
-        console.error(`${LOG_PREFIX} Missing SESSION_SECRET, cannot run shopify loopbacks`);
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Missing SESSION_SECRET, cannot run shopify loopbacks` });
         continue;
       }
 
@@ -2895,13 +2721,13 @@ async function processPendingWebhooksBatch(
 
       // Unknown topic → dead immediately (non-retryable bad data)
       if (!KNOWN_TOPICS.has(item.topic)) {
-        console.error(`${LOG_PREFIX} Item ${item.id} unknown shopify topic '${item.topic}' — marking dead`);
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} unknown shopify topic '${item.topic}' — marking dead` });
         await markRowDead(defaultDb, item as any, `Unknown topic: ${item.topic}`);
         continue;
       }
 
       try {
-        console.log(`${LOG_PREFIX} Retrying shopify item ${item.id} (${item.topic}), attempt ${item.attempts + 1}`);
+        logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Retrying shopify item ${item.id} (${item.topic}), attempt ${item.attempts + 1}` });
 
         const basePath = SHOPIFY_ROUTE_TOPICS.has(item.topic)
           ? "/api/shopify/webhooks"
@@ -2924,7 +2750,7 @@ async function processPendingWebhooksBatch(
 
         if (res.ok) {
           await markRowSuccess(defaultDb, item as any);
-          console.log(`${LOG_PREFIX} Item ${item.id} (${item.topic}) succeeded`);
+          logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (${item.topic}) succeeded` });
         } else {
           throw new Error(`Local API returned ${res.status}`);
         }
@@ -2941,11 +2767,9 @@ async function processPendingWebhooksBatch(
           const orderId = (item.payload as any)?.order_id
             ?? (item.payload as any)?.id
             ?? "unknown";
-          console.error(
-            `CRITICAL: Shopify Webhook Dead-Lettered\nTopic: ${item.topic}\nOrder: ${orderId}\nLast Error: ${itemErr?.message || String(itemErr)}\nAttempts: ${attempts}\nQueue Row ID: ${item.id}`,
-          );
+          logger.error("oms.webhook_retry_worker", { message: `CRITICAL: Shopify Webhook Dead-Lettered\nTopic: ${item.topic}\nOrder: ${orderId}\nLast Error: ${itemErr?.message || String(itemErr)}\nAttempts: ${attempts}\nQueue Row ID: ${item.id}` });
         } else {
-          console.warn(`${LOG_PREFIX} Item ${item.id} (${item.topic}) failed again. Next retry at ${nextRetryAt.toISOString()}`);
+          logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} (${item.topic}) failed again. Next retry at ${nextRetryAt.toISOString()}` });
         }
       }
       continue;
@@ -2953,12 +2777,12 @@ async function processPendingWebhooksBatch(
 
     // Legacy shopify / other providers — HTTP loopback path.
     if (!secret) {
-      console.error(`${LOG_PREFIX} Missing SESSION_SECRET, cannot run loopbacks`);
+      logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Missing SESSION_SECRET, cannot run loopbacks` });
       return;
     }
 
     try {
-      console.log(`${LOG_PREFIX} Retrying item ${item.id} (${item.topic}), attempt ${item.attempts + 1}`);
+      logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Retrying item ${item.id} (${item.topic}), attempt ${item.attempts + 1}` });
 
       // Forward to local API
       const url = `http://127.0.0.1:${process.env.PORT || 5000}/api/oms/webhooks/${item.topic}`;
@@ -2979,7 +2803,7 @@ async function processPendingWebhooksBatch(
       if (res.ok) {
         // Success! Mark as done
         await markRowSuccess(defaultDb, item as any);
-        console.log(`${LOG_PREFIX} Item ${item.id} succeeded`);
+        logger.info("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} succeeded` });
       } else {
         // Still failed
         throw new Error(`Local API returned ${res.status}`);
@@ -2993,7 +2817,7 @@ async function processPendingWebhooksBatch(
       if (applied === false) continue;
 
       if (status === "dead") {
-        console.error(`${LOG_PREFIX} Item ${item.id} moved to DLQ (dead letter) after ${attempts} attempts`);
+        logger.error("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} moved to DLQ (dead letter) after ${attempts} attempts` });
         incr("shopify_webhook_dlq_dead_letter", 1, {
           provider: item.provider,
           topic: item.topic,
@@ -3002,7 +2826,7 @@ async function processPendingWebhooksBatch(
         });
         // TODO: Fire an alert or slack notification here in the future
       } else {
-        console.warn(`${LOG_PREFIX} Item ${item.id} failed again. Next retry at ${nextRetryAt.toISOString()}`);
+        logger.warn("oms.webhook_retry_worker", { message: `${LOG_PREFIX} Item ${item.id} failed again. Next retry at ${nextRetryAt.toISOString()}` });
         incr("shopify_webhook_retry_processed", 1, {
           provider: item.provider,
           topic: item.topic,

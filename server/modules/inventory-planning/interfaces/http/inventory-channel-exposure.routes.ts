@@ -443,11 +443,7 @@ function sendError(res: Response, error: unknown, action: string): Response {
       },
     });
   }
-  console.error(JSON.stringify({
-    code: "INVENTORY_CHANNEL_EXPOSURE_FAILED",
-    action,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  logger.error("INVENTORY_CHANNEL_EXPOSURE_FAILED", { code: "INVENTORY_CHANNEL_EXPOSURE_FAILED", error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({
     error: { code: "INVENTORY_CHANNEL_EXPOSURE_FAILED", message: `Failed to ${action}.` },
   });

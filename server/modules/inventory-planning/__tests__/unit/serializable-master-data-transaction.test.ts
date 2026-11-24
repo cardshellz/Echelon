@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { retrySerializableMasterDataTransaction } from "../../infrastructure/serializable-master-data-transaction";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 describe("serializable master-data transaction retries", () => {
-  beforeEach(() => { vi.spyOn(console, "warn").mockImplementation(() => undefined); });
+  beforeEach(() => { spyLoggerJson("warn"); });
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("returns success without retrying", async () => {
@@ -11,7 +12,7 @@ describe("serializable master-data transaction retries", () => {
     await expect(retrySerializableMasterDataTransaction("create_transformation_draft", transaction))
       .resolves.toBe(result);
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(console.warn).not.toHaveBeenCalled();
+    expect(getLoggerJsonSpy("warn")).not.toHaveBeenCalled();
   });
 
   it("restarts the full transaction after rollback and preserves the current business conflict", async () => {
@@ -29,10 +30,10 @@ describe("serializable master-data transaction retries", () => {
       .rejects.toMatchObject({ code: "INVENTORY_AVAILABILITY_DRAFT_EXISTS", status: 409 });
     expect(events).toEqual(["begin", "write", "rollback", "begin", "read current head"]);
     expect(transaction).toHaveBeenCalledTimes(2);
-    expect(console.warn).toHaveBeenCalledWith(JSON.stringify({
+    expect(JSON.parse(getLoggerJsonSpy("warn").mock.calls[0][0])).toMatchObject({
       code: "INVENTORY_AVAILABILITY_SERIALIZATION_RETRY",
       operation: "create_transformation_draft", failedAttempt: 1, maxAttempts: 3,
-    }));
+    });
   });
 
   it("retries wrapped serialization failures and returns an idempotent receipt", async () => {
@@ -52,7 +53,7 @@ describe("serializable master-data transaction retries", () => {
     await expect(retrySerializableMasterDataTransaction("refresh_transformation_draft", transaction))
       .rejects.toBe(failure);
     expect(transaction).toHaveBeenCalledTimes(3);
-    expect(console.warn).toHaveBeenCalledTimes(2);
+    expect(getLoggerJsonSpy("warn")).toHaveBeenCalledTimes(2);
   });
 
   it.each(["23505", "23503", "40P01", "ECONNRESET", "INVENTORY_AVAILABILITY_DRAFT_STALE"])(
@@ -62,7 +63,7 @@ describe("serializable master-data transaction retries", () => {
       await expect(retrySerializableMasterDataTransaction("create_transformation_draft", transaction))
         .rejects.toBe(failure);
       expect(transaction).toHaveBeenCalledTimes(1);
-      expect(console.warn).not.toHaveBeenCalled();
+      expect(getLoggerJsonSpy("warn")).not.toHaveBeenCalled();
     },
   );
 

@@ -8,6 +8,7 @@
 import { db as echelonDb, pool as shellzClubDb } from "../../../db";
 import { omsOrders } from "../../../../shared/schema/oms.schema";
 import { eq, isNull } from "drizzle-orm";
+import { logger } from "../../../platform/observability/logger";
 
 interface MemberTierLookup {
   tier: string | null;
@@ -32,7 +33,7 @@ async function getMemberTierByEmail(email: string): Promise<string | null> {
 
     return result.rows[0]?.tier || null;
   } catch (err) {
-    console.error(`Failed to lookup tier for ${email}:`, err);
+    logger.error("oms.member_tier_enrichment", { message: `Failed to lookup tier for ${email}:`, error: err });
     return null;
   }
 }
@@ -43,7 +44,7 @@ async function getMemberTierByEmail(email: string): Promise<string | null> {
  */
 export async function enrichOrderWithMemberTier(orderId: number, customerEmail: string): Promise<void> {
   if (!customerEmail) {
-    console.log(`[Member Tier] Order ${orderId} - no customer email, skipping enrichment`);
+    logger.info("oms.member_tier_enrichment", { message: `[Member Tier] Order ${orderId} - no customer email, skipping enrichment` });
     return;
   }
 
@@ -56,12 +57,12 @@ export async function enrichOrderWithMemberTier(orderId: number, customerEmail: 
         .set({ memberTier: tier })
         .where(eq(omsOrders.id, orderId));
 
-      console.log(`[Member Tier] Order ${orderId} enriched: ${tier}`);
+      logger.info("oms.member_tier_enrichment", { message: `[Member Tier] Order ${orderId} enriched: ${tier}` });
     } else {
-      console.log(`[Member Tier] Order ${orderId} - ${customerEmail} is not a member`);
+      logger.info("oms.member_tier_enrichment", { message: `[Member Tier] Order ${orderId} - ${customerEmail} is not a member` });
     }
   } catch (err) {
-    console.error(`[Member Tier] Failed to enrich order ${orderId}:`, err);
+    logger.error("oms.member_tier_enrichment", { message: `[Member Tier] Failed to enrich order ${orderId}:`, error: err });
     // Non-blocking - don't throw
   }
 }
@@ -71,7 +72,7 @@ export async function enrichOrderWithMemberTier(orderId: number, customerEmail: 
  * Run once to populate historical data
  */
 export async function backfillMemberTiers(limit = 100): Promise<number> {
-  console.log(`[Member Tier] Starting backfill (limit: ${limit})`);
+  logger.info("oms.member_tier_enrichment", { message: `[Member Tier] Starting backfill (limit: ${limit})` });
 
   const ordersToEnrich = await echelonDb
     .select({ id: omsOrders.id, customerEmail: omsOrders.customerEmail })
@@ -88,6 +89,6 @@ export async function backfillMemberTiers(limit = 100): Promise<number> {
     }
   }
 
-  console.log(`[Member Tier] Backfill complete: ${enriched}/${ordersToEnrich.length} enriched`);
+  logger.info("oms.member_tier_enrichment", { message: `[Member Tier] Backfill complete: ${enriched}/${ordersToEnrich.length} enriched` });
   return enriched;
 }

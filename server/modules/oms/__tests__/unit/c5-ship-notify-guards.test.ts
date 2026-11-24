@@ -93,7 +93,7 @@ describe("D-NOMATCH: no-match SHIP_NOTIFY surfacing", () => {
       ),
     );
     expect(fnBlock).toContain("ship_notify_no_match");
-    expect(fnBlock).toContain("JSON.stringify");
+    expect(fnBlock).toContain("logger.error");
   });
 
   it("persists a WMS reconciliation exception for unmatched shipments", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
 import { PgEbayBusinessPolicyRepository } from "../../infrastructure/ebay-business-policies.repository";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 const scope = { channelId: 67, connectionId: 9, accountId: "seller", environment: "production" as const, marketplaceId: "EBAY_US" };
@@ -40,11 +41,11 @@ describe("eBay policy transaction transport failures", () => {
   it("preserves the operation failure when rollback also fails and destroys the connection", async () => {
     const original = new Error("audit failed");
     const { repository, release } = fixture(new Map([["ROLLBACK", new Error("socket closed")]]));
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       await expect(repository.withScope(scope, async () => { throw original; })).rejects.toBe(original);
       expect(release).toHaveBeenCalledExactlyOnceWith(true);
-      expect(log).toHaveBeenCalledWith(JSON.stringify({ event: "ebay_policy_rollback_failed", channelId: 67, connectionId: 9 }));
+      expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: "ebay_policy_rollback_failed", channelId: 67, connectionId: 9 });
     } finally { log.mockRestore(); }
   });
 

@@ -23,6 +23,7 @@ import { previewIsolated } from "./inventory-channel-rule-preview";
 import { loadActivePublicationTargets, loadChannelRuleReviewTargets, loadManagedSellableVariantIds } from "./inventory-channel-exposure-runtime.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
 import { enqueueReviewedDefinitionPublication } from "./inventory-product-definition.repository";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * Applies ONE saved product or SKU channel rule (owner decision 2026-11-07:
@@ -77,11 +78,7 @@ export class PostgresChannelRuleStore implements ChannelRuleStore {
     });
     // After COMMIT only. The durable audit trail is the receipt row, the sealed
     // version (sealed_by/sealed_at) and the head revision; this line is for search.
-    console.info(JSON.stringify({ level: "info", event: "channel_rule_applied", action: "channel_rule_apply",
-      outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor,
-      channel_id: receipt.channelId, scope_key: receipt.scopeKey, product_id: receipt.productId,
-      before: { active_policy_id: before }, after: { active_policy_id: receipt.policyId },
-      publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt }));
+    logger.info("channel_rule_apply", { event: "channel_rule_applied", outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor, channel_id: receipt.channelId, scope_key: receipt.scopeKey, product_id: receipt.productId, before: { active_policy_id: before }, after: { active_policy_id: receipt.policyId }, publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt });
     return receipt;
   }
 
@@ -141,11 +138,7 @@ export class PostgresChannelRuleStore implements ChannelRuleStore {
     });
     // After COMMIT only; see apply. The saved version's own audit event is in the same transaction.
     const { receipt } = result;
-    console.info(JSON.stringify({ level: "info", event: "channel_rule_set", action: "channel_rule_set",
-      outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor,
-      channel_id: receipt.channelId, scope_key: receipt.scopeKey, product_id: receipt.productId,
-      before: { active_policy_id: before }, after: { active_policy_id: receipt.policyId },
-      publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt }));
+    logger.info("channel_rule_set", { event: "channel_rule_set", outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor, channel_id: receipt.channelId, scope_key: receipt.scopeKey, product_id: receipt.productId, before: { active_policy_id: before }, after: { active_policy_id: receipt.policyId }, publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt });
     return result;
   }
 
@@ -158,11 +151,7 @@ export class PostgresChannelRuleStore implements ChannelRuleStore {
     });
     // After COMMIT only; the receipt row and each sealed version are the durable trail.
     const { receipt } = result;
-    console.info(JSON.stringify({ level: "info", event: "channel_rules_copied", action: "channel_rule_copy",
-      outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor,
-      channel_id: receipt.channelId, source_channel_id: result.sourceChannelId,
-      before: { rules: 0 }, after: { rules: receipt.changedDefinitions },
-      publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt }));
+    logger.info("channel_rule_copy", { event: "channel_rules_copied", outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor, channel_id: receipt.channelId, source_channel_id: result.sourceChannelId, before: { rules: 0 }, after: { rules: receipt.changedDefinitions }, publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt });
     return result;
   }
 

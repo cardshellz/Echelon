@@ -16,6 +16,7 @@ import {
 } from "../../warehouse/cross-module-warehouse-mutations.api";
 import { CatalogInventoryCommandError, CatalogInventoryCommandService,
   type CatalogInventoryCommandRepository, type CatalogInventoryUnitOfWork } from "../application/catalog-inventory-command.service";
+import { logger } from "../../../platform/observability/logger";
 
 export class PostgresCatalogInventoryCommandRepository implements CatalogInventoryCommandRepository {
   constructor(private readonly database: typeof applicationDatabase, private readonly inventory: InventoryUseCases) {}
@@ -100,5 +101,5 @@ export class PostgresCatalogInventoryCommandRepository implements CatalogInvento
 
 export function createCatalogInventoryCommandService(database: typeof applicationDatabase, inventory: InventoryUseCases) {
   return new CatalogInventoryCommandService(new PostgresCatalogInventoryCommandRepository(database, inventory),
-    () => new Date(), error => console.error("[CatalogInventory] Committed command notification failed", error));
+    () => new Date(), error => logger.error("catalog.inventory_command_repository", { message: "[CatalogInventory] Committed command notification failed", error: error }));
 }

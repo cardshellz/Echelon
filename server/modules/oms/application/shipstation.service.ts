@@ -39,6 +39,7 @@ import { createShipStationNotifyWebhookDispatch } from "../shipstation/shipstati
 import { createShipStationOrderControls } from "../shipstation/shipstation-order-controls";
 import { createShipStationPushHandlers } from "../shipstation/shipstation-push-shipment";
 import { createShipStationShipmentOrderResolution } from "../shipstation/shipstation-shipment-order-resolution";
+import { logger } from "../../../platform/observability/logger";
 
 export {
   normalizeCountryToIso2,
@@ -309,7 +310,7 @@ export function createShipStationService(
       );
       return result.orders?.[0] || null;
     } catch (err: any) {
-      console.warn(`[ShipStation] getOrderByNumber ${orderNumber} failed:`, err.message);
+      logger.warn("oms.shipstation_service", { message: `[ShipStation] getOrderByNumber ${orderNumber} failed:`, error: err.message });
       return null;
     }
   }
@@ -320,7 +321,7 @@ export function createShipStationService(
 
   async function registerWebhook(targetUrl: string): Promise<void> {
     if (!isConfigured()) {
-      console.log("[ShipStation] Not configured — skipping webhook registration");
+      logger.info("oms.shipstation_service", { message: "[ShipStation] Not configured — skipping webhook registration" });
       return;
     }
 
@@ -337,7 +338,7 @@ export function createShipStationService(
       );
 
       if (alreadyRegistered) {
-        console.log("[ShipStation] SHIP_NOTIFY webhook already registered");
+        logger.info("oms.shipstation_service", { message: "[ShipStation] SHIP_NOTIFY webhook already registered" });
         return;
       }
 
@@ -352,9 +353,9 @@ export function createShipStationService(
         friendly_name: "Echelon OMS Tracking",
       });
 
-      console.log(`[ShipStation] Registered SHIP_NOTIFY webhook -> ${redactSensitiveUrl(targetUrl)}`);
+      logger.info("oms.shipstation_service", { message: `[ShipStation] Registered SHIP_NOTIFY webhook -> ${redactSensitiveUrl(targetUrl)}` });
     } catch (err: any) {
-      console.error(`[ShipStation] Failed to register webhook: ${err.message}`);
+      logger.error("oms.shipstation_service", { message: `[ShipStation] Failed to register webhook: ${err.message}` });
     }
   }
 
@@ -368,7 +369,7 @@ export function createShipStationService(
     try {
       return await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
     } catch (err: any) {
-      console.warn(`[ShipStation] getOrderById ${shipstationOrderId} failed:`, err.message);
+      logger.warn("oms.shipstation_service", { message: `[ShipStation] getOrderById ${shipstationOrderId} failed:`, error: err.message });
       return null;
     }
   }

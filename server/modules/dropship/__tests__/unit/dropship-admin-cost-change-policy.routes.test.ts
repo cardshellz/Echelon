@@ -8,6 +8,7 @@ import {
   registerDropshipAdminCostChangePolicyRoutes,
   statusForCostChangePolicyError,
 } from "../../interfaces/http/dropship-admin-cost-change-policy.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 
@@ -167,7 +168,7 @@ describe("dropship admin cost change policy routes", () => {
   });
 
   it("does not leak an unrecognized failure to the caller, and logs it", async () => {
-    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logged = spyLoggerJson("error");
     service.createError = new Error("connection reset");
 
     const response = await jsonRequest(`${server.url}${POLICY_URL}`, {

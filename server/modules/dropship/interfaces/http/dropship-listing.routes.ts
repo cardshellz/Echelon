@@ -322,7 +322,7 @@ function sendDropshipListingError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[DropshipListingRoutes] Unexpected listing request error:", error);
+  logger.error("dropship.listing_routes", { message: "[DropshipListingRoutes] Unexpected listing request error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_LISTING_INTERNAL_ERROR",

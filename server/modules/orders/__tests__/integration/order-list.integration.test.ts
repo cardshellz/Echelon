@@ -10,6 +10,7 @@ import { PickingHistoryRepository } from "../../infrastructure/picking-history.r
 import express, { type Request } from "express";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -181,7 +182,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     const server: Server = createServer(app);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/picking/queue`;
-    const logging = vi.spyOn(console, "error");
+    const logging = spyLoggerJson("error");
     try {
       expect((await fetch(url)).status).toBe(401);
       expect((await fetch(url, { headers: { authorization: "fixture-without-picking" } })).status).toBe(403);

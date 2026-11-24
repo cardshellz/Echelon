@@ -3,6 +3,7 @@ import type { DropshipCostChangeNoticeService } from "../../application/dropship
 import { DropshipError } from "../../domain/errors";
 import { createDropshipCostChangeNoticeServiceFromEnv } from "../../infrastructure/dropship-cost-change-notice.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 /**
  * The vendor's own view of .ops cost changes on their listings
@@ -28,12 +29,7 @@ function sendCostChangeError(res: Response, error: unknown): Response {
       error: { code: error.code, message: error.message, context: error.context },
     });
   }
-  console.error(JSON.stringify({
-    level: "error",
-    code: "DROPSHIP_COST_CHANGE_INTERNAL_ERROR",
-    message: "Unexpected vendor cost change request error.",
-    context: { error: error instanceof Error ? error.message : String(error) },
-  }));
+  logger.error("DROPSHIP_COST_CHANGE_INTERNAL_ERROR", { code: "DROPSHIP_COST_CHANGE_INTERNAL_ERROR", message: "Unexpected vendor cost change request error.", context: { error: error instanceof Error ? error.message : String(error) } });
   return res.status(500).json({ error: { code: "DROPSHIP_COST_CHANGE_INTERNAL_ERROR", message: "Dropship cost change request failed." } });
 }
 

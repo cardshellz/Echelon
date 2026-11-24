@@ -37,6 +37,7 @@ import {
   getHistoricalContentsCorrectionPreview,
   getHistoricalContentsReviewPreview,
 } from "../../application/control-tower-historical-contents.actions";
+import { logger } from "../../../../platform/observability/logger";
 
 function operatorName(req: Request): string {
   return req.session.user?.username || req.session.user?.displayName || String(req.session.user?.id || "unknown");
@@ -318,7 +319,7 @@ export function registerOperationsControlTowerRoutes(app: Express) {
       const filters = parseControlTowerFilters(req.query);
       res.json(await getOperationsControlTower({ ...dependencies(req), canViewProcurement }, filters));
     } catch (error: any) {
-      console.error("[Operations Control Tower] load failed:", error);
+      logger.error("operations.control_tower_routes", { message: "[Operations Control Tower] load failed:", error: error });
       res.status(500).json({ error: "Failed to load operations control tower" });
     }
   });
@@ -339,7 +340,7 @@ export function registerOperationsControlTowerRoutes(app: Express) {
       }
       res.json(result);
     } catch (error: any) {
-      console.error("[Operations Control Tower] detail failed:", error);
+      logger.error("operations.control_tower_routes", { message: "[Operations Control Tower] detail failed:", error: error });
       res.status(500).json({ error: "Failed to load operations control tower detail" });
     }
   });
@@ -390,7 +391,7 @@ export function registerOperationsControlTowerRoutes(app: Express) {
         res.status(error.statusCode).json({ error: error.message, code: error.code });
         return;
       }
-      console.error("[Operations Control Tower] action failed:", error);
+      logger.error("operations.control_tower_routes", { message: "[Operations Control Tower] action failed:", error: error });
       res.status(500).json({
         error: "Failed to execute control tower action",
         code: "CONTROL_TOWER_ACTION_INTERNAL_ERROR",
@@ -404,7 +405,7 @@ function sendControlTowerV2Error(res: Response, error: unknown, fallback: string
     res.status(error.statusCode).json({ error: error.message, code: error.code });
     return;
   }
-  console.error(`[Operations Control Tower V2] ${fallback}`, error);
+  logger.error("operations.control_tower_routes", { message: `[Operations Control Tower V2] ${fallback}`, error: error });
   res.status(500).json({ error: fallback, code: "CONTROL_TOWER_INTERNAL_ERROR" });
 }
 
@@ -415,9 +416,9 @@ function logSlowControlTowerRequest(
 ): void {
   const durationMs = Date.now() - startedAt;
   if (durationMs < 750) return;
-  console.warn("[Operations Control Tower V2] slow request", {
+  logger.warn("operations.control_tower_routes", { message: "[Operations Control Tower V2] slow request", context: {
     endpoint,
     durationMs,
     ...context,
-  });
+  } });
 }

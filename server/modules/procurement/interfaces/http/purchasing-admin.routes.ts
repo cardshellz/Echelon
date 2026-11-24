@@ -19,6 +19,7 @@ import {
   buildSupplierEvidenceImportPreview,
   publicSupplierEvidenceImportPreview,
 } from "../../application/supplier-evidence-import.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const PG_INTEGER_MAX = 2_147_483_647;
 const MAX_QUOTE_CLOCK_SKEW_MS = 5 * 60 * 1_000;
@@ -453,7 +454,7 @@ export function registerPurchasingAdminRoutes(app: Express) {
         if (error instanceof PurchasingError) {
           return res.status(error.statusCode).json({ error: error.message, details: error.details });
         }
-        console.error("[supplier evidence preview] error:", error);
+        logger.error("procurement.purchasing_admin_routes", { message: "[supplier evidence preview] error:", error: error });
         res.status(500).json({ error: "Failed to preview supplier evidence import" });
       }
     },
@@ -495,7 +496,7 @@ export function registerPurchasingAdminRoutes(app: Express) {
         if (error instanceof PurchasingError) {
           return res.status(error.statusCode).json({ error: error.message, details: error.details });
         }
-        console.error("[supplier evidence apply] error:", error);
+        logger.error("procurement.purchasing_admin_routes", { message: "[supplier evidence apply] error:", error: error });
         res.status(500).json({ error: "Failed to apply supplier evidence import" });
       }
     },
@@ -679,7 +680,7 @@ export function registerPurchasingAdminRoutes(app: Express) {
         if (error instanceof PurchasingError) {
           return res.status(error.statusCode).json({ error: error.message, details: error.details });
         }
-        console.error("[catalog bulk-upsert] error:", error);
+        logger.error("procurement.purchasing_admin_routes", { message: "[catalog bulk-upsert] error:", error: error });
         res.status(500).json({ error: error.message });
       }
     },
@@ -707,7 +708,7 @@ export function registerPurchasingAdminRoutes(app: Express) {
         const result = await storage.searchVendorCatalog({ vendorId, q, limit });
         res.json(result);
       } catch (error: any) {
-        console.error("[catalog-search] error:", error);
+        logger.error("procurement.purchasing_admin_routes", { message: "[catalog-search] error:", error: error });
         res.status(500).json({ error: error.message });
       }
     },

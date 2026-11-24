@@ -12,6 +12,7 @@ import type { Express, Response } from "express";
 import { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import { runShadow } from "../../application/shadow-quote.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const shadowRunSchema = z.object({
   days: z.number().int().min(1).max(365).optional(),
@@ -40,7 +41,7 @@ export function registerShadowAdminRoutes(app: Express): void {
 }
 
 function sendShadowAdminError(res: Response, error: unknown, action: string): Response {
-  console.error(`[ShadowAdminRoutes] Failed to ${action}:`, error);
+  logger.error("shipping-engine.shadow_admin_routes", { message: `[ShadowAdminRoutes] Failed to ${action}:`, error: error });
   return res.status(500).json({
     error: { code: "SHIPPING_ADMIN_INTERNAL_ERROR", message: `Failed to ${action}.` },
   });

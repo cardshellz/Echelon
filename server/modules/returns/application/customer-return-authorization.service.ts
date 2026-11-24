@@ -11,6 +11,7 @@ import {
   type CustomerReturnAuthorizationStore, type CustomerReturnAuthorizationResult,
   type LockedCustomerReturnAuthorizationSource, type PersistCustomerReturnAuthorizationInput,
 } from "./customer-return-authorization.ports";
+import { logger } from "../../../platform/observability/logger";
 
 const id = z.number().int().positive().safe();
 const identity = z.string().trim().min(1).max(255);
@@ -372,9 +373,9 @@ export class CustomerReturnAuthorizationService {
       // Never serialize source payloads, customer references, SQL errors or causes.
       try {
         if (this.dependencies.reportFailure) this.dependencies.reportFailure(event);
-        else console.error(JSON.stringify({ component: "customer_returns", ...event }));
+        else logger.error("returns.customer_return_authorization_service", { component: "customer_returns", ...event });
       } catch {
-        console.error(JSON.stringify({ component: "customer_returns", ...event, reportingFailed: true }));
+        logger.error("returns.customer_return_authorization_service", { component: "customer_returns", ...event, reportingFailed: true });
       }
       throw classified;
     }

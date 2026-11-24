@@ -12,6 +12,7 @@ import type {
   PackageHistoryFilter,
 } from "./package-history.ports";
 import { z } from "zod";
+import { logger } from "../../../platform/observability/logger";
 
 const CONCURRENCY = 2;
 const MAX_TRACKING_NUMBERS = 200;
@@ -34,14 +35,7 @@ export class PackageHistoryWorker {
       try {
         report(event);
       } catch {
-        console.error(
-          JSON.stringify({
-            action: "shipping_package_history_report",
-            outcome: "failed",
-            omsOrderId: event.omsOrderId,
-            code: "PACKAGE_HISTORY_REPORT_FAILED",
-          }),
-        );
+        logger.error("shipping_package_history_report", { outcome: "failed", omsOrderId: event.omsOrderId, code: "PACKAGE_HISTORY_REPORT_FAILED" });
       }
     };
     await store.drain(1_000, filter);

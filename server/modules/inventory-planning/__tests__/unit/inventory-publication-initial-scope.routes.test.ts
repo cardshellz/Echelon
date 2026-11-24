@@ -5,6 +5,7 @@ import { z } from "zod";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerInventoryPublicationInitialScopeRoutes } from "../../interfaces/http/inventory-publication-initial-scope.routes";
 import { InitialPublicationScopeError } from "../../application/inventory-publication-initial-scope.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 vi.mock("../../../identity", () => ({ hasPermission }));
@@ -104,13 +105,14 @@ describe("initial publication scope HTTP boundary", () => {
     } });
   });
   it("logs a classified unexpected failure and preserves retry identity guidance", async () => {
-    const logger = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logger = spyLoggerJson("error");
     service.prepare.mockRejectedValue(Object.assign(new Error("private credentials"), { code: "unsafe\nsecret" }));
     const response = await post("prepare");
     expect(response.status).toBe(500);
     expect(response.body).toEqual({ error: {
       code: "INITIAL_SCOPE_FAILED", message: "Preparation is not confirmed. Retry using the same command key.",
     } });
-    expect(logger).toHaveBeenCalledWith(JSON.stringify({ event: "publication_initial_scope_failed", code: "UNKNOWN" }));
+    expect(JSON.parse(logger.mock.calls[0][0])).toMatchObject({ event: "publication_initial_scope_failed", code: "UNKNOWN" });
+    expect(logger.mock.calls[0][0]).not.toContain("secret");
   });
 });

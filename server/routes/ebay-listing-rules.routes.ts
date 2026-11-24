@@ -51,6 +51,7 @@ import {
   insertEbayListingRuleRecord,
   updateEbayListingRuleRecord,
 } from "../modules/channels/ebay-route-admin.api";
+import { logger } from "../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -87,7 +88,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         .orderBy(asc(productTypes.sortOrder));
       res.json(types);
     } catch (err: any) {
-      console.error("[Product Types] Error:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[Product Types] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -134,7 +135,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
 
       res.json(result);
     } catch (err: any) {
-      console.error("[Products With Types] Error:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[Products With Types] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -172,7 +173,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
 
       res.json({ success: true, productId, productType: typeValue });
     } catch (err: any) {
-      console.error("[Product Type Update] Error:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[Product Type Update] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -208,7 +209,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
       await bulkUpdateCatalogProductType(idList, typeValue, pool);
       res.json({ success: true, updated: idList.length, productType: typeValue });
     } catch (err: any) {
-      console.error("[Bulk Product Type] Error:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[Bulk Product Type] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -225,7 +226,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         .orderBy(asc(ebayListingRules.sortOrder));
       res.json(rules.map(listingRuleView));
     } catch (err: any) {
-      console.error("[eBay Listing Rules] Error fetching:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[eBay Listing Rules] Error fetching:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -271,7 +272,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         res.status(409).json({ error: "A rule with this scope already exists" });
         return;
       }
-      console.error("[eBay Listing Rules] Error creating:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[eBay Listing Rules] Error creating:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -309,7 +310,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
       res.json(listingRuleView(updated));
     } catch (err: any) {
       if (err instanceof EbayBusinessPolicyError) { sendEbayPolicyError(res, err); return; }
-      console.error("[eBay Listing Rules] Error updating:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[eBay Listing Rules] Error updating:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -351,7 +352,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
 
       res.json({ success: true });
     } catch (err: any) {
-      console.error("[eBay Listing Rules] Error deleting:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[eBay Listing Rules] Error deleting:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -446,7 +447,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
       });
     } catch (err: any) {
       if (err instanceof EbayBusinessPolicyError) { sendEbayPolicyError(res, err); return; }
-      console.error("[eBay Listing Rules] Error resolving:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[eBay Listing Rules] Error resolving:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -502,7 +503,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
 
       res.json({ categories });
     } catch (err: any) {
-      console.error("[eBay Store Categories] Error:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[eBay Store Categories] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -543,7 +544,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
 
       if (!resp.ok) {
         const errorBody = await resp.text();
-        console.error("[eBay Browse Categories] API error:", resp.status, errorBody);
+        logger.error("routes.ebay_listing_rules_routes", { message: "[eBay Browse Categories] API error:", details: [resp.status, errorBody] });
         res.status(resp.status).json({ error: `eBay API error: ${resp.status}` });
         return;
       }
@@ -560,7 +561,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
 
       res.json({ categories: suggestions });
     } catch (err: any) {
-      console.error("[eBay Browse Categories] Error:", err.message);
+      logger.error("routes.ebay_listing_rules_routes", { message: "[eBay Browse Categories] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

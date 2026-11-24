@@ -21,6 +21,7 @@ import type { CustomerReturnLabelStatus } from "@shared/returns/customer-return-
 import { customerReturnSubmissionHash } from "../../application/customer-return-intake-preparation";
 import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
 import type { CustomerReturnLabelsService } from "../../application/customer-return-labels.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const customerScope = { channelId: 36, omsOrderId: 100, externalOrderId: "1001", externalCustomerId: "customer-1" };
 
@@ -150,7 +151,7 @@ describe("private return submission and exact-intent recovery", () => {
     const s = await setup();
     s.persist.mockRejectedValueOnce({ code: "private customer payload", cause: null });
     s.reportFailure.mockImplementationOnce(() => { throw new Error("reporter unavailable"); });
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = spyLoggerJson("error");
     try {
       await expect(s.service.submit(s.input, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_PROCESSING" });
       expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ code: "RETURN_SUBMISSION_UNEXPECTED_FAILURE", reportingFailed: true });

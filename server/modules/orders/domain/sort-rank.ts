@@ -1,3 +1,4 @@
+import { logger } from "../../../platform/observability/logger";
 /**
  * Sort rank — flattens the pick queue's multi-field sort order into a
  * single lexicographically-sortable string, so downstream systems
@@ -344,7 +345,7 @@ export async function resolveSlaDueAt(
     } catch (err) {
       // Keep the global fallback if channel lookup fails.
       // eslint-disable-next-line no-console
-      console.warn("[sort-rank] Failed to resolve channel SLA days, using default:", (err as Error).message);
+      logger.warn("orders.sort_rank", { message: "[sort-rank] Failed to resolve channel SLA days, using default:", detail: (err as Error).message });
     }
   }
 
@@ -407,7 +408,7 @@ async function loadSettings(dbHandle: PickPrioritySettingsDb): Promise<PickPrior
   } catch (err) {
     // Swallow — we always have the hardcoded fallback.
     // eslint-disable-next-line no-console
-    console.warn("[sort-rank] Failed to load pick-priority settings, using defaults:", (err as Error).message);
+    logger.warn("orders.sort_rank", { message: "[sort-rank] Failed to load pick-priority settings, using defaults:", detail: (err as Error).message });
   }
 
   settingsCache = {

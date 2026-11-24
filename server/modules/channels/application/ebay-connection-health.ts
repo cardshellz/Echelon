@@ -2,6 +2,7 @@ import { resolveEbayListingIssue, type EbayListingIssueInput } from "@shared/eba
 import type { EbayAuthService } from "../adapters/ebay/ebay-auth.service";
 import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
 import { ChannelFulfillmentProviderError } from "../domain/channel-fulfillment-provider.error";
+import { logger } from "../../../platform/observability/logger";
 
 /** Credential presence and a verified live connection are different facts. */
 export async function readEbayConnectionHealth(
@@ -21,7 +22,7 @@ export async function readEbayConnectionHealth(
       : error instanceof Error && "code" in error && typeof error.code === "string" && error.code.startsWith("EBAY_")
         ? error.code : "EBAY_AUTH_UNAVAILABLE";
     const input: EbayListingIssueInput = { code, message: error instanceof EbayListingSyncError ? error.message : undefined };
-    console.error(JSON.stringify({ event: "ebay_connection_verification_failed", channelId, code }));
+    logger.error("ebay_connection_verification_failed", { event: "ebay_connection_verification_failed", channelId, code });
     const issue = resolveEbayListingIssue(input);
     const connectionIssue = issue.action.kind === "retry_sync"
       ? {

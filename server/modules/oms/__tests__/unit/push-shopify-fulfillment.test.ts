@@ -39,6 +39,7 @@ import {
   __test__,
 } from "../../application/fulfillment-push.service";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // ─── Fixtures ────────────────────────────────────────────────────────
 
@@ -2243,7 +2244,7 @@ describe("resolveFulfillmentOrderLinesFromCandidates :: location pinning", () =>
   });
 
   it("falls back to any-location match (with a warning) when nothing is at the ship location", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const candidates = [
       candidate({ fulfillmentOrderLineItemId: "at-B", assignedLocationId: LOC_B, remaining: 2 }),
     ];

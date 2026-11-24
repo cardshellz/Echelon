@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { loadPurchaseRecommendationPipelineHealth } from "../../application/purchase-recommendation-pipeline-health.service";
 import { sendProcurementHealthCriticalEscalation } from "../../application/procurement-health-escalation.service";
 import { loadProcurementHealthSummary } from "../../application/procurement-health-summary.service";
+import { logger } from "../../../../platform/observability/logger";
 
 function parseHealthLimit(value: unknown): number {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -29,7 +30,7 @@ export function registerProcurementHealthRoutes(app: Express) {
       try {
         res.json(await loadPurchaseRecommendationPipelineHealth());
       } catch (error: any) {
-        console.error("Error fetching recommendation pipeline health:", error);
+        logger.error("procurement.health_routes", { message: "Error fetching recommendation pipeline health:", error: error });
         res.status(500).json({ error: "Failed to fetch recommendation pipeline health" });
       }
     },
@@ -41,7 +42,7 @@ export function registerProcurementHealthRoutes(app: Express) {
       const { shipmentTracking } = app.locals.services;
       res.json(await loadProcurementHealthSummary({ shipmentTracking, limit }));
     } catch (error: any) {
-      console.error("Error fetching procurement health:", error);
+      logger.error("procurement.health_routes", { message: "Error fetching procurement health:", error: error });
       res.status(500).json({ error: "Failed to fetch procurement health" });
     }
   });
@@ -56,7 +57,7 @@ export function registerProcurementHealthRoutes(app: Express) {
       const escalation = await sendProcurementHealthCriticalEscalation(health, { dedupeHours, force });
       res.json({ health, escalation });
     } catch (error: any) {
-      console.error("Error escalating procurement health:", error);
+      logger.error("procurement.health_routes", { message: "Error escalating procurement health:", error: error });
       res.status(500).json({ error: "Failed to escalate procurement health" });
     }
   });

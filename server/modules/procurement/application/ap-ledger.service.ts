@@ -57,6 +57,7 @@ import {
   evaluatePurchaseOrderInvoiceMatches,
 } from "./purchase-order-invoice-match";
 import { COGSService } from "../../inventory";
+import { logger } from "../../../platform/observability/logger";
 
 // ── Error class ─────────────────────────────────────────────────────
 
@@ -768,7 +769,7 @@ async function runPoFinancialDetectionHooks(poId: number): Promise<void> {
   try {
     await detectFinancialExceptions(poId);
   } catch (detectionErr) {
-    console.error("[po-exceptions] detection hook failed in recomputePoFinancialAggregates:", detectionErr);
+    logger.error("procurement.ap_ledger_service", { message: "[po-exceptions] detection hook failed in recomputePoFinancialAggregates:", error: detectionErr });
   }
 }
 
@@ -3432,7 +3433,7 @@ export async function runInvoiceMatch(invoiceId: number, actorId?: string) {
       await detectMatchMismatch(normalizedInvoiceId);
     }
   } catch (detectionErr) {
-    console.error("[po-exceptions] detection hook failed in runInvoiceMatch:", detectionErr);
+    logger.error("procurement.ap_ledger_service", { message: "[po-exceptions] detection hook failed in runInvoiceMatch:", error: detectionErr });
   }
 
   return updatedLines;

@@ -19,6 +19,7 @@
  */
 import { createShopifyProductMappingReconciliationService } from "../modules/catalog/application/shopify-product-mapping-reconciliation.service";
 import { channelsStorage } from "../modules/channels";
+import { logger } from "../platform/observability/logger";
 
 const ACTOR = "scheduled-mapping-reconciler";
 
@@ -40,7 +41,7 @@ export async function runShopifyMappingReconciliation(): Promise<MappingReconcil
   const shopify = channels.find((c: any) => c.provider === "shopify" && c.isDefault === 1)
     ?? channels.find((c: any) => c.provider === "shopify");
   if (!shopify) {
-    console.warn("[mapping-reconciler] no Shopify channel configured — skipping");
+    logger.warn("jobs.shopify_mapping_reconciliation_job", { message: "[mapping-reconciler] no Shopify channel configured — skipping" });
     return empty;
   }
 
@@ -68,12 +69,7 @@ export async function runShopifyMappingReconciliation(): Promise<MappingReconcil
         // A fingerprint mismatch means the row changed under us — the next run
         // re-evaluates it against fresh evidence rather than forcing the write.
         retireFailures++;
-        console.warn(JSON.stringify({
-          event: "shopify_mapping_retire_failed",
-          productId: item.productId,
-          shopifyProductId: item.shopifyProductId,
-          error: error instanceof Error ? error.message : String(error),
-        }));
+        logger.warn("shopify_mapping_retire_failed", { event: "shopify_mapping_retire_failed", productId: item.productId, shopifyProductId: item.shopifyProductId, error: error instanceof Error ? error.message : String(error) });
       }
     }
   }
@@ -87,12 +83,7 @@ export async function runShopifyMappingReconciliation(): Promise<MappingReconcil
     skippedAutoRetire: autoRetire ? 0 : retirable.length,
   };
 
-  console.log(JSON.stringify({
-    event: "shopify_mapping_reconciliation",
-    ...result,
-    issueCounts: report.summary.issueCounts,
-    autoRetireEnabled: autoRetire,
-  }));
+  logger.info("shopify_mapping_reconciliation", { event: "shopify_mapping_reconciliation", ...result, issueCounts: report.summary.issueCounts, autoRetireEnabled: autoRetire });
 
   return result;
 }

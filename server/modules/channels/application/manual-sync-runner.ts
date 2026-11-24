@@ -14,6 +14,7 @@
  */
 
 import type { SyncLogWriteParams } from "./sync-settings.service";
+import { logger } from "../../../platform/observability/logger";
 
 export interface ManualSyncServices {
   inventoryPublicationWork: {
@@ -97,7 +98,7 @@ export function createManualSyncRunner(clock: () => number = Date.now): ManualSy
       // The requester already got their 202 — this is the only place the
       // failure can surface. Keep it loud and queryable via getStatus().
       status.lastError = error?.message || String(error);
-      console.error(`[ManualSync] Background sweep failed: ${status.lastError}`);
+      logger.error("channels.manual_sync_runner", { message: `[ManualSync] Background sweep failed: ${status.lastError}` });
     } finally {
       status.running = false;
       status.finishedAt = new Date(clock()).toISOString();

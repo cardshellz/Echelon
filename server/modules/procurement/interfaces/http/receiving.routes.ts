@@ -23,6 +23,7 @@ export const MAX_RECEIVING_LIST_LIMIT = 500;
 import { requireIdempotency } from "../../../../middleware/idempotency";
 import * as notificationService from "../../../notifications/in-app-notifications.api";
 import { millsToCents, centsToMills } from "@shared/utils/money";
+import { logger } from "../../../../platform/observability/logger";
 
 /**
  * Resolve an incoming (mills?, cents?) pair on a receiving-line request
@@ -119,7 +120,7 @@ export function registerReceivingRoutes(app: Express) {
 
       res.json(enriched);
     } catch (error) {
-      console.error("Error fetching receiving orders:", error);
+      logger.error("procurement.receiving_routes", { message: "Error fetching receiving orders:", error: error });
       res.status(500).json({ error: "Failed to fetch receiving orders" });
     }
   });
@@ -127,20 +128,20 @@ export function registerReceivingRoutes(app: Express) {
   app.get("/api/receiving/:id", requireReceivingRead, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      console.log("[RECEIVING] Fetching order id:", id);
+      logger.info("procurement.receiving_routes", { message: "[RECEIVING] Fetching order id:", detail: id });
 
       const order = await storage.getReceivingOrderById(id);
-      console.log("[RECEIVING] Order found:", order ? "yes" : "no");
+      logger.info("procurement.receiving_routes", { message: "[RECEIVING] Order found:", detail: order ? "yes" : "no" });
 
       if (!order) {
         return res.status(404).json({ error: "Receiving order not found" });
       }
 
       const lines = await storage.getReceivingLines(id);
-      console.log("[RECEIVING] Lines count:", lines.length);
+      logger.info("procurement.receiving_routes", { message: "[RECEIVING] Lines count:", detail: lines.length });
 
       const vendor = order.vendorId ? await storage.getVendorById(order.vendorId) : null;
-      console.log("[RECEIVING] Vendor:", vendor ? vendor.name : "none");
+      logger.info("procurement.receiving_routes", { message: "[RECEIVING] Vendor:", detail: vendor ? vendor.name : "none" });
 
       const capabilities = await req.app.locals.services.receiptReversal.getReturnReversalCapabilities(id);
       const enrichedLines = lines.map(line => {
@@ -150,8 +151,8 @@ export function registerReceivingRoutes(app: Express) {
       });
       res.json({ ...order, lines: enrichedLines, vendor, reversalCapability: capabilities.order });
     } catch (error: any) {
-      console.error("[RECEIVING] Error fetching receiving order:", error?.message || error);
-      console.error("[RECEIVING] Stack:", error?.stack);
+      logger.error("procurement.receiving_routes", { message: "[RECEIVING] Error fetching receiving order:", error: error?.message || error });
+      logger.error("procurement.receiving_routes", { message: "[RECEIVING] Stack:", error: error?.stack });
       res.status(500).json({ error: "Failed to fetch receiving order", details: error?.message });
     }
   });
@@ -167,7 +168,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json(order);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error updating receiving order:", error);
+      logger.error("procurement.receiving_routes", { message: "Error updating receiving order:", error: error });
       res.status(500).json({ error: "Failed to update receiving order" });
     }
   });
@@ -183,7 +184,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json({ success: true });
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error deleting receiving order:", error);
+      logger.error("procurement.receiving_routes", { message: "Error deleting receiving order:", error: error });
       res.status(500).json({ error: "Failed to delete receiving order" });
     }
   });
@@ -195,7 +196,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error opening receiving order:", error);
+      logger.error("procurement.receiving_routes", { message: "Error opening receiving order:", error: error });
       res.status(500).json({ error: "Failed to open receiving order" });
     }
   });
@@ -208,7 +209,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json(result);
     } catch (error) {
       if (error instanceof ReceivingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
-      console.error("[Receiving] Cost retry failed", error);
+      logger.error("procurement.receiving_routes", { message: "[Receiving] Cost retry failed", error: error });
       res.status(500).json({ error: "Unable to retry receipt costs" });
     }
   });
@@ -228,14 +229,14 @@ export function registerReceivingRoutes(app: Express) {
       if (rcvReplen && result.putawayLocationIds?.length) {
         for (const locId of result.putawayLocationIds) {
           rcvReplen.checkReplenForLocation(locId).catch((err: any) =>
-            console.warn(`[Replen] Post-receiving check failed for loc ${locId}:`, err)
+            logger.warn("procurement.receiving_routes", { message: `[Replen] Post-receiving check failed for loc ${locId}:`, error: err })
           );
         }
       }
       res.json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error closing receiving order:", error);
+      logger.error("procurement.receiving_routes", { message: "Error closing receiving order:", error: error });
       res.status(500).json({ error: "Failed to close receiving order" });
     }
   });
@@ -248,7 +249,7 @@ export function registerReceivingRoutes(app: Express) {
       const lines = await storage.getReceivingLines(orderId);
       res.json(lines.map(withReceivingUnitVersion));
     } catch (error) {
-      console.error("Error fetching receiving lines:", error);
+      logger.error("procurement.receiving_routes", { message: "Error fetching receiving lines:", error: error });
       res.status(500).json({ error: "Failed to fetch receiving lines" });
     }
   });
@@ -287,7 +288,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json(line);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error updating receiving line:", error);
+      logger.error("procurement.receiving_routes", { message: "Error updating receiving line:", error: error });
       res.status(500).json({ error: "Failed to update receiving line" });
     }
   });
@@ -301,7 +302,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      console.error("Error creating variant from receiving line:", error);
+      logger.error("procurement.receiving_routes", { message: "Error creating variant from receiving line:", error: error });
       res.status(500).json({ error: "Failed to create variant" });
     }
   });
@@ -314,7 +315,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error completing all lines:", error);
+      logger.error("procurement.receiving_routes", { message: "Error completing all lines:", error: error });
       res.status(500).json({ error: "Failed to complete all lines" });
     }
   });
@@ -327,7 +328,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json({ success: true });
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error deleting receiving line:", error);
+      logger.error("procurement.receiving_routes", { message: "Error deleting receiving line:", error: error });
       res.status(500).json({ error: "Failed to delete receiving line" });
     }
   });
@@ -344,7 +345,7 @@ export function registerReceivingRoutes(app: Express) {
       res.status(201).json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error bulk creating receiving lines:", error);
+      logger.error("procurement.receiving_routes", { message: "Error bulk creating receiving lines:", error: error });
       res.status(500).json({ error: "Failed to create receiving lines" });
     }
   });
@@ -365,7 +366,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json({ success: true });
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("[Receiving] Error discarding draft receiving order:", error);
+      logger.error("procurement.receiving_routes", { message: "[Receiving] Error discarding draft receiving order:", error: error });
       res.status(500).json({ error: "Failed to discard receiving order" });
     }
   });
@@ -380,7 +381,7 @@ export function registerReceivingRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("[Receiving] Error voiding zero-post closed receiving order:", error);
+      logger.error("procurement.receiving_routes", { message: "[Receiving] Error voiding zero-post closed receiving order:", error: error });
       res.status(500).json({ error: "Failed to void zero-post receiving order" });
     }
   });
@@ -395,7 +396,7 @@ export function registerReceivingRoutes(app: Express) {
         const reversals = await receiptReversal.getReversalsForOrder(Number(req.params.id));
         res.json(reversals);
       } catch (error: any) {
-        console.error("[Receiving] Error fetching reversals:", error);
+        logger.error("procurement.receiving_routes", { message: "[Receiving] Error fetching reversals:", error: error });
         res.status(500).json({ error: "Failed to fetch reversals" });
       }
     },
@@ -412,7 +413,7 @@ export function registerReceivingRoutes(app: Express) {
         const warnings = await receiveValidation.evaluateOrder(Number(req.params.id));
         res.json(warnings);
       } catch (error: any) {
-        console.error("[Receiving] Error evaluating validation warnings:", error);
+        logger.error("procurement.receiving_routes", { message: "[Receiving] Error evaluating validation warnings:", error: error });
         res.status(500).json({ error: "Failed to evaluate validation warnings" });
       }
     },

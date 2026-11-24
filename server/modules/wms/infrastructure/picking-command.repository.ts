@@ -13,6 +13,7 @@ import {
   canonicalAvailabilityClaimUnpickCommandSchema,
   canonicalAvailabilityClaimPickResultSchema,
 } from "@shared/types/inventory-availability-claims";
+import { logger } from "../../../platform/observability/logger";
 
 export type PickingCommandTransaction = Pick<
   typeof db,
@@ -370,13 +371,7 @@ export async function deliverPickingFollowup<
     const message = error instanceof Error ? error.message : String(error);
     await database.execute(sql`UPDATE wms.picking_commands SET last_error=${message.slice(0, 2000)},attempt_count=attempt_count+1
       WHERE command_key=${key} AND completed_at IS NULL`);
-    console.error(
-      JSON.stringify({
-        event: "picking_followup_pending",
-        commandKey: key,
-        message,
-      }),
-    );
+    logger.error("picking_followup_pending", { event: "picking_followup_pending", commandKey: key, message });
     return null;
   }
 }

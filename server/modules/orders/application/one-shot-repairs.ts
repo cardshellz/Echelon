@@ -8,6 +8,7 @@ import {
 } from "../../shipping/engine-and-reconcile.api";
 import { cancelDuplicateOutboundShipmentInWms } from "../../wms/outbound-shipment-mutations.api";
 import { recomputeAllActiveSortRanksDetailed } from "../sort-rank-and-priority.api";
+import { logger } from "../../../platform/observability/logger";
 
 export const ONE_SHOT_SORT_RANK_RECOMPUTE_JOB_KEY =
   "oneshot.orders.active_sort_rank_recompute_v1";
@@ -39,7 +40,7 @@ export async function runOneTimeActiveSortRankRecompute(deps: {
     const { updated, orderIds } = await recomputeAllActiveSortRanksDetailed();
     updatedCount = updated;
     if (updated > 0) {
-      console.log(`[Sort-Rank] Recomputed sort_rank for ${updated} active order(s)`);
+      logger.info("orders.one_shot_repairs", { message: `[Sort-Rank] Recomputed sort_rank for ${updated} active order(s)` });
       for (const orderId of orderIds) {
         await enqueueShipStationSortRankSyncRetry(
           db,
@@ -48,9 +49,7 @@ export async function runOneTimeActiveSortRankRecompute(deps: {
         );
       }
       queuedCount = orderIds.length;
-      console.log(
-        `[Sort-Rank] Queued ShipStation customField1 sync for ${orderIds.length} active order(s)`,
-      );
+      logger.info("orders.one_shot_repairs", { message: `[Sort-Rank] Queued ShipStation customField1 sync for ${orderIds.length} active order(s)` });
     }
   };
 
@@ -150,19 +149,14 @@ export async function runRetiredDuplicateShipmentCleanup(deps: {
                 try {
                   await engine.cancel(ref);
                 } catch (ssErr: any) {
-                  console.warn(
-                    `[Data Repair] Could not cancel engine order ${ref.engineOrderRef}: ${ssErr?.message}`,
-                  );
+                  logger.warn("orders.one_shot_repairs", { message: `[Data Repair] Could not cancel engine order ${ref.engineOrderRef}: ${ssErr?.message}` });
                 }
               }
             }
             cancelledCount = dupes.rows.length;
-            console.warn(
-              `[Data Repair] Cancelled ${dupes.rows.length} duplicate shipment(s):`,
-              (dupes.rows as any[])
+            logger.warn("orders.one_shot_repairs", { message: `[Data Repair] Cancelled ${dupes.rows.length} duplicate shipment(s):`, detail: (dupes.rows as any[])
                 .map((r: any) => `shipment ${r.id} (order ${r.order_id}, status=${r.status})`)
-                .join(", "),
-            );
+                .join(", ") });
           }
         },
       });

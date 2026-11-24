@@ -73,6 +73,7 @@ import {
   updateRateTableMetadataInTx,
   updateSingleRateTableRowInTx,
 } from "../../infrastructure/rate-table-admin.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const INITIAL_RATE_TABLE_SERVICE_LEVEL_CODE = "standard";
 
@@ -1440,7 +1441,7 @@ function sendRateTableAdminError(res: Response, error: unknown, action: string):
       },
     });
   }
-  console.error(`[RateTableAdminRoutes] Failed to ${action}:`, error);
+  logger.error("shipping-engine.rate_table_admin_routes", { message: `[RateTableAdminRoutes] Failed to ${action}:`, error: error });
   return res.status(500).json({
     error: { code: "SHIPPING_ADMIN_INTERNAL_ERROR", message: `Failed to ${action}.` },
   });

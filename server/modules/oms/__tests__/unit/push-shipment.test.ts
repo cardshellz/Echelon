@@ -21,6 +21,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 import {
   createShipStationService,
   validateShipmentForPush,
@@ -289,7 +290,7 @@ describe("validateShipmentForPush :: header-level violations", () => {
     // The line-sum vs total_cents reconciliation was removed (#58276): it was
     // warn-only and structurally wrong. A totals mismatch must neither throw
     // nor warn now — ShipStation accepts whatever totals we send.
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     expect(() =>
       validateShipmentForPush(
         okShipment(),
@@ -1900,7 +1901,7 @@ describe("pushShipment :: error cases", () => {
   });
 
   it("warns but pushes when the owning WMS order is already shipped (multi-shipment)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const shipmentRow = okShipment({ status: "queued" });
     const mock = makeDb([
       { rows: [shipmentRow] },

@@ -4,6 +4,7 @@ import {
   registerScheduledJob,
   type RegisteredJobHandle,
 } from "../../../infrastructure/job-registry";
+import { logger } from "../../../platform/observability/logger";
 
 export const EBAY_LISTING_RECONCILE_LOCK_ID = 918502;
 const RECONCILE_INTERVAL_MS = 30 * 60 * 1000;
@@ -36,9 +37,7 @@ export function startEbayListingReconciliationScheduler(
 
       const internalApiKey = process.env.INTERNAL_API_KEY;
       if (!internalApiKey) {
-        console.warn(
-          "[eBay Reconcile] Skipping scheduled listing reconciliation: INTERNAL_API_KEY is not configured",
-        );
+        logger.warn("channels.ebay_listing_reconciliation_scheduler", { message: "[eBay Reconcile] Skipping scheduled listing reconciliation: INTERNAL_API_KEY is not configured" });
         return;
       }
 
@@ -62,9 +61,7 @@ export function startEbayListingReconciliationScheduler(
           res.on("data", (chunk: string) => (body += chunk));
           res.on("end", () => {
             if (res.statusCode < 200 || res.statusCode >= 300) {
-              console.warn(
-                `[eBay Reconcile] Scheduled endpoint returned ${res.statusCode}: ${body.slice(0, 300)}`,
-              );
+              logger.warn("channels.ebay_listing_reconciliation_scheduler", { message: `[eBay Reconcile] Scheduled endpoint returned ${res.statusCode}: ${body.slice(0, 300)}` });
               resolve();
               return;
             }
@@ -73,14 +70,10 @@ export function startEbayListingReconciliationScheduler(
               const data = JSON.parse(body);
               const changes = (data.ended || 0) + (data.deleted || 0);
               if (data.checked > 0) {
-                console.log(
-                  `[eBay Reconcile] checked=${data.checked} active=${data.active} ended=${data.ended} deleted=${data.deleted} errors=${data.errors}`,
-                );
+                logger.info("channels.ebay_listing_reconciliation_scheduler", { message: `[eBay Reconcile] checked=${data.checked} active=${data.active} ended=${data.ended} deleted=${data.deleted} errors=${data.errors}` });
               }
               if (changes > 0) {
-                console.log(
-                  `[eBay Reconcile] ⚠️ ${changes} listing(s) ended/deleted on eBay — check listing feed`,
-                );
+                logger.info("channels.ebay_listing_reconciliation_scheduler", { message: `[eBay Reconcile] ⚠️ ${changes} listing(s) ended/deleted on eBay — check listing feed` });
                 try {
                   deps.notify?.("listing_status_change", {
                     title: "eBay Listings Changed",
@@ -96,7 +89,7 @@ export function startEbayListingReconciliationScheduler(
           });
         });
         req.on("error", (err: any) => {
-          console.warn(`[eBay Reconcile] Scheduled run failed: ${err.message}`);
+          logger.warn("channels.ebay_listing_reconciliation_scheduler", { message: `[eBay Reconcile] Scheduled run failed: ${err.message}` });
           resolve();
         });
         req.write(reqData);

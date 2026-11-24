@@ -3,6 +3,7 @@ import type { DropshipListingPushStatusService } from "../../application/dropshi
 import { DropshipError } from "../../domain/errors";
 import { createDropshipListingPushStatusServiceFromEnv } from "../../infrastructure/dropship-listing-push-status.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 /** The vendor portal polls this after queueing a push until the job is finished. */
 export function registerDropshipListingPushStatusRoutes(
@@ -42,7 +43,7 @@ function sendDropshipListingPushStatusError(res: Response, error: unknown): Resp
       return res.status(status).json({ error: { code: error.code, message: error.message } });
     }
   }
-  console.error("[DropshipListingPushStatusRoutes] Unexpected listing push status error:", error);
+  logger.error("dropship.listing_push_status_routes", { message: "[DropshipListingPushStatusRoutes] Unexpected listing push status error:", error: error });
   return res.status(500).json({
     error: { code: "DROPSHIP_LISTING_PUSH_STATUS_INTERNAL_ERROR", message: "Listing push status request failed." },
   });

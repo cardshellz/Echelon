@@ -5,6 +5,7 @@ import { db } from "../../../../db";
 import { requirePermission } from "../../../../routes/middleware";
 import { SupplierSourcingRepository } from "../../infrastructure/supplier-sourcing.repository";
 import { SupplierSourcingError, SupplierSourcingService } from "../../application/supplier-sourcing.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const pathId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(sourcingId);
 function actor(req: Request): string | undefined { return (req as Request & { user?: { id?: string } }).user?.id ?? req.session?.user?.id; }
@@ -12,7 +13,7 @@ export function registerSupplierSourcingRoutes(app: Express): void {
   const service = new SupplierSourcingService(new SupplierSourcingRepository(db), () => new Date());
   function failure(error: unknown, req: Request, res: Response) {
     const code = error instanceof SupplierSourcingError ? error.code : error instanceof z.ZodError ? "SUPPLIER_SOURCING_INVALID" : "SUPPLIER_SOURCING_UNAVAILABLE";
-    console.error(JSON.stringify({ event: "procurement.supplier_sourcing_failed", code, actorId: actor(req) ?? null, vendorProductId: req.params.vendorProductId }));
+    logger.error("procurement.supplier_sourcing_failed", { event: "procurement.supplier_sourcing_failed", code, actorId: actor(req) ?? null, vendorProductId: req.params.vendorProductId });
     return res.status(error instanceof SupplierSourcingError ? error.statusCode : error instanceof z.ZodError ? 400 : 500).json({ code, error: error instanceof SupplierSourcingError ? error.message : error instanceof z.ZodError ? error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ") : "Supplier sourcing settings could not be loaded or saved. Retry the same request." });
   }
   app.get("/api/vendor-products/:vendorProductId/sourcing", requirePermission("inventory", "view"), async (req, res) => {

@@ -7,6 +7,7 @@ import {
   RECEIPT_COST_RECOVERY_GRACE_MS, RECEIPT_COST_RECOVERY_LEASE_MS, RECEIPT_COST_RECOVERY_MAX_ATTEMPTS,
 } from "../domain/receipt-cost-recovery.domain";
 import type { ReceiptCostRecoveryRepository } from "../infrastructure/receipt-cost-recovery.repository";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 export interface ReceiptCostRecoveryDependencies {
   repository: ReceiptCostRecoveryRepository;
@@ -59,7 +60,7 @@ export function startReceiptCostRecoveryWorker(
 ): NonOverlappingSchedulerHandle | null {
   if (schedulerIsDisabled("RECEIPT_COST_RECOVERY_DISABLED", environment) || environment.RECEIPT_COST_RECOVERY_ENABLED !== "true") return null;
   return startNonOverlappingScheduler({ taskName: "receipt-cost-recovery", initialDelayMs: 30_000, intervalMs: 60_000,
-    logger: { error: (payload) => console.error(JSON.stringify(payload)) },
+    logger: { error: (payload) => platformLogger.error("procurement.receipt_cost_recovery_worker", { error: JSON.stringify(payload) }) },
     run: async () => { await runReceiptCostRecoveryBatch({ ...dependencies, clock: () => new Date(), leaseToken: randomUUID,
-      logger: { info: (payload) => console.info(JSON.stringify(payload)), error: (payload) => console.error(JSON.stringify(payload)) } }); } });
+      logger: { info: (payload) => platformLogger.info("procurement.receipt_cost_recovery_worker", { detail: JSON.stringify(payload) }), error: (payload) => platformLogger.error("procurement.receipt_cost_recovery_worker", { error: JSON.stringify(payload) }) } }); } });
 }

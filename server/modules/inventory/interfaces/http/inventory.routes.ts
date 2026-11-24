@@ -38,6 +38,7 @@ import { FinancialCommandError } from "../../../../platform/commands/transaction
 import { ReturnRestockError, CostEvidenceError, LotCostError } from "../../return-inventory.api";
 import { InventoryQuantityError } from "../../domain/quantity-ledger";
 import { inventoryQuantityErrorStatus } from "../../application/inventory-quantity-error-status";
+import { logger } from "../../../../platform/observability/logger";
 
 type InventoryRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -77,18 +78,18 @@ export function registerInventoryRoutes(app: Express) {
       const { channelSync: adjSync, replenishment: adjReplen } = req.app.locals.services;
       if (adjSync) {
         adjSync.queueSyncAfterInventoryChange(adjustVariantId).catch((err: any) =>
-          console.warn(`[ChannelSync] Post-adjust sync failed for variant ${adjustVariantId}:`, err)
+          logger.warn("inventory.routes", { message: `[ChannelSync] Post-adjust sync failed for variant ${adjustVariantId}:`, error: err })
         );
       }
       if (adjReplen) {
         adjReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          console.warn(`[Replen] Post-adjust check failed for loc ${warehouseLocationId}:`, err)
+          logger.warn("inventory.routes", { message: `[Replen] Post-adjust check failed for loc ${warehouseLocationId}:`, error: err })
         );
       }
 
       res.json({ success: true });
     } catch (error) {
-      console.error("Error adjusting inventory:", error);
+      logger.error("inventory.routes", { message: "Error adjusting inventory:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: "Failed to adjust inventory" });
     }
@@ -115,7 +116,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await storage.searchSkusByPattern(searchPattern, limit);
       res.json(result);
     } catch (error) {
-      console.error("Error searching SKUs:", error);
+      logger.error("inventory.routes", { message: "Error searching SKUs:", error: error });
       res.status(500).json({ error: "Failed to search SKUs" });
     }
   });
@@ -131,7 +132,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await storage.searchSkuLocations(searchPattern);
       res.json(result);
     } catch (error) {
-      console.error("Error fetching SKU locations:", error);
+      logger.error("inventory.routes", { message: "Error fetching SKU locations:", error: error });
       res.status(500).json({ error: "Failed to fetch SKU locations" });
     }
   });
@@ -155,7 +156,7 @@ export function registerInventoryRoutes(app: Express) {
           context: error.context ?? null,
         });
       }
-      console.error("Transfer error:", error);
+      logger.error("inventory.routes", { message: "Transfer error:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       if (error instanceof AppError) {
         return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
@@ -174,7 +175,7 @@ export function registerInventoryRoutes(app: Express) {
   // Cross-building inventory has a durable two-leg lifecycle. Dispatch removes
   // source ATP into isolated transit custody; receive is a separate atomic post.
   const sendInterwarehouseError = (res: any, error: any, commandKey?: unknown) => {
-    console.error("Inter-warehouse transfer error:", error);
+    logger.error("inventory.routes", { message: "Inter-warehouse transfer error:", error: error });
     const receipt = typeof commandKey === "string" && commandKey.trim().length >= 8 && commandKey.trim().length <= 120
       ? { interwarehouseCommandReceipt: { contractVersion: "interwarehouse_transfer_v1", commandKey: commandKey.trim(), outcome: "rejected" } }
       : {};
@@ -307,7 +308,7 @@ export function registerInventoryRoutes(app: Express) {
         batchId: result.batchId,
       });
     } catch (error) {
-      console.error("SKU conversion error:", error);
+      logger.error("inventory.routes", { message: "SKU conversion error:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(400).json({ error: String(error) });
     }
@@ -319,7 +320,7 @@ export function registerInventoryRoutes(app: Express) {
       const transfers = await storage.getTransferHistory(limit);
       res.json(transfers);
     } catch (error) {
-      console.error("Get transfers error:", error);
+      logger.error("inventory.routes", { message: "Get transfers error:", error: error });
       res.status(500).json({ error: "Failed to get transfer history" });
     }
   });
@@ -333,7 +334,7 @@ export function registerInventoryRoutes(app: Express) {
       const transaction = await inventoryCore.undoTransfer(transactionId, userId);
       res.json({ success: true, transaction });
     } catch (error) {
-      console.error("Undo transfer error:", error);
+      logger.error("inventory.routes", { message: "Undo transfer error:", error: error });
       res.status(400).json({ error: String(error) });
     }
   });
@@ -389,7 +390,7 @@ export function registerInventoryRoutes(app: Express) {
         order: tx.orderId ? orderMap.get(tx.orderId) ? { id: orderMap.get(tx.orderId)!.id, orderNumber: orderMap.get(tx.orderId)!.orderNumber } : null : null,
       })));
     } catch (error) {
-      console.error("Error fetching transactions:", error);
+      logger.error("inventory.routes", { message: "Error fetching transactions:", error: error });
       res.status(500).json({ error: "Failed to fetch transactions" });
     }
   }));
@@ -433,7 +434,7 @@ export function registerInventoryRoutes(app: Express) {
         csvReason = await storage.getAdjustmentReasonByCode("CSV_UPLOAD");
       } catch (err) {
         // Reason codes table not set up yet - continue without it
-        console.log("Note: adjustment_reasons table not available, continuing without reason codes");
+        logger.info("inventory.routes", { message: "Note: adjustment_reasons table not available, continuing without reason codes" });
       }
 
       const csvAffectedLocations = new Set<number>();
@@ -554,7 +555,7 @@ export function registerInventoryRoutes(app: Express) {
       if (csvReplen && csvAffectedLocations.size > 0) {
         for (const locId of csvAffectedLocations) {
           csvReplen.checkReplenForLocation(locId).catch((err: any) =>
-            console.warn(`[Replen] Post-CSV-upload check failed for loc ${locId}:`, err)
+            logger.warn("inventory.routes", { message: `[Replen] Post-CSV-upload check failed for loc ${locId}:`, error: err })
           );
         }
       }
@@ -570,7 +571,7 @@ export function registerInventoryRoutes(app: Express) {
         results,
       });
     } catch (error) {
-      console.error("Error processing CSV upload:", error);
+      logger.error("inventory.routes", { message: "Error processing CSV upload:", error: error });
       res.status(500).json({ error: "Failed to process CSV upload" });
     }
   });
@@ -633,13 +634,13 @@ export function registerInventoryRoutes(app: Express) {
       const { channelSync: rcvSync } = req.app.locals.services;
       if (rcvSync) {
         rcvSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-          console.warn(`[ChannelSync] Post-receive sync failed for variant ${variantId}:`, err)
+          logger.warn("inventory.routes", { message: `[ChannelSync] Post-receive sync failed for variant ${variantId}:`, error: err })
         );
       }
 
       res.json({ success: true, variantQtyReceived: variantQty });
     } catch (error) {
-      console.error("Error receiving inventory:", error);
+      logger.error("inventory.routes", { message: "Error receiving inventory:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: "Failed to receive inventory" });
     }
@@ -697,7 +698,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(result);
     } catch (error) {
-      console.error("Error getting variant locations:", error);
+      logger.error("inventory.routes", { message: "Error getting variant locations:", error: error });
       res.status(500).json({ error: "Failed to get variant locations" });
     }
   });
@@ -720,7 +721,7 @@ export function registerInventoryRoutes(app: Express) {
         return res.status(409).json({ code: "INVENTORY_LEVEL_HISTORY_RETAINED",
           error: "Empty bin rows keep their stock history and can't be deleted. They are hidden from inventory automatically." });
       }
-      console.error("Error deleting inventory level:", error);
+      logger.error("inventory.routes", { message: "Error deleting inventory level:", error: error });
       res.status(500).json({ error: error.message || "Failed to delete" });
     }
   });
@@ -760,7 +761,7 @@ export function registerInventoryRoutes(app: Express) {
       });
       res.json(status);
     } catch (error) {
-      console.error("Error checking backorder status:", error);
+      logger.error("inventory.routes", { message: "Error checking backorder status:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to check backorder status" });
     }
@@ -774,7 +775,7 @@ export function registerInventoryRoutes(app: Express) {
       const transactions = await storage.getInventoryTransactionsByProductVariantId(itemId, limit);
       res.json(transactions);
     } catch (error) {
-      console.error("Error fetching inventory transactions:", error);
+      logger.error("inventory.routes", { message: "Error fetching inventory transactions:", error: error });
       res.status(500).json({ error: "Failed to fetch transactions" });
     }
   });
@@ -839,7 +840,7 @@ export function registerInventoryRoutes(app: Express) {
         res.json(summaries.filter(Boolean));
       }
     } catch (error) {
-      console.error("Error fetching inventory summary:", error);
+      logger.error("inventory.routes", { message: "Error fetching inventory summary:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to fetch summary" });
     }
@@ -881,7 +882,7 @@ export function registerInventoryRoutes(app: Express) {
         total: work.inventory.reduce((total, item) => total + item.products, 0),
       });
     } catch (error) {
-      console.error("Error syncing inventory to channels:", error);
+      logger.error("inventory.routes", { message: "Error syncing inventory to channels:", error: error });
       res.status(500).json({ error: "Failed to sync inventory" });
     }
   });
@@ -914,13 +915,13 @@ export function registerInventoryRoutes(app: Express) {
       if (breakReplen) {
         const targetLocId = result.targetLocationId ?? targetLocationId ?? warehouseLocationId;
         breakReplen.checkReplenForLocation(targetLocId).catch((err: any) =>
-          console.warn(`[Replen] Post-break check failed for loc ${targetLocId}:`, err)
+          logger.warn("inventory.routes", { message: `[Replen] Post-break check failed for loc ${targetLocId}:`, error: err })
         );
       }
 
       res.json(result);
     } catch (error: any) {
-      console.error("Error breaking variant:", error);
+      logger.error("inventory.routes", { message: "Error breaking variant:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(400).json({ error: error.message || "Failed to break variant" });
     }
@@ -948,13 +949,13 @@ export function registerInventoryRoutes(app: Express) {
       const { replenishment: asmReplen } = req.app.locals.services;
       if (asmReplen) {
         asmReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          console.warn(`[Replen] Post-assemble check failed for loc ${warehouseLocationId}:`, err)
+          logger.warn("inventory.routes", { message: `[Replen] Post-assemble check failed for loc ${warehouseLocationId}:`, error: err })
         );
       }
 
       res.json(result);
     } catch (error: any) {
-      console.error("Error assembling variant:", error);
+      logger.error("inventory.routes", { message: "Error assembling variant:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(400).json({ error: error.message || "Failed to assemble variant" });
     }
@@ -981,7 +982,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(preview);
     } catch (error: any) {
-      console.error("Error getting conversion preview:", error);
+      logger.error("inventory.routes", { message: "Error getting conversion preview:", error: error });
       res.status(400).json({ error: error.message || "Failed to get preview" });
     }
   });
@@ -1010,13 +1011,13 @@ export function registerInventoryRoutes(app: Express) {
       const { replenishment: retReplen } = req.app.locals.services;
       if (retReplen) {
         retReplen.checkReplenForLocation(body.warehouseLocationId).catch((err: any) =>
-          console.warn(`[Replen] Post-return check failed for loc ${body.warehouseLocationId}:`, err)
+          logger.warn("inventory.routes", { message: `[Replen] Post-return check failed for loc ${body.warehouseLocationId}:`, error: err })
         );
       }
 
       res.json(returnCommandResultFor(body).parse(result));
     } catch (error: any) {
-      console.error("Error processing return:", error);
+      logger.error("inventory.routes", { message: "Error processing return:", error: error });
       if (error instanceof ReturnRestockError || error instanceof CostEvidenceError || error instanceof LotCostError) {
         return res.status(error.statusCode).json({ code: error.code,error: error.message,context: error.context });
       }
@@ -1036,7 +1037,7 @@ export function registerInventoryRoutes(app: Express) {
       const history = await returns.getReturnHistory(orderId);
       res.json(history);
     } catch (error: any) {
-      console.error("Error getting return history:", error);
+      logger.error("inventory.routes", { message: "Error getting return history:", error: error });
       res.status(500).json({ error: error.message || "Failed to get return history" });
     }
   });
@@ -1095,7 +1096,7 @@ export function registerInventoryRoutes(app: Express) {
         returnHistory,
       });
     } catch (error: any) {
-      console.error("Error looking up order for return:", error);
+      logger.error("inventory.routes", { message: "Error looking up order for return:", error: error });
       res.status(500).json({ error: error.message || "Failed to look up order" });
     }
   });
@@ -1116,7 +1117,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await reservation.reserveOrder(orderId);
       res.json(result);
     } catch (error: any) {
-      console.error("Error reserving order:", error);
+      logger.error("inventory.routes", { message: "Error reserving order:", error: error });
       res.status(500).json({ error: error.message || "Failed to reserve order" });
     }
   });
@@ -1133,7 +1134,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await reservation.releaseOrderReservation(orderId, "Manual release via API");
       res.json(result);
     } catch (error: any) {
-      console.error("Error releasing reservation:", error);
+      logger.error("inventory.routes", { message: "Error releasing reservation:", error: error });
       res.status(500).json({ error: error.message || "Failed to release reservation" });
     }
   });
@@ -1150,7 +1151,7 @@ export function registerInventoryRoutes(app: Express) {
       const status = await reservation.getOrderReservationStatus(orderId);
       res.json(status);
     } catch (error: any) {
-      console.error("Error getting reservation status:", error);
+      logger.error("inventory.routes", { message: "Error getting reservation status:", error: error });
       res.status(500).json({ error: error.message || "Failed to get reservation status" });
     }
   });
@@ -1171,7 +1172,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await inventoryPublicationWork.syncProduct(productId, "manual_product_sync");
       res.json(result);
     } catch (error: any) {
-      console.error("Error syncing product:", error);
+      logger.error("inventory.routes", { message: "Error syncing product:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to sync product" });
     }
@@ -1220,22 +1221,13 @@ export function registerInventoryRoutes(app: Express) {
       // Run sync in background
       inventoryPublicationWork.syncChannelProducts(channelId, "manual_channel_sync")
         .then((result) => {
-          console.log(JSON.stringify({
-            event: "manual_channel_inventory_publication_completed",
-            authority: result.authority,
-            channelId,
-            result,
-          }));
+          logger.info("manual_channel_inventory_publication_completed", { event: "manual_channel_inventory_publication_completed", authority: result.authority, channelId, result });
         })
         .catch((err: any) => {
-          console.error(JSON.stringify({
-            event: "manual_channel_inventory_publication_failed",
-            channelId,
-            error: err instanceof Error ? err.message : String(err),
-          }));
+          logger.error("manual_channel_inventory_publication_failed", { event: "manual_channel_inventory_publication_failed", channelId, error: err instanceof Error ? err.message : String(err) });
         });
     } catch (error: any) {
-      console.error("Error starting channel sync:", error);
+      logger.error("inventory.routes", { message: "Error starting channel sync:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to start sync" });
     }
@@ -1309,7 +1301,7 @@ export function registerInventoryRoutes(app: Express) {
       const warning = alerts.filter((a: any) => a.severity === "warning").length;
       res.json({ alerts, summary: { total: alerts.length, critical, warning } });
     } catch (error: any) {
-      console.error("Error checking inventory alerts:", error);
+      logger.error("inventory.routes", { message: "Error checking inventory alerts:", error: error });
       res.status(500).json({ error: error.message || "Failed to check alerts" });
     }
   });
@@ -1335,7 +1327,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(lots);
     } catch (error: any) {
-      console.error("Error fetching inventory lots:", error);
+      logger.error("inventory.routes", { message: "Error fetching inventory lots:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch lots" });
     }
   });
@@ -1347,7 +1339,7 @@ export function registerInventoryRoutes(app: Express) {
       if (!lot) return res.status(404).json({ error: "Lot not found" });
       res.json(lot);
     } catch (error: any) {
-      console.error("Error fetching lot:", error);
+      logger.error("inventory.routes", { message: "Error fetching lot:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch lot" });
     }
   });
@@ -1358,7 +1350,7 @@ export function registerInventoryRoutes(app: Express) {
       const valuation = await inventoryLots.getInventoryValuation();
       res.json(valuation);
     } catch (error: any) {
-      console.error("Error computing inventory valuation:", error);
+      logger.error("inventory.routes", { message: "Error computing inventory valuation:", error: error });
       res.status(500).json({ error: error.message || "Failed to compute valuation" });
     }
   });
@@ -1369,7 +1361,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await inventoryLots.createLegacyLots();
       res.json({ success: true, ...result });
     } catch (error: any) {
-      console.error("Error creating legacy lots:", error);
+      logger.error("inventory.routes", { message: "Error creating legacy lots:", error: error });
       res.status(500).json({ error: error.message || "Failed to create legacy lots" });
     }
   });
@@ -1507,7 +1499,7 @@ export function registerInventoryRoutes(app: Express) {
         message: "DRY RUN - No data written. Review above and POST to /api/inventory/bootstrap to execute."
       });
     } catch (error) {
-      console.error("Error in bootstrap dry run:", error);
+      logger.error("inventory.routes", { message: "Error in bootstrap dry run:", error: error });
       res.status(500).json({ error: "Failed to run bootstrap analysis" });
     }
   });
@@ -1721,7 +1713,7 @@ export function registerInventoryRoutes(app: Express) {
         message: "Bootstrap complete. Products, variants, and levels have been created."
       });
     } catch (error) {
-      console.error("Error in bootstrap:", error);
+      logger.error("inventory.routes", { message: "Error in bootstrap:", error: error });
       res.status(500).json({ error: "Failed to bootstrap inventory" });
     }
   });
@@ -1735,7 +1727,7 @@ export function registerInventoryRoutes(app: Express) {
       const locations = await storage.getAllWarehouseLocations();
       res.json(locations);
     } catch (error) {
-      console.error("Error fetching warehouse locations:", error);
+      logger.error("inventory.routes", { message: "Error fetching warehouse locations:", error: error });
       res.status(500).json({ error: "Failed to fetch locations" });
     }
   });
@@ -1749,7 +1741,7 @@ export function registerInventoryRoutes(app: Express) {
       const location = await storage.createWarehouseLocation(parsed.data);
       res.status(201).json(location);
     } catch (error) {
-      console.error("Error creating warehouse location:", error);
+      logger.error("inventory.routes", { message: "Error creating warehouse location:", error: error });
       res.status(500).json({ error: "Failed to create location" });
     }
   });
@@ -1759,7 +1751,7 @@ export function registerInventoryRoutes(app: Express) {
       const allProducts = await storage.getAllProducts();
       res.json(allProducts);
     } catch (error) {
-      console.error("Error fetching catalog products:", error);
+      logger.error("inventory.routes", { message: "Error fetching catalog products:", error: error });
       res.status(500).json({ error: "Failed to fetch catalog products" });
     }
   });
@@ -1783,7 +1775,7 @@ export function registerInventoryRoutes(app: Express) {
         matchedVariantSku: r.variant_sku !== r.product_sku ? r.variant_sku : null,
       })));
     } catch (error) {
-      console.error("Error searching catalog products:", error);
+      logger.error("inventory.routes", { message: "Error searching catalog products:", error: error });
       res.status(500).json({ error: "Failed to search catalog products" });
     }
   });
@@ -1801,7 +1793,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json({ ...product, variants, assets });
     } catch (error) {
-      console.error("Error fetching catalog product:", error);
+      logger.error("inventory.routes", { message: "Error fetching catalog product:", error: error });
       res.status(500).json({ error: "Failed to fetch catalog product" });
     }
   });
@@ -1822,7 +1814,7 @@ export function registerInventoryRoutes(app: Express) {
       if (error.name === "ZodError") {
         return res.status(400).json({ error: "Invalid product data", details: error.errors });
       }
-      console.error("Error creating catalog product:", error);
+      logger.error("inventory.routes", { message: "Error creating catalog product:", error: error });
       res.status(500).json({ error: error.message || "Failed to create catalog product" });
     }
   });
@@ -1873,7 +1865,7 @@ export function registerInventoryRoutes(app: Express) {
       if (error.name === "ZodError") {
         return res.status(400).json({ error: "Invalid product data", details: error.errors });
       }
-      console.error("Error updating catalog product:", error);
+      logger.error("inventory.routes", { message: "Error updating catalog product:", error: error });
       res.status(500).json({ error: error.message || "Failed to update catalog product" });
     }
   });
@@ -1887,7 +1879,7 @@ export function registerInventoryRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error deleting catalog product:", error);
+      logger.error("inventory.routes", { message: "Error deleting catalog product:", error: error });
       res.status(500).json({ error: error.message || "Failed to delete catalog product" });
     }
   });
@@ -1897,7 +1889,7 @@ export function registerInventoryRoutes(app: Express) {
       const items = await storage.getAllProducts();
       res.json(items);
     } catch (error) {
-      console.error("Error fetching products:", error);
+      logger.error("inventory.routes", { message: "Error fetching products:", error: error });
       res.status(500).json({ error: "Failed to fetch products" });
     }
   });
@@ -1907,7 +1899,7 @@ export function registerInventoryRoutes(app: Express) {
       const productsData = await storage.getProductsWithoutLocations();
       res.json(productsData);
     } catch (error) {
-      console.error("Error fetching unassigned products:", error);
+      logger.error("inventory.routes", { message: "Error fetching unassigned products:", error: error });
       res.status(500).json({ error: "Failed to fetch unassigned products" });
     }
   });
@@ -1922,7 +1914,7 @@ export function registerInventoryRoutes(app: Express) {
       }
       res.json(summary);
     } catch (error) {
-      console.error("Error fetching inventory item:", error);
+      logger.error("inventory.routes", { message: "Error fetching inventory item:", error: error });
       res.status(500).json({ error: "Failed to fetch item" });
     }
   });
@@ -1942,7 +1934,7 @@ export function registerInventoryRoutes(app: Express) {
         : await createProduct();
       res.status(201).json(item);
     } catch (error) {
-      console.error("Error creating product:", error);
+      logger.error("inventory.routes", { message: "Error creating product:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to create product" });
     }
@@ -1953,7 +1945,7 @@ export function registerInventoryRoutes(app: Express) {
       const variants = await storage.getAllProductVariants();
       res.json(variants);
     } catch (error) {
-      console.error("Error fetching product variants:", error);
+      logger.error("inventory.routes", { message: "Error fetching product variants:", error: error });
       res.status(500).json({ error: "Failed to fetch variants" });
     }
   });
@@ -1974,7 +1966,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(updated);
     } catch (error) {
-      console.error("Error updating variant:", error);
+      logger.error("inventory.routes", { message: "Error updating variant:", error: error });
       res.status(500).json({ error: "Failed to update variant" });
     }
   });
@@ -1985,7 +1977,7 @@ export function registerInventoryRoutes(app: Express) {
       const variants = await storage.getProductVariantsByProductId(id);
       res.json(variants);
     } catch (error) {
-      console.error("Error fetching variants for product:", error);
+      logger.error("inventory.routes", { message: "Error fetching variants for product:", error: error });
       res.status(500).json({ error: "Failed to fetch variants" });
     }
   });
@@ -1999,7 +1991,7 @@ export function registerInventoryRoutes(app: Express) {
       const variant = await storage.createProductVariant(parsed.data);
       res.status(201).json(variant);
     } catch (error) {
-      console.error("Error creating product variant:", error);
+      logger.error("inventory.routes", { message: "Error creating product variant:", error: error });
       res.status(500).json({ error: "Failed to create variant" });
     }
   });
@@ -2010,7 +2002,7 @@ export function registerInventoryRoutes(app: Express) {
       const levels = await storage.getInventoryLevelsByProductVariantId(variantId);
       res.json(levels);
     } catch (error) {
-      console.error("Error fetching inventory levels:", error);
+      logger.error("inventory.routes", { message: "Error fetching inventory levels:", error: error });
       res.status(500).json({ error: "Failed to fetch levels" });
     }
   });
@@ -2069,7 +2061,7 @@ export function registerInventoryRoutes(app: Express) {
         errors: errors.slice(0, 10),
       });
     } catch (error) {
-      console.error("Error migrating locations:", error);
+      logger.error("inventory.routes", { message: "Error migrating locations:", error: error });
       res.status(500).json({ error: "Failed to migrate locations" });
     }
   });
@@ -2098,7 +2090,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await wmsSync.cleanupGidDuplicateShipments();
       res.json(result);
     } catch (error: any) {
-      console.error("[GID Cleanup] Failed:", error);
+      logger.error("inventory.routes", { message: "[GID Cleanup] Failed:", error: error });
       res.status(500).json({ error: error?.message || "Failed to cleanup GID duplicates" });
     }
   });
@@ -2116,7 +2108,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await wmsSync.reconcileCancellations(limit);
       res.json(result);
     } catch (error: any) {
-      console.error("[Reconcile] Cancel reconciliation failed:", error);
+      logger.error("inventory.routes", { message: "[Reconcile] Cancel reconciliation failed:", error: error });
       res.status(500).json({ error: error?.message || "Failed to reconcile cancellations" });
     }
   });
@@ -2134,7 +2126,7 @@ export function registerInventoryRoutes(app: Express) {
       const synced = await wmsSync.backfillUnsynced(limit);
       res.json({ synced, limit });
     } catch (error: any) {
-      console.error("[Backfill] OMS→WMS failed:", error);
+      logger.error("inventory.routes", { message: "[Backfill] OMS→WMS failed:", error: error });
       res.status(500).json({ error: error?.message || "Failed to backfill OMS to WMS" });
     }
   });
@@ -2155,7 +2147,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await syncRecovery.runAll();
       res.json(result);
     } catch (error: any) {
-      console.error("[Recover] Failed:", error);
+      logger.error("inventory.routes", { message: "[Recover] Failed:", error: error });
       res
         .status(500)
         .json({ error: error?.message || "Failed to run recovery" });
@@ -2194,7 +2186,7 @@ export function registerInventoryRoutes(app: Express) {
           null : null,
       });
     } catch (error) {
-      console.error("Error checking sync health:", error);
+      logger.error("inventory.routes", { message: "Error checking sync health:", error: error });
       res.status(500).json({ error: String(error) });
     }
   });
@@ -2213,13 +2205,13 @@ export function registerInventoryRoutes(app: Express) {
       const sendgridApiKey = process.env.SENDGRID_API_KEY;
 
       if (sendgridApiKey) {
-        console.log("[ALERT] Would send email alert to:", adminEmail);
+        logger.info("inventory.routes", { message: "[ALERT] Would send email alert to:", detail: adminEmail });
         res.json({ success: true, message: "Alert sent (SendGrid configured)", recipient: adminEmail });
       } else {
-        console.log("[ALERT] Sync alert triggered but SendGrid not configured");
-        console.log("[ALERT] Would send to:", adminEmail);
-        console.log("[ALERT] Status:", health.status);
-        console.log("[ALERT] Error:", (health as any).lastSyncError);
+        logger.info("inventory.routes", { message: "[ALERT] Sync alert triggered but SendGrid not configured" });
+        logger.info("inventory.routes", { message: "[ALERT] Would send to:", detail: adminEmail });
+        logger.info("inventory.routes", { message: "[ALERT] Status:", detail: health.status });
+        logger.info("inventory.routes", { message: "[ALERT] Error:", detail: (health as any).lastSyncError });
 
         res.json({
           success: true,
@@ -2229,7 +2221,7 @@ export function registerInventoryRoutes(app: Express) {
         });
       }
     } catch (error) {
-      console.error("Error sending sync alert:", error);
+      logger.error("inventory.routes", { message: "Error sending sync alert:", error: error });
       res.status(500).json({ error: String(error) });
     }
   });
@@ -2262,7 +2254,7 @@ export function registerInventoryRoutes(app: Express) {
         sampleMissingOrders: debugStatus.sampleOrders
       });
     } catch (error) {
-      console.error("Debug sync error:", error);
+      logger.error("inventory.routes", { message: "Debug sync error:", error: error });
       res.status(500).json({ error: String(error) });
     }
   });
@@ -2292,7 +2284,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(result);
     } catch (error) {
-      console.error("Error fetching inventory levels:", error);
+      logger.error("inventory.routes", { message: "Error fetching inventory levels:", error: error });
       res.status(500).json({ error: "Failed to fetch inventory levels" });
     }
   });
@@ -2311,14 +2303,7 @@ export function registerInventoryRoutes(app: Express) {
       const conversions = await req.app.locals.services.inventoryConversions.getAllowedConversions(productId);
       res.json(conversions);
     } catch (error) {
-      console.error(JSON.stringify({
-        level: "error",
-        action: "inventory.allowed_conversions.read_failed",
-        outcome: "failed",
-        error_code: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED",
-        product_id: productId,
-        message: error instanceof Error ? error.message : String(error),
-      }));
+      logger.error("inventory.allowed_conversions.read_failed", { outcome: "failed", error_code: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED", product_id: productId, message: error instanceof Error ? error.message : String(error) });
       res.status(500).json({ error: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED", message: "Failed to read allowed conversions" });
     }
   });
@@ -2413,7 +2398,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(Array.from(binMap.values()));
     } catch (error) {
-      console.error("Error fetching inventory by bin:", error);
+      logger.error("inventory.routes", { message: "Error fetching inventory by bin:", error: error });
       res.status(500).json({ error: "Failed to fetch inventory by bin" });
     }
   });
@@ -2440,7 +2425,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(locations);
     } catch (error) {
-      console.error("Error fetching variant locations:", error);
+      logger.error("inventory.routes", { message: "Error fetching variant locations:", error: error });
       res.status(500).json({ error: "Failed to fetch variant locations" });
     }
   });
@@ -2483,7 +2468,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(exportData);
     } catch (error) {
-      console.error("Error exporting inventory:", error);
+      logger.error("inventory.routes", { message: "Error exporting inventory:", error: error });
       res.status(500).json({ error: "Failed to export inventory" });
     }
   });
@@ -2516,18 +2501,18 @@ export function registerInventoryRoutes(app: Express) {
       const { channelSync: addSync, replenishment: addReplen } = req.app.locals.services;
       if (addSync) {
         addSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-          console.warn(`[ChannelSync] Post-add-stock sync failed for variant ${variantId}:`, err)
+          logger.warn("inventory.routes", { message: `[ChannelSync] Post-add-stock sync failed for variant ${variantId}:`, error: err })
         );
       }
       if (addReplen) {
         addReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          console.warn(`[Replen] Post-add-stock check failed for loc ${warehouseLocationId}:`, err)
+          logger.warn("inventory.routes", { message: `[Replen] Post-add-stock check failed for loc ${warehouseLocationId}:`, error: err })
         );
       }
 
       res.json({ success: true, variantQtyAdded: variantQty });
     } catch (error) {
-      console.error("Error adding stock:", error);
+      logger.error("inventory.routes", { message: "Error adding stock:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: "Failed to add stock" });
     }
@@ -2560,18 +2545,18 @@ export function registerInventoryRoutes(app: Express) {
       const { channelSync: adjStockSync, replenishment: adjStockReplen } = req.app.locals.services;
       if (adjStockSync) {
         adjStockSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-          console.warn(`[ChannelSync] Post-adjust-stock sync failed for variant ${variantId}:`, err)
+          logger.warn("inventory.routes", { message: `[ChannelSync] Post-adjust-stock sync failed for variant ${variantId}:`, error: err })
         );
       }
       if (adjStockReplen) {
         adjStockReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          console.warn(`[Replen] Post-adjust-stock check failed for loc ${warehouseLocationId}:`, err)
+          logger.warn("inventory.routes", { message: `[Replen] Post-adjust-stock check failed for loc ${warehouseLocationId}:`, error: err })
         );
       }
 
       res.json({ success: true, variantQtyDelta });
     } catch (error) {
-      console.error("Error adjusting stock:", error);
+      logger.error("inventory.routes", { message: "Error adjusting stock:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: "Failed to adjust stock" });
     }
@@ -2681,7 +2666,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json(csvResults);
     } catch (error) {
-      console.error("Error importing inventory CSV:", error);
+      logger.error("inventory.routes", { message: "Error importing inventory CSV:", error: error });
       res.status(500).json({ error: "Failed to import CSV" });
     }
   });
@@ -2703,14 +2688,14 @@ export function registerInventoryRoutes(app: Express) {
       inventorySource.syncAll()
         .then((results: any[]) => {
           for (const r of results) {
-            console.log(`[InventorySource] ${r.warehouseCode}: ${r.synced} synced, ${r.skipped} skipped, ${r.errors.length} errors`);
+            logger.info("inventory.routes", { message: `[InventorySource] ${r.warehouseCode}: ${r.synced} synced, ${r.skipped} skipped, ${r.errors.length} errors` });
           }
         })
         .catch((err: any) => {
-          console.error("[InventorySource] Bulk sync failed:", err);
+          logger.error("inventory.routes", { message: "[InventorySource] Bulk sync failed:", error: err });
         });
     } catch (error: any) {
-      console.error("Error starting bulk inventory source sync:", error);
+      logger.error("inventory.routes", { message: "Error starting bulk inventory source sync:", error: error });
       res.status(500).json({ error: error.message || "Failed to start sync" });
     }
   });
@@ -2727,7 +2712,7 @@ export function registerInventoryRoutes(app: Express) {
       const { cogs } = req.app.locals.services;
       res.json(await cogs.getCostFollowUps(parsed.data));
     } catch (error) {
-      console.error(JSON.stringify({ event: "cost_follow_up_read_failed",code: error && typeof error === "object" && "code" in error ? error.code : "UNCLASSIFIED" }));
+      logger.error("cost_follow_up_read_failed", { event: "cost_follow_up_read_failed", code: error && typeof error === "object" && "code" in error ? error.code : "UNCLASSIFIED" });
       res.status(500).json({ code: "COST_FOLLOW_UP_READ_FAILED",error: "Could not read accounting follow-up evidence." });
     }
   });
@@ -2738,7 +2723,7 @@ export function registerInventoryRoutes(app: Express) {
       const valuation = await cogs.getInventoryValuation();
       res.json(valuation);
     } catch (error: any) {
-      console.error("Error getting inventory valuation:", error);
+      logger.error("inventory.routes", { message: "Error getting inventory valuation:", error: error });
       res.status(500).json({ error: "Failed to get inventory valuation" });
     }
   });
@@ -2756,7 +2741,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await cogs.getAllCostLots({ productId, search, onlyPending, limit, offset });
       res.json(result);
     } catch (error: any) {
-      console.error("Error getting cost lots:", error);
+      logger.error("inventory.routes", { message: "Error getting cost lots:", error: error });
       res.status(500).json({ error: "Failed to get cost lots" });
     }
   });
@@ -2769,7 +2754,7 @@ export function registerInventoryRoutes(app: Express) {
       const lots = await cogs.getProductCostLots(variantId);
       res.json(lots);
     } catch (error: any) {
-      console.error("Error getting variant cost lots:", error);
+      logger.error("inventory.routes", { message: "Error getting variant cost lots:", error: error });
       res.status(500).json({ error: "Failed to get variant cost lots" });
     }
   });
@@ -2785,7 +2770,7 @@ export function registerInventoryRoutes(app: Express) {
       res.setHeader("Content-Disposition", "attachment; filename=lot_costs_template.csv");
       res.send([header, ...rows].join("\n"));
     } catch (error: any) {
-      console.error("Error building lot-cost template:", error);
+      logger.error("inventory.routes", { message: "Error building lot-cost template:", error: error });
       res.status(500).json({ error: "Failed to build lot-cost template" });
     }
   });
@@ -2804,7 +2789,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await cogs.applyLotCostUpload(data, apply);
       res.json({ apply, ...result });
     } catch (error: any) {
-      console.error("Error processing lot-cost upload:", error);
+      logger.error("inventory.routes", { message: "Error processing lot-cost upload:", error: error });
       res.status(500).json({ error: "Failed to process lot-cost upload" });
     }
   });
@@ -2823,7 +2808,7 @@ export function registerInventoryRoutes(app: Express) {
       }
       res.json(result);
     } catch (error: any) {
-      console.error("Error getting order COGS:", error);
+      logger.error("inventory.routes", { message: "Error getting order COGS:", error: error });
       if (error instanceof OrderCOGSCurrencyError) {
         return res.status(422).json({ error: error.message, code: error.code, currency: error.currency });
       }
@@ -2845,7 +2830,7 @@ export function registerInventoryRoutes(app: Express) {
       }
       res.json(result);
     } catch (error: any) {
-      console.error("Error getting order COGS:", error);
+      logger.error("inventory.routes", { message: "Error getting order COGS:", error: error });
       if (error instanceof OrderCOGSCurrencyError) {
         return res.status(422).json({ error: error.message, code: error.code, currency: error.currency });
       }
@@ -2876,7 +2861,7 @@ export function registerInventoryRoutes(app: Express) {
 
       res.json({ success: true, lot });
     } catch (error: any) {
-      console.error("Error creating manual cost entry:", error);
+      logger.error("inventory.routes", { message: "Error creating manual cost entry:", error: error });
       if (error instanceof MoneyInputError)
         return res.status(400).json({ error: error.message, code: error.code, context: error.context });
       if (sendInventoryQuantityError(res, error)) return;
@@ -2897,7 +2882,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await cogs.bulkManualImport(entries);
       res.json(result);
     } catch (error: any) {
-      console.error("Error bulk importing costs:", error);
+      logger.error("inventory.routes", { message: "Error bulk importing costs:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to bulk import" });
     }
@@ -2925,7 +2910,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await cogs.backfillLotCostsBySku(entries);
       res.json(result);
     } catch (error: any) {
-      console.error("Error backfilling lot costs:", error);
+      logger.error("inventory.routes", { message: "Error backfilling lot costs:", error: error });
       res.status(500).json({ error: error.message || "Failed to backfill lot costs" });
     }
   });
@@ -2937,7 +2922,7 @@ export function registerInventoryRoutes(app: Express) {
       const lots = await cogs.getManualLots();
       res.json(lots);
     } catch (error: any) {
-      console.error("Error getting manual lots:", error);
+      logger.error("inventory.routes", { message: "Error getting manual lots:", error: error });
       res.status(500).json({ error: "Failed to get manual lots" });
     }
   });
@@ -2955,7 +2940,7 @@ export function registerInventoryRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error updating manual lot:", error);
+      logger.error("inventory.routes", { message: "Error updating manual lot:", error: error });
       res.status(500).json({ error: "Failed to update manual lot" });
     }
   });
@@ -2972,7 +2957,7 @@ export function registerInventoryRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error deleting manual lot:", error);
+      logger.error("inventory.routes", { message: "Error deleting manual lot:", error: error });
       res.status(500).json({ error: "Failed to delete manual lot" });
     }
   });
@@ -3000,7 +2985,7 @@ export function registerInventoryRoutes(app: Express) {
       if (!result) return res.status(404).json({ error: "Lot not found" });
       res.json(result);
     } catch (error: any) {
-      console.error("Error recosting lot:", error);
+      logger.error("inventory.routes", { message: "Error recosting lot:", error: error });
       res.status(500).json({ error: "Failed to recost lot" });
     }
   });
@@ -3013,7 +2998,7 @@ export function registerInventoryRoutes(app: Express) {
       const adjustments = await cogs.getCostAdjustments(limit);
       res.json(adjustments);
     } catch (error: any) {
-      console.error("Error getting cost adjustments:", error);
+      logger.error("inventory.routes", { message: "Error getting cost adjustments:", error: error });
       res.status(500).json({ error: "Failed to get cost adjustments" });
     }
   });
@@ -3026,7 +3011,7 @@ export function registerInventoryRoutes(app: Express) {
       const orders = await cogs.getAffectedOrdersForLot(lotId);
       res.json(orders);
     } catch (error: any) {
-      console.error("Error getting affected orders:", error);
+      logger.error("inventory.routes", { message: "Error getting affected orders:", error: error });
       res.status(500).json({ error: "Failed to get affected orders" });
     }
   });

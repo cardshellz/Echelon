@@ -25,6 +25,7 @@ vi.mock("../../application/rfq-workflow.commands", async (importOriginal) => ({
 import { registerRfqWorkflowRoutes } from "../../interfaces/http/rfq-workflow.routes";
 import { RfqEvidenceIntegrityError } from "../../infrastructure/rfq-workflow.repository";
 import { RfqWorkflowError } from "../../application/rfq-workflow.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 describe("RFQ workflow HTTP authority and durable command identity", () => {
   let server: http.Server;
@@ -135,7 +136,7 @@ describe("RFQ workflow HTTP authority and durable command identity", () => {
   it("maps review conflicts separately from invalid stored evidence without leaking details", async () => {
     mocks.detail.mockRejectedValueOnce(new RfqWorkflowError("RFQ_NOT_FOUND", "Quote request was not found", 404));
     expect((await request("/api/purchasing/rfqs/10")).status).toBe(404);
-    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logged = spyLoggerJson("error");
     mocks.detail.mockRejectedValueOnce(new RfqEvidenceIntegrityError());
     const response = await request("/api/purchasing/rfqs/10");
     expect(response.status).toBe(500);

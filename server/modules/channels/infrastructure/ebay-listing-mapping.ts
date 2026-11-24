@@ -10,6 +10,7 @@ import { EBAY_CHANNEL_ID, getAuthService } from "./ebay-api-runtime";
 import { readExistingEbayListingMappingIdentity, readExistingEbayListingMappingSource } from "./ebay-active-listing-sync";
 import { PostgresEbayListingMappingRepairRepository } from "./ebay-listing-mapping.repository";
 import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibility";
+import { logger } from "../../../platform/observability/logger";
 
 const canonicalRegistration = new PgMarketplaceListingRegistrationRepository(pool);
 const store = new PostgresEbayListingMappingRepairRepository(pool, {
@@ -57,7 +58,7 @@ export const ebayListingMappingService = new EbayListingMappingService({
   },
   store,
   reportDiagnosticFailure: event => {
-    console.error(JSON.stringify({ event: "ebay_listing_mapping_check_failed", ...event }));
+    logger.error("ebay_listing_mapping_check_failed", { event: "ebay_listing_mapping_check_failed", ...event });
   },
   now: () => new Date(),
 });

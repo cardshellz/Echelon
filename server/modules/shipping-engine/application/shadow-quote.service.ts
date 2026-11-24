@@ -38,6 +38,7 @@ import {
   loadPackingInputs,
   resolveVariantIdsBySku,
 } from "../../cartonization/packing-inputs.api";
+import { logger } from "../../../platform/observability/logger";
 
 /** Origin used when an order has no warehouse assigned (primary warehouse). */
 const DEFAULT_ORIGIN_WAREHOUSE_ID = 1;
@@ -151,7 +152,7 @@ export async function runShadow(
       }));
     } catch (error) {
       // One bad order must not sink the run — count it as fully degraded.
-      console.error(`[ShadowQuote] order ${order.orderNumber} (${order.id}) failed:`, error);
+      logger.error("shipping-engine.shadow_quote_service", { message: `[ShadowQuote] order ${order.orderNumber} (${order.id}) failed:`, error: error });
       outcomes.push({
         packingComplete: false,
         ratesFound: false,
@@ -249,7 +250,7 @@ async function runShadowForOrder(
     });
   } catch (error) {
     // Snapshot is the observability payload, not the run — degrade loudly.
-    console.error(`[ShadowQuote] snapshot persist failed for order ${order.id}:`, error);
+    logger.error("shipping-engine.shadow_quote_service", { message: `[ShadowQuote] snapshot persist failed for order ${order.id}:`, error: error });
     warnings.push("quote snapshot persist failed");
   }
 

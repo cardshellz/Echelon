@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { resolveProviderCountryCode } from "@shared/country-code";
+import { logger } from "../../../platform/observability/logger";
 
 // Use existing variable names from user's Shopify app setup
 
@@ -441,7 +442,7 @@ export async function fetchUnfulfilledOrders(
   const maxPages = options.maxPages ?? MAX_SHOPIFY_PAGINATION_PAGES;
   const seenCursors = new Set<string>();
 
-  console.log("[SHOPIFY SYNC] Starting to fetch unfulfilled orders...");
+  logger.info("integrations.shopify", { message: "[SHOPIFY SYNC] Starting to fetch unfulfilled orders..." });
 
   do {
     pageCount++;
@@ -454,7 +455,7 @@ export async function fetchUnfulfilledOrders(
       ? `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&page_info=${pageInfo}`
       : `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&fulfillment_status=unfulfilled,partial,null`;
 
-    console.log(`[SHOPIFY SYNC] Fetching page ${pageCount}...`);
+    logger.info("integrations.shopify", { message: `[SHOPIFY SYNC] Fetching page ${pageCount}...` });
 
     const response: Response = await fetchShopifyWithRetry(url, config.accessToken, options);
 
@@ -464,7 +465,7 @@ export async function fetchUnfulfilledOrders(
     }
 
     const data: ShopifyOrdersResponse = await response.json();
-    console.log(`[SHOPIFY SYNC] Page ${pageCount}: Got ${data.orders.length} orders`);
+    logger.info("integrations.shopify", { message: `[SHOPIFY SYNC] Page ${pageCount}: Got ${data.orders.length} orders` });
 
     for (const order of data.orders) {
       if (!order.cancelled_at) {
@@ -483,7 +484,7 @@ export async function fetchUnfulfilledOrders(
         }
         seenCursors.add(nextCursor);
         pageInfo = nextCursor;
-        console.log(`[SHOPIFY SYNC] Found next page cursor`);
+        logger.info("integrations.shopify", { message: `[SHOPIFY SYNC] Found next page cursor` });
       }
     }
 
@@ -492,7 +493,7 @@ export async function fetchUnfulfilledOrders(
     }
   } while (pageInfo);
 
-  console.log(`[SHOPIFY SYNC] Complete: Fetched ${allOrders.length} total orders across ${pageCount} pages`);
+  logger.info("integrations.shopify", { message: `[SHOPIFY SYNC] Complete: Fetched ${allOrders.length} total orders across ${pageCount} pages` });
 
   return allOrders;
 }

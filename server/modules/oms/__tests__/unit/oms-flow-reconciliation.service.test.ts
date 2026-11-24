@@ -11,6 +11,7 @@ import {
   resetOmsFlowReconciliationSchedulerHeartbeatForTests,
   runOmsFlowReconciliation,
 } from "../../application/oms-flow-reconciliation.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const OMS_FLOW_RECONCILIATION_SRC = readFileSync(
   resolve(__dirname, "../../application/oms-flow-reconciliation.service.ts"),
@@ -173,7 +174,7 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("reports a failing check and still returns every other check", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = spyLoggerJson("error");
     const { execute } = checkDb({
       WMS_PARTITION_DUPLICATE_LINE_COVERAGE: new Error('relation "x" does not exist'),
       WMS_READY_WITHOUT_SHIPMENT: { count: 1, sample: [{ wms_order_id: 20 }] },
@@ -259,8 +260,8 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("per-step isolation: failing checks are reported and the run continues", async () => {
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const consoleError = spyLoggerJson("error");
+    const warn = spyLoggerJson("warn");
     resetOmsFlowReconciliationSchedulerHeartbeatForTests();
     // Every query throws. Before 2026-07-07 the first rejection aborted every
     // later step; before 2026-10-05 it emptied all checks at once.
@@ -291,7 +292,7 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("logs a compact summary when scheduled reconciliation finds issues", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const { execute } = checkDb({
       WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: { count: 3, sample: [{ shipment_id: 30 }] },
     });
@@ -310,7 +311,7 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("auto-closes dead fulfillment retry rows after later scoped success evidence", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const db = {
       execute: vi.fn(async () => sampleRows([{ id: 108147 }])),
     };
@@ -342,7 +343,7 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("hands stale eBay writebacks to canonical authority", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const inserts: unknown[] = [];
     const ensureLegacyShipment = vi.fn(async () => ({}));
     const { execute } = checkDb({
@@ -391,7 +392,7 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("auto-queues ShipStation push retries when scheduled reconciliation finds unpushed shipments", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const inserts: unknown[] = [];
     const { execute } = checkDb({
       SHIPMENT_NOT_PUSHED_TO_SHIPSTATION: { count: 1, sample: [{ shipment_id: 482, order_number: "#57067" }] },
@@ -422,7 +423,7 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("hands missing Shopify fulfillment writebacks to canonical authority", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const inserts: unknown[] = [];
     const ensureLegacyShipment = vi.fn(async () => ({}));
     const { execute } = checkDb({}, (_query, text) => {
@@ -485,7 +486,7 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("leaves paid recovery to the Shopify sweep while auto-remediating missing shipments", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const inserts: unknown[] = [];
     const { execute } = checkDb({
       OMS_PAID_WITHOUT_WMS: { count: 1, sample: [{ oms_order_id: 10 }] },
@@ -525,7 +526,7 @@ describe("oms-flow-reconciliation.service", () => {
   it("reports WMS-final and shipped-package drift but leaves their repair to an operator", async () => {
     // Both repairs push fulfillments to the channel at once, oldest first with no
     // age limit. They never ran automatically while their checks were mislabelled.
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     const ensureLegacyShipment = vi.fn(async () => ({}));
     const authority = canonicalAuthority(ensureLegacyShipment);
     const { execute } = checkDb({

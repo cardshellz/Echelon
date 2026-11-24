@@ -18,6 +18,7 @@ import {
   confirmParcel,
   getPackingQueue,
 } from "../../application/packing.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const confirmParcelSchema = z.object({
   actualBoxId: z.number().int().positive().nullable().optional(),
@@ -195,7 +196,7 @@ function sendPackingError(
   error: unknown,
   action: string,
 ): Response {
-  console.error(`[PackingRoutes] Failed to ${action}:`, error);
+  logger.error("shipping-engine.packing_routes", { message: `[PackingRoutes] Failed to ${action}:`, error: error });
   return res.status(500).json({
     error: { code: "PACKING_INTERNAL_ERROR", message: `Failed to ${action}.` },
   });

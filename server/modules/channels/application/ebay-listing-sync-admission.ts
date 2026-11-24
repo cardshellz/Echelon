@@ -9,6 +9,7 @@ import {
   type EbayListingSyncIdentity,
   type StoredEbayListingSyncJob,
 } from "../domain/ebay-listing-sync.domain";
+import { logger } from "../../../platform/observability/logger";
 
 export interface EbayListingSyncAdmissionProduct {
   readonly productId: number;
@@ -59,7 +60,7 @@ export async function admitEbayListingSyncProducts(
       const failure = classifyAdmissionFailure(error);
       let message = failure.message;
       let code = failure.code;
-      console.error(JSON.stringify({ event: "ebay_listing_sync_admission_failed", productId: product.productId, commandKey, code }));
+      logger.error("ebay_listing_sync_admission_failed", { event: "ebay_listing_sync_admission_failed", productId: product.productId, commandKey, code });
       try {
         const saved = await dependencies.recordFailure({
           channelId: input.channelId, productId: product.productId,
@@ -71,7 +72,7 @@ export async function admitEbayListingSyncProducts(
         // The HTTP response must distinguish an unsaved admission from a durable job.
         message += " This sync request could not be saved; retry this product after the connection recovers.";
         code = "EBAY_SYNC_ADMISSION_UNSAVED";
-        console.error(JSON.stringify({ event: "ebay_listing_sync_admission_unsaved", productId: product.productId, commandKey, code }));
+        logger.error("ebay_listing_sync_admission_unsaved", { event: "ebay_listing_sync_admission_unsaved", productId: product.productId, commandKey, code });
       }
       const variants = product.variants.length ? product.variants : [{ variantId: undefined, sku: null }];
       summary.errors += variants.length;

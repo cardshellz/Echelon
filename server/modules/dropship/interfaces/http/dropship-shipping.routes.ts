@@ -3,6 +3,7 @@ import { DropshipError } from "../../domain/errors";
 import type { DropshipShippingQuoteService } from "../../application/dropship-shipping-quote-service";
 import { createDropshipShippingQuoteServiceFromEnv } from "../../infrastructure/dropship-shipping-quote.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipShippingRoutes(
   app: Express,
@@ -71,7 +72,7 @@ function sendDropshipShippingError(res: Response, error: unknown) {
     });
   }
 
-  console.error("[DropshipShippingRoutes] Unexpected shipping quote error:", error);
+  logger.error("dropship.shipping_routes", { message: "[DropshipShippingRoutes] Unexpected shipping quote error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_SHIPPING_INTERNAL_ERROR",

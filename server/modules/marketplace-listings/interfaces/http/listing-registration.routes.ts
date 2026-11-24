@@ -10,6 +10,7 @@ import type {
   VerifyExistingListingInput,
 } from "../..";
 import { MarketplaceListingRegistrationError } from "../../domain/registration-errors";
+import { logger } from "../../../../platform/observability/logger";
 
 const EBAY_PROVIDER = "ebay";
 const IDEMPOTENCY_HEADER_NAMES = ["Idempotency-Key", "X-Idempotency-Key"] as const;
@@ -462,7 +463,7 @@ function sendRegistrationError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[MarketplaceListingRegistrationRoutes] Unexpected error", error);
+  logger.error("marketplace-listings.listing_registration_routes", { message: "[MarketplaceListingRegistrationRoutes] Unexpected error", error: error });
   return res.status(500).json({
     error: {
       code: "MARKETPLACE_LISTING_REGISTRATION_INTERNAL_ERROR",

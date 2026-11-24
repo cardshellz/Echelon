@@ -11,6 +11,7 @@ import {
   resolveChannelListingPrice,
   ChannelPricingResolutionError,
 } from "../../modules/channels/application/channel-pricing-resolver";
+import { logger } from "../../platform/observability/logger";
 
 type EbayPricingRuleService = Pick<
   ReturnType<typeof createChannelPricingService>,
@@ -133,7 +134,7 @@ registerEbayPricingRuleRoutes(router);
         effectivePrice: (effectivePrice / 100).toFixed(2),
       });
     } catch (err: any) {
-      console.error("[eBay Effective Price] Error:", err.message);
+      logger.error("routes.ebay_pricing_routes", { message: "[eBay Effective Price] Error:", error: err.message });
       res.status(err instanceof ChannelPricingResolutionError ? err.status : 500).json({ error: err.message, ...(err instanceof ChannelPricingResolutionError ? { code: err.code } : {}) });
     }
   });
@@ -182,7 +183,7 @@ registerEbayPricingRuleRoutes(router);
 
       res.json({ prices });
     } catch (err: any) {
-      console.error("[eBay Effective Prices] Error:", err.message);
+      logger.error("routes.ebay_pricing_routes", { message: "[eBay Effective Prices] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createOmsService } from "../../application/oms.service";
 import { __test__ as webhook } from "../../application/oms-webhooks";
 import { normalizeShopifyCustomerId, validateShopifyCustomerIdentityCopy } from "../../application/shopify-customer-identity";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ db: {} }));
 
@@ -25,7 +26,7 @@ describe("Shopify customer identity copy", () => {
     { sourceTopic: "orders/paid", rawPayload: { customer: { id: 3978054467743 } } },
   ])("rejects a dropped source ID on $sourceTopic before a transaction starts", async source => {
     const transaction = vi.fn();
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       await expect(createOmsService({ transaction }).ingestOrder(36, "1001", {
         ...source, orderedAt: new Date("2026-10-08T12:00:00Z"), lineItems: [],

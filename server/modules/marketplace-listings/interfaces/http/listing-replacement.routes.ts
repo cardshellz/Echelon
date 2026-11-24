@@ -10,6 +10,7 @@ import {
   type ListingReplacementExecutionService,
   type ListingReplacementPlanningService,
 } from "../..";
+import { logger } from "../../../../platform/observability/logger";
 
 type PlanningPort = Pick<ListingReplacementPlanningService, "plan">;
 type ExecutionPort = Pick<
@@ -350,10 +351,7 @@ function sendError(res: Response, error: unknown): Response {
       },
     });
   }
-  console.error(
-    "[MarketplaceListingReplacementRoutes] Unexpected error",
-    error,
-  );
+  logger.error("marketplace-listings.listing_replacement_routes", { message: "[MarketplaceListingReplacementRoutes] Unexpected error", error: error });
   return res.status(500).json({
     error: {
       code: "MARKETPLACE_LISTING_REPLACEMENT_INTERNAL_ERROR",

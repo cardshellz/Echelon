@@ -22,6 +22,7 @@ import {
 import { registerDemandEventRoutes } from "./demand-events.routes";
 import { registerEnterpriseDashboardRoutes } from "./enterprise-dashboard.routes";
 import { registerPurchaseForecastBacktestingRoutes } from "./purchase-forecast-backtesting.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerPurchasingRoutes(app: Express) {
   registerPurchaseTaxRoutes(app);
@@ -34,7 +35,7 @@ export function registerPurchasingRoutes(app: Express) {
       const vendors = await procurementStorage.getAllVendors();
       res.json(vendors);
     } catch (error) {
-      console.error("Error fetching vendors:", error);
+      logger.error("procurement.routes", { message: "Error fetching vendors:", error: error });
       res.status(500).json({ error: "Failed to fetch vendors" });
     }
   });
@@ -48,7 +49,7 @@ export function registerPurchasingRoutes(app: Express) {
       }
       res.json(vendor);
     } catch (error) {
-      console.error("Error fetching vendor:", error);
+      logger.error("procurement.routes", { message: "Error fetching vendor:", error: error });
       res.status(500).json({ error: "Failed to fetch vendor" });
     }
   });
@@ -60,7 +61,7 @@ export function registerPurchasingRoutes(app: Express) {
       res.status(201).json(vendor);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error creating vendor:", error);
+      logger.error("procurement.routes", { message: "Error creating vendor:", error: error });
       res.status(500).json({ error: "Failed to create vendor" });
     }
   });
@@ -72,7 +73,7 @@ export function registerPurchasingRoutes(app: Express) {
       res.json(vendor);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error updating vendor:", error);
+      logger.error("procurement.routes", { message: "Error updating vendor:", error: error });
       res.status(500).json({ error: "Failed to update vendor" });
     }
   });
@@ -84,7 +85,7 @@ export function registerPurchasingRoutes(app: Express) {
       res.json({ success: true, vendor });
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error deleting vendor:", error);
+      logger.error("procurement.routes", { message: "Error deleting vendor:", error: error });
       res.status(500).json({ error: "Failed to deactivate vendor" });
     }
   });

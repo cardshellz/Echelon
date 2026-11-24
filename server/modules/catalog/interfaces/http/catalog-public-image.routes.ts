@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { z } from "zod";
 import { CATALOG_PUBLIC_IMAGE_ROUTE } from "../../domain/catalog-public-image";
 import { PRODUCT_IMAGE_EXTENSIONS, type DownloadableProductImage } from "../../application/product-image-download.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const paramsSchema = z.object({
   id: z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647)),
@@ -29,7 +30,7 @@ export function registerCatalogPublicImageRoutes(
       res.setHeader("Content-Disposition", `inline; filename="catalog-image-${params.data.id}.${PRODUCT_IMAGE_EXTENSIONS[image.mimeType]}"`);
       return res.type(image.mimeType).send(image.data);
     } catch {
-      console.error(JSON.stringify({ event: "catalog.public_image.read_failed", assetId: params.data.id, code: "CATALOG_IMAGE_READ_FAILED" }));
+      logger.error("catalog.public_image.read_failed", { event: "catalog.public_image.read_failed", assetId: params.data.id, code: "CATALOG_IMAGE_READ_FAILED" });
       return res.status(503).json({ code: "CATALOG_IMAGE_READ_FAILED", error: "Image temporarily unavailable." });
     }
   });

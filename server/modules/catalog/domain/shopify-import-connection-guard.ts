@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../../../db";
 import type { ShopifyCatalogProduct } from "../../integrations/shopify.api";
+import { logger } from "../../../platform/observability/logger";
 
 const ownershipRows = z.array(z.object({
   command_key: z.string().uuid(), remote_product_id: z.string().nullable(), state: z.string(), product_only: z.boolean(),
@@ -76,8 +77,6 @@ export async function filterConnectionOwnedShopifyProducts<Row extends Pick<Shop
   const pendingTags = new Set(owners.filter(owner => owner.state !== "complete").map(owner => `echelon-connection-${owner.command_key}`));
   const filtered = snapshot.filter(product => !blockedIds.has(String(product.shopifyProductId))
     && !product.tags?.some(tag => pendingTags.has(tag)));
-  if (filtered.length !== snapshot.length) console.info(JSON.stringify({
-    code: "SHOPIFY_IMPORT_CONNECTION_OWNERS_PRESERVED", skippedVariants: snapshot.length - filtered.length,
-  }));
+  if (filtered.length !== snapshot.length) logger.info("SHOPIFY_IMPORT_CONNECTION_OWNERS_PRESERVED", { code: "SHOPIFY_IMPORT_CONNECTION_OWNERS_PRESERVED", skippedVariants: snapshot.length - filtered.length });
   return filtered;
 }

@@ -5,6 +5,7 @@ import {
   type InventoryPublicationSweepSchedulerHandle,
 } from "./inventory-publication-sweep.scheduler";
 import type { SyncSettingsService } from "./sync-settings.service";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 export const ECHELON_SYNC_SWEEP_LOCK_ID = 918501;
 
@@ -112,7 +113,7 @@ export function startEchelonSyncScheduler(
       await deps.syncSettings.updateLastSweep(durationMs);
       deps.log(`[Echelon Sync] Sweep completed in ${durationMs}ms`, "echelon-sync");
     } catch (err: any) {
-      console.warn("[Echelon Sync] Sweep error:", err?.message);
+      platformLogger.warn("channels.echelon_sync_sweep_scheduler", { message: "[Echelon Sync] Sweep error:", error: err?.message });
     }
   }
 
@@ -145,7 +146,7 @@ export function startEchelonSyncScheduler(
     },
     logger: {
       info: (message) => deps.log(`[Echelon Sync] ${message}`, "echelon-sync"),
-      error: (message) => console.warn(`[Echelon Sync] ${message}`),
+      error: (message) => platformLogger.warn("channels.echelon_sync_sweep_scheduler", { message: `[Echelon Sync] ${message}` }),
     },
   });
 }

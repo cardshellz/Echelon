@@ -51,6 +51,7 @@ import {
   updateWmsOrderByIdInWms,
   updateWmsOrderByIdReturningInWms,
 } from "../../wms/wms-order-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via
@@ -114,9 +115,7 @@ async function findExistingOrderForCreate(tx: any, order: InsertOrder): Promise<
       .limit(1);
 
     if (existingByOmsId.length > 0) {
-      console.log(
-        `[ORDER CREATE] Skipping duplicate order - already exists by omsFulfillmentOrderId: ${order.omsFulfillmentOrderId}`,
-      );
+      logger.info("orders.storage", { message: `[ORDER CREATE] Skipping duplicate order - already exists by omsFulfillmentOrderId: ${order.omsFulfillmentOrderId}` });
       return existingByOmsId[0];
     }
 
@@ -134,9 +133,7 @@ async function findExistingOrderForCreate(tx: any, order: InsertOrder): Promise<
       .limit(1);
 
     if (existingByExternalId.length > 0) {
-      console.log(
-        `[ORDER CREATE] Skipping duplicate order - already exists by externalOrderId: ${order.externalOrderId}`,
-      );
+      logger.info("orders.storage", { message: `[ORDER CREATE] Skipping duplicate order - already exists by externalOrderId: ${order.externalOrderId}` });
       return existingByExternalId[0];
     }
   }
@@ -149,9 +146,7 @@ async function findExistingOrderForCreate(tx: any, order: InsertOrder): Promise<
       .limit(1);
 
     if (existingBySourceTableId.length > 0) {
-      console.log(
-        `[ORDER CREATE] Skipping duplicate order - already exists by sourceTableId: ${order.sourceTableId}`,
-      );
+      logger.info("orders.storage", { message: `[ORDER CREATE] Skipping duplicate order - already exists by sourceTableId: ${order.sourceTableId}` });
       return existingBySourceTableId[0];
     }
   }
@@ -680,7 +675,7 @@ export const orderMethods: IOrderStorage = {
           }
         }
       } catch (err) {
-        console.warn("[PickQueue] Failed to enrich images:", (err as Error).message);
+        logger.warn("orders.storage", { message: "[PickQueue] Failed to enrich images:", detail: (err as Error).message });
       }
     }
 
@@ -704,7 +699,7 @@ export const orderMethods: IOrderStorage = {
           }
         }
       } catch (err) {
-        console.warn("[PickQueue] Failed to enrich barcodes:", (err as Error).message);
+        logger.warn("orders.storage", { message: "[PickQueue] Failed to enrich barcodes:", detail: (err as Error).message });
       }
     }
 
@@ -804,17 +799,13 @@ export const orderMethods: IOrderStorage = {
     );
 
     if (existingOrder.length > 0) {
-      console.log(`[CLAIM] Picker ${pickerId} already owns in-progress order ${orderId}, returning existing`);
+      logger.info("orders.storage", { message: `[CLAIM] Picker ${pickerId} already owns in-progress order ${orderId}, returning existing` });
       return existingOrder[0];
     }
 
     const currentOrder = await db.select().from(orders).where(eq(orders.id, orderId));
     if (currentOrder.length > 0) {
-      console.log(`[CLAIM] Order ${orderId} current state:`, {
-        warehouseStatus: currentOrder[0].warehouseStatus,
-        assignedPickerId: currentOrder[0].assignedPickerId,
-        onHold: currentOrder[0].onHold
-      });
+      logger.info("orders.storage", { message: `[CLAIM] Order ${orderId} current state:`, warehouseStatus: currentOrder[0].warehouseStatus, assignedPickerId: currentOrder[0].assignedPickerId, onHold: currentOrder[0].onHold });
     }
 
     // The picker assignment is ONLY a lock while the order is actively being
@@ -829,9 +820,9 @@ export const orderMethods: IOrderStorage = {
     const result = await claimWmsOrderForPickerInWms(db, orderId, pickerId, new Date());
 
     if (result.length === 0) {
-      console.log(`[CLAIM] Order ${orderId} claim failed - not available for picker ${pickerId}`);
+      logger.info("orders.storage", { message: `[CLAIM] Order ${orderId} claim failed - not available for picker ${pickerId}` });
     } else {
-      console.log(`[CLAIM] Order ${orderId} claimed successfully by picker ${pickerId}`);
+      logger.info("orders.storage", { message: `[CLAIM] Order ${orderId} claimed successfully by picker ${pickerId}` });
     }
 
     return result[0] || null;
@@ -846,9 +837,7 @@ export const orderMethods: IOrderStorage = {
     if (SHIPMENT_DERIVED_STATUSES.has(status)) {
       const { warehouseStatus } = await recomputeOrderStatusFromShipments(db, orderId);
       if (warehouseStatus !== status) {
-        console.warn(
-          `[updateOrderStatus] Caller requested ${status} for order ${orderId} but recompute produced ${warehouseStatus}. Honored recompute result.`,
-        );
+        logger.warn("orders.storage", { message: `[updateOrderStatus] Caller requested ${status} for order ${orderId} but recompute produced ${warehouseStatus}. Honored recompute result.` });
       }
       // Still cascade item completion for shipped-family transitions.
       if (warehouseStatus === "shipped" || warehouseStatus === "partially_shipped") {

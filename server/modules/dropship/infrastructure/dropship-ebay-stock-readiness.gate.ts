@@ -28,6 +28,7 @@ import type {
 } from "../application/dropship-ebay-stock-readiness-port";
 import type { DropshipMarketplaceListingPushRequest } from "../application/dropship-marketplace-listing-push-provider";
 import type { DropshipLogEvent } from "../application/dropship-ports";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 /** The only actor a listing push links stock as (inventory's allow-list). */
 const LISTING_PUSH_STOCK_ACTOR = "system:dropship-listing-push";
@@ -47,10 +48,10 @@ export interface DropshipStockLinkLogger {
 export function makeDropshipStockLinkLogger(): DropshipStockLinkLogger {
   const write = (level: StockLinkLogLevel, event: DropshipLogEvent) => {
     const line = JSON.stringify({ level, code: event.code, message: event.message, context: event.context ?? {} });
-    if (level === "error") console.error(line);
-    else if (level === "warn") console.warn(line);
-    else if (level === "info") console.info(line);
-    else console.debug(line);
+    if (level === "error") platformLogger.error("dropship.ebay_stock_readiness_gate", { error: line });
+    else if (level === "warn") platformLogger.warn("dropship.ebay_stock_readiness_gate", { detail: line });
+    else if (level === "info") platformLogger.info("dropship.ebay_stock_readiness_gate", { detail: line });
+    else platformLogger.debug("dropship.ebay_stock_readiness_gate", { detail: line });
   };
   return {
     debug: event => write("debug", event), info: event => write("info", event),

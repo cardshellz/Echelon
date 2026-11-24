@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { enqueueShipStationShipmentPushRetry } from "../../oms/webhook-retry.api";
 import { pushShipmentThroughEngine } from "./shipment-push-payload";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * After an order-level hold is released, make the order actually shippable:
@@ -27,9 +28,7 @@ export async function reserveAndPushAfterHoldRelease(
   try {
     await services?.reservation?.reserveOrder?.(orderId);
   } catch (err: any) {
-    console.warn(
-      `[${context}] re-reserve after hold release failed for order ${orderId}: ${err?.message} — detector will retry`,
-    );
+    logger.warn("orders.release_hold_push", { message: `[${context}] re-reserve after hold release failed for order ${orderId}: ${err?.message} — detector will retry` });
   }
 
   const useEngine = services?.shippingEngine?.isConfigured?.() === true;
@@ -50,7 +49,7 @@ export async function reserveAndPushAfterHoldRelease(
       ORDER BY id
     `);
   } catch (err: any) {
-    console.error(`[${context}] unpushed-shipment lookup failed for order ${orderId}: ${err?.message}`);
+    logger.error("orders.release_hold_push", { message: `[${context}] unpushed-shipment lookup failed for order ${orderId}: ${err?.message}` });
     return { pushed: 0, failed: 0 };
   }
 
@@ -68,23 +67,17 @@ export async function reserveAndPushAfterHoldRelease(
       pushed++;
     } catch (err: any) {
       failed++;
-      console.error(
-        `[${context}] engine push after hold release failed for shipment ${shipmentId} (order ${orderId}): ${err?.message}`,
-      );
+      logger.error("orders.release_hold_push", { message: `[${context}] engine push after hold release failed for shipment ${shipmentId} (order ${orderId}): ${err?.message}` });
       try {
         await enqueueShipStationShipmentPushRetry(db, shipmentId, err);
       } catch (retryErr: any) {
-        console.error(
-          `[${context}] failed to enqueue push retry for shipment ${shipmentId}: ${retryErr?.message ?? String(retryErr)}`,
-        );
+        logger.error("orders.release_hold_push", { message: `[${context}] failed to enqueue push retry for shipment ${shipmentId}: ${retryErr?.message ?? String(retryErr)}` });
       }
     }
   }
   if (pushed > 0 || failed > 0) {
-    console.log(
-      `[${context}] order ${orderId}: pushed ${pushed} never-pushed shipment(s) after hold release` +
-        (failed > 0 ? `; ${failed} failed (retry queued)` : ""),
-    );
+    logger.info("orders.release_hold_push", { detail: `[${context}] order ${orderId}: pushed ${pushed} never-pushed shipment(s) after hold release` +
+        (failed > 0 ? `; ${failed} failed (retry queued)` : "") });
   }
   return { pushed, failed };
 }

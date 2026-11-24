@@ -25,6 +25,7 @@ import {
   type BuildAuthorization,
   type BuildAuthorizationRequest,
 } from "../domain/transformation-execution-authority";
+import { logger } from "../../../platform/observability/logger";
 
 type Db = {
   execute: (query: any) => Promise<{ rows: any[] }>;
@@ -1232,12 +1233,7 @@ export class BuildExecutionRepository {
         `);
       });
     } catch (recordingError) {
-      console.error(JSON.stringify({
-        event: "build_execution_failure_recording_failed",
-        buildOrderId,
-        originalError: errorMessage(error),
-        recordingError: errorMessage(recordingError),
-      }));
+      logger.error("build_execution_failure_recording_failed", { event: "build_execution_failure_recording_failed", buildOrderId, originalError: errorMessage(error), recordingError: errorMessage(recordingError) });
     }
   }
 

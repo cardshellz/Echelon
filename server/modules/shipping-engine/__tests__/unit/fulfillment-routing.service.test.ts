@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 import type {
   ShippingFulfillmentCatalog,
   ShippingFulfillmentCatalogMethod,
@@ -93,7 +94,7 @@ describe("FulfillmentRoutingService", () => {
 
   it("resolves exact provider methods, preserves preference order, and writes one audited revision", async () => {
     const { store, tx } = fakeStore(profile());
-    const audit = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const audit = spyLoggerJson("info");
     const service = new FulfillmentRoutingService({
       store,
       catalogProvider: provider(availableCatalog()),

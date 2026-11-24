@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import type { db } from "../../../db";
+import { logger } from "../../../platform/observability/logger";
 
 const identity = z.number().int().positive().safe();
 const FOLLOWUP_BATCH_SIZE = 20;
@@ -76,8 +77,7 @@ export class SupplierReturnFollowupService {
           await tx.execute(sql`UPDATE inventory.supplier_return_followups SET attempt_count=${attemptCount},
             next_attempt_at=${nextAttempt},last_error=${message}
             WHERE supplier_return_id=${returnId} AND product_variant_id=${productVariantId} AND completed_at IS NULL`);
-          console.error(JSON.stringify({ event: "supplier_return_inventory_followup_failed", returnId, productVariantId,
-            attemptCount, nextAttemptAt: nextAttempt.toISOString(), message }));
+          logger.error("supplier_return_inventory_followup_failed", { event: "supplier_return_inventory_followup_failed", returnId, productVariantId, attemptCount, nextAttemptAt: nextAttempt.toISOString(), message });
           return false;
         }
         const completedAt = z.date().parse(this.clock());
@@ -87,8 +87,7 @@ export class SupplierReturnFollowupService {
         return true;
       });
     } catch (error) {
-      console.error(JSON.stringify({ event: "supplier_return_inventory_followup_failed", returnId, productVariantId,
-        message: error instanceof Error ? error.message : String(error) }));
+      logger.error("supplier_return_inventory_followup_failed", { event: "supplier_return_inventory_followup_failed", returnId, productVariantId, message: error instanceof Error ? error.message : String(error) });
       return false;
     }
   }

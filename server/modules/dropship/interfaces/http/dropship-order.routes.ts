@@ -19,6 +19,7 @@ import {
   dropshipVendorOrderDetailResponseSchema,
   type DropshipVendorOrderDetailResponseInput,
 } from "../../../../../shared/dropship/vendor-order-detail";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipOrderRoutes(
   app: Express,
@@ -82,16 +83,11 @@ export function registerDropshipOrderRoutes(
       if (!response.success) {
         // Fail closed: a detail that does not fit is never sent. This needs a
         // human (data or code drifted from the contract), so it logs at error.
-        console.error(JSON.stringify({
-          level: "error",
-          code: "DROPSHIP_VENDOR_ORDER_DETAIL_CONTRACT_INVALID",
-          message: "Order detail did not fit the vendor contract; nothing was sent.",
-          context: {
+        logger.error("DROPSHIP_VENDOR_ORDER_DETAIL_CONTRACT_INVALID", { code: "DROPSHIP_VENDOR_ORDER_DETAIL_CONTRACT_INVALID", message: "Order detail did not fit the vendor contract; nothing was sent.", context: {
             intakeId: result.intakeId,
             vendorId: provisioned.vendor.vendorId,
             issues: response.error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
-          },
-        }));
+          } });
         return res.status(500).json({
           error: {
             code: "DROPSHIP_ORDER_INTERNAL_ERROR",
@@ -237,7 +233,7 @@ function sendDropshipOrderError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[DropshipOrderRoutes] Unexpected order error:", error);
+  logger.error("dropship.order_routes", { message: "[DropshipOrderRoutes] Unexpected order error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_ORDER_INTERNAL_ERROR",

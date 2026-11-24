@@ -504,7 +504,7 @@ export async function buildWmsLineItemFromOmsLine(
     try {
       binLocation = await resolveAssignedBinLocation(database, variantId);
     } catch (err: any) {
-      console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
+      logger.warn("oms.wms_sync_service", { message: `[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}` });
     }
   }
 
@@ -863,7 +863,7 @@ export class WmsSyncService {
         .limit(1);
 
       if (omsOrderResult.length === 0) {
-        console.error(`[WMS Sync] OMS order ${omsOrderId} not found`);
+        logger.error("oms.wms_sync_service", { message: `[WMS Sync] OMS order ${omsOrderId} not found` });
         return null;
       }
 
@@ -886,18 +886,14 @@ export class WmsSyncService {
         );
       }
       if (mode === "standard" && isUnfinalizedDropshipAcceptance) {
-        console.warn(
-          `[WMS Sync] OMS order ${omsOrderId} is awaiting canonical dropship acceptance finalization; skipped operational dispatch`,
-        );
+        logger.warn("oms.wms_sync_service", { message: `[WMS Sync] OMS order ${omsOrderId} is awaiting canonical dropship acceptance finalization; skipped operational dispatch` });
         return null;
       }
       const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey(mode);
 
       if (await this.isFinalOrCancelledOmsOrder(omsOrder)) {
         await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
-        console.log(
-          `[WMS Sync] OMS order ${omsOrderId} is ${omsOrder.status}/${omsOrder.financialStatus}; skipped WMS sync`,
-        );
+        logger.info("oms.wms_sync_service", { message: `[WMS Sync] OMS order ${omsOrderId} is ${omsOrder.status}/${omsOrder.financialStatus}; skipped WMS sync` });
         return null;
       }
 
@@ -936,9 +932,7 @@ export class WmsSyncService {
         enrichContext({ wmsOrderId });
         if (isTerminalResidualRecovery) {
           await this.refreshOmsLineMaterializedQuantities(omsOrderId);
-          console.log(
-            `[WMS Sync] Residual recovery partition already exists for OMS order ${omsOrderId} (WMS ${wmsOrderId}); reused without mutating the shipped original partition`,
-          );
+          logger.info("oms.wms_sync_service", { message: `[WMS Sync] Residual recovery partition already exists for OMS order ${omsOrderId} (WMS ${wmsOrderId}); reused without mutating the shipped original partition` });
           return wmsOrderId;
         }
         if (isDropshipAcceptanceClaim) {
@@ -958,10 +952,8 @@ export class WmsSyncService {
         }
         const headerRefresh = await this.refreshExistingWmsOrderHeaderFromOms(omsOrder, wmsOrderId);
         const reconciled = await this.reconcileExistingWmsOrderLines(omsOrderId, wmsOrderId);
-        console.log(
-          `[WMS Sync] Order ${omsOrderId} already synced to WMS (id ${wmsOrderId}); ` +
-            `headerRefreshed=${headerRefresh.updated}; promoted=${headerRefresh.promoted}; reconciled ${reconciled.insertedItems} missing item(s)`,
-        );
+        logger.info("oms.wms_sync_service", { detail: `[WMS Sync] Order ${omsOrderId} already synced to WMS (id ${wmsOrderId}); ` +
+            `headerRefreshed=${headerRefresh.updated}; promoted=${headerRefresh.promoted}; reconciled ${reconciled.insertedItems} missing item(s)` });
 
         return wmsOrderId;
       }
@@ -982,9 +974,7 @@ export class WmsSyncService {
         !isTerminalResidualRecovery &&
         (omsStatusLower === "shipped" || omsFulfillmentLower === "fulfilled")
       ) {
-        console.warn(
-          `[WMS Sync] OMS order ${omsOrderId} is ${omsStatusLower}/${omsFulfillmentLower} with no existing WMS order — fulfilled out-of-band; skipping WMS create to avoid a duplicate shipping-engine push`,
-        );
+        logger.warn("oms.wms_sync_service", { message: `[WMS Sync] OMS order ${omsOrderId} is ${omsStatusLower}/${omsFulfillmentLower} with no existing WMS order — fulfilled out-of-band; skipping WMS create to avoid a duplicate shipping-engine push` });
         return null;
       }
 
@@ -995,7 +985,7 @@ export class WmsSyncService {
         .where(eq(omsOrderLines.orderId, omsOrderId));
 
       if (omsLines.length === 0) {
-        console.warn(`[WMS Sync] OMS order ${omsOrderId} has no line items — skipping`);
+        logger.warn("oms.wms_sync_service", { message: `[WMS Sync] OMS order ${omsOrderId} has no line items — skipping` });
         return null;
       }
 
@@ -1011,9 +1001,7 @@ export class WmsSyncService {
           financialStatus: omsOrder.financialStatus,
           lines: omsLines,
         });
-        console.warn(
-          `[WMS Sync] OMS order ${omsOrderId} has no OMS-authorized fulfillable quantity; skipping WMS materialization`,
-        );
+        logger.warn("oms.wms_sync_service", { message: `[WMS Sync] OMS order ${omsOrderId} has no OMS-authorized fulfillable quantity; skipping WMS materialization` });
         return null;
       }
 
@@ -1098,7 +1086,7 @@ export class WmsSyncService {
               { cause: err },
             );
           }
-          console.warn(`[WMS Sync] Warehouse routing failed for OMS order ${omsOrderId}: ${err?.message ?? err}`);
+          logger.warn("oms.wms_sync_service", { message: `[WMS Sync] Warehouse routing failed for OMS order ${omsOrderId}: ${err?.message ?? err}` });
         }
       }
       const routedWarehouseId = requireRoutedWarehouseId({
@@ -1242,9 +1230,7 @@ export class WmsSyncService {
         );
 
         if (remainingOmsLines.length === 0) {
-          console.warn(
-            `[WMS Sync] OMS order ${omsOrderId} has no remaining authorized quantity to materialize after row lock`,
-          );
+          logger.warn("oms.wms_sync_service", { message: `[WMS Sync] OMS order ${omsOrderId} has no remaining authorized quantity to materialize after row lock` });
           return { noMaterializableAuthority: true };
         }
 
@@ -1303,10 +1289,8 @@ export class WmsSyncService {
                 `partition=${returnedPartitionKey}); refusing to consume line authority`,
             );
           }
-          console.warn(
-            `[WMS Sync] createOrderWithItems returned WMS order ${newWmsOrder.id} outside OMS order ${omsOrderId} ` +
-              `partition ${fulfillmentPartitionKey}; reconciling instead of consuming line authority`,
-          );
+          logger.warn("oms.wms_sync_service", { detail: `[WMS Sync] createOrderWithItems returned WMS order ${newWmsOrder.id} outside OMS order ${omsOrderId} ` +
+              `partition ${fulfillmentPartitionKey}; reconciling instead of consuming line authority` });
           return { racedExistingWmsOrderId: Number(newWmsOrder.id) };
         }
 
@@ -1329,7 +1313,7 @@ export class WmsSyncService {
           });
         }
 
-        console.log(`[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})`);
+        logger.info("oms.wms_sync_service", { message: `[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})` });
 
         return {
           newWmsOrder,
@@ -1344,9 +1328,7 @@ export class WmsSyncService {
       // create a second order or push a second ShipStation order.
       if ((txResult as any).racedExistingWmsOrderId) {
         const racedId = Number((txResult as any).racedExistingWmsOrderId);
-        console.warn(
-          `[WMS Sync] Concurrent sync race for OMS order ${omsOrderId} — WMS order ${racedId} already created by a parallel sync; reconciling instead of creating a duplicate`,
-        );
+        logger.warn("oms.wms_sync_service", { message: `[WMS Sync] Concurrent sync race for OMS order ${omsOrderId} — WMS order ${racedId} already created by a parallel sync; reconciling instead of creating a duplicate` });
         if (isDropshipAcceptanceClaim) {
           await this.reserveRequired(racedId, omsOrderId, "dropship_acceptance_race_replay");
           return racedId;
@@ -1358,9 +1340,7 @@ export class WmsSyncService {
           await this.refreshOmsLineMaterializedQuantities(omsOrderId);
         } catch (err: any) {
           if (err instanceof WmsShipmentPrerequisiteError) throw err;
-          console.error(
-            `[WMS Sync] Reconcile after race for OMS order ${omsOrderId} (WMS ${racedId}) failed: ${err.message}`,
-          );
+          logger.error("oms.wms_sync_service", { message: `[WMS Sync] Reconcile after race for OMS order ${omsOrderId} (WMS ${racedId}) failed: ${err.message}` });
         }
         return racedId;
       }
@@ -1431,7 +1411,7 @@ export class WmsSyncService {
       if (engine?.isConfigured?.() && shipmentIdForPush !== null) {
         const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
         if (recheckOms && (await this.isFinalOrCancelledOmsOrder(recheckOms))) {
-            console.warn(`[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping engine push, cancelling WMS`);
+            logger.warn("oms.wms_sync_service", { message: `[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping engine push, cancelling WMS` });
             await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
             return newWmsOrder.id;
           }
@@ -1441,17 +1421,13 @@ export class WmsSyncService {
             } else {
               await this.services.shipStation.pushShipment(shipmentIdForPush);
             }
-            console.log(
-              `[WMS Sync] Pushed shipment ${shipmentIdForPush} to ShipStation via pushShipment`,
-            );
+            logger.info("oms.wms_sync_service", { message: `[WMS Sync] Pushed shipment ${shipmentIdForPush} to ShipStation via pushShipment` });
           } catch (err: any) {
             // Don't block the sync, but do persist a retry immediately.
             // Health/reconciliation is the safety net; this retry row is
             // the hot-path guarantee for transient ShipStation/API/data
             // failures after the WMS shipment row already exists.
-            console.error(
-              `[WMS Sync] pushShipment failed for shipment ${shipmentIdForPush} (OMS order ${omsOrderId}): ${err.message}`,
-            );
+            logger.error("oms.wms_sync_service", { message: `[WMS Sync] pushShipment failed for shipment ${shipmentIdForPush} (OMS order ${omsOrderId}): ${err.message}` });
             try {
               await enqueueShipStationShipmentPushRetry(
                 db,
@@ -1459,9 +1435,7 @@ export class WmsSyncService {
                 err,
               );
             } catch (retryErr: any) {
-              console.error(
-                `[WMS Sync] failed to enqueue ShipStation retry for shipment ${shipmentIdForPush}: ${retryErr?.message ?? String(retryErr)}`,
-              );
+              logger.error("oms.wms_sync_service", { message: `[WMS Sync] failed to enqueue ShipStation retry for shipment ${shipmentIdForPush}: ${retryErr?.message ?? String(retryErr)}` });
             }
           }
       }
@@ -1476,9 +1450,9 @@ export class WmsSyncService {
       // failure and re-queued/dead-lettered it (e.g. old orders fulfilled in ShipStation
       // before Echelon's WMS existed).
       if (err instanceof CountryCodeValidationError) {
-        console.error(JSON.stringify({ event: "oms_country_validation_failed", operation: "wms_sync", omsOrderId, code: err.code }));
+        logger.error("oms_country_validation_failed", { event: "oms_country_validation_failed", operation: "wms_sync", omsOrderId, code: err.code });
       } else {
-        console.error(`[WMS Sync] Failed to sync OMS order ${omsOrderId} to WMS: ${err.message}`);
+        logger.error("oms.wms_sync_service", { message: `[WMS Sync] Failed to sync OMS order ${omsOrderId} to WMS: ${err.message}` });
       }
       throw err;
     }
@@ -1952,9 +1926,7 @@ export class WmsSyncService {
             },
           );
         }
-        console.log(
-          `[WMS Sync] Linked combined-child order ${input.wmsOrderId} to parent ${parentWmsOrderId}'s shipment ${linked.shipmentId} (created=${linked.created}); parent owns the provider push`,
-        );
+        logger.info("oms.wms_sync_service", { message: `[WMS Sync] Linked combined-child order ${input.wmsOrderId} to parent ${parentWmsOrderId}'s shipment ${linked.shipmentId} (created=${linked.created}); parent owns the provider push` });
         return { shipmentIdForPush: null, changedItems };
       }
 
@@ -2011,9 +1983,7 @@ export class WmsSyncService {
           },
         );
       }
-      console.log(
-        `[WMS Sync] ${shipment.created ? "Created" : "Reused"} shipment ${shipment.shipmentId} for WMS order ${input.wmsOrderId} after inventory authority resolved`,
-      );
+      logger.info("oms.wms_sync_service", { message: `[WMS Sync] ${shipment.created ? "Created" : "Reused"} shipment ${shipment.shipmentId} for WMS order ${input.wmsOrderId} after inventory authority resolved` });
       return {
         shipmentIdForPush: deferred ? null : shipment.shipmentId,
         changedItems,
@@ -2107,9 +2077,7 @@ export class WmsSyncService {
         await this.recordReservationBlocked(wmsOrderId, omsOrderId, context, err);
         return;
       }
-      console.error(
-        `[WMS Sync] Reservation authority failed for WMS order ${wmsOrderId} (${context}): ${err?.message ?? String(err)} — aborting shipment processing so the sync can retry`,
-      );
+      logger.error("oms.wms_sync_service", { message: `[WMS Sync] Reservation authority failed for WMS order ${wmsOrderId} (${context}): ${err?.message ?? String(err)} — aborting shipment processing so the sync can retry` });
       throw new WmsShipmentPrerequisiteError(
         "Authority-aware inventory reservation failed before shipment processing.",
         { wmsOrderId, omsOrderId, context, causeCode: err?.code ?? null },
@@ -2121,9 +2089,7 @@ export class WmsSyncService {
     const detail = reserveResult.failed
       .map((failure: { sku: string; reason: string }) => `${failure.sku}: ${failure.reason}`)
       .join(", ");
-    console.warn(
-      `[WMS Sync] Reservation shortfall for WMS order ${wmsOrderId} (${context}): ${detail} — proceeding without hold; unreservable lines surface as pick shorts`,
-    );
+    logger.warn("oms.wms_sync_service", { message: `[WMS Sync] Reservation shortfall for WMS order ${wmsOrderId} (${context}): ${detail} — proceeding without hold; unreservable lines surface as pick shorts` });
     if (omsOrderId) {
       try {
         await db.insert(omsOrderEvents).values({
@@ -2136,9 +2102,7 @@ export class WmsSyncService {
           },
         });
       } catch (err: any) {
-        console.error(
-          `[WMS Sync] Failed to record reservation shortfall for OMS order ${omsOrderId}: ${err?.message ?? String(err)} — aborting shipment processing`,
-        );
+        logger.error("oms.wms_sync_service", { message: `[WMS Sync] Failed to record reservation shortfall for OMS order ${omsOrderId}: ${err?.message ?? String(err)} — aborting shipment processing` });
         throw new WmsShipmentPrerequisiteError(
           "The reservation shortfall was not durably recorded before shipment processing.",
           { wmsOrderId, omsOrderId, context, causeCode: err?.code ?? null },
@@ -2156,8 +2120,7 @@ export class WmsSyncService {
   ): Promise<void> {
     const code = reservationErrorCode(err);
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(JSON.stringify({ level: "warn", action: "reserve_before_shipment", outcome: "blocked_by_order_data",
-      wms_order_id: wmsOrderId, oms_order_id: omsOrderId, error_code: code, error: message, context }));
+    logger.warn("reserve_before_shipment", { outcome: "blocked_by_order_data", wms_order_id: wmsOrderId, oms_order_id: omsOrderId, error_code: code, error: message, context });
     if (!omsOrderId) return;
     try {
       await db.insert(omsOrderEvents).values({
@@ -2380,9 +2343,7 @@ export class WmsSyncService {
     });
 
     if (promoted) {
-      console.log(
-        `[WMS Sync] Promoted WMS order ${wmsOrderId} from pending → ready (OMS financial_status=${omsOrder.financialStatus})`,
-      );
+      logger.info("oms.wms_sync_service", { message: `[WMS Sync] Promoted WMS order ${wmsOrderId} from pending → ready (OMS financial_status=${omsOrder.financialStatus})` });
     }
 
     if (sortRankChanged && ACTIVE_SORT_RANK_SYNC_STATUSES.has(promoted ? "ready" : String(wmsOrder.warehouseStatus))) {
@@ -2644,9 +2605,7 @@ export class WmsSyncService {
       if (omsQty === wmsQty) continue;
 
       if ((wmsItem.pickedQuantity ?? 0) > 0 && omsQty < (wmsItem.pickedQuantity ?? 0)) {
-        console.warn(
-          `[WMS Sync] Item ${wmsItem.sku} (id ${wmsItem.id}): OMS qty reduced to ${omsQty} but ${wmsItem.pickedQuantity} already picked - needs manual review`,
-        );
+        logger.warn("oms.wms_sync_service", { message: `[WMS Sync] Item ${wmsItem.sku} (id ${wmsItem.id}): OMS qty reduced to ${omsQty} but ${wmsItem.pickedQuantity} already picked - needs manual review` });
         await this.recordWmsReconciliationReviewException(db, {
           rule: "picked_quantity_exceeds_oms_authority",
           source: "reconcileExistingWmsOrderLines",
@@ -2666,9 +2625,7 @@ export class WmsSyncService {
           authorityQuantity: omsQty,
         });
         const reconciledStatus = reconciled.status;
-        console.log(
-          `[WMS Sync] Reconciled item ${wmsItem.sku} (id ${wmsItem.id}): qty ${wmsQty} -> ${omsQty}, status ${wmsItem.status} -> ${reconciledStatus}`,
-        );
+        logger.info("oms.wms_sync_service", { message: `[WMS Sync] Reconciled item ${wmsItem.sku} (id ${wmsItem.id}): qty ${wmsQty} -> ${omsQty}, status ${wmsItem.status} -> ${reconciledStatus}` });
       }
     }
 
@@ -3114,7 +3071,7 @@ export class WmsSyncService {
     const warehouseStatus = wmsOrderResult.rows[0].warehouse_status;
 
     if (["shipped", "cancelled", "completed"].includes(warehouseStatus)) {
-      console.log(`${LOG} Skipping order ${wmsOrderId} — terminal state '${warehouseStatus}'`);
+      logger.info("oms.wms_sync_service", { message: `${LOG} Skipping order ${wmsOrderId} — terminal state '${warehouseStatus}'` });
       return result;
     }
 
@@ -3403,7 +3360,7 @@ export class WmsSyncService {
       shouldRepush = shouldRepush || claimReconciliation.reconciled === true;
     } catch (e: any) {
       if (e?.code === "CANONICAL_DEMAND_RECONCILIATION_FAILED") throw e;
-      console.warn(`${LOG} Reservation rebalance failed for order ${wmsOrderId}: ${e.message}`);
+      logger.warn("oms.wms_sync_service", { message: `${LOG} Reservation rebalance failed for order ${wmsOrderId}: ${e.message}` });
     }
 
     if (shouldRepush) {
@@ -3430,7 +3387,7 @@ export class WmsSyncService {
               } else {
                 await this.services.shipStation.pushShipment(shipment.id);
               }
-              console.log(`${LOG} Re-pushed shipment ${shipment.id} to engine after item edit`);
+              logger.info("oms.wms_sync_service", { message: `${LOG} Re-pushed shipment ${shipment.id} to engine after item edit` });
             } catch (pushErr: any) {
               await enqueueShipStationShipmentPushRetry(
                 db,
@@ -3440,7 +3397,7 @@ export class WmsSyncService {
             }
           }
         } catch (e: any) {
-          console.error(`${LOG} Failed to re-push shipments to ShipStation for order ${wmsOrderId}: ${e.message}`);
+          logger.error("oms.wms_sync_service", { message: `${LOG} Failed to re-push shipments to ShipStation for order ${wmsOrderId}: ${e.message}` });
         }
       }
     }
@@ -3461,18 +3418,14 @@ export class WmsSyncService {
     }
 
     if (result.flaggedForReview.length > 0) {
-      console.warn(`${LOG} Order ${wmsOrderId} has items requiring review:`, result.flaggedForReview);
+      logger.warn("oms.wms_sync_service", { message: `${LOG} Order ${wmsOrderId} has items requiring review:`, detail: result.flaggedForReview });
     }
 
     if (warehouseStatus === "picking") {
-      console.warn(
-        `${LOG} Order ${wmsOrderId} modified while picker is active — picker may have stale data`,
-      );
+      logger.warn("oms.wms_sync_service", { message: `${LOG} Order ${wmsOrderId} modified while picker is active — picker may have stale data` });
     }
 
-    console.log(
-      `${LOG} Order ${wmsOrderId}: ${result.updated} updated, ${result.added} added, ${result.removed} removed, ${result.flaggedForReview.length} flagged`,
-    );
+    logger.info("oms.wms_sync_service", { message: `${LOG} Order ${wmsOrderId}: ${result.updated} updated, ${result.added} added, ${result.removed} removed, ${result.flaggedForReview.length} flagged` });
 
     return result;
   }
@@ -3604,7 +3557,7 @@ export class WmsSyncService {
         }
       }
     } catch (err) {
-      console.warn(`[WMS Sync] Failed to fetch priority modifier for order ${omsOrder.id}:`, err);
+      logger.warn("oms.wms_sync_service", { message: `[WMS Sync] Failed to fetch priority modifier for order ${omsOrder.id}:`, error: err });
       legacyMember = { outcome: "lookup_failed" };
     }
 
@@ -3768,7 +3721,7 @@ export class WmsSyncService {
       }
     }
 
-    console.log(`[WMS Sync] Batch sync: ${synced} synced, ${failed} failed`);
+    logger.info("oms.wms_sync_service", { message: `[WMS Sync] Batch sync: ${synced} synced, ${failed} failed` });
     return { synced, failed };
   }
 
@@ -3809,7 +3762,7 @@ export class WmsSyncService {
 
     const ids = unsynced.rows.map((r) => r.id);
     if (ids.length === 0) {
-      console.log(`[WMS Sync] No unsynced orders found`);
+      logger.info("oms.wms_sync_service", { message: `[WMS Sync] No unsynced orders found` });
       return 0;
     }
 
@@ -3850,11 +3803,11 @@ export class WmsSyncService {
 
     const rows = stale.rows ?? [];
     if (rows.length === 0) {
-      console.log(`[WMS Sync] Cancel reconcile: no stale cancellations found`);
+      logger.info("oms.wms_sync_service", { message: `[WMS Sync] Cancel reconcile: no stale cancellations found` });
       return { cancelled: 0, failed: 0 };
     }
 
-    console.log(`[WMS Sync] Cancel reconcile: found ${rows.length} orders cancelled in Shopify but active in OMS`);
+    logger.info("oms.wms_sync_service", { message: `[WMS Sync] Cancel reconcile: found ${rows.length} orders cancelled in Shopify but active in OMS` });
 
     const { cancelOrderCascade } = await import("./oms-webhooks");
 
@@ -3878,9 +3831,7 @@ export class WmsSyncService {
         });
 
         if (verdict.outcome === "blocked_by_state") {
-          console.warn(
-            `[WMS Sync] Cancel reconcile: skipped OMS ${row.oms_id} (${row.external_order_number}): ${verdict.reason}`,
-          );
+          logger.warn("oms.wms_sync_service", { message: `[WMS Sync] Cancel reconcile: skipped OMS ${row.oms_id} (${row.external_order_number}): ${verdict.reason}` });
           continue;
         }
 
@@ -3892,15 +3843,15 @@ export class WmsSyncService {
           logPrefix: "[Cancel Reconcile]",
         });
 
-        console.log(`[WMS Sync] Cancel reconcile: cancelled ${row.external_order_number} (OMS ${row.oms_id}, WMS ${row.wms_id ?? "none"})`);
+        logger.info("oms.wms_sync_service", { message: `[WMS Sync] Cancel reconcile: cancelled ${row.external_order_number} (OMS ${row.oms_id}, WMS ${row.wms_id ?? "none"})` });
         cancelled++;
       } catch (err: any) {
-        console.error(`[WMS Sync] Cancel reconcile: failed for OMS ${row.oms_id} (${row.external_order_number}): ${err.message}`);
+        logger.error("oms.wms_sync_service", { message: `[WMS Sync] Cancel reconcile: failed for OMS ${row.oms_id} (${row.external_order_number}): ${err.message}` });
         failed++;
       }
     }
 
-    console.log(`[WMS Sync] Cancel reconcile: ${cancelled} cancelled, ${failed} failed`);
+    logger.info("oms.wms_sync_service", { message: `[WMS Sync] Cancel reconcile: ${cancelled} cancelled, ${failed} failed` });
     return { cancelled, failed };
   }
 
@@ -3940,11 +3891,11 @@ export class WmsSyncService {
 
     const rows = dupes.rows ?? [];
     if (rows.length === 0) {
-      console.log(`[WMS Sync] GID cleanup: no duplicate shipments to cancel`);
+      logger.info("oms.wms_sync_service", { message: `[WMS Sync] GID cleanup: no duplicate shipments to cancel` });
       return { cancelled: 0, failed: 0 };
     }
 
-    console.log(`[WMS Sync] GID cleanup: found ${rows.length} cancelled OMS orders with active SS shipments`);
+    logger.info("oms.wms_sync_service", { message: `[WMS Sync] GID cleanup: found ${rows.length} cancelled OMS orders with active SS shipments` });
 
     const { cancelOrderCascade } = await import("./oms-webhooks");
 
@@ -3966,10 +3917,10 @@ export class WmsSyncService {
           reason: "duplicate OMS order from GID/numeric mismatch",
           logPrefix: "[GID Cleanup]",
         });
-        console.log(`[WMS Sync] GID cleanup: cascaded cancel for ${row.external_order_number} (OMS ${row.oms_id})`);
+        logger.info("oms.wms_sync_service", { message: `[WMS Sync] GID cleanup: cascaded cancel for ${row.external_order_number} (OMS ${row.oms_id})` });
         cancelled++;
       } catch (err: any) {
-        console.error(`[WMS Sync] GID cleanup: failed for OMS ${row.oms_id}: ${err.message}`);
+        logger.error("oms.wms_sync_service", { message: `[WMS Sync] GID cleanup: failed for OMS ${row.oms_id}: ${err.message}` });
         failed++;
       }
     }
@@ -4037,10 +3988,10 @@ export class WmsSyncService {
       const { ordersStorage } = await import("../../orders");
       await ordersStorage.updateOrderProgress(wmsOrderId);
 
-      console.log(`[WMS Resync] Resynced ${newItems.length} items for WMS order ${wmsOrderId} (OMS ${omsOrderId})`);
+      logger.info("oms.wms_sync_service", { message: `[WMS Resync] Resynced ${newItems.length} items for WMS order ${wmsOrderId} (OMS ${omsOrderId})` });
       return { success: true, message: `Resynced ${newItems.length} items`, itemCount: newItems.length };
     } catch (err: any) {
-      console.error(`[WMS Resync] Failed for WMS order ${wmsOrderId}: ${err.message}`);
+      logger.error("oms.wms_sync_service", { message: `[WMS Resync] Failed for WMS order ${wmsOrderId}: ${err.message}` });
       return { success: false, message: err.message };
     }
   }

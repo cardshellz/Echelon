@@ -1,5 +1,6 @@
 import type { AllowedInventoryConversion } from "@shared/types/inventory-conversions";
 import type { InventoryConversionReader } from "../../inventory-planning/inventory-conversion-read.port.api";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 export interface InventoryLevelAtpRow {
   productVariantId: number;
@@ -69,7 +70,7 @@ export interface InventoryLevelLogger {
   error(event: Record<string, unknown>): void;
 }
 
-const defaultLogger: InventoryLevelLogger = { error: event => console.error(JSON.stringify(event)) };
+const defaultLogger: InventoryLevelLogger = { error: event => platformLogger.error("inventory.levels_query", { error: JSON.stringify(event) }) };
 
 function errorCode(error: unknown): string {
   const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;

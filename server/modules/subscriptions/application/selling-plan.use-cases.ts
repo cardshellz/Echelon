@@ -2,10 +2,11 @@ import { db } from "../../../db";
 import * as domain from "../domain/subscription.domain";
 import * as storage from "../infrastructure/subscription.repository";
 import * as shopifyAdapter from "../infrastructure/shopify.adapter";
+import { logger } from "../../../platform/observability/logger";
 
 export async function createSellingPlanGroupUseCase(membershipProductGid: string) {
   const existingPlans = await storage.getAllPlans();
-  
+
   // Extract pure logic out to Domain
   const resolvedConfigs = domain.mapPlansToSellingPlanConfigs(existingPlans);
   const sellingPlansToCreate = domain.buildShopifySellingPlanCreatePayload(resolvedConfigs);
@@ -28,7 +29,7 @@ export async function createSellingPlanGroupUseCase(membershipProductGid: string
         const matchingConfig = resolvedConfigs.find(c => c.name === sp.name);
         if (matchingConfig) {
           const numericId = parseInt(sp.gid.split("/").pop() || "0");
-          
+
           await storage.updatePlanSellingPlan(matchingConfig.planId, sp.gid, numericId, tx);
           await storage.upsertSellingPlanMap({
             shopify_selling_plan_gid: sp.gid,
@@ -41,9 +42,9 @@ export async function createSellingPlanGroupUseCase(membershipProductGid: string
         }
       }
     });
-    console.log(`[SellingPlans UseCase] Persisted group ${group.id}`);
+    logger.info("subscriptions.selling_plan_use_cases", { message: `[SellingPlans UseCase] Persisted group ${group.id}` });
   } catch (e) {
-    console.error(`[SellingPlans UseCase] Failed to persist group ${group.id}`, e);
+    logger.error("subscriptions.selling_plan_use_cases", { message: `[SellingPlans UseCase] Failed to persist group ${group.id}`, error: e });
     throw e;
   }
 

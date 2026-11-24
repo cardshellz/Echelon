@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipListingPushOpsService } from "../../application/dropship-listing-push-ops-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipListingPushOpsServiceFromEnv } from "../../infrastructure/dropship-listing-push-ops.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -63,7 +64,7 @@ function sendDropshipListingPushOpsError(res: Response, error: unknown): Respons
     });
   }
 
-  console.error("[DropshipAdminListingPushOpsRoutes] Unexpected listing push ops error:", error);
+  logger.error("dropship.admin_listing_push_ops_routes", { message: "[DropshipAdminListingPushOpsRoutes] Unexpected listing push ops error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_LISTING_PUSH_OPS_INTERNAL_ERROR",

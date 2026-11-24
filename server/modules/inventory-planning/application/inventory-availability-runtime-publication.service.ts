@@ -1,5 +1,6 @@
 import type { InventoryChannelExposureRuntimePlan } from "@shared/types/inventory-channel-exposure";
 import type { InventoryAvailabilityRuntimeAuthority } from "./inventory-availability-runtime-atp.service";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 export interface ActivePublicationVariantMapping {
   productVariantId: number;
@@ -152,13 +153,13 @@ export interface InventoryAvailabilityRuntimePublicationLogger {
 
 const defaultLogger: InventoryAvailabilityRuntimePublicationLogger = {
   info(event) {
-    console.info(JSON.stringify(event));
+    platformLogger.info("inventory-planning.inventory_availability_runtime_publication_service", { detail: JSON.stringify(event) });
   },
   warn(event) {
-    console.warn(JSON.stringify(event));
+    platformLogger.warn("inventory-planning.inventory_availability_runtime_publication_service", { detail: JSON.stringify(event) });
   },
   error(event) {
-    console.error(JSON.stringify(event));
+    platformLogger.error("inventory-planning.inventory_availability_runtime_publication_service", { error: JSON.stringify(event) });
   },
 };
 

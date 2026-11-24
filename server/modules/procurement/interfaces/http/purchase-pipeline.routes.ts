@@ -5,6 +5,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { createPurchasePipelineRepository } from "../../infrastructure/purchase-pipeline.repository";
 import { projectPurchasePipeline, PurchasePipelineError } from "../../application/purchase-pipeline.service";
 import { createSupplierProgressService, pipelineLineIdSchema } from "../../application/supplier-progress.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerPurchasePipelineRoutes(app: Express, database = db, clock: () => Date = () => new Date()): void {
   // Factories do not read or initialize storage during unrelated route imports.
@@ -12,7 +13,7 @@ export function registerPurchasePipelineRoutes(app: Express, database = db, cloc
   const progress = createSupplierProgressService(database, clock);
   const fail = (res: import("express").Response, error: unknown, operation: string) => {
     if (error instanceof PurchasePipelineError) { res.status(error.statusCode).json({ code: error.code, error: error.message }); return; }
-    console.error({ event: "procurement.purchase_pipeline.failed", operation, error });
+    logger.error("procurement.purchase_pipeline.failed", { event: "procurement.purchase_pipeline.failed", operation, error });
     res.status(500).json({ code: "PURCHASE_PIPELINE_FAILED", error: "Unable to load or save purchase pipeline evidence. Retry an unchanged progress request with the same key." });
   };
   app.get("/api/purchasing/pipeline", requirePermission("purchasing", "view"), async (req, res) => {

@@ -13,6 +13,7 @@ vi.mock("../../application/supplier-sourcing.service", async (original) => ({
 }));
 import { registerSupplierSourcingRoutes } from "../../interfaces/http/supplier-sourcing.routes";
 import { SupplierSourcingError } from "../../application/supplier-sourcing.service";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 describe("supplier sourcing HTTP authority", () => {
   let server: http.Server;
@@ -24,7 +25,7 @@ describe("supplier sourcing HTTP authority", () => {
     registerSupplierSourcingRoutes(app); server = http.createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
   });
   afterEach(async () => { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); vi.restoreAllMocks(); });
   function request(path: string, body?: unknown, actor: string | null = "reviewer") {
@@ -60,6 +61,6 @@ describe("supplier sourcing HTTP authority", () => {
     mocks.read.mockRejectedValueOnce(new Error("SECRET_CONNECTION_STRING"));
     const response = await request("/api/vendor-products/20/sourcing");
     expect(response.status).toBe(500); expect(await response.text()).not.toContain("SECRET_CONNECTION_STRING");
-    expect(console.error).toHaveBeenCalled();
+    expect(getLoggerJsonSpy("error")).toHaveBeenCalled();
   });
 });

@@ -26,6 +26,7 @@ import {
 import { guardOrderEditShopifyIngress } from "../../order-edits/oms-coordination.api";
 import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity, orderLineInventoryIdentitySnapshot } from "./order-line-catalog-identity.service";
 import { isShopifyOrderSource, normalizeShopifyCustomerId, ShopifyCustomerIdentityError, validateShopifyCustomerIdentityCopy } from "./shopify-customer-identity";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -242,7 +243,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
       shipToCountry = parseCountryCode(data.shipToCountry);
     } catch (error) {
       if (error instanceof CountryCodeValidationError) {
-        console.error(JSON.stringify({ event: "oms_country_validation_failed", operation: "ingest_order", channelId, code: error.code }));
+        logger.error("oms_country_validation_failed", { event: "oms_country_validation_failed", operation: "ingest_order", channelId, code: error.code });
       }
       throw error;
     }
@@ -257,7 +258,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
         : null;
     } catch (error) {
       if (error instanceof ShopifyCustomerIdentityError) {
-        console.error(JSON.stringify({ event: "oms_customer_identity_validation_failed", channelId, externalOrderId, code: error.code }));
+        logger.error("oms_customer_identity_validation_failed", { event: "oms_customer_identity_validation_failed", channelId, externalOrderId, code: error.code });
       }
       throw error;
     }
@@ -325,7 +326,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
             "The OMS order could not be resolved after an ingestion conflict.", { channelId, externalOrderId });
           const existingCustomerId = normalizeShopifyCustomerId(existing.externalCustomerId);
           if (existingCustomerId !== null && existingCustomerId !== shopifyCustomerId) {
-            console.error(JSON.stringify({ event: "oms_customer_identity_conflict", orderId: existing.id, channelId, externalOrderId, code: "OMS_CUSTOMER_ID_CONFLICT" }));
+            logger.error("oms_customer_identity_conflict", { event: "oms_customer_identity_conflict", orderId: existing.id, channelId, externalOrderId, code: "OMS_CUSTOMER_ID_CONFLICT" });
             throw new ShopifyCustomerIdentityError("OMS_CUSTOMER_ID_CONFLICT", "The existing OMS order belongs to a different Shopify customer.",
               { orderId: existing.id, channelId, externalOrderId });
           }
@@ -406,12 +407,12 @@ export function createOmsService(db: any, reservationService?: any, options: { c
         details: { channelId, externalOrderId, lineItemCount: data.lineItems.length },
       });
 
-      console.log(`[OMS] Ingested order ${data.externalOrderNumber || externalOrderId} from channel ${channelId}`);
+      logger.info("oms.service", { message: `[OMS] Ingested order ${data.externalOrderNumber || externalOrderId} from channel ${channelId}` });
       return inserted;
     });
 
     if (!order) {
-      console.log(`[METRIC] oms.duplicate_ingest_avoided_total=1 (channel_id=${channelId}, external_order_id=${externalOrderId})`);
+      logger.info("oms.service", { message: `[METRIC] oms.duplicate_ingest_avoided_total=1 (channel_id=${channelId}, external_order_id=${externalOrderId})` });
 
       const existing = await db
         .select()
@@ -603,9 +604,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
       });
 
       if (insertedLines > 0 || updatedLines > 0) {
-        console.log(
-          `[OMS] Reconciled duplicate ingest lines for order ${existingOrder.id}: inserted=${insertedLines} updated=${updatedLines}`,
-        );
+        logger.info("oms.service", { message: `[OMS] Reconciled duplicate ingest lines for order ${existingOrder.id}: inserted=${insertedLines} updated=${updatedLines}` });
       }
 
       return existingOrder;
@@ -652,7 +651,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
     // If the WMS order does not exist yet, we do nothing — WMS sync reserves
     // as part of creating it.
     if (!reservationService?.reserveOrder) {
-      console.error(`[OMS] reserveInventory called but no ReservationService wired. Order ${orderId} not reserved.`);
+      logger.error("oms.service", { message: `[OMS] reserveInventory called but no ReservationService wired. Order ${orderId} not reserved.` });
       return { reserved: 0, failed: ["no_reservation_service"] };
     }
 
@@ -665,9 +664,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
     `);
     const wmsOrder = wmsRows?.rows?.[0];
     if (!wmsOrder) {
-      console.log(
-        `[OMS] reserveInventory(${orderId}): no WMS order yet — reservation happens at WMS sync (single-writer)`,
-      );
+      logger.info("oms.service", { message: `[OMS] reserveInventory(${orderId}): no WMS order yet — reservation happens at WMS sync (single-writer)` });
       return { reserved: 0, failed: [] };
     }
 
@@ -1249,9 +1246,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
       // No FOs returned — edge case (very new order, or non-fulfillable
       // composition). Logged so it's visible; C22c's Path B will retry
       // at fulfillment-push time.
-      console.log(
-        `[OMS] populateShopifyFulfillmentOrderIds: order ${omsOrderId} (${shopifyOrderGid}) has no fulfillment orders yet`,
-      );
+      logger.info("oms.service", { message: `[OMS] populateShopifyFulfillmentOrderIds: order ${omsOrderId} (${shopifyOrderGid}) has no fulfillment orders yet` });
       return { matched: 0, unmatched: lines.length, updates: 0 };
     }
 
@@ -1262,9 +1257,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
       const provider = String(line.fulfillmentProvider ?? "").trim();
       if (provider.length > 0 && provider.toLowerCase() !== "shopify") {
         unmatched++;
-        console.log(
-          `[OMS] populateShopifyFulfillmentOrderIds: skipping line ${line.id} provider=${provider} (not Shopify)`,
-        );
+        logger.info("oms.service", { message: `[OMS] populateShopifyFulfillmentOrderIds: skipping line ${line.id} provider=${provider} (not Shopify)` });
         continue;
       }
 
@@ -1278,9 +1271,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
       );
       if (!candidate) {
         unmatched++;
-        console.log(
-          `[OMS] populateShopifyFulfillmentOrderIds: no FO match for line ${line.id} sku=${sku} qty=${line.quantity} (will be retried via Path B)`,
-        );
+        logger.info("oms.service", { message: `[OMS] populateShopifyFulfillmentOrderIds: no FO match for line ${line.id} sku=${sku} qty=${line.quantity} (will be retried via Path B)` });
         continue;
       }
       candidate.remaining -= line.quantity;

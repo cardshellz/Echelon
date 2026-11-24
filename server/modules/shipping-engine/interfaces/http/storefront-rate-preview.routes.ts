@@ -6,6 +6,7 @@ import {
   computeCheckoutRatePreview,
   type CheckoutRatePreviewResult,
 } from "./carrier-callback.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 const previewLineSchema = z.object({
   sku: z.string().trim().min(1).max(255).nullable(),
@@ -110,13 +111,9 @@ export function registerStorefrontRatePreviewRoutes(
 
         return res.json(storefrontRatePreviewResponseSchema.parse({ groups }));
       } catch (error) {
-        console.error(JSON.stringify({
-          code: "STOREFRONT_RATE_PREVIEW_FAILED",
-          message: "Storefront shipping-rate preview failed.",
-          context: {
+        logger.error("STOREFRONT_RATE_PREVIEW_FAILED", { code: "STOREFRONT_RATE_PREVIEW_FAILED", message: "Storefront shipping-rate preview failed.", context: {
             error: error instanceof Error ? error.message : String(error),
-          },
-        }));
+          } });
         return res.status(500).json({
           error: {
             code: "STOREFRONT_RATE_PREVIEW_FAILED",

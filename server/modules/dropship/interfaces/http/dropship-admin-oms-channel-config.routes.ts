@@ -4,6 +4,7 @@ import type { DropshipOmsChannelConfigService } from "../../application/dropship
 import { omsChannelConfigValidationError } from "../../application/dropship-oms-channel-config-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipOmsChannelConfigServiceFromEnv } from "../../infrastructure/dropship-oms-channel-config.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -102,7 +103,7 @@ function sendDropshipOmsChannelConfigError(res: Response, error: unknown): Respo
     });
   }
 
-  console.error("[DropshipAdminOmsChannelConfigRoutes] Unexpected OMS channel config error:", error);
+  logger.error("dropship.admin_oms_channel_config_routes", { message: "[DropshipAdminOmsChannelConfigRoutes] Unexpected OMS channel config error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_OMS_CHANNEL_CONFIG_INTERNAL_ERROR",

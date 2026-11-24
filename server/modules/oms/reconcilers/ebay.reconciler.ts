@@ -10,6 +10,7 @@ import {
   isChannelFulfillmentHandoffComplete,
 } from "../application/channel-fulfillment-authority.handoff";
 import type { ChannelFulfillmentAuthorityService } from "../application/channel-fulfillment-authority.service";
+import { logger } from "../../../platform/observability/logger";
 
 export class EbayFulfillmentReconciler implements FulfillmentReconciler {
   constructor(
@@ -33,7 +34,7 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
 
       return "unfulfilled";
     } catch (err: any) {
-      console.error(`[EbayFulfillmentReconciler] Error checking status for order ${order.id}: ${err.message}`);
+      logger.error("oms.ebay_reconciler", { message: `[EbayFulfillmentReconciler] Error checking status for order ${order.id}: ${err.message}` });
       return "unknown";
     }
   }
@@ -42,15 +43,13 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
     try {
       const orderId = Number((order as any).id);
       if (!Number.isInteger(orderId) || orderId <= 0) {
-        console.error(`[EbayFulfillmentReconciler] Cannot repush order without a valid id`);
+        logger.error("oms.ebay_reconciler", { message: `[EbayFulfillmentReconciler] Cannot repush order without a valid id` });
         return false;
       }
 
       const shipmentIds = await this.findShippedWmsShipmentIds(orderId);
       if (shipmentIds.length === 0) {
-        console.error(
-          `[EbayFulfillmentReconciler] No shipped WMS package exists for OMS order ${orderId}`,
-        );
+        logger.error("oms.ebay_reconciler", { message: `[EbayFulfillmentReconciler] No shipped WMS package exists for OMS order ${orderId}` });
         return false;
       }
 
@@ -70,15 +69,13 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
           }
         } catch (err: any) {
           failures++;
-          console.error(
-            `[EbayFulfillmentReconciler] Error repushing tracking for shipment ${shipmentId}: ${err.message}`,
-          );
+          logger.error("oms.ebay_reconciler", { message: `[EbayFulfillmentReconciler] Error repushing tracking for shipment ${shipmentId}: ${err.message}` });
         }
       }
 
       return failures === 0;
     } catch (err: any) {
-      console.error(`[EbayFulfillmentReconciler] Error repushing tracking for order ${order.id}: ${err.message}`);
+      logger.error("oms.ebay_reconciler", { message: `[EbayFulfillmentReconciler] Error repushing tracking for order ${order.id}: ${err.message}` });
       return false;
     }
   }
@@ -111,9 +108,7 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
         ? response.fulfillments
         : [];
       if (fulfillments.length === 0) {
-        console.warn(
-          `[EbayFulfillmentReconciler] eBay order ${externalId} is FULFILLED but has no shipping fulfillment records`,
-        );
+        logger.warn("oms.ebay_reconciler", { message: `[EbayFulfillmentReconciler] eBay order ${externalId} is FULFILLED but has no shipping fulfillment records` });
         return false;
       }
 
@@ -136,14 +131,10 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
         if (result.processingStatus === "review") reviewed++;
       }
 
-      console.log(
-        `[EbayFulfillmentReconciler] Reconciled ${fulfillments.length} eBay fulfillment package(s) for order ${externalId}; review=${reviewed}`,
-      );
+      logger.info("oms.ebay_reconciler", { message: `[EbayFulfillmentReconciler] Reconciled ${fulfillments.length} eBay fulfillment package(s) for order ${externalId}; review=${reviewed}` });
       return reviewed === 0;
     } catch (err: any) {
-      console.error(
-        `[EbayFulfillmentReconciler] Error syncing fulfillment from eBay for order ${order.id}: ${err.message}`,
-      );
+      logger.error("oms.ebay_reconciler", { message: `[EbayFulfillmentReconciler] Error syncing fulfillment from eBay for order ${order.id}: ${err.message}` });
       return false;
     }
   }

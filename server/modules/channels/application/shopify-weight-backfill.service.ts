@@ -23,6 +23,7 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { channelConnections, channels, productVariants } from "@shared/schema";
 import { updateVariantWeightIfNullInCatalog } from "../../catalog/cross-module-product-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -176,7 +177,7 @@ export async function runShopifyWeightBackfill(
     report.skippedNoMapping = candidates.length - mapped.length;
 
     if (mapped.length === 0) {
-      console.log(`[ShopifyWeightBackfill] ${dryRun ? "DRY RUN" : "LIVE"}: no mapped candidates — nothing to fetch`);
+      logger.info("channels.shopify_weight_backfill_service", { message: `[ShopifyWeightBackfill] ${dryRun ? "DRY RUN" : "LIVE"}: no mapped candidates — nothing to fetch` });
       return report;
     }
 
@@ -224,15 +225,13 @@ export async function runShopifyWeightBackfill(
       }
     }
 
-    console.log(
-      `[ShopifyWeightBackfill] ${dryRun ? "DRY RUN" : "LIVE"} complete: ` +
+    logger.info("channels.shopify_weight_backfill_service", { detail: `[ShopifyWeightBackfill] ${dryRun ? "DRY RUN" : "LIVE"} complete: ` +
         `${report.candidates} candidates, ${report.fetched} fetched, ${report.updated} ${dryRun ? "would update" : "updated"}, ` +
         `${report.skippedNoMapping} no mapping, ${report.skippedNoWeight} no weight, ` +
-        `${report.skippedAlreadySet} already set, ${report.errors.length} errors`,
-    );
+        `${report.skippedAlreadySet} already set, ${report.errors.length} errors` });
   } catch (err: any) {
     report.errors.push(`Weight backfill failed: ${err?.message ?? String(err)}`);
-    console.error(`[ShopifyWeightBackfill] Fatal error:`, err);
+    logger.error("channels.shopify_weight_backfill_service", { message: `[ShopifyWeightBackfill] Fatal error:`, error: err });
   }
 
   return report;
@@ -444,7 +443,7 @@ async function shopifyGraphql(
 
     if (response.status === 429) {
       const retryAfter = parseInt(response.headers.get("Retry-After") || "2", 10);
-      console.warn(`[ShopifyWeightBackfill] Rate limited, retrying in ${retryAfter}s (attempt ${attempt})`);
+      logger.warn("channels.shopify_weight_backfill_service", { message: `[ShopifyWeightBackfill] Rate limited, retrying in ${retryAfter}s (attempt ${attempt})` });
       await delay(retryAfter * 1000);
       continue;
     }
@@ -453,7 +452,7 @@ async function shopifyGraphql(
       const errorBody = await response.text();
       if (attempt < GRAPHQL_MAX_RETRIES && response.status >= 500) {
         const backoff = GRAPHQL_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        console.warn(`[ShopifyWeightBackfill] Server error ${response.status}, retrying in ${backoff}ms`);
+        logger.warn("channels.shopify_weight_backfill_service", { message: `[ShopifyWeightBackfill] Server error ${response.status}, retrying in ${backoff}ms` });
         await delay(backoff);
         continue;
       }
@@ -466,7 +465,7 @@ async function shopifyGraphql(
       const throttled = payload.errors.some((e: any) => e?.extensions?.code === "THROTTLED");
       if (throttled && attempt < GRAPHQL_MAX_RETRIES) {
         const backoff = GRAPHQL_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        console.warn(`[ShopifyWeightBackfill] GraphQL throttled, retrying in ${backoff}ms`);
+        logger.warn("channels.shopify_weight_backfill_service", { message: `[ShopifyWeightBackfill] GraphQL throttled, retrying in ${backoff}ms` });
         await delay(backoff);
         continue;
       }

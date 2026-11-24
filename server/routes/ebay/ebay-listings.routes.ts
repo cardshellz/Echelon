@@ -38,6 +38,7 @@ import {
   markChannelListingReconcileDeleted,
   markChannelListingReconcileEnded,
 } from "../../modules/channels/ebay-route-admin.api";
+import { logger } from "../../platform/observability/logger";
 
 export const router = express.Router();
 const EBAY_LISTING_DEFAULT_MARKETPLACE_ID = "EBAY_US";
@@ -45,8 +46,7 @@ const publicationImageUrl = createCatalogPublicImageUrl(process.env);
 const ebayListingConnector = new EbayMarketplaceListingConnector();
 const feedInventory = new EbayListingFeedInventoryService(atpService, {
   createReference: randomUUID,
-  reportFailure: ({ error, ...context }) => console.error({ event: "ebay_listing_feed_inventory_failed", ...context,
-    error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" }),
+  reportFailure: ({ error, ...context }) => logger.error("ebay_listing_feed_inventory_failed", { event: "ebay_listing_feed_inventory_failed", ...context, error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" }),
 });
 const feedReader = new EbayListingFeedReader(pool, EBAY_CHANNEL_ID, {
   inventory: feedInventory,
@@ -74,16 +74,13 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
         } finally {
           // One measurement per coalesced load, including failed loads. This
           // distinguishes slow projection work from connection acquisition.
-          console.info({ event: "channel_listing_feed_read", channelId: EBAY_CHANNEL_ID,
-            elapsedMs: Math.round(performance.now() - startedAt), productCount, poolAtStart,
-            poolAtFinish: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount } });
+          logger.info("channel_listing_feed_read", { event: "channel_listing_feed_read", channelId: EBAY_CHANNEL_ID, elapsedMs: Math.round(performance.now() - startedAt), productCount, poolAtStart, poolAtFinish: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount } });
         }
       }));
     } catch (error) {
       const reference = randomUUID();
       const issue = resolveEbayListingIssue({ code: "EBAY_LISTING_FEED_UNAVAILABLE", jobId: reference });
-      console.error({ event: "ebay_listing_feed_failed", reference,
-        error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown listing feed read failure" });
+      logger.error("ebay_listing_feed_failed", { event: "ebay_listing_feed_failed", reference, error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown listing feed read failure" });
       res.status(500).json({ code: issue.code, error: issue.message, issue });
     }
   });
@@ -97,8 +94,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
     } catch (error) {
       const reference = randomUUID();
       const issue = resolveEbayListingIssue({ code: "EBAY_FEED_QUANTITY_UNAVAILABLE", productId: productId.data, jobId: reference });
-      console.error({ event: "ebay_listing_inventory_failed", reference, productId: productId.data,
-        error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" });
+      logger.error("ebay_listing_inventory_failed", { event: "ebay_listing_inventory_failed", reference, productId: productId.data, error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" });
       res.status(503).json({ code: issue.code, error: issue.message, issue });
     }
   });
@@ -308,7 +304,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
             changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "ended" });
           }
         } catch (err: any) {
-          console.error(`[eBay Reconcile] Error checking SKU ${sku}:`, err.message);
+          logger.error("routes.ebay_listings_routes", { message: `[eBay Reconcile] Error checking SKU ${sku}:`, error: err.message });
           errors++;
         }
 
@@ -317,13 +313,13 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
       }
 
       if (changes.length > 0) {
-        console.log(`[eBay Reconcile] Status changes:`, changes.map((c) => `${c.sku}: ${c.oldStatus} → ${c.newStatus}`).join(", "));
+        logger.info("routes.ebay_listings_routes", { message: `[eBay Reconcile] Status changes:`, detail: changes.map((c) => `${c.sku}: ${c.oldStatus} → ${c.newStatus}`).join(", ") });
       }
-      console.log(`[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} quantityDrift=${quantityDrift} errors=${errors}`);
+      logger.info("routes.ebay_listings_routes", { message: `[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} quantityDrift=${quantityDrift} errors=${errors}` });
 
       res.json({ checked: listings.length, active, ended, deleted, quantityDrift, errors, changes });
     } catch (err: any) {
-      console.error("[eBay Reconcile] Error:", err.message);
+      logger.error("routes.ebay_listings_routes", { message: "[eBay Reconcile] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

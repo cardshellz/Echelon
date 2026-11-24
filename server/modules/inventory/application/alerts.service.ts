@@ -4,6 +4,7 @@ import {
   productVariants,
   warehouseLocations,
 } from "@shared/schema";
+import { logger } from "../../../platform/observability/logger";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -174,9 +175,7 @@ class InventoryAlertService {
     `);
     const count = Array.isArray(res?.rows) ? res.rows.length : 0;
     if (count > 0) {
-      console.warn(
-        `[Startup Warning] Found ${count} negative inventory levels. They have NOT been cleared.`,
-      );
+      logger.warn("inventory.alerts_service", { message: `[Startup Warning] Found ${count} negative inventory levels. They have NOT been cleared.` });
     }
     return count;
   }

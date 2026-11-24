@@ -40,11 +40,12 @@ vi.mock("../../application/webhook-inbox.service", () => ({
 import { createOmsService } from "../../application/oms.service";
 import { __test__ as webhook, registerOmsWebhooks } from "../../application/oms-webhooks";
 import { WmsSyncService } from "../../application/wms-sync.service";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.spyOn(console, "error").mockImplementation(() => undefined);
-  vi.spyOn(console, "log").mockImplementation(() => undefined);
+  spyLoggerJson("error");
+  spyLoggerJson("log");
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -67,14 +68,12 @@ describe("OMS country write boundaries", () => {
         } as unknown as OrderData),
       ).rejects.toMatchObject({ code: "ORDER_COUNTRY_INVALID" });
       expect(transaction).not.toHaveBeenCalled();
-      expect(console.error).toHaveBeenCalledWith(
-        JSON.stringify({
-          event: "oms_country_validation_failed",
-          operation: "ingest_order",
-          channelId: 36,
-          code: "ORDER_COUNTRY_INVALID",
-        }),
-      );
+      expect(JSON.parse(getLoggerJsonSpy("error").mock.calls[0][0])).toMatchObject({
+        event: "oms_country_validation_failed",
+        operation: "ingest_order",
+        channelId: 36,
+        code: "ORDER_COUNTRY_INVALID",
+      });
     },
   );
 
@@ -180,7 +179,7 @@ describe("Shopify country mapping and partial address updates", () => {
       expect(JSON.stringify(response.send.mock.calls)).not.toContain(
         "private-invalid-country",
       );
-      expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      expect(JSON.stringify(getLoggerJsonSpy("error").mock.calls)).not.toContain(
         "private-invalid-country",
       );
     },

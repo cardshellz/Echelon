@@ -20,6 +20,7 @@
 import { eq } from "drizzle-orm";
 import { channels, type Channel } from "@shared/schema";
 import type { SourceLockService } from "./source-lock.service";
+import { logger } from "../../../platform/observability/logger";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -53,13 +54,13 @@ export async function initializeSourceLockDefaults(
     throw new Error(`Channel ${channelId} not found`);
   }
 
-  console.log(`[SourceLockInit] Initializing defaults for channel "${channel.name}" (${channelId})`);
+  logger.info("channels.source_lock_init", { message: `[SourceLockInit] Initializing defaults for channel "${channel.name}" (${channelId})` });
 
   const fieldsInitialized = await sourceLockService.initializeChannelDefaults(channelId, "system_init");
   const lockStatus = await sourceLockService.getChannelLockStatus(channelId);
 
-  console.log(`[SourceLockInit] Initialized ${fieldsInitialized} field configs for channel "${channel.name}"`);
-  console.log(`[SourceLockInit] Lock status:`, lockStatus);
+  logger.info("channels.source_lock_init", { message: `[SourceLockInit] Initialized ${fieldsInitialized} field configs for channel "${channel.name}"` });
+  logger.info("channels.source_lock_init", { message: `[SourceLockInit] Lock status:`, detail: lockStatus });
 
   return {
     channelId,
@@ -88,7 +89,7 @@ export async function initializeAllChannelDefaults(
       const result = await initializeSourceLockDefaults(db, sourceLockService, channel.id);
       results.push(result);
     } catch (err: any) {
-      console.error(`[SourceLockInit] Failed for channel ${channel.name}: ${err.message}`);
+      logger.error("channels.source_lock_init", { message: `[SourceLockInit] Failed for channel ${channel.name}: ${err.message}` });
     }
   }
 

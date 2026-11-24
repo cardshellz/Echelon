@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { BuildDomainError } from "../../domain/build.domain";
+import { logger } from "../../../../platform/observability/logger";
 
 function actorId(req: Request): string | undefined {
   return req.session.user?.id;
@@ -61,10 +62,7 @@ function respondWithBuildError(res: Response, error: unknown): void {
     return;
   }
 
-  console.error(JSON.stringify({
-    event: "build_request_failed",
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  logger.error("build_request_failed", { event: "build_request_failed", error: error instanceof Error ? error.message : String(error) });
   res.status(500).json({
     error: {
       code: "BUILD_INTERNAL_ERROR",

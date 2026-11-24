@@ -8,6 +8,7 @@ import { CustomerReturnLiveError } from "../../application/customer-return-live-
 import { PostgresCustomerReturnSettingsStore } from "../../infrastructure/customer-return-label-settings.repository";
 import { labelPolicy, labelPreparationFixture, labelSettings, LABEL_KEY } from "../support/label-fixtures";
 import { LIVE_NOW } from "../support/live-inspection-fixtures";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const ports = vi.hoisted(() => ({
   live: vi.fn(), findOwnedOrder: vi.fn(), listOwnedOrders: vi.fn(), readOwnedAuthorization: vi.fn(), readOwnedCommand: vi.fn(),
@@ -83,11 +84,11 @@ describe("customer returns production composition", () => {
     const s = await setup();
     vi.spyOn(PostgresCustomerReturnSettingsStore.prototype, "read").mockResolvedValue(null);
     vi.spyOn(PostgresCustomerReturnSettingsStore.prototype, "readControl").mockResolvedValue({ paused: false, version: 0 });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const warn = spyLoggerJson("warn");
     s.lookupCanonical.mockRejectedValue(new CustomerReturnLiveError("RETURN_LIVE_DATA_UNVERIFIED", "private provider credential", 503));
     expect(await s.services.orders.list({})).toEqual({ orders: [], nextBeforeOmsOrderId: null, unavailableOrderCount: 1 });
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(warn.mock.calls[0][0])).toEqual({ event: "return_customer_order_unavailable",
+    expect(JSON.parse(warn.mock.calls[0][0])).toMatchObject({ event: "return_customer_order_unavailable",
       code: "RETURN_ORDER_INSPECTION_UNAVAILABLE", channelId: 36, omsOrderId: 100,
       reason: "inspection_failed", causeCode: "RETURN_LIVE_DATA_UNVERIFIED" });
     expect(s.progress).not.toHaveBeenCalled();

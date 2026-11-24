@@ -10,6 +10,7 @@ import { HistoricalShipStationContentsReviewService } from
   "../modules/shipping/historical-shipstation-contents.api";
 import { classifyReviewedShipStationContents } from
   "../modules/shipping/historical-shipstation-contents.api";
+import { logger } from "../platform/observability/logger";
 
 interface Options {
   readonly shippingProviderLabelId: string;
@@ -75,14 +76,11 @@ export async function runCurrentShipStationContentsReviewJob(options: Options) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   (async () => {
     try {
-      console.log(JSON.stringify(await runCurrentShipStationContentsReviewJob(
+      logger.info("jobs.current_shipstation_contents_review_job", { detail: JSON.stringify(await runCurrentShipStationContentsReviewJob(
         parseOptions(process.argv.slice(2)),
-      )));
+      )) });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "CURRENT_SHIPSTATION_CONTENTS_REVIEW_FAILED",
-        message: error instanceof Error ? error.message : "Unknown failure",
-      }));
+      logger.error("CURRENT_SHIPSTATION_CONTENTS_REVIEW_FAILED", { code: "CURRENT_SHIPSTATION_CONTENTS_REVIEW_FAILED", message: error instanceof Error ? error.message : "Unknown failure" });
       process.exitCode = 1;
     } finally {
       await pool.end();

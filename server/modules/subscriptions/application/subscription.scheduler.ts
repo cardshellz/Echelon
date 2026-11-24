@@ -8,6 +8,7 @@ import {
   isDefinitiveSubscriptionProviderRejection,
 } from "../infrastructure/shopify.adapter";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
+import { logger } from "../../../platform/observability/logger";
 
 const BATCH_DELAY_MS = 500; // 500ms between billing attempts to respect rate limits
 export const BILLING_LOCK_ID = 54321;
@@ -33,7 +34,7 @@ export async function processDueBillings(
 
   // First, reconcile memberships (M7)
   const reconcileStats = await storage.reconcileCurrentMemberships();
-  console.log(`[BillingScheduler] M7 Reconcile check complete: ${reconcileStats.upserted} members aligned`);
+  logger.info("subscriptions.subscription_scheduler", { message: `[BillingScheduler] M7 Reconcile check complete: ${reconcileStats.upserted} members aligned` });
 
   const due = await storage.getDueBillings();
   const errors: string[] = [];
@@ -42,19 +43,19 @@ export async function processDueBillings(
   let failed = 0;
   let uncertain = 0;
 
-  console.log(`[BillingScheduler] Found ${due.length} subscriptions due for billing`);
+  logger.info("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Found ${due.length} subscriptions due for billing` });
 
   for (let idx = 0; idx < due.length; idx++) {
     const sub = due[idx];
     if (!sub.shopify_subscription_contract_gid) {
-      console.warn(`[BillingScheduler] Subscription ${sub.id} has no contract GID, skipping`);
+      logger.warn("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Subscription ${sub.id} has no contract GID, skipping` });
       continue;
     }
 
     // Atomically claim billing_in_progress = false -> true so overlapping callers cannot double-dispatch
     const claimed = await storage.claimBillingInProgress(sub.id);
     if (!claimed) {
-      console.log(`[BillingScheduler] Subscription ${sub.id} already claimed, skipping`);
+      logger.info("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Subscription ${sub.id} already claimed, skipping` });
       continue;
     }
 
@@ -103,7 +104,7 @@ export async function processDueBillings(
       });
 
       succeeded++;
-      console.log(`[BillingScheduler] Initiated billing for subscription ${sub.id} (contract ${sub.shopify_subscription_contract_id})`);
+      logger.info("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Initiated billing for subscription ${sub.id} (contract ${sub.shopify_subscription_contract_id})` });
     } catch (err: any) {
       const errMessage = err instanceof Error ? err.message : String(err);
 
@@ -111,7 +112,7 @@ export async function processDueBillings(
         failed++;
         const errMsg = `Subscription ${sub.id}: ${errMessage}`;
         errors.push(errMsg);
-        console.error(`[BillingScheduler] Definitive provider rejection: ${errMsg}`);
+        logger.error("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Definitive provider rejection: ${errMsg}` });
 
         await db.transaction(async (tx) => {
           await storage.setBillingInProgress(sub.id, false, tx);
@@ -146,7 +147,7 @@ export async function processDueBillings(
         uncertain++;
         const errMsg = `Subscription ${sub.id} (uncertain — locked pending reconciliation): ${errMessage}`;
         errors.push(errMsg);
-        console.error(`[BillingScheduler] Uncertain provider outcome: ${errMsg}`);
+        logger.error("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Uncertain provider outcome: ${errMsg}` });
 
         await db.transaction(async (tx) => {
           await storage.insertBillingLog(
@@ -185,9 +186,7 @@ export async function processDueBillings(
     }
   }
 
-  console.log(
-    `[BillingScheduler] Complete: processed=${processed} succeeded=${succeeded} failed=${failed} uncertain=${uncertain}`,
-  );
+  logger.info("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Complete: processed=${processed} succeeded=${succeeded} failed=${failed} uncertain=${uncertain}` });
 
   return { skipped: false, processed, succeeded, failed, uncertain, errors };
 }
@@ -224,7 +223,7 @@ export function startBillingScheduler(): void {
     try {
       await runBillingPassWithLock();
     } catch (err: any) {
-      console.error(`[BillingScheduler] Startup run error: ${err.message}`);
+      logger.error("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Startup run error: ${err.message}` });
     }
 
     // Then run every hour
@@ -232,10 +231,10 @@ export function startBillingScheduler(): void {
       try {
         await runBillingPassWithLock();
       } catch (err: any) {
-        console.error(`[BillingScheduler] Scheduled run error: ${err.message}`);
+        logger.error("subscriptions.subscription_scheduler", { message: `[BillingScheduler] Scheduled run error: ${err.message}` });
       }
     }, INTERVAL_MS);
 
-    console.log("[BillingScheduler] Billing scheduler started (runs every hour, dyno-safe lock)");
+    logger.info("subscriptions.subscription_scheduler", { message: "[BillingScheduler] Billing scheduler started (runs every hour, dyno-safe lock)" });
   }, 2 * 60 * 1000);
 }

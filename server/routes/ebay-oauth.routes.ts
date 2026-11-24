@@ -22,6 +22,7 @@ import { randomBytes } from "node:crypto";
 import { channelMethods } from "../modules/channels";
 import { createEbayOAuthAuthorization, verifyEbayOAuthAuthorization, resolveEbayOAuthChannel, type EbayOAuthAuthorization } from "../modules/channels/application/ebay-oauth-authorization";
 import { safeListingDiagnostic } from "@shared/ebay-listing-issue";
+import { logger } from "../platform/observability/logger";
 
 declare module "express-session" {
   interface SessionData { ebayOAuthAuthorization?: EbayOAuthAuthorization; }
@@ -59,7 +60,7 @@ export function registerEbayOAuthRoutes(app: Express): void {
       await saveOAuthSession(req);
       res.redirect(new EbayAuthService(db as any, config).getConsentUrl(challenge.state));
     } catch (error) {
-      console.error(JSON.stringify({ event: "ebay_oauth_consent_failed", actorId: String(req.session.user!.id) }));
+      logger.error("ebay_oauth_consent_failed", { event: "ebay_oauth_consent_failed", actorId: String(req.session.user!.id) });
       sendOAuthPage(res, 400, "eBay connection could not start", safeListingDiagnostic(error instanceof Error ? error.message : undefined) ?? "Return to Connection settings and start the connection again.");
     }
   });
@@ -84,11 +85,11 @@ export function registerEbayOAuthRoutes(app: Express): void {
       const code = singleQueryParam(req.query.code);
       if (!code?.trim() || code.length > 10_000) { sendOAuthPage(res, 400, "eBay authorization code is missing", "Start a new connection from eBay Connection settings. This callback cannot be retried without a new authorization."); return; }
       await new EbayAuthService(db as any, config).exchangeAuthorizationCode(channelId, code);
-      console.info(JSON.stringify({ event: "ebay_oauth_connected", channelId, actorId: String(req.session.user!.id), environment: config.environment }));
+      logger.info("ebay_oauth_connected", { event: "ebay_oauth_connected", channelId, actorId: String(req.session.user!.id), environment: config.environment });
       sendOAuthPage(res, 200, "eBay connected", "Return to eBay Connection settings and choose Refresh connection. Existing listing updates can then be retried.");
     } catch (error) {
       const code = error instanceof Error && "code" in error && typeof error.code === "string" && /^[A-Z0-9_]{1,100}$/.test(error.code) ? error.code : "EBAY_OAUTH_CONNECTION_FAILED";
-      console.error(JSON.stringify({ event: "ebay_oauth_connection_failed", code, actorId: String(req.session.user!.id) }));
+      logger.error("ebay_oauth_connection_failed", { event: "ebay_oauth_connection_failed", code, actorId: String(req.session.user!.id) });
       const message = safeListingDiagnostic(error instanceof Error ? error.message : undefined) ?? "Return to eBay Connection settings and reconnect. If the problem continues, give the connection error code to an administrator.";
       sendOAuthPage(res, 400, "eBay connection needs attention", `${message} Error code: ${code}.`);
     }
@@ -134,7 +135,7 @@ export function registerEbayOAuthRoutes(app: Express): void {
         })),
       });
     } catch {
-      console.error(JSON.stringify({ event: "ebay_oauth_status_failed", actorId: String(req.session.user!.id), environment: config.environment }));
+      logger.error("ebay_oauth_status_failed", { event: "ebay_oauth_status_failed", actorId: String(req.session.user!.id), environment: config.environment });
       res.status(503).json({ configured: true, code: "EBAY_AUTH_STATUS_UNAVAILABLE", error: "The saved connection status could not be loaded. Refresh Connection settings; if it still fails, give this error code to an administrator." });
     }
   });

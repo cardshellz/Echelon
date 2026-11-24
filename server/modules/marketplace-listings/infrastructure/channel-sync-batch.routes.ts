@@ -8,6 +8,7 @@ import {
   channelSyncBatchesSchema,
   startChannelSyncBatchSchema,
 } from "@shared/types/channel-sync-batch";
+import { logger } from "../../../platform/observability/logger";
 
 const id = z.coerce.number().int().positive().max(2_147_483_647);
 const offsetSchema = z.coerce.number().int().min(0).max(1_000_000).default(0);
@@ -35,12 +36,7 @@ async function respond(
         .json({ code: error.code, message: error.message });
     } else {
       // Invalid output is unavailable server evidence, not an operator input error.
-      console.error(
-        JSON.stringify({
-          event: "channel_sync_batch_request_failed",
-          code: "SYNC_BATCH_UNAVAILABLE",
-        }),
-      );
+      logger.error("channel_sync_batch_request_failed", { event: "channel_sync_batch_request_failed", code: "SYNC_BATCH_UNAVAILABLE" });
       res.status(503).json({
         code: "SYNC_BATCH_UNAVAILABLE",
         message:

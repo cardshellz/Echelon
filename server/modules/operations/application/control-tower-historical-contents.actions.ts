@@ -20,6 +20,7 @@ import {
   HistoricalShipStationContentsReviewServiceError,
 } from "../../shipping/historical-shipstation-contents.api";
 import { ControlTowerRequestError } from "../interfaces/http/control-tower-v2.request";
+import { logger } from "../../../platform/observability/logger";
 
 interface HistoricalContentsReviewService {
   preview(exceptionId: string): Promise<unknown>;
@@ -269,11 +270,7 @@ export async function decideHistoricalContentsReview(input: Readonly<{
           enqueueReprocess: input.enqueueReprocess,
         });
       } catch (enqueueError) {
-        console.error("[Operations Control Tower V2] historical contents reprocess enqueue failed after decision commit", {
-          workItemId: input.workItemId,
-          exceptionId,
-          error: enqueueError instanceof Error ? enqueueError.message : String(enqueueError),
-        });
+        logger.error("operations.control_tower_historical_contents_actions", { message: "[Operations Control Tower V2] historical contents reprocess enqueue failed after decision commit", workItemId: input.workItemId, exceptionId, error: enqueueError instanceof Error ? enqueueError.message : String(enqueueError) });
         throw new ControlTowerRequestError(
           "Historical WMS package-content confirmation was recorded, but queueing ShipStation order reprocessing failed. Retry with the same decision to complete queueing.",
           503,

@@ -264,10 +264,8 @@ async function enqueueMissingShipStationLinkRecovery(
     `sweeper observed unlinked ShipStation order ${observedOrderId}`,
     { allowExhaustedRecovery: true },
   );
-  console.warn(
-    `[ShipStation Sweeper] Queued exact-identity recovery for WMS shipment ${shipmentId}; ` +
-      `ShipStation order ${observedOrderId} has key ${String(order.orderKey ?? "")}.`,
-  );
+  platformLogger.warn("oms.shipstation_sweeper", { detail: `[ShipStation Sweeper] Queued exact-identity recovery for WMS shipment ${shipmentId}; ` +
+      `ShipStation order ${observedOrderId} has key ${String(order.orderKey ?? "")}.` });
   return true;
 }
 
@@ -322,7 +320,7 @@ export async function sweepShipStationQueue(
     getAuthHeader: () => `Basic ${encodedAuth}`,
   });
 
-  console.log("[ShipStation Sweeper] Fetching all awaiting_shipment orders...");
+  platformLogger.info("oms.shipstation_sweeper", { message: "[ShipStation Sweeper] Fetching all awaiting_shipment orders..." });
 
   let page = 1;
   const pageSize = 100;
@@ -338,10 +336,7 @@ export async function sweepShipStationQueue(
         `/orders?orderStatus=awaiting_shipment&pageSize=${pageSize}&page=${page}`,
       );
     } catch (err: any) {
-      console.warn(
-        "[ShipStation Sweeper] Failed to fetch SS queue",
-        err?.message ?? String(err),
-      );
+      platformLogger.warn("oms.shipstation_sweeper", { message: "[ShipStation Sweeper] Failed to fetch SS queue", error: err?.message ?? String(err) });
       awaitingShipmentScanComplete = false;
       break;
     }
@@ -410,11 +405,9 @@ export async function sweepShipStationQueue(
             )) {
               continue;
             }
-            console.log(
-              `[ShipStation Sweeper] Ignored additional SS order ${order.orderId} ` +
+            platformLogger.info("oms.shipstation_sweeper", { detail: `[ShipStation Sweeper] Ignored additional SS order ${order.orderId} ` +
                 `for WMS shipment ${wmsShipmentId}; canonical SS order is ` +
-                `${finality.shipStationOrderId ?? "unknown"}.`,
-            );
+                `${finality.shipStationOrderId ?? "unknown"}.` });
             continue;
           }
           if (!finality.isFinal) {
@@ -426,11 +419,9 @@ export async function sweepShipStationQueue(
             "shipstation_queue_review_required",
           );
           totalFlagged++;
-          console.warn(
-            `[ShipStation Sweeper] Flagged stale SS awaiting order ${order.orderId} ` +
+          platformLogger.warn("oms.shipstation_sweeper", { detail: `[ShipStation Sweeper] Flagged stale SS awaiting order ${order.orderId} ` +
               `(${order.orderNumber}, key=${orderKey}) for WMS review; ` +
-              `shipmentStatus=${finality.shipmentStatus}, warehouseStatus=${finality.warehouseStatus}`,
-          );
+              `shipmentStatus=${finality.shipmentStatus}, warehouseStatus=${finality.warehouseStatus}` });
           continue;
         }
 
@@ -443,10 +434,8 @@ export async function sweepShipStationQueue(
             ),
           );
           totalFlagged++;
-          console.warn(
-            `[ShipStation Sweeper] Flagged stale SS awaiting order ${order.orderId} ` +
-              `(${order.orderNumber}, key=${orderKey}) for OMS review`,
-          );
+          platformLogger.warn("oms.shipstation_sweeper", { detail: `[ShipStation Sweeper] Flagged stale SS awaiting order ${order.orderId} ` +
+              `(${order.orderNumber}, key=${orderKey}) for OMS review` });
         }
       }
     }
@@ -466,9 +455,7 @@ export async function sweepShipStationQueue(
   }
 
   if (totalFlagged > 0) {
-    console.log(
-      `[ShipStation Sweeper] Done. Flagged ${totalFlagged} ShipStation queue issue(s) for review.`,
-    );
+    platformLogger.info("oms.shipstation_sweeper", { message: `[ShipStation Sweeper] Done. Flagged ${totalFlagged} ShipStation queue issue(s) for review.` });
   }
 }
 
@@ -476,7 +463,7 @@ async function flagAwaitingPaymentOrdersForReview(
   apiRequest: ShipStationApiRequester,
   deps: ShipStationSweeperDependencies,
 ): Promise<number> {
-  console.log("[ShipStation Sweeper] Checking for Echelon orders stuck in awaiting_payment...");
+  platformLogger.info("oms.shipstation_sweeper", { message: "[ShipStation Sweeper] Checking for Echelon orders stuck in awaiting_payment..." });
 
   let page = 1;
   const pageSize = 100;
@@ -490,9 +477,7 @@ async function flagAwaitingPaymentOrdersForReview(
         `/orders?orderStatus=awaiting_payment&pageSize=${pageSize}&page=${page}`,
       );
     } catch (err: any) {
-      console.warn(
-        `[ShipStation Sweeper] Failed to fetch awaiting_payment page ${page}: ${err?.message ?? String(err)}`,
-      );
+      platformLogger.warn("oms.shipstation_sweeper", { message: `[ShipStation Sweeper] Failed to fetch awaiting_payment page ${page}: ${err?.message ?? String(err)}` });
       break;
     }
 
@@ -524,11 +509,9 @@ async function flagAwaitingPaymentOrdersForReview(
           )) {
             continue;
           }
-          console.log(
-            `[ShipStation Sweeper] Ignored additional awaiting_payment SS order ` +
+          platformLogger.info("oms.shipstation_sweeper", { detail: `[ShipStation Sweeper] Ignored additional awaiting_payment SS order ` +
               `${order.orderId} for WMS shipment ${wmsShipmentId}; canonical SS order is ` +
-              `${finality.shipStationOrderId ?? "unknown"}.`,
-          );
+              `${finality.shipStationOrderId ?? "unknown"}.` });
           continue;
         }
         await flagWmsShipmentForShipStationReview(
@@ -536,10 +519,8 @@ async function flagAwaitingPaymentOrdersForReview(
           "shipstation_awaiting_payment_review",
         );
         flagged++;
-        console.warn(
-          `[ShipStation Sweeper] Flagged awaiting_payment SS order ${order.orderId} ` +
-            `(${order.orderNumber}, key=${orderKey}) for WMS review`,
-        );
+        platformLogger.warn("oms.shipstation_sweeper", { detail: `[ShipStation Sweeper] Flagged awaiting_payment SS order ${order.orderId} ` +
+            `(${order.orderNumber}, key=${orderKey}) for WMS review` });
         continue;
       }
 
@@ -552,10 +533,8 @@ async function flagAwaitingPaymentOrdersForReview(
           ),
         );
         flagged++;
-        console.warn(
-          `[ShipStation Sweeper] Flagged awaiting_payment SS order ${order.orderId} ` +
-            `(${order.orderNumber}, key=${orderKey}) for OMS review`,
-        );
+        platformLogger.warn("oms.shipstation_sweeper", { detail: `[ShipStation Sweeper] Flagged awaiting_payment SS order ${order.orderId} ` +
+            `(${order.orderNumber}, key=${orderKey}) for OMS review` });
       }
     }
 

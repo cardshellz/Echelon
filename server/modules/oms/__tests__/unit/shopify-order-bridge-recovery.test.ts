@@ -5,6 +5,7 @@ import {
   backfillShopifyOrders,
   bridgeShopifyOrderToOms,
 } from "../../application/shopify-bridge";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const SHOPIFY_BRIDGE_SRC = readFileSync(
   resolve(__dirname, "../../application/shopify-bridge.ts"),
@@ -41,7 +42,7 @@ describe("Shopify raw-to-OMS bridge recovery", () => {
       .mockResolvedValueOnce({ rows: [{ channel_id: 36 }] })
       .mockResolvedValueOnce({ rows: [] });
     const ingestOrder = vi.fn();
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       await expect(bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001"))
         .rejects.toMatchObject({ name: "MoneyInputError" });
@@ -95,7 +96,7 @@ describe("Shopify raw-to-OMS bridge recovery", () => {
       .mockResolvedValueOnce({ rows: [{ channel_id: 36 }] })
       .mockResolvedValueOnce({ rows: [] });
     const ingestOrder = vi.fn();
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       await expect(bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001"))
         .rejects.toMatchObject({ code: "OMS_CUSTOMER_ID_INVALID" });
@@ -118,13 +119,14 @@ describe("Shopify raw-to-OMS bridge recovery", () => {
   it.each(["XX", "private-invalid-country", 123])("rejects malformed raw country %j before OMS ingestion", async country => {
     const execute = vi.fn().mockResolvedValueOnce({ rows: [{ ...rawOrder("1001", "#1001"), shipping_country: country }] });
     const ingestOrder = vi.fn();
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       await expect(bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001"))
         .rejects.toMatchObject({ code: "ORDER_COUNTRY_INVALID" });
       expect(ingestOrder).not.toHaveBeenCalled();
       expect(execute).toHaveBeenCalledTimes(1);
-      expect(log).toHaveBeenCalledWith(JSON.stringify({ event: "oms_country_validation_failed", operation: "shopify_bridge", code: "ORDER_COUNTRY_INVALID", shopifyOrderId: "1001" }));
+      expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: "oms_country_validation_failed", operation: "shopify_bridge", code: "ORDER_COUNTRY_INVALID", shopifyOrderId: "1001" });
+      expect(log.mock.calls[0][0]).not.toContain("private");
     } finally {
       log.mockRestore();
     }

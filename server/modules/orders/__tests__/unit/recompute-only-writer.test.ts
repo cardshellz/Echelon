@@ -36,6 +36,7 @@ vi.mock("../../../../db", () => {
 import { db as mockedDb } from "../../../../db";
 import { recomputeOrderStatusFromShipments } from "../../application/shipment-rollup";
 import { orderMethods as ordersStorage } from "../../infrastructure/orders.storage";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const recomputeMock = recomputeOrderStatusFromShipments as unknown as ReturnType<
   typeof vi.fn
@@ -106,7 +107,7 @@ describe("updateOrderStatus — shipment-derived delegation (C16)", () => {
       warehouseStatus: "partially_shipped",
       changed: true,
     });
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warnSpy = spyLoggerJson("warn");
 
     await ordersStorage.updateOrderStatus(42, "shipped" as any);
 
@@ -117,7 +118,7 @@ describe("updateOrderStatus — shipment-derived delegation (C16)", () => {
 
   it("does NOT log a warning when recompute matches the request", async () => {
     recomputeMock.mockResolvedValue({ warehouseStatus: "shipped", changed: true });
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warnSpy = spyLoggerJson("warn");
 
     await ordersStorage.updateOrderStatus(42, "shipped" as any);
 

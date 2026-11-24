@@ -1,6 +1,7 @@
 import { startNonOverlappingScheduler, type NonOverlappingSchedulerHandle } from "../../../infrastructure/non-overlapping-scheduler";
 import { schedulerIsDisabled } from "../../../infrastructure/scheduler-config";
 import type { ShopifyProductConnectionService } from "./shopify-product-connection.service";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 const CONNECTION_WORKER_INTERVAL_MS = 5_000;
 
@@ -13,7 +14,7 @@ export function startShopifyProductConnectionWorker(
   if (schedulerIsDisabled("SHOPIFY_PRODUCT_CONNECTION_DISABLED", environment)) return null;
   return startNonOverlappingScheduler({
     taskName: "shopify-product-connections", initialDelayMs: 1_000, intervalMs: CONNECTION_WORKER_INTERVAL_MS,
-    logger: { error: payload => console.error(JSON.stringify(payload)) },
+    logger: { error: payload => platformLogger.error("catalog.shopify_product_connection_worker", { error: JSON.stringify(payload) }) },
     run: async () => { await service.processDue(); },
   });
 }

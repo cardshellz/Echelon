@@ -16,6 +16,7 @@ import { captureSafetyDraftReviewSnapshotInsideTransaction } from "./inventory-a
 import { captureDefinitionImpact, enqueueReviewedDefinitionPublication } from "./inventory-product-definition.repository";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
+import { logger } from "../../../platform/observability/logger";
 
 /** The version row's idempotency key for a version written by `set`; distinct from keys the draft endpoints are given. */
 const SAFETY_SET_DRAFT_KEY_PREFIX = "safety-set:";
@@ -120,10 +121,7 @@ export class PostgresSafetyDefinitionStore implements SafetyDefinitionStore {
       return setResult(receipt, review);
     });
     // After COMMIT only. The durable audit trail is the receipt row, the sealed version and its audit event.
-    console.info(JSON.stringify({ level: "info", event: "safety_definition_set", action: "safety_definition_set",
-      outcome: result.receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor, scope_key: scopeKey,
-      after: { active_policy_id: result.receipt.policyId }, affected_products: result.affectedProducts,
-      publication_ids: result.receipt.publicationIds, applied_at: result.receipt.appliedAt }));
+    logger.info("safety_definition_set", { event: "safety_definition_set", outcome: result.receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor, scope_key: scopeKey, after: { active_policy_id: result.receipt.policyId }, affected_products: result.affectedProducts, publication_ids: result.receipt.publicationIds, applied_at: result.receipt.appliedAt });
     return result;
   }
 

@@ -37,6 +37,7 @@ import { lockInventoryCostGraph } from "../../inventory/cost-evidence.repository
 import type { AmendmentTransaction } from "../infrastructure/po-quantity-amendment.repository";
 import { computePurchaseOrderInvoiceMatchSourceFingerprint } from "./purchase-order-invoice-match";
 import { isRetiredReceiveExceptionKind } from "./receive-warning-policy";
+import { logger } from "../../../platform/observability/logger";
 
 // ─── Error class ──────────────────────────────────────────────────────────────
 
@@ -169,10 +170,7 @@ export async function recordReceiveValidationWarnings(input: {
       });
     } catch (error) {
       // Warning persistence must never fail the receiving close.
-      console.warn(
-        `[po-exceptions] Failed to persist receive warning ${warning.kind} for PO ${input.purchaseOrderId}:`,
-        error,
-      );
+      logger.warn("procurement.po_exceptions_service", { message: `[po-exceptions] Failed to persist receive warning ${warning.kind} for PO ${input.purchaseOrderId}:`, error: error });
     }
   }
 }

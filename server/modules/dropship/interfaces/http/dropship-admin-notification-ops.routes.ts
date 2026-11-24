@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipNotificationOpsService } from "../../application/dropship-notification-ops-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipNotificationOpsServiceFromEnv } from "../../infrastructure/dropship-notification-ops.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -63,7 +64,7 @@ function sendDropshipNotificationOpsError(res: Response, error: unknown): Respon
     });
   }
 
-  console.error("[DropshipAdminNotificationOpsRoutes] Unexpected notification ops error:", error);
+  logger.error("dropship.admin_notification_ops_routes", { message: "[DropshipAdminNotificationOpsRoutes] Unexpected notification ops error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_NOTIFICATION_OPS_INTERNAL_ERROR",

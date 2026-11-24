@@ -11,6 +11,7 @@ import { inspectCatalogImage } from "../domain/catalog-image-inspection";
 import { storeCatalogOriginal } from "./catalog-image-originals.service";
 import { prepareOptionalCatalogRendition, type CatalogPublicationRendition, type CatalogRenditionWarning } from "../domain/catalog-publication-rendition";
 import type { DownloadableProductImage } from "./product-image-download.service";
+import { logger } from "../../../platform/observability/logger";
 export type { SharedImportedPhoto } from "../domain/shared-product-photos.domain";
 const MAX_POSITION = 2147483647;
 // Bound source payloads and writes, allowing repeated product photos across many SKUs.
@@ -67,7 +68,7 @@ export function createSharedProductPhotoImporter(database: Pick<typeof db, "tran
         const {rendition,warning} = await prepareOptionalCatalogRendition(image);
         if (warning) {
           warnings.push({...warning,url:candidate.url});
-          console.warn(JSON.stringify({event:"catalog.image_rendition.unavailable",productId,code:warning.code}));
+          logger.warn("catalog.image_rendition.unavailable", { event:"catalog.image_rendition.unavailable", productId, code:warning.code });
         }
         retainedBytes += image.data.byteLength + (rendition?.image.data.byteLength ?? 0);
         if (retainedBytes > MAX_IMPORTED_ORIGINAL_BYTES)

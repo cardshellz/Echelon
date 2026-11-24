@@ -293,11 +293,11 @@ export class CycleCountUseCases {
 
   /**
    * Core approval logic for a single item. Shared by approveVariance and bulkApprove.
-   * 
+   *
    * The authority boundary locks and reads real-time inventory rather than using
    * the count session's stale expected quantity. Canonical authority also repairs
    * exact claim ownership before applying a counted shortage.
-   * 
+   *
    * Returns the adjustment info if inventory was changed, or null if skipped/guarded.
    */
   private async approveItemCore(
@@ -323,11 +323,9 @@ export class CycleCountUseCases {
       });
       const realTimeVariance = result.quantityDelta;
       if (realTimeVariance !== 0) {
-        console.log(
-          `[CYCLE COUNT] Reconciled through inventory authority: variant=${item.productVariantId} ` +
+        logger.info("inventory.cycle_count_use_cases", { detail: `[CYCLE COUNT] Reconciled through inventory authority: variant=${item.productVariantId} ` +
           `loc=${item.warehouseLocationId} current=${result.quantityBefore} counted=${result.quantityAfter} ` +
-          `delta=${realTimeVariance} displacedOrders=${result.displacedOrderIds.length}`,
-        );
+          `delta=${realTimeVariance} displacedOrders=${result.displacedOrderIds.length}` });
         adjustment = {
           sku: item.expectedSku || item.countedSku,
           type: item.mismatchType || item.varianceType,
@@ -336,7 +334,7 @@ export class CycleCountUseCases {
         };
       }
     } else {
-      console.warn(`[CYCLE COUNT] SKIPPED adjustment for item ${item.id}: productVariantId=${item.productVariantId} countedQty=${item.countedQty} sku=${item.expectedSku || item.countedSku}`);
+      logger.warn("inventory.cycle_count_use_cases", { message: `[CYCLE COUNT] SKIPPED adjustment for item ${item.id}: productVariantId=${item.productVariantId} countedQty=${item.countedQty} sku=${item.expectedSku || item.countedSku}` });
       await this.storage.updateCycleCountItem(item.id, {
         status: "approved",
         approvedBy,
@@ -368,7 +366,7 @@ export class CycleCountUseCases {
       if (variant && !syncedVariants.has(variant.id)) {
         syncedVariants.add(variant.id);
         this.channelSync.queueSyncAfterInventoryChange(variant.id).catch((err: any) =>
-          console.warn(`[ChannelSync] Post-cycle-count sync failed for ${adj.sku}:`, err)
+          logger.warn("inventory.cycle_count_use_cases", { message: `[ChannelSync] Post-cycle-count sync failed for ${adj.sku}:`, error: err })
         );
       }
     }
@@ -379,7 +377,7 @@ export class CycleCountUseCases {
     }
     for (const locId of replenLocations) {
       this.replenishment.checkReplenForLocation(locId).catch((err: any) =>
-        console.warn(`[Replen] Post-cycle-count check failed for loc ${locId}:`, err)
+        logger.warn("inventory.cycle_count_use_cases", { message: `[Replen] Post-cycle-count check failed for loc ${locId}:`, error: err })
       );
     }
   }
@@ -436,7 +434,7 @@ export class CycleCountUseCases {
       try {
         await this.replenishment.checkReplenForLocation(locationId);
       } catch (err: any) {
-        console.warn(`[Replen] Linked replen exception close recheck failed for loc ${locationId}:`, err?.message);
+        logger.warn("inventory.cycle_count_use_cases", { message: `[Replen] Linked replen exception close recheck failed for loc ${locationId}:`, error: err?.message });
       }
     }
 
@@ -1297,7 +1295,7 @@ export class CycleCountUseCases {
         if (!item.varianceType) { skipped++; continue; }
 
         // Approve primary item through the authority-owned transaction.
-        console.log(`[CYCLE COUNT] bulkApprove item ${itemId}: sku=${item.expectedSku || item.countedSku} varianceQty=${item.varianceQty} varianceType=${item.varianceType} pvId=${item.productVariantId}`);
+        logger.info("inventory.cycle_count_use_cases", { message: `[CYCLE COUNT] bulkApprove item ${itemId}: sku=${item.expectedSku || item.countedSku} varianceQty=${item.varianceQty} varianceType=${item.varianceType} pvId=${item.productVariantId}` });
         const { adjustment: adj, negativeGuarded } = await this.approveItemCore(item, reasonCode, notes, approvedBy);
         if (adj) adjustmentCount++;
         if (negativeGuarded) {
@@ -1419,7 +1417,7 @@ export class CycleCountUseCases {
         name: baseSku,
         baseUnit: "EA",
       });
-      console.log(`[CycleCount] Created product ${product.id} for base SKU ${baseSku}`);
+      logger.info("inventory.cycle_count_use_cases", { message: `[CycleCount] Created product ${product.id} for base SKU ${baseSku}` });
     }
 
     // Create variant
@@ -1430,7 +1428,7 @@ export class CycleCountUseCases {
       unitsPerVariant,
       hierarchyLevel,
     });
-    console.log(`[CycleCount] Created variant ${variant.id} (${variant.sku}) under product ${product.id}`);
+    logger.info("inventory.cycle_count_use_cases", { message: `[CycleCount] Created variant ${variant.id} (${variant.sku}) under product ${product.id}` });
 
     // Link to this cycle count item
     await this.storage.updateCycleCountItem(itemId, { productVariantId: variant.id });
@@ -1461,7 +1459,7 @@ export class CycleCountUseCases {
    */
   private async detectTransfers(items: CycleCountItem[]): Promise<TransferSuggestion[]> {
     const transfers: TransferSuggestion[] = [];
-    
+
     // Group by productVariantId
     const byVariant = new Map<number, CycleCountItem[]>();
     for (const item of items) {
@@ -1541,7 +1539,7 @@ export class CycleCountUseCases {
 
     // Detect transfers
     const transfers = await this.detectTransfers(countedItems);
-    
+
     // Build transfer map: how much of each item's variance is explained by transfers
     const transferMap = new Map<string, { qty: number; partner: string }>();
     for (const t of transfers) {

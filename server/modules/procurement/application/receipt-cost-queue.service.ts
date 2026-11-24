@@ -3,6 +3,7 @@ import { z } from "zod";
 import { receiptCostRequestResultSchema } from "@shared/procurement/receipt-cost-queue";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction } from "../../inventory/cost-evidence.repository.api";
+import { logger } from "../../../platform/observability/logger";
 
 type Database = CostEvidenceTransaction & { transaction<T>(work: (tx: any) => Promise<T>): Promise<T> };
 export type ReceiptCostReconciler = { reconcilePurchaseOrderLine(lineId: number, tx: any, actorId?: string): Promise<unknown> };
@@ -49,7 +50,7 @@ export async function processReceiptCostRequests(db: Database, receiptId: number
   try {
     pending = (await db.execute(sql`SELECT id,purchase_order_line_id FROM procurement.receipt_cost_requests WHERE receiving_order_id=${receiptId} ${automaticRequestId === undefined ? sql`` : sql`AND id=${automaticRequestId}`} ORDER BY id`)).rows;
   } catch (error) {
-    console.error(JSON.stringify({ code: "RECEIPT_COST_QUEUE_UNAVAILABLE", receiptId, actor, error: error instanceof Error ? error.message : "unknown" }));
+    logger.error("RECEIPT_COST_QUEUE_UNAVAILABLE", { code: "RECEIPT_COST_QUEUE_UNAVAILABLE", receiptId, actor, error: error instanceof Error ? error.message : "unknown" });
     return { state: "retry_required", requests: [] };
   }
   const requests: ReceiptCostRequestResult[] = [];
@@ -85,7 +86,7 @@ export async function processReceiptCostRequests(db: Database, receiptId: number
       });
       requests.push(result);
     } catch (error) {
-      console.error(JSON.stringify({ code: "RECEIPT_COST_RETRY_REQUIRED", receiptId, requestId, purchaseOrderLineId, actor, error: error instanceof Error ? error.message : "unknown" }));
+      logger.error("RECEIPT_COST_RETRY_REQUIRED", { code: "RECEIPT_COST_RETRY_REQUIRED", receiptId, requestId, purchaseOrderLineId, actor, error: error instanceof Error ? error.message : "unknown" });
       const summary: ReceiptCostRequestResult = { requestId, purchaseOrderLineId, state: "retry_required", attemptRecorded: false,
         issues: [{ code: "RECEIPT_COST_RETRY_REQUIRED", message: "Stock was received. The cost transaction rolled back; retry cost reconciliation." }] };
       try {
@@ -101,8 +102,7 @@ export async function processReceiptCostRequests(db: Database, receiptId: number
         });
         summary.attemptRecorded = true;
       } catch (recordError) {
-        console.error(JSON.stringify({ code: "RECEIPT_COST_FAILURE_RECORD_UNAVAILABLE", receiptId, requestId, actor,
-          error: recordError instanceof Error ? recordError.message : "unknown" }));
+        logger.error("RECEIPT_COST_FAILURE_RECORD_UNAVAILABLE", { code: "RECEIPT_COST_FAILURE_RECORD_UNAVAILABLE", receiptId, requestId, actor, error: recordError instanceof Error ? recordError.message : "unknown" });
       }
       requests.push(summary);
     }

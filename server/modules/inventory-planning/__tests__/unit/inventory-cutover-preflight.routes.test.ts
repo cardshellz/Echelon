@@ -8,6 +8,7 @@ import { InventoryCutoverPreflightError, InventoryCutoverPreflightService } from
 import type { InventoryCutoverPreflightFacts } from "../../domain/inventory-cutover-preflight";
 import { WmsCutoverDemandCaptureError } from "../../../wms/infrastructure/inventory-cutover-demand-reader";
 import { InventoryCutoverEncumbranceCaptureError } from "../../../inventory/infrastructure/inventory-cutover-encumbrance.repository";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 // Keep the real requirePermission middleware; isolate only its identity-owner call.
@@ -41,7 +42,7 @@ describe("inventory cutover preflight routes", () => {
 
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
     service = { preview: vi.fn(async () => report()) };
     session = { user: { id: "operator-1" } };
     server = await startServer(service, () => session);
@@ -101,7 +102,7 @@ describe("inventory cutover preflight routes", () => {
     const response = await request(server.url + PATH);
     expect(response).toMatchObject({ status: 503, body: { error: { code: "INVENTORY_CUTOVER_CAPTURE_RETRYABLE" } } });
     expect(service.preview).toHaveBeenCalledTimes(1); expect(JSON.stringify(response.body)).not.toContain("secret");
-    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain("secret");
+    expect(JSON.stringify(getLoggerJsonSpy("error").mock.calls)).not.toContain("secret");
   });
   it.each([
     new WmsCutoverDemandCaptureError("WMS_CUTOVER_CAPTURE_LIMIT_EXCEEDED", "private row census", { secret: "private rows" }),

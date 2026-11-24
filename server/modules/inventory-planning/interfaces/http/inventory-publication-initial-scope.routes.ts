@@ -2,6 +2,7 @@ import type { Express, Response } from "express";
 import { ZodError } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import { InitialPublicationScopeError, type InventoryPublicationInitialScopeService } from "../../application/inventory-publication-initial-scope.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerInventoryPublicationInitialScopeRoutes(app: Express,
   service: Pick<InventoryPublicationInitialScopeService, "review" | "prepare">): void {
@@ -28,6 +29,6 @@ function respond(res: Response, error: unknown): void {
   if (["40001", "40P01", "55P03", "55000", "57014"].includes(code)) {
     res.status(409).json({ error: { code: "INITIAL_SCOPE_BUSY", message: "Authority, listing work or cutover state changed. Review again before retrying." } }); return;
   }
-  console.error(JSON.stringify({ event: "publication_initial_scope_failed", code: /^[A-Z0-9_]{1,100}$/.test(code) ? code : "UNKNOWN" }));
+  logger.error("publication_initial_scope_failed", { event: "publication_initial_scope_failed", code: /^[A-Z0-9_]{1,100}$/.test(code) ? code : "UNKNOWN" });
   res.status(500).json({ error: { code: "INITIAL_SCOPE_FAILED", message: "Preparation is not confirmed. Retry using the same command key." } });
 }

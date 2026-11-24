@@ -3,6 +3,7 @@ import { startDropshipWorkerSchedule } from "./dropship-worker-schedule";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipEbayOrderIntakePollServiceFromEnv } from "./dropship-ebay-order-intake.factory";
 import { createDropshipOrderIntakeHealthServiceFromEnv } from "./dropship-order-intake-health.factory";
+import { logger } from "../../../platform/observability/logger";
 
 const DROPSHIP_EBAY_ORDER_INTAKE_WORKER_LOCK_ID = 736206;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
@@ -56,19 +57,11 @@ export function startDropshipEbayOrderIntakeWorker(): void {
       await withAdvisoryLock(DROPSHIP_EBAY_ORDER_INTAKE_WORKER_LOCK_ID, async () => {
         const result = await runDropshipEbayOrderIntakeHealthMonitor();
         if (result.storesTransitioned > 0) {
-          console.warn(JSON.stringify({
-            code: "DROPSHIP_ORDER_INTAKE_HEALTH_MONITOR_TRANSITIONED",
-            message: "Dropship order-intake health monitor changed one or more store states.",
-            context: result,
-          }));
+          logger.warn("DROPSHIP_ORDER_INTAKE_HEALTH_MONITOR_TRANSITIONED", { code: "DROPSHIP_ORDER_INTAKE_HEALTH_MONITOR_TRANSITIONED", message: "Dropship order-intake health monitor changed one or more store states.", context: result });
         }
       });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "DROPSHIP_ORDER_INTAKE_HEALTH_MONITOR_FAILED",
-        message: "Dropship order-intake health monitor failed.",
-        context: buildSchedulerFailureContext(error),
-      }));
+      logger.error("DROPSHIP_ORDER_INTAKE_HEALTH_MONITOR_FAILED", { code: "DROPSHIP_ORDER_INTAKE_HEALTH_MONITOR_FAILED", message: "Dropship order-intake health monitor failed.", context: buildSchedulerFailureContext(error) });
     }
 
     try {
@@ -82,19 +75,11 @@ export function startDropshipEbayOrderIntakeWorker(): void {
           || result.ordersRejected > 0
           || result.ordersConflicted > 0
         ) {
-          console.info(JSON.stringify({
-            code: "DROPSHIP_EBAY_ORDER_INTAKE_SWEEP_COMPLETED",
-            message: "Dropship eBay order intake sweep completed.",
-            context: result,
-          }));
+          logger.info("DROPSHIP_EBAY_ORDER_INTAKE_SWEEP_COMPLETED", { code: "DROPSHIP_EBAY_ORDER_INTAKE_SWEEP_COMPLETED", message: "Dropship eBay order intake sweep completed.", context: result });
         }
       });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "DROPSHIP_EBAY_ORDER_INTAKE_SWEEP_FAILED",
-        message: "Dropship eBay order intake sweep failed.",
-        context: buildSchedulerFailureContext(error),
-      }));
+      logger.error("DROPSHIP_EBAY_ORDER_INTAKE_SWEEP_FAILED", { code: "DROPSHIP_EBAY_ORDER_INTAKE_SWEEP_FAILED", message: "Dropship eBay order intake sweep failed.", context: buildSchedulerFailureContext(error) });
     }
   };
 
@@ -103,11 +88,7 @@ export function startDropshipEbayOrderIntakeWorker(): void {
     intervalMs,
     run: runLockedSweep,
   });
-  console.info(JSON.stringify({
-    code: "DROPSHIP_EBAY_ORDER_INTAKE_WORKER_STARTED",
-    message: "Dropship eBay order intake worker started.",
-    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
-  }));
+  logger.info("DROPSHIP_EBAY_ORDER_INTAKE_WORKER_STARTED", { code: "DROPSHIP_EBAY_ORDER_INTAKE_WORKER_STARTED", message: "Dropship eBay order intake worker started.", context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" } });
 }
 
 function envPositiveInteger(name: string, fallback: number): number {

@@ -3,12 +3,13 @@ import { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import { InboundTrackingError } from "../../domain/inbound-tracking.domain";
 import { getInboundTrackingService } from "../../application/inbound-tracking.runtime";
+import { logger } from "../../../../platform/observability/logger";
 const routeId = (value: string): number => z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647)).parse(value);
 const actor = (request: Request): unknown => (request as Request & { user?: { id?: unknown } }).user?.id ?? request.session?.user?.id;
 function failure(error: unknown, response: Response): void {
   if (error instanceof InboundTrackingError) { response.status(error.status).json({ code: error.code, error: error.message }); return; }
   if (error instanceof z.ZodError) { response.status(400).json({ code: "TRACKING_INPUT_INVALID", error: "Tracking input is invalid. Check reference, carrier, revision and request key." }); return; }
-  console.error(JSON.stringify({ event: "procurement.inbound_tracking.request_failed", code: "TRACKING_REQUEST_FAILED" }));
+  logger.error("procurement.inbound_tracking.request_failed", { event: "procurement.inbound_tracking.request_failed", code: "TRACKING_REQUEST_FAILED" });
   response.status(500).json({ code: "TRACKING_REQUEST_FAILED", error: "Tracking request failed. Retry the same request key for any pending change." });
 }
 export function registerInboundTrackingRoutes(app: Express, service = getInboundTrackingService()): void {

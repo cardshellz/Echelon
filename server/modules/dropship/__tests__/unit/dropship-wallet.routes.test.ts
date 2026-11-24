@@ -8,6 +8,7 @@ import type { DropshipWalletService } from "../../application/dropship-wallet-se
 import { toDropshipStripeError } from "../../infrastructure/dropship-stripe-error";
 import { registerDropshipWalletRoutes } from "../../interfaces/http/dropship-wallet.routes";
 import type { StripeDropshipFundingProvider } from "../../infrastructure/dropship-stripe-funding.provider";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 
@@ -37,7 +38,7 @@ describe("dropship wallet routes error responses", () => {
     setupSessionError = new Error("not set");
     logged = [];
     for (const level of ["error", "warn", "info"] as const) {
-      vi.spyOn(console, level).mockImplementation((line: unknown) => {
+      spyLoggerJson(level, (line: unknown) => {
         logged.push({ level, payload: JSON.parse(String(line)) });
       });
     }
@@ -140,7 +141,7 @@ describe("dropship wallet routes card fee exposure", () => {
     configureError = null;
     walletError = null;
     for (const level of ["error", "warn", "info"] as const) {
-      vi.spyOn(console, level).mockImplementation(() => {});
+      spyLoggerJson(level);
     }
     const service = {
       getWalletForMember: async () => {
@@ -483,7 +484,7 @@ describe("dropship wallet routes advance and bank balance (funding design phase 
     verifyError = null;
     registrationReplayed = false;
     for (const level of ["error", "warn", "info"] as const) {
-      vi.spyOn(console, level).mockImplementation(() => {});
+      spyLoggerJson(level);
     }
     const wallet = {
       account: { walletAccountId: 1, vendorId: 10, availableBalanceCents: 0, pendingBalanceCents: 40_000, currency: "USD", status: "active", createdAt: now, updatedAt: now },
@@ -650,7 +651,7 @@ describe("dropship wallet routes USDC deposits (funding design phase 6)", () => 
     assigned = [];
     created = true;
     for (const level of ["error", "warn", "info"] as const) {
-      vi.spyOn(console, level).mockImplementation(() => {});
+      spyLoggerJson(level);
     }
     const service = { getWalletForMember: async () => wallet } as unknown as DropshipWalletService;
     server = await startServer(buildApp(service, fakeUsdcDepositService({
@@ -764,7 +765,7 @@ describe("dropship wallet routes funding method removal", () => {
 
   beforeEach(async () => {
     for (const level of ["error", "warn", "info"] as const) {
-      vi.spyOn(console, level).mockImplementation(() => {});
+      spyLoggerJson(level);
     }
     removeFundingMethodForMember = vi.fn();
     const service = { removeFundingMethodForMember } as unknown as DropshipWalletService;

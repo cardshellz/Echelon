@@ -20,6 +20,7 @@ import {
   shippingServiceLevels,
   shippingVariantAttrs,
 } from "@shared/schema";
+import { logger } from "../../../../platform/observability/logger";
 
 /**
  * Admin surface for the shipping engine (quote plane) config:
@@ -419,7 +420,7 @@ function sendShippingAdminError(
   error: unknown,
   action: string,
 ): Response {
-  console.error(`[ShippingAdminRoutes] Failed to ${action}:`, error);
+  logger.error("shipping-engine.shipping_admin_routes", { message: `[ShippingAdminRoutes] Failed to ${action}:`, error: error });
   return res.status(500).json({
     error: {
       code: "SHIPPING_ADMIN_INTERNAL_ERROR",
