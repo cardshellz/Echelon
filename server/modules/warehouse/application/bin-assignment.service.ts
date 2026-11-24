@@ -1,5 +1,9 @@
 import { eq, and, sql } from "drizzle-orm";
 import { backfillOpenOrderItemBinAssignment } from "../../orders/bin-location-backfill.api";
+import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-intake-and-items.api";
+import { transferStock } from "../../inventory/transfer-stock.api";
+import { relocateSlotReplenPointersInInventory } from "../../inventory/cross-module-inventory-mutations.api";
+import { assertPickFaceAssignmentEligible } from "../domain/location-integrity";
 import {
   productLocations,
   productVariants,
@@ -77,6 +81,45 @@ export type ImportResult = {
   errors: { row: number; sku: string; error: string }[];
 };
 
+export type InventoryTransferOwnerPort = {
+  transfer: (...args: any[]) => Promise<{
+    reservedMoved: number;
+    orderItemsRepointed: number;
+    transferReceiptId: number | null;
+  }>;
+  withTx: (tx: any) => {
+    transfer: (...args: any[]) => Promise<{
+      reservedMoved: number;
+      orderItemsRepointed: number;
+      transferReceiptId: number | null;
+    }>;
+  };
+  publishInventoryChange?: (productVariantId: number, trigger: string) => Promise<void>;
+};
+
+export type RelocatePickSlotRequest = {
+  productVariantId?: number;
+  productLocationId?: number;
+  fromLocationId?: number | null;
+  toLocationId: number;
+  moveStock?: boolean;
+  userId?: string | null;
+  notes?: string | null;
+  inventoryOwner?: InventoryTransferOwnerPort;
+};
+
+export type RelocatePickSlotResult = {
+  productLocation: ProductLocation;
+  fromLocationId: number | null;
+  toLocationId: number;
+  movedQty: number;
+  movedReservedQty: number;
+  repointedOrderItems: number;
+  migratedReplenConfigs: number;
+  migratedReplenTasks: number;
+  transferReceiptId: number | null;
+};
+
 /**
  * Bin Assignment service for Echelon WMS.
  *
@@ -88,6 +131,7 @@ export class BinAssignmentService {
   constructor(
     private readonly db: DrizzleDb,
     private readonly storage: Storage,
+    private readonly inventoryOwner?: InventoryTransferOwnerPort,
   ) {}
 
   /**
@@ -318,6 +362,7 @@ export class BinAssignmentService {
         FROM warehouse.product_locations pl
         LEFT JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
         WHERE pl.status = 'active'
+          AND (wl.warehouse_id = ${loc.warehouseId} OR pl.warehouse_location_id IS NULL)
           AND (
             pl.product_variant_id = ${params.productVariantId}
             OR (
@@ -343,14 +388,19 @@ export class BinAssignmentService {
       const existingIds = existingResult.rows.map((row: any) => Number(row.id)).filter(Number.isInteger);
       const canonicalId = existingIds[0];
 
-      // Demotion is scoped to THIS variant (plus legacy SKU-keyed rows that
-      // never got a variant id). It must never widen to the product: until
-      // 2026-05-14 it did, and every sibling pack size lost its flag whenever
-      // a new variant was slotted.
+      // Demotion is scoped to THIS variant within THIS warehouse (plus legacy
+      // SKU-keyed or orphan rows). It must never widen to the product or strip
+      // another warehouse's primary pick bin.
       await tx.execute(sql`
         UPDATE warehouse.product_locations
         SET is_primary = 0, updated_at = NOW()
         WHERE status = 'active'
+          AND (
+            warehouse_location_id IS NULL
+            OR warehouse_location_id IN (
+              SELECT id FROM warehouse.warehouse_locations WHERE warehouse_id = ${loc.warehouseId}
+            )
+          )
           AND (
             product_variant_id = ${params.productVariantId}
             OR (
@@ -384,6 +434,12 @@ export class BinAssignmentService {
           await tx.execute(sql`
             DELETE FROM warehouse.product_locations
             WHERE id <> ${canonicalId}
+              AND (
+                warehouse_location_id IS NULL
+                OR warehouse_location_id IN (
+                  SELECT id FROM warehouse.warehouse_locations WHERE warehouse_id = ${loc.warehouseId}
+                )
+              )
               AND (
                 product_variant_id = ${params.productVariantId}
                 OR (
@@ -501,6 +557,306 @@ export class BinAssignmentService {
   }
 
   /**
+   * Atomically relocate a SKU's Primary Pick Bin ("Move Slot & Stock Together"):
+   *   1. Moves physical stock + FIFO lots + reserved allocations (`transferStock(..., moveReserved: true)`)
+   *   2. Updates the warehouse-scoped primary `product_locations` slot (`1 Primary Pick Bin / SKU / Warehouse`)
+   *   3. Migrates `location_replen_configs` + open unstarted `replen_tasks` to the new bin
+   *   4. Repoints ALL pending unpicked `wms.order_items` (including 0-reserved promised lines) to the new bin
+   */
+  async relocatePickSlot(params: RelocatePickSlotRequest): Promise<RelocatePickSlotResult> {
+    if (!Number.isInteger(params.toLocationId) || params.toLocationId <= 0) {
+      throw new BinAssignmentValidationError(
+        "SLOT_RELOCATION_INVALID_DESTINATION",
+        "Destination warehouse location ID must be a positive integer",
+      );
+    }
+
+    const toLoc = await this.storage.getWarehouseLocationById(params.toLocationId);
+    if (!toLoc) {
+      throw new Error(`Warehouse location ${params.toLocationId} not found`);
+    }
+    assertPickFaceAssignmentEligible(toLoc);
+
+    let existingSlot: ProductLocation | undefined;
+    if (params.productLocationId != null) {
+      existingSlot = await this.storage.getProductLocationById(params.productLocationId);
+      if (!existingSlot) {
+        throw new Error(`Product location ${params.productLocationId} not found`);
+      }
+    }
+
+    let resolvedVariantId = params.productVariantId ?? existingSlot?.productVariantId ?? null;
+    if (!resolvedVariantId && existingSlot?.sku) {
+      const bySku = await this.storage.getProductVariantBySku(existingSlot.sku.toUpperCase());
+      resolvedVariantId = bySku?.id ?? null;
+    }
+    if (!resolvedVariantId) {
+      throw new BinAssignmentValidationError(
+        "SLOT_RELOCATION_VARIANT_REQUIRED",
+        "A valid productVariantId is required to relocate a pick slot",
+      );
+    }
+
+    const variant = await this.storage.getProductVariantById(resolvedVariantId);
+    if (!variant) {
+      throw new Error(`Variant ${resolvedVariantId} not found`);
+    }
+    const product = await this.storage.getProductById(variant.productId);
+    const upperSku = (variant.sku || existingSlot?.sku || product?.sku || "").toUpperCase();
+
+    let sourceLocation: WarehouseLocation | undefined;
+    if (params.fromLocationId != null) {
+      sourceLocation = await this.storage.getWarehouseLocationById(params.fromLocationId);
+      if (!sourceLocation) {
+        throw new Error(`Source warehouse location ${params.fromLocationId} not found`);
+      }
+    } else if (existingSlot?.warehouseLocationId != null) {
+      sourceLocation = await this.storage.getWarehouseLocationById(existingSlot.warehouseLocationId);
+    }
+
+    if (sourceLocation && sourceLocation.warehouseId != null && sourceLocation.warehouseId !== toLoc.warehouseId) {
+      throw new BinAssignmentValidationError(
+        "SLOT_RELOCATION_CROSS_WAREHOUSE",
+        `Cannot relocate pick slot across warehouses (${sourceLocation.warehouseId} -> ${toLoc.warehouseId})`,
+      );
+    }
+
+    const moveStock = params.moveStock !== false;
+    const transferOwner = params.inventoryOwner ?? this.inventoryOwner;
+    if (moveStock && sourceLocation && sourceLocation.id !== toLoc.id) {
+      if (sourceLocation.cycleCountFreezeId != null) {
+        throw new Error(
+          `Source location ${sourceLocation.code} is frozen for cycle count (#${sourceLocation.cycleCountFreezeId})`,
+        );
+      }
+      if (!transferOwner) {
+        throw new Error("Inventory transfer owner is required when moveStock is enabled");
+      }
+    }
+
+    const postCommitEffects: Array<() => Promise<void>> = [];
+
+    const txOutcome = await this.db.transaction(async (tx) => {
+      // If sourceLocation wasn't provided on input, discover the current slot in this warehouse inside the tx
+      let effectiveSourceLoc = sourceLocation ?? null;
+      const existingResult = await tx.execute(sql`
+        SELECT pl.id, pl.warehouse_location_id, wl.code AS source_code, wl.warehouse_id AS source_warehouse_id, wl.cycle_count_freeze_id AS source_freeze_id
+        FROM warehouse.product_locations pl
+        LEFT JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+        WHERE pl.status = 'active'
+          AND (wl.warehouse_id = ${toLoc.warehouseId} OR pl.warehouse_location_id IS NULL)
+          AND (
+            pl.product_variant_id = ${resolvedVariantId}
+            OR (
+              pl.product_variant_id IS NULL
+              AND pl.sku IS NOT NULL
+              AND UPPER(pl.sku) = ${upperSku}
+            )
+          )
+        ORDER BY
+          CASE WHEN pl.id = ${existingSlot?.id ?? -1} THEN 0 ELSE 1 END,
+          pl.is_primary DESC,
+          pl.updated_at DESC,
+          pl.id ASC
+      `);
+      const slotRows = (existingResult.rows ?? []) as Array<{
+        id: number;
+        warehouse_location_id: number | null;
+        source_code: string | null;
+        source_warehouse_id: number | null;
+        source_freeze_id: number | null;
+      }>;
+      const canonicalSlotId = existingSlot?.id ?? (slotRows[0]?.id ? Number(slotRows[0].id) : undefined);
+      if (!effectiveSourceLoc && slotRows[0]?.warehouse_location_id) {
+        if (moveStock && slotRows[0].source_freeze_id != null) {
+          throw new Error(
+            `Source location ${slotRows[0].source_code ?? slotRows[0].warehouse_location_id} is frozen for cycle count (#${slotRows[0].source_freeze_id})`,
+          );
+        }
+        effectiveSourceLoc = {
+          id: Number(slotRows[0].warehouse_location_id),
+          code: String(slotRows[0].source_code ?? ""),
+          warehouseId: slotRows[0].source_warehouse_id ?? toLoc.warehouseId,
+        } as WarehouseLocation;
+      }
+
+      let movedQty = 0;
+      let movedReservedQty = 0;
+      let transferReceiptId: number | null = null;
+
+      // 1. Move physical stock + FIFO lots + reservations when requested and stock > 0
+      if (moveStock && effectiveSourceLoc && effectiveSourceLoc.id !== toLoc.id && transferOwner) {
+        const levelRes = await tx.execute(sql`
+          SELECT variant_qty
+          FROM inventory.inventory_levels
+          WHERE product_variant_id = ${resolvedVariantId}
+            AND warehouse_location_id = ${effectiveSourceLoc.id}
+          FOR UPDATE
+        `);
+        const onHandAtSource = Math.max(0, Number((levelRes?.rows?.[0] as any)?.variant_qty ?? 0));
+        if (onHandAtSource > 0) {
+          const transferResult = await transferStock(transferOwner.withTx(tx), {
+            productVariantId: resolvedVariantId,
+            fromLocationId: effectiveSourceLoc.id,
+            toLocationId: toLoc.id,
+            qty: onHandAtSource,
+            moveReserved: true,
+            userId: params.userId ?? "system",
+            referenceType: "slot_relocation",
+            referenceId: `slot:${resolvedVariantId}:${effectiveSourceLoc.id}->${toLoc.id}`,
+            notes:
+              params.notes ||
+              `Relocated primary pick slot & stock for ${upperSku} from ${effectiveSourceLoc.code} to ${toLoc.code}`,
+            deferUntilCommit: (effect) => postCommitEffects.push(effect),
+          });
+          movedQty = onHandAtSource;
+          movedReservedQty = transferResult.reservedMoved;
+          transferReceiptId = transferResult.transferReceiptId;
+        }
+      }
+
+      // 2. Enforce 1 Primary Pick Bin per SKU per Warehouse & update/insert slot
+      await tx.execute(sql`
+        UPDATE warehouse.product_locations
+        SET is_primary = 0, updated_at = NOW()
+        WHERE status = 'active'
+          AND (
+            warehouse_location_id IS NULL
+            OR warehouse_location_id IN (
+              SELECT id FROM warehouse.warehouse_locations WHERE warehouse_id = ${toLoc.warehouseId}
+            )
+          )
+          AND (
+            product_variant_id = ${resolvedVariantId}
+            OR (
+              product_variant_id IS NULL
+              AND sku IS NOT NULL
+              AND UPPER(sku) = ${upperSku}
+            )
+          )
+      `);
+
+      let savedSlot: ProductLocation;
+      if (canonicalSlotId) {
+        const updatedRows = await tx
+          .update(productLocations)
+          .set({
+            productId: variant.productId,
+            productVariantId: resolvedVariantId,
+            sku: upperSku || null,
+            name: product?.name || variant.name,
+            barcode: variant.barcode || null,
+            warehouseLocationId: toLoc.id,
+            location: toLoc.code,
+            zone: toLoc.zone || "U",
+            isPrimary: PRIMARY_SLOT_FLAG,
+            status: "active",
+            updatedAt: new Date(),
+          })
+          .where(eq(productLocations.id, canonicalSlotId))
+          .returning();
+        savedSlot = updatedRows[0];
+
+        if (slotRows.length > 1) {
+          await tx.execute(sql`
+            DELETE FROM warehouse.product_locations
+            WHERE id <> ${canonicalSlotId}
+              AND (
+                warehouse_location_id IS NULL
+                OR warehouse_location_id IN (
+                  SELECT id FROM warehouse.warehouse_locations WHERE warehouse_id = ${toLoc.warehouseId}
+                )
+              )
+              AND (
+                product_variant_id = ${resolvedVariantId}
+                OR (
+                  product_variant_id IS NULL
+                  AND sku IS NOT NULL
+                  AND UPPER(sku) = ${upperSku}
+                )
+              )
+          `);
+        }
+      } else {
+        const insertedRows = await tx
+          .insert(productLocations)
+          .values({
+            productId: variant.productId,
+            productVariantId: resolvedVariantId,
+            sku: upperSku || null,
+            name: product?.name || variant.name,
+            location: toLoc.code,
+            zone: toLoc.zone || "U",
+            warehouseLocationId: toLoc.id,
+            isPrimary: PRIMARY_SLOT_FLAG,
+            status: "active",
+            barcode: variant.barcode || null,
+          })
+          .returning();
+        savedSlot = insertedRows[0];
+      }
+
+      // 3. Migrate replen configs + open unstarted replen tasks
+      let migratedReplenConfigs = 0;
+      let migratedReplenTasks = 0;
+      let repointedOrderItems = 0;
+
+      if (effectiveSourceLoc && effectiveSourceLoc.id !== toLoc.id) {
+        const migrated = await relocateSlotReplenPointersInInventory(tx, {
+          productVariantId: resolvedVariantId,
+          fromLocationId: effectiveSourceLoc.id,
+          toLocationId: toLoc.id,
+        });
+        migratedReplenConfigs = migrated.migratedConfigs;
+        migratedReplenTasks = migrated.migratedTasks;
+
+        // 4. Repoint ALL remaining pending unpicked WMS order lines (including 0-reserved promised lines)
+        if (effectiveSourceLoc.code) {
+          const wmsReg = await tx.execute(sql`SELECT to_regclass('wms.order_items') AS reg`);
+          if ((wmsReg?.rows?.[0] as any)?.reg) {
+            repointedOrderItems = await repointPendingWmsOrderItemsForInventoryTransfer(tx as any, {
+              productVariantId: resolvedVariantId,
+              fromLocationCode: effectiveSourceLoc.code,
+              toLocationCode: toLoc.code,
+              toZone: toLoc.zone || "U",
+              warehouseId: toLoc.warehouseId,
+            });
+          }
+        }
+      }
+
+      return {
+        productLocation: savedSlot,
+        fromLocationId: effectiveSourceLoc?.id ?? null,
+        toLocationId: toLoc.id,
+        movedQty,
+        movedReservedQty,
+        repointedOrderItems,
+        migratedReplenConfigs,
+        migratedReplenTasks,
+        transferReceiptId,
+      };
+    });
+
+    for (const effect of postCommitEffects) {
+      await effect();
+    }
+
+    await backfillOpenOrderItemBinAssignment({
+      sku: txOutcome.productLocation?.sku ?? upperSku,
+      locationCode: txOutcome.productLocation?.location ?? toLoc.code,
+      zone: txOutcome.productLocation?.zone ?? toLoc.zone,
+      warehouseId: toLoc.warehouseId,
+    });
+
+    if (txOutcome.movedQty > 0 && transferOwner?.publishInventoryChange) {
+      await transferOwner.publishInventoryChange(resolvedVariantId, "slot_relocation").catch(() => undefined);
+    }
+
+    return txOutcome;
+  }
+
+  /**
    * Export all assigned variants as a CSV string.
    */
   async exportAssignments(): Promise<string> {
@@ -528,6 +884,7 @@ export class BinAssignmentService {
 export function createBinAssignmentService(
   db: DrizzleDb,
   storage: Storage,
+  inventoryOwner?: InventoryTransferOwnerPort,
 ): BinAssignmentService {
-  return new BinAssignmentService(db, storage);
+  return new BinAssignmentService(db, storage, inventoryOwner);
 }

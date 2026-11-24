@@ -1457,7 +1457,7 @@ export class InventoryUseCases {
         notes: params.reason,
         userId: params.userId ?? null,
         unitCostCents: conversionOutputCostCents ?? params.unitCostCents ?? null,
-        inventoryLotId: primaryConversionLotId ?? (consumedDetail?.consumedLots.length === 1 ? consumedDetail.consumedLots[0].lotId : null),
+        inventoryLotId: primaryConversionLotId ?? (consumedDetail?.consumedLots?.length === 1 ? consumedDetail.consumedLots[0].lotId : null),
       }, tx);
       adjustmentTransactionId = transaction.id;
       if (quantityPosting && !sharedPosting) {
@@ -1672,6 +1672,11 @@ export class InventoryUseCases {
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
       }, tx);
+
+      const availableAtLevel = Math.max(0, (level.variantQty ?? 0) - (level.reservedQty ?? 0));
+      if (availableAtLevel < qtyToReserve) {
+        return false;
+      }
 
       await this.storage.adjustInventoryLevel(level.id, { reservedQty: qtyToReserve }, tx);
 

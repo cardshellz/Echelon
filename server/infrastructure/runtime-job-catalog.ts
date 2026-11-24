@@ -75,6 +75,16 @@ export const EXTERNAL_RUNTIME_JOBS: readonly ExternalRuntimeJobDefinition[] = [
     persistedRunKey: "cycle_count_freeze_guard",
   },
   {
+    name: "inventory.proactive_replen_sweep",
+    cadenceMs: 15 * 60_000,
+    initialDelayMs: 45_000,
+    advisoryLockId: 918533,
+    concurrencyMechanism: "session_advisory_lock",
+    writableStates: ["inventory.replen_tasks", "inventory.inventory_levels", "inventory.inventory_lots"],
+    deadLetterPolicy: "log_and_retry_next_tick",
+    disableEnvVar: "PROACTIVE_REPLEN_SWEEP_DISABLED",
+  },
+  {
     name: "oms.flow_reconciliation",
     cadenceMs: 15 * 60_000,
     advisoryLockId: 918405,

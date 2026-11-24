@@ -354,3 +354,69 @@ export async function updateWarehouseAutoDraftAndForecastSettingsInTx(
     WHERE id = ${input.targetId}
   `);
 }
+
+export async function relocateSlotReplenPointersInInventory(
+  tx: { execute: (...args: any[]) => any },
+  input: {
+    productVariantId: number;
+    fromLocationId: number;
+    toLocationId: number;
+  },
+): Promise<{ migratedConfigs: number; migratedTasks: number }> {
+  if (input.fromLocationId === input.toLocationId) {
+    return { migratedConfigs: 0, migratedTasks: 0 };
+  }
+
+  let migratedConfigs = 0;
+  const cfgReg = await tx.execute(sql`SELECT to_regclass('inventory.location_replen_config') AS reg`);
+  if ((cfgReg?.rows?.[0] as any)?.reg) {
+    const movedCfgs = await tx.execute(sql`
+      UPDATE inventory.location_replen_config src
+      SET warehouse_location_id = ${input.toLocationId},
+          updated_at = NOW()
+      WHERE src.warehouse_location_id = ${input.fromLocationId}
+        AND src.product_variant_id = ${input.productVariantId}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM inventory.location_replen_config dst
+          WHERE dst.warehouse_location_id = ${input.toLocationId}
+            AND dst.product_variant_id = ${input.productVariantId}
+        )
+      RETURNING src.id
+    `);
+    migratedConfigs = Array.isArray(movedCfgs?.rows) ? movedCfgs.rows.length : 0;
+
+    // Clean up any leftover duplicate source config if destination already had one
+    await tx.execute(sql`
+      DELETE FROM inventory.location_replen_config
+      WHERE warehouse_location_id = ${input.fromLocationId}
+        AND product_variant_id = ${input.productVariantId}
+    `);
+  }
+
+  let migratedTasks = 0;
+  const taskReg = await tx.execute(sql`SELECT to_regclass('inventory.replen_tasks') AS reg`);
+  if ((taskReg?.rows?.[0] as any)?.reg) {
+    const movedTasks = await tx.execute(sql`
+      UPDATE inventory.replen_tasks
+      SET to_location_id = ${input.toLocationId},
+          from_location_id = CASE
+            WHEN from_location_id = ${input.fromLocationId}
+             AND status = 'blocked'
+             AND COALESCE(qty_source_units, 0) = 0
+            THEN ${input.toLocationId}
+            ELSE from_location_id
+          END,
+          revision = COALESCE(revision, 0) + 1
+      WHERE to_location_id = ${input.fromLocationId}
+        AND pick_product_variant_id = ${input.productVariantId}
+        AND status IN ('pending', 'assigned', 'blocked')
+        AND COALESCE(qty_completed, 0) = 0
+        AND operation_request_hash IS NULL
+      RETURNING id
+    `);
+    migratedTasks = Array.isArray(movedTasks?.rows) ? movedTasks.rows.length : 0;
+  }
+
+  return { migratedConfigs, migratedTasks };
+}
