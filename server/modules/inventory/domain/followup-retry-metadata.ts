@@ -76,7 +76,7 @@ export function formatFollowupRetryError(
 ): { formattedError: string; attempts: number; deadLettered: boolean; nextRetryAt: Date | null } {
   const prior = parseFollowupRetryState(previousLastError);
   const attempts = prior.attempts + 1;
-  const cleanMsg = String(errorMessage || "unknown_error").trim();
+  const cleanMsg = String(prior.rawMessage && !errorMessage ? prior.rawMessage : errorMessage || "unknown_error").trim();
 
   if (attempts >= maxAttempts) {
     const prefix = `[DEAD_LETTER attempts=${attempts}] `;
@@ -84,6 +84,15 @@ export function formatFollowupRetryError(
       formattedError: `${prefix}${cleanMsg}`.slice(0, 2000),
       attempts,
       deadLettered: true,
+      nextRetryAt: null,
+    };
+  }
+
+  if (attempts === 1) {
+    return {
+      formattedError: cleanMsg.slice(0, 2000),
+      attempts: 1,
+      deadLettered: false,
       nextRetryAt: null,
     };
   }

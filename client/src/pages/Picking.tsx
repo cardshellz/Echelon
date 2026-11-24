@@ -344,9 +344,16 @@ function PickingWorkspace() {
         ?? queue.flatMap(batch => batch.items).find(item => item.id === itemId);
       if (item?.sourcePlan?.status === "blocked") throw new Error(item.sourcePlan.message);
       const source = item?.sourcePlan?.status === "ready" ? item.sourcePlan.warehouseLocationId : undefined;
+      const effectiveReplenSourceId = replenSourceLocationId ?? selectedReplenSourceByItem[itemId];
+      const effectiveConfirmFoundOnShelf =
+        confirmFoundOnShelf !== undefined
+          ? confirmFoundOnShelf
+          : status !== "short"
+            ? false
+            : undefined;
       return updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod, source, {
-        replenSourceLocationId,
-        confirmFoundOnShelf,
+        replenSourceLocationId: effectiveReplenSourceId,
+        confirmFoundOnShelf: effectiveConfirmFoundOnShelf,
       });
     },
     onSuccess: (data: PickResponse) => {
@@ -431,7 +438,11 @@ function PickingWorkspace() {
 
       const errCode = (error as any)?.code;
       const errDetails = (error as any)?.details ?? {};
-      if (errCode === "found_on_shelf_confirmation_required" && variables.status !== "short") {
+      if (
+        errCode === "found_on_shelf_confirmation_required" &&
+        variables.status !== "short" &&
+        typeof setFoundOnShelfPrompt === "function"
+      ) {
         const matchedItem =
           singleQueue.flatMap((o) => o.items).find((it) => it.id === variables.itemId) ??
           queue.flatMap((b) => b.items).find((it) => it.id === variables.itemId);
@@ -440,7 +451,7 @@ function PickingWorkspace() {
           sku: matchedItem?.sku || "SKU",
           locationCode: String(errDetails.locationCode || matchedItem?.location || "Bin"),
           systemQty: Number(errDetails.systemQty ?? 0),
-          status: variables.status as FoundOnShelfPromptState["status"],
+          status: variables.status === "in_progress" ? "in_progress" : "completed",
           pickedQuantity: Number(variables.pickedQuantity ?? matchedItem?.qty ?? 1),
           pickMethod:
             variables.pickMethod && variables.pickMethod !== "short"
@@ -946,8 +957,6 @@ function PickingWorkspace() {
       status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
       pickedQuantity: newPicked,
       pickMethod: "scan",
-      replenSourceLocationId: selectedReplenSourceByItem[item.id],
-      confirmFoundOnShelf: false,
     });
     
     const checkAndHandleCompletion = (items: typeof activeWork.items) => {
@@ -1018,8 +1027,6 @@ function PickingWorkspace() {
       status: "completed" as ItemStatus,
       pickedQuantity: qty,
       pickMethod: "pick_all",
-      replenSourceLocationId: selectedReplenSourceByItem[item.id],
-      confirmFoundOnShelf: false,
     });
     
     let orderCompleted = false;
@@ -1122,8 +1129,6 @@ function PickingWorkspace() {
       status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
       pickedQuantity: newPicked,
       pickMethod: "manual",
-      replenSourceLocationId: selectedReplenSourceByItem[item.id],
-      confirmFoundOnShelf: false,
     });
     
     let orderCompleted = false;

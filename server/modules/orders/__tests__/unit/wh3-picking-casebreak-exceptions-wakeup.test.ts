@@ -621,15 +621,20 @@ describe("WH-3: Picking, 1-Click Case-Break, Found-on-Shelf, Short Pick, Excepti
       }),
     });
 
-    // Outbox retry backoff + dead-lettering after 10 attempts
+    // Outbox retry backoff + dead-lettering after 10 attempts (attempt 1 preserves raw last_error)
     const t0 = new Date("2026-11-24T16:00:00.000Z");
     let errState: string | null = null;
     for (let i = 1; i <= 9; i++) {
       const next = formatFollowupRetryError(errState, "channel down", t0, 10);
       expect(next.deadLettered).toBe(false);
       expect(next.attempts).toBe(i);
-      expect(isFollowupReadyForRetry(next.formattedError, t0)).toBe(false);
-      expect(isFollowupReadyForRetry(next.formattedError, new Date(t0.getTime() + 600_000))).toBe(true);
+      if (i === 1) {
+        expect(next.formattedError).toBe("channel down");
+        expect(isFollowupReadyForRetry(next.formattedError, t0)).toBe(true);
+      } else {
+        expect(isFollowupReadyForRetry(next.formattedError, t0)).toBe(false);
+        expect(isFollowupReadyForRetry(next.formattedError, new Date(t0.getTime() + 600_000))).toBe(true);
+      }
       errState = next.formattedError;
     }
     const tenth = formatFollowupRetryError(errState, "channel down", t0, 10);

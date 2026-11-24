@@ -382,10 +382,12 @@ export async function deliverPickingFollowup<
     const attempts = Math.max(1, Number(updated.rows?.[0]?.attempt_count ?? 1));
     const deadLettered = attempts >= MAX_PICKING_FOLLOWUP_ATTEMPTS;
     const backoffMs = Math.min(300_000, 5_000 * Math.pow(2, attempts - 1));
-    const nextRetryIso = new Date(now.getTime() + backoffMs).toISOString();
+    const nextRetryIso = attempts === 1 ? null : new Date(now.getTime() + backoffMs).toISOString();
     const formattedError = deadLettered
       ? `[DEAD_LETTER attempts=${attempts}] ${message}`.slice(0, 2000)
-      : `[retry next=${nextRetryIso}] ${message}`.slice(0, 2000);
+      : attempts === 1
+        ? message.slice(0, 2000)
+        : `[retry next=${nextRetryIso}] ${message}`.slice(0, 2000);
     await database.execute(sql`UPDATE wms.picking_commands SET last_error=${formattedError}
       WHERE command_key=${key} AND completed_at IS NULL`);
     if (deadLettered) {
