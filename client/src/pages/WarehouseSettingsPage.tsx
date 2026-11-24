@@ -430,38 +430,6 @@ export default function WarehouseSettingsPage() {
               </div>
               <div>
                 <Label>
-                  Inline replen max units
-                  <HintIcon text="Hybrid-mode threshold measured in individual pieces. Tasks for this many units or fewer run inline (auto-execute); larger ones queue for a human." />
-                </Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={form.inlineReplenMaxUnits ?? 50}
-                  onChange={(e) => setForm({ ...form, inlineReplenMaxUnits: parseInt(e.target.value) || 0 })}
-                  className="mt-1"
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  In hybrid mode, tasks under this threshold run inline; above, they queue.
-                </p>
-              </div>
-              <div>
-                <Label>
-                  Inline replen max cases
-                  <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
-                    Coming Soon
-                  </Badge>
-                  <HintIcon text="Planned hybrid-mode threshold measured in cases (complement to the units threshold). Not yet consumed by the replen service — value saves but does nothing today." />
-                </Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={form.inlineReplenMaxCases ?? 2}
-                  onChange={(e) => setForm({ ...form, inlineReplenMaxCases: parseInt(e.target.value) || 0 })}
-                  className="mt-1"
-                />
-              </div>
-              <div>
-                <Label>
                   Urgent replen threshold (units)
                   <Badge variant="outline" className="ml-2 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">
                     Coming Soon

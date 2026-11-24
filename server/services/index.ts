@@ -650,11 +650,11 @@ export function createServices(
     inventoryCore.triggerNotifyChange(variantId, trigger);
   });
 
-  // Bin assignment (depends on catalog + warehouse storage)
+  // Bin assignment & single-owner slotting (depends on catalog + warehouse storage + inventoryCore for atomic slot+stock moves)
   const binAssignment = createBinAssignmentService(db, {
     ...catalogStorage,
     ...warehouseStorage,
-  });
+  }, inventoryCore);
 
   // OMS — Unified Order Management (wired to WMS reservation service for proper ATP-gated reserves)
   const oms = createOmsService(db, reservation);

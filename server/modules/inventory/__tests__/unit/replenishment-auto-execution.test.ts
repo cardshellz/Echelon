@@ -43,7 +43,7 @@ describe("rule-owned automatic replenishment", () => {
       ).toBe("inline");
     },
   );
-  it("applies the existing hybrid BASE-unit limit to same-SKU transfers", () => {
+  it("executes inline in hybrid mode without any artificial unit or case cap", () => {
     expect(
       resolveReplenishmentAutoExecution(
         0,
@@ -58,7 +58,16 @@ describe("rule-owned automatic replenishment", () => {
         0,
         0,
         { replenMode: "hybrid", inlineReplenMaxUnits: 50 },
-        51,
+        500,
+        "case_break",
+      ).executionMode,
+    ).toBe("inline");
+    expect(
+      resolveReplenishmentAutoExecution(
+        0,
+        0,
+        { replenMode: "queue" },
+        50,
         "full_case",
       ).executionMode,
     ).toBe("queue");

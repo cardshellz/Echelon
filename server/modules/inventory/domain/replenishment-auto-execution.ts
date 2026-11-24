@@ -1,9 +1,7 @@
 export interface ReplenishmentAutoExecutionSettings {
   replenMode: string;
-  inlineReplenMaxUnits: number | null;
+  inlineReplenMaxUnits?: number | null;
 }
-
-const DEFAULT_INLINE_REPLENISHMENT_BASE_UNITS = 50;
 
 /**
  * The run/queue override (1 = always run, 2 = always queue) that applies to a
@@ -38,7 +36,7 @@ export function resolveReplenishmentAutoExecution(
   ruleOverride: number | null | undefined,
   tierOverride: number | null | undefined,
   settings: ReplenishmentAutoExecutionSettings | null,
-  targetBaseUnits: number,
+  _targetBaseUnits: number,
   method = "case_break",
 ): { shouldAutoExecute: boolean; executionMode: "inline" | "queue" } {
   const decision = (inline: boolean) => ({
@@ -53,13 +51,8 @@ export function resolveReplenishmentAutoExecution(
     if (override === 1) return decision(true);
     if (override === 2) return decision(false);
   }
-  if (settings?.replenMode === "inline") return decision(true);
-  if (settings?.replenMode === "hybrid") {
-    return decision(
-      targetBaseUnits <=
-        (settings.inlineReplenMaxUnits ||
-          DEFAULT_INLINE_REPLENISHMENT_BASE_UNITS),
-    );
+  if (settings?.replenMode === "inline" || settings?.replenMode === "hybrid") {
+    return decision(true);
   }
   return decision(false);
 }

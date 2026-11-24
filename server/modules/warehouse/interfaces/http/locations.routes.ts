@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { z } from "zod";
-import { warehouseStorage } from "../..";
+import { createBinAssignmentService, warehouseStorage } from "../..";
+import { relocatePickSlot } from "../../slotting.api";
 import { catalogStorage } from "../../../catalog";
 import { ordersStorage } from "../../../orders";
 import { inventoryStorage } from "../../../inventory";
@@ -216,6 +217,9 @@ export function registerLocationRoutes(app: Express) {
 
       // Update the product location and log the move audit atomically in a single transaction
       const userId = req.session?.user?.id || 'system';
+      if (req.body?.moveStock === true) {
+        return handleMoveSlotAndStock(req, res, id, targetLocationId, userId, notes);
+      }
       const updated = await db.transaction(async (tx) => {
         const updatedRow = await storage.updateProductLocation(
           id,
@@ -256,6 +260,31 @@ export function registerLocationRoutes(app: Express) {
       res.status(500).json({ error: error.message || "Failed to move product" });
     }
   });
+
+  async function handleMoveSlotAndStock(
+    req: any,
+    res: any,
+    productLocationId: number,
+    toLocationId: number,
+    userId: string,
+    notes?: string,
+  ) {
+    const svc = req.app.locals.services?.binAssignment
+      ?? createBinAssignmentService(db, storage, req.app.locals.services?.inventoryCore);
+    const result = await relocatePickSlot(svc, {
+      productLocationId,
+      toLocationId,
+      moveStock: true,
+      userId,
+      notes: notes || null,
+      inventoryOwner: req.app.locals.services?.inventoryCore,
+    });
+    return res.json({
+      success: true,
+      message: `Moved ${result.productLocation.sku} and ${result.movedQty} unit(s) to ${result.productLocation.location}`,
+      ...result,
+    });
+  }
 
   // CSV Export - Download all locations as CSV using papaparse
   app.get("/api/locations/export/csv", requirePermission("inventory", "view"), async (req, res) => {

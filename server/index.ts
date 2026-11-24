@@ -88,6 +88,7 @@ import {
 } from "./modules/dropship/runtime-workers.api";
 import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-order-authority.api";
 import { startCycleCountFreezeGuard } from "./modules/inventory/application/cycle-count-freeze-guard.scheduler";
+import { startProactiveReplenSweepScheduler } from "./modules/inventory/application/proactive-replen-sweep.scheduler";
 import {
   startOmsFlowReconciliationScheduler,
   startOmsOpsAlertScheduler,
@@ -890,6 +891,13 @@ app.use(createHttpRequestLogger());
         startCycleCountFreezeGuard(db);
       } else {
         logSchedulerDisabled("scheduler", "Cycle-count freeze guard", "CYCLE_COUNT_FREEZE_GUARD_DISABLED");
+      }
+
+      if (!schedulersDisabled("PROACTIVE_REPLEN_SWEEP_DISABLED")) {
+        const proactiveReplenSweep = startProactiveReplenSweepScheduler(services.replenishment);
+        httpServer.once("close", () => proactiveReplenSweep.stop());
+      } else {
+        logSchedulerDisabled("scheduler", "Proactive replenishment sweep", "PROACTIVE_REPLEN_SWEEP_DISABLED");
       }
 
       // 'completed'-status fix: the pick-queue self-heal completes orders and

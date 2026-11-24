@@ -416,12 +416,14 @@ function toNullableBoolean(value: unknown): boolean | null {
 export async function resolveAssignedBinLocation(
   database: DbLike,
   variantId: number,
+  warehouseId?: number | null,
 ): Promise<WmsBinLocation | null> {
-  const rows: Array<{
+  const allRows: Array<{
     slotId: number;
     slotStatus: string | null;
     isPrimary: number | null;
     code: string;
+    warehouseId: number | null;
     warehouseZone: string | null;
     productZone: string | null;
     locationIsActive: number | null;
@@ -434,6 +436,7 @@ export async function resolveAssignedBinLocation(
       slotStatus: productLocations.status,
       isPrimary: productLocations.isPrimary,
       code: warehouseLocations.code,
+      warehouseId: warehouseLocations.warehouseId,
       warehouseZone: warehouseLocations.zone,
       productZone: productLocations.zone,
       locationIsActive: warehouseLocations.isActive,
@@ -448,6 +451,10 @@ export async function resolveAssignedBinLocation(
     )
     .where(eq(productLocations.productVariantId, variantId));
 
+  const scopedRows = warehouseId != null
+    ? allRows.filter((r) => r.warehouseId === warehouseId || r.warehouseId == null)
+    : allRows;
+  const rows = scopedRows.length > 0 ? scopedRows : allRows;
   const best = selectPickBinCandidate(rows);
   return best
     ? {
@@ -490,6 +497,7 @@ export async function buildWmsLineItemFromOmsLine(
   materializableQuantity: number,
   orderId = 0,
   financialScope: "source_line" | "residual_quantity" = "source_line",
+  warehouseId?: number | null,
 ): Promise<InsertWmsOrderItem> {
   if (materializableQuantity <= 0) {
     throw new Error(`[WMS Sync] Cannot create WMS item for OMS line ${line.id} with non-positive quantity ${materializableQuantity}`);
@@ -502,7 +510,7 @@ export async function buildWmsLineItemFromOmsLine(
   let binLocation: WmsBinLocation | null = null;
   if (variantId && line.inventoryTracking !== false) {
     try {
-      binLocation = await resolveAssignedBinLocation(database, variantId);
+      binLocation = await resolveAssignedBinLocation(database, variantId, warehouseId);
     } catch (err: any) {
       logger.warn("oms.wms_sync_service", { message: `[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}` });
     }
@@ -1245,6 +1253,7 @@ export class WmsSyncService {
               isTerminalResidualRecovery
                 ? "residual_quantity"
                 : "source_line",
+              wmsOrderData.warehouseId ?? null,
             ),
           );
         }
@@ -3059,8 +3068,9 @@ export class WmsSyncService {
     const wmsOrderResult = await db.execute<{
       id: number;
       warehouse_status: string;
+      warehouse_id: number | null;
     }>(sql`
-      SELECT id, warehouse_status FROM wms.orders
+      SELECT id, warehouse_status, warehouse_id FROM wms.orders
       WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrderId)})
          OR (source = 'shopify' AND source_table_id = ${String(omsOrderId)})
       LIMIT 1
@@ -3069,6 +3079,7 @@ export class WmsSyncService {
 
     const wmsOrderId = wmsOrderResult.rows[0].id;
     const warehouseStatus = wmsOrderResult.rows[0].warehouse_status;
+    const wmsWarehouseId = wmsOrderResult.rows[0].warehouse_id ?? null;
 
     if (["shipped", "cancelled", "completed"].includes(warehouseStatus)) {
       logger.info("oms.wms_sync_service", { message: `${LOG} Skipping order ${wmsOrderId} — terminal state '${warehouseStatus}'` });
@@ -3168,7 +3179,7 @@ export class WmsSyncService {
           omsLine.productVariantId !== wmsItem.productId
         ) {
           updates.productId = omsLine.productVariantId;
-          const bin = await resolveAssignedBinLocation(db, omsLine.productVariantId);
+          const bin = await resolveAssignedBinLocation(db, omsLine.productVariantId, wmsWarehouseId);
           if (bin) {
             updates.location = bin.location;
             updates.zone = bin.zone;
@@ -3198,7 +3209,7 @@ export class WmsSyncService {
           omsLine.productVariantId !== wmsItem.productId
         ) {
           updates.productId = omsLine.productVariantId;
-          const bin = await resolveAssignedBinLocation(db, omsLine.productVariantId);
+          const bin = await resolveAssignedBinLocation(db, omsLine.productVariantId, wmsWarehouseId);
           if (bin) {
             updates.location = bin.location;
             updates.zone = bin.zone;

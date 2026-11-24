@@ -13,7 +13,10 @@ import { z } from "zod";
 export type BinAssignmentValidationCode =
   | "BIN_ASSIGNMENT_REQUEST_INVALID"
   | "BIN_ASSIGNMENT_PRIMARY_FLAG_INVALID"
-  | "BIN_ASSIGNMENT_PRIMARY_REQUIRED";
+  | "BIN_ASSIGNMENT_PRIMARY_REQUIRED"
+  | "SLOT_RELOCATION_INVALID_DESTINATION"
+  | "SLOT_RELOCATION_VARIANT_REQUIRED"
+  | "SLOT_RELOCATION_CROSS_WAREHOUSE";
 
 /** A rejected slot-assignment command. Routes map it to HTTP 400. */
 export class BinAssignmentValidationError extends Error {

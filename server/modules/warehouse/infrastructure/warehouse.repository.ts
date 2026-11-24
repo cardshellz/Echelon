@@ -384,8 +384,31 @@ export async function createProductLocation(location: InsertProductLocation, tx:
     assertPickFaceAssignmentEligible(loc);
     targetWarehouseId = loc.warehouseId;
   }
+  const upperSku = location.sku?.toUpperCase() || null;
+  const shouldBePrimary = location.isPrimary !== 0 && location.status !== "inactive";
+  if (shouldBePrimary && targetWarehouseId != null && (location.productVariantId != null || upperSku)) {
+    const variantClause = location.productVariantId != null
+      ? sql`product_variant_id = ${location.productVariantId}`
+      : sql`product_variant_id IS NULL AND UPPER(sku) = ${upperSku}`;
+    await tx.execute(sql`
+      UPDATE warehouse.product_locations
+      SET is_primary = 0, updated_at = NOW()
+      WHERE status = 'active'
+        AND ${variantClause}
+        AND (
+          warehouse_location_id IS NULL
+          OR warehouse_location_id IN (
+            SELECT id FROM warehouse.warehouse_locations WHERE warehouse_id = ${targetWarehouseId}
+          )
+        )
+    `);
+  }
   const result = await tx.insert(productLocations).values({
-    ...location, sku: location.sku?.toUpperCase() || null, location: location.location.toUpperCase(), zone: location.zone.toUpperCase(),
+    ...location,
+    isPrimary: shouldBePrimary ? 1 : (location.isPrimary ?? 1),
+    sku: upperSku,
+    location: location.location.toUpperCase(),
+    zone: location.zone.toUpperCase(),
   }).returning();
   if (result[0]?.status === "active") {
     await backfillOpenOrderItemBinAssignment({
