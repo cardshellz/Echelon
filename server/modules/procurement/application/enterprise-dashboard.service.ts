@@ -12,6 +12,7 @@
 
 import { sql } from "drizzle-orm";
 import { db } from "../../../db";
+import { logger } from "../../../platform/observability/logger";
 
 // ─── Types ─────────────────────────────────────────────────────────
 
@@ -362,7 +363,7 @@ async function safe<T>(fn: () => Promise<T>, fallback: T, label: string): Promis
   try {
     return await fn();
   } catch (err: any) {
-    console.error(`[EnterpriseDashboard] ${label} failed:`, err?.message ?? err);
+    logger.error("procurement.enterprise_dashboard_service", { message: `[EnterpriseDashboard] ${label} failed:`, error: err?.message ?? err });
     return fallback;
   }
 }

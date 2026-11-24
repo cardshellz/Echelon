@@ -28,6 +28,7 @@ import { ebayListingExclusionService } from "../../modules/channels/ebay-listing
 import { registerEbayListingExclusionRoutes } from "./ebay-listing-exclusion.routes";
 import { createSharedProductPhotoImporter } from "../../modules/catalog/application/shared-product-photos.service";
 import { ebayOriginalPhotoUrl } from "../../modules/channels/adapters/ebay/ebay-photo-requirements";
+import { logger } from "../../platform/observability/logger";
 
 export const router = express.Router();
 
@@ -146,7 +147,7 @@ for (const kind of ["product", "variant"] as const) {
         throw err;
       }
     } catch (err: any) {
-      console.error("[eBay Import Images] Error:", err.message);
+      logger.error("routes.ebay_policies_routes", { message: "[eBay Import Images] Error:", error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

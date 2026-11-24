@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { ordersStorage } from "../..";
 import { requirePermission, requireInternalApiKey } from "../../../../routes/middleware";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerOperationsDashboardRoutes(app: Express) {
   app.get("/api/operations/pick-replen-health", requirePermission("inventory", "view"), async (req, res) => {
@@ -15,7 +16,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error: any) {
-      console.error("Error fetching pick/replen health:", error?.message || error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching pick/replen health:", error: error?.message || error });
       res.status(500).json({ error: "Failed to fetch pick/replen health" });
     }
   });
@@ -85,7 +86,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error: any) {
-      console.error("Error cleaning pick/replen health:", error?.message || error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error cleaning pick/replen health:", error: error?.message || error });
       res.status(500).json({ error: error?.message || "Failed to clean pick/replen health" });
     }
   });
@@ -99,7 +100,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       const alerts = await slaMonitor.getSLAAlerts();
       res.json(alerts);
     } catch (error: any) {
-      console.error("Error fetching SLA alerts:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching SLA alerts:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch SLA alerts" });
     }
   });
@@ -111,7 +112,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       const summary = await slaMonitor.getSLASummary();
       res.json(summary);
     } catch (error: any) {
-      console.error("Error fetching SLA summary:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching SLA summary:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch SLA summary" });
     }
   });
@@ -123,7 +124,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       const result = await slaMonitor.updateSLAStatuses();
       res.json({ message: "SLA statuses updated", ...result });
     } catch (error: any) {
-      console.error("Error updating SLA statuses:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error updating SLA statuses:", error: error });
       res.status(500).json({ error: error.message || "Failed to update SLA statuses" });
     }
   });
@@ -147,7 +148,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error: any) {
-      console.error("Error fetching bin inventory:", error?.message || error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching bin inventory:", error: error?.message || error });
       res.status(500).json({ error: "Failed to fetch bin inventory", detail: error?.message });
     }
   });
@@ -161,7 +162,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error) {
-      console.error("Error fetching unassigned inventory:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching unassigned inventory:", error: error });
       res.status(500).json({ error: "Failed to fetch unassigned inventory" });
     }
   });
@@ -175,7 +176,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error) {
-      console.error("Error fetching location health:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching location health:", error: error });
       res.status(500).json({ error: "Failed to fetch location health" });
     }
   });
@@ -189,7 +190,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error) {
-      console.error("Error fetching exceptions:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching exceptions:", error: error });
       res.status(500).json({ error: "Failed to fetch exceptions" });
     }
   });
@@ -203,7 +204,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error) {
-      console.error("Error fetching pick readiness:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching pick readiness:", error: error });
       res.status(500).json({ error: "Failed to fetch pick readiness" });
     }
   });
@@ -218,7 +219,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error) {
-      console.error("Error fetching activity:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching activity:", error: error });
       res.status(500).json({ error: "Failed to fetch activity" });
     }
   });
@@ -237,7 +238,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
       });
       res.json(result);
     } catch (error) {
-      console.error("Error fetching action queue:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Error fetching action queue:", error: error });
       res.status(500).json({ error: "Failed to fetch action queue" });
     }
   });
@@ -284,7 +285,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
         syncedAt: new Date().toISOString(),
       });
     } catch (error: any) {
-      console.error("Internal API - orders error:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Internal API - orders error:", error: error });
       res.status(500).json({ error: "Failed to fetch orders" });
     }
   });
@@ -314,7 +315,7 @@ export function registerOperationsDashboardRoutes(app: Express) {
         })),
       });
     } catch (error: any) {
-      console.error("Internal API - shipments error:", error);
+      logger.error("orders.operations_dashboard_routes", { message: "Internal API - shipments error:", error: error });
       res.status(500).json({ error: "Failed to fetch shipments" });
     }
   });

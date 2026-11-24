@@ -14,6 +14,7 @@ import {
   SHOPIFY_OWNERSHIP_REVIEW_FILTERS,
   shopifyOwnershipRepairApplySchema,
 } from "../../domain/shopify-product-mapping-reconciliation.domain";
+import { logger } from "../../../../platform/observability/logger";
 
 const reconciliationParamsSchema = z.object({
   channelId: z.coerce.number().int().positive(),
@@ -91,7 +92,7 @@ function sendMappingError(
     });
   }
 
-  console.error(`Error during ${operation}:`, error);
+  logger.error("catalog.shopify_product_mapping_reconciliation_routes", { message: `Error during ${operation}:`, error: error });
   return res.status(500).json({
     error: `Failed to ${operation}`,
     code: "SHOPIFY_MAPPING_RECONCILIATION_FAILED",

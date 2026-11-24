@@ -2,6 +2,7 @@
 // These routes must be registered BEFORE auth middleware (unauthenticated, signature-verified).
 import type { Express, Request, Response } from "express";
 import { verifyShopifyWebhook } from "../../../integrations/shopify.api";
+import { logger } from "../../../../platform/observability/logger";
 /*
 import {
   handleContractCreated,
@@ -23,18 +24,18 @@ export function registerSubscriptionWebhookRoutes(app: Express): void {
       // Verify HMAC signature
       const hmacHeader = req.headers["x-shopify-hmac-sha256"] as string;
       if (!hmacHeader) {
-        console.warn("[SubWebhook] Missing HMAC header");
+        logger.warn("subscriptions.subscription_webhooks", { message: "[SubWebhook] Missing HMAC header" });
         return res.status(401).json({ error: "Missing HMAC header" });
       }
 
       const rawBody = (req as any).rawBody as Buffer;
       if (!rawBody) {
-        console.warn("[SubWebhook] Missing raw body");
+        logger.warn("subscriptions.subscription_webhooks", { message: "[SubWebhook] Missing raw body" });
         return res.status(400).json({ error: "Missing raw body" });
       }
 
       if (!verifyShopifyWebhook(rawBody, hmacHeader)) {
-        console.warn("[SubWebhook] Invalid HMAC signature");
+        logger.warn("subscriptions.subscription_webhooks", { message: "[SubWebhook] Invalid HMAC signature" });
         return res.status(401).json({ error: "Invalid signature" });
       }
 
@@ -46,10 +47,10 @@ export function registerSubscriptionWebhookRoutes(app: Express): void {
 
       // Process in background
       handler(payload).catch(err => {
-        console.error(`[SubWebhook] Handler error: ${err.message}`, err.stack);
+        logger.error("subscriptions.subscription_webhooks", { message: `[SubWebhook] Handler error: ${err.message}`, error: err.stack });
       });
     } catch (err: any) {
-      console.error(`[SubWebhook] Error: ${err.message}`);
+      logger.error("subscriptions.subscription_webhooks", { message: `[SubWebhook] Error: ${err.message}` });
       res.status(500).json({ error: "Internal error" });
     }
   }
@@ -78,5 +79,5 @@ export function registerSubscriptionWebhookRoutes(app: Express): void {
   });
   */
 
-  console.info("[SubWebhook] Subscription webhook listener disabled in Echelon (owned by shellz-club-app)");
+  logger.info("subscriptions.subscription_webhooks", { message: "[SubWebhook] Subscription webhook listener disabled in Echelon (owned by shellz-club-app)" });
 }

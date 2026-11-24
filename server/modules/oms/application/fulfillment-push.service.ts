@@ -51,6 +51,7 @@ import {
   EbayTrackingConflictError,
   recordEbayTrackingConflict,
 } from "./channel-fulfillment-conflict";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Carrier code mapping: WMS/internal → eBay carrier codes
@@ -1315,7 +1316,7 @@ export function createFulfillmentPushService(
       .limit(1);
 
     if (!order) {
-      console.error(`[FulfillmentPush] Order ${orderId} not found`);
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] Order ${orderId} not found` });
       return false;
     }
 
@@ -1327,7 +1328,7 @@ export function createFulfillmentPushService(
       .limit(1);
 
     if (!channel) {
-      console.error(`[FulfillmentPush] Channel ${order.channelId} not found`);
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] Channel ${order.channelId} not found` });
       return false;
     }
 
@@ -1338,7 +1339,7 @@ export function createFulfillmentPushService(
       }
 
       if (!order.trackingNumber || !order.trackingCarrier) {
-        console.warn(`[FulfillmentPush] Order ${orderId} has no tracking info`);
+        logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] Order ${orderId} has no tracking info` });
         return false;
       }
 
@@ -1352,14 +1353,14 @@ export function createFulfillmentPushService(
       } else if (channel.provider === "shopify") {
         // Shopify tracking is handled by the existing fulfillment webhook flow
         // No push needed — Shopify already has its own fulfillment system
-        console.log(`[FulfillmentPush] Skipping Shopify push for order ${orderId} — handled natively`);
+        logger.info("oms.fulfillment_push_service", { message: `[FulfillmentPush] Skipping Shopify push for order ${orderId} — handled natively` });
         return true;
       }
 
-      console.warn(`[FulfillmentPush] No push handler for provider: ${channel.provider}`);
+      logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] No push handler for provider: ${channel.provider}` });
       return false;
     } catch (err: any) {
-      console.error(`[FulfillmentPush] Failed to push tracking for order ${orderId}: ${err.message}`);
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] Failed to push tracking for order ${orderId}: ${err.message}` });
 
       // Record failure event
       await db.insert(omsOrderEvents).values({
@@ -1423,7 +1424,7 @@ export function createFulfillmentPushService(
 
   async function pushToEbay(order: any, orderId: number): Promise<boolean> {
     if (!_ebayApiClient) {
-      console.error(`[FulfillmentPush] eBay API client not available`);
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay API client not available` });
       return false;
     }
 
@@ -1434,7 +1435,7 @@ export function createFulfillmentPushService(
       .where(eq(omsOrderLines.orderId, orderId));
 
     if (lines.length === 0) {
-      console.warn(`[FulfillmentPush] No line items for order ${orderId}`);
+      logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] No line items for order ${orderId}` });
       return false;
     }
 
@@ -1469,7 +1470,7 @@ export function createFulfillmentPushService(
     );
 
     const fulfillmentId = result?.fulfillmentId;
-    console.log(`[FulfillmentPush] eBay tracking pushed for order ${orderId} → fulfillment ${fulfillmentId ?? "(no id — accepted by eBay)"}`);
+    logger.info("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay tracking pushed for order ${orderId} → fulfillment ${fulfillmentId ?? "(no id — accepted by eBay)"}` });
 
     // Record success event
     await db.insert(omsOrderEvents).values({
@@ -1532,7 +1533,7 @@ export function createFulfillmentPushService(
     `);
     const shipment = shipmentResult?.rows?.[0];
     if (!shipment) {
-      console.error(`[FulfillmentPush] Shipment ${shipmentId} not found or not linked to OMS`);
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] Shipment ${shipmentId} not found or not linked to OMS` });
       return false;
     }
 
@@ -1552,7 +1553,7 @@ export function createFulfillmentPushService(
         : new Date(shipment.shipped_at));
 
     if (!carrier || !trackingNumber) {
-      console.warn(`[FulfillmentPush] Shipment ${shipmentId} has no tracking info`);
+      logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] Shipment ${shipmentId} has no tracking info` });
       return false;
     }
     if (Number.isNaN(shippedAt.getTime())) {
@@ -1580,7 +1581,7 @@ export function createFulfillmentPushService(
     }
 
     if (shipment.provider !== "ebay") {
-      console.warn(`[FulfillmentPush] No shipment push handler for provider: ${shipment.provider}`);
+      logger.warn("oms.fulfillment_push_service", { message: `[FulfillmentPush] No shipment push handler for provider: ${shipment.provider}` });
       return false;
     }
     if (!shipment.external_order_id) {
@@ -1588,7 +1589,7 @@ export function createFulfillmentPushService(
     }
 
     if (!_ebayApiClient) {
-      console.error(`[FulfillmentPush] eBay API client not available`);
+      logger.error("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay API client not available` });
       return false;
     }
 
@@ -1628,7 +1629,7 @@ export function createFulfillmentPushService(
         await recordEbayTrackingConflict(db, conflictInput);
         throw new EbayTrackingConflictError(conflictInput);
       }
-      console.log(`[FulfillmentPush] eBay tracking already pushed for shipment ${shipmentId}; idempotent skip`);
+      logger.info("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay tracking already pushed for shipment ${shipmentId}; idempotent skip` });
       return true;
     }
 
@@ -1685,9 +1686,7 @@ export function createFulfillmentPushService(
       fulfillmentPayload,
     );
     const fulfillmentId = result?.fulfillmentId;
-    console.log(
-      `[FulfillmentPush] eBay tracking pushed for shipment ${shipmentId} (order ${omsOrderId}) -> fulfillment ${fulfillmentId ?? "(no id - accepted by eBay)"}`,
-    );
+    logger.info("oms.fulfillment_push_service", { message: `[FulfillmentPush] eBay tracking pushed for shipment ${shipmentId} (order ${omsOrderId}) -> fulfillment ${fulfillmentId ?? "(no id - accepted by eBay)"}` });
 
     await db.insert(omsOrderEvents).values({
       orderId: omsOrderId,
@@ -2499,9 +2498,7 @@ export function createFulfillmentPushService(
       0,
     );
     if (shopifyPositiveItems.length === 0) {
-      console.log(
-        `[pushShopifyFulfillment] shipment ${shipmentId} has no Shopify-provider items; skipping Shopify fulfillment push`,
-      );
+      logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} has no Shopify-provider items; skipping Shopify fulfillment push` });
       await recordShopifyWritebackEvidence({
         eventType: "shopify_fulfillment_reconciled",
         order,
@@ -2525,9 +2522,7 @@ export function createFulfillmentPushService(
     }
     const skippedProviderItems = positiveItems.length - shopifyPositiveItems.length;
     if (skippedProviderItems > 0) {
-      console.log(
-        `[pushShopifyFulfillment] shipment ${shipmentId} skipping ${skippedProviderItems} non-Shopify provider item(s)`,
-      );
+      logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} skipping ${skippedProviderItems} non-Shopify provider item(s)` });
     }
 
     if (command) {
@@ -2668,18 +2663,14 @@ export function createFulfillmentPushService(
       if (validation.ok) {
         resolved = validation.resolved;
         pathAUsed = true;
-        console.log(
-          `[pushShopifyFulfillment] shipment ${shipmentId} using Path A (stored FO line item ids validated against live Shopify quantities)`,
-        );
+        logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} using Path A (stored FO line item ids validated against live Shopify quantities)` });
       } else {
         pathAReason = validation.reason;
       }
     }
 
     if (!pathAUsed) {
-      console.log(
-        `[pushShopifyFulfillment] shipment ${shipmentId} using Path B (Shopify fulfillmentOrders GQL) — reason: ${pathAReason}`,
-      );
+      logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} using Path B (Shopify fulfillmentOrders GQL) — reason: ${pathAReason}` });
       // Pin matching to the warehouse this shipment shipped from so a
       // multi-warehouse split line routes to the correct location's
       // fulfillment ticket. Sourced from the order load (no extra query).
@@ -2739,9 +2730,7 @@ export function createFulfillmentPushService(
                  )
             `);
           } catch (err: any) {
-            console.error(
-              `[pushShopifyFulfillment] back-write failed for oms_order_line ${r.omsOrderLineId}: ${err?.message ?? String(err)}`,
-            );
+            logger.error("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] back-write failed for oms_order_line ${r.omsOrderLineId}: ${err?.message ?? String(err)}` });
             // Non-fatal — continue with the actual push.
           }
         }
@@ -2816,9 +2805,7 @@ export function createFulfillmentPushService(
       // Misconfiguration: no warehouses or channel set up with
       // shopify_location_id. We can't safely filter, so skip the filter
       // (legacy behaviour) and warn loudly. Per D13 fallback note.
-      console.warn(
-        `[pushShopifyFulfillment] shipment ${shipmentId} — no warehouses.shopify_location_id (or channels.shopify_location_id) configured — skipping location filter`,
-      );
+      logger.warn("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} — no warehouses.shopify_location_id (or channels.shopify_location_id) configured — skipping location filter` });
     } else {
       const foIds = Array.from(new Set(resolved.map((r) => r.fulfillmentOrderId)));
       const allowedFoIds = await fetchOurFulfillmentOrderIds(
@@ -2836,9 +2823,7 @@ export function createFulfillmentPushService(
       resolved = resolved.filter((r) => allowedFoIds.has(r.fulfillmentOrderId));
       const filteredCount = beforeCount - resolved.length;
       if (filteredCount > 0) {
-        console.log(
-          `[pushShopifyFulfillment] shipment ${shipmentId} — filtered ${filteredCount}/${beforeCount} resolved items to 3PL/non-our locations (kept ${resolved.length})`,
-        );
+        logger.info("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] shipment ${shipmentId} — filtered ${filteredCount}/${beforeCount} resolved items to 3PL/non-our locations (kept ${resolved.length})` });
       }
 
       if (resolved.length === 0) {
@@ -2971,10 +2956,8 @@ export function createFulfillmentPushService(
 
     const persistRowCount = persistResult?.rowCount ?? null;
     if (persistRowCount === 0) {
-      console.log(
-        `[pushShopifyFulfillment] shipment ${shipmentId} preserved legacy fulfillment ` +
-          `${existingFulfillmentId ?? "(concurrent value)"}; recorded additional fulfillment ${fulfillmentGid}`,
-      );
+      logger.info("oms.fulfillment_push_service", { detail: `[pushShopifyFulfillment] shipment ${shipmentId} preserved legacy fulfillment ` +
+          `${existingFulfillmentId ?? "(concurrent value)"}; recorded additional fulfillment ${fulfillmentGid}` });
     }
 
     // D-PUSHAUDIT: This evidence is part of the writeback contract, not
@@ -3195,9 +3178,7 @@ export function createFulfillmentPushService(
       // Voided / cancelled siblings: skip. Pushing tracking to a voided
       // shipment would be wrong; C17 handles their cancel-side cleanup.
       if (sibStatus === "voided" || sibStatus === "cancelled") {
-        console.log(
-          `[pushFulfillmentForCombinedGroup] group ${combinedGroupId}: skipping sibling shipment ${sibShipmentId} (status=${sibStatus})`,
-        );
+        logger.info("oms.fulfillment_push_service", { message: `[pushFulfillmentForCombinedGroup] group ${combinedGroupId}: skipping sibling shipment ${sibShipmentId} (status=${sibStatus})` });
         fulfillments.push({
           shipmentId: sibShipmentId,
           orderId: sibOrderId,
@@ -3238,9 +3219,7 @@ export function createFulfillmentPushService(
             ? err.context.code
             : "shopify_push_unknown_error";
         const message: string = err?.message ?? String(err);
-        console.error(
-          `[pushFulfillmentForCombinedGroup] group ${combinedGroupId}: sibling shipment ${sibShipmentId} push failed (code=${code}): ${message} — continuing fan-out for remaining siblings`,
-        );
+        logger.error("oms.fulfillment_push_service", { message: `[pushFulfillmentForCombinedGroup] group ${combinedGroupId}: sibling shipment ${sibShipmentId} push failed (code=${code}): ${message} — continuing fan-out for remaining siblings` });
         fulfillments.push({
           shipmentId: sibShipmentId,
           orderId: sibOrderId,
@@ -3516,9 +3495,7 @@ export function createFulfillmentPushService(
       });
 
       if (isAlreadyCancelled) {
-        console.log(
-          `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} already cancelled — idempotent skip`,
-        );
+        logger.info("oms.fulfillment_push_service", { message: `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} already cancelled — idempotent skip` });
         incr("shopify_cancel_idempotent_skip", 1, { fulfillmentGid });
         return { fulfillmentGid, alreadyCancelled: true };
       }
@@ -3535,9 +3512,7 @@ export function createFulfillmentPushService(
       );
     }
 
-    console.log(
-      `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} cancelled (status=${payload?.fulfillment?.status ?? "unknown"})`,
-    );
+    logger.info("oms.fulfillment_push_service", { message: `[cancelShopifyFulfillment] fulfillment ${fulfillmentGid} cancelled (status=${payload?.fulfillment?.status ?? "unknown"})` });
     incr("shopify_cancel_succeeded", 1, { fulfillmentGid });
     return { fulfillmentGid, alreadyCancelled: false };
   }
@@ -3745,9 +3720,7 @@ export function createFulfillmentPushService(
       });
 
       if (isAlreadyHasTracking) {
-        console.log(
-          `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} already has tracking ${trimmedNumber} — idempotent skip`,
-        );
+        logger.info("oms.fulfillment_push_service", { message: `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} already has tracking ${trimmedNumber} — idempotent skip` });
         incr("shopify_tracking_update_idempotent_skip", 1, { fulfillmentGid });
         return { fulfillmentGid, trackingNumberChanged: false };
       }
@@ -3771,18 +3744,14 @@ export function createFulfillmentPushService(
       typeof returnedNumber === "string" &&
       returnedNumber === trimmedNumber
     ) {
-      console.log(
-        `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking updated to ${trimmedNumber}`,
-      );
+      logger.info("oms.fulfillment_push_service", { message: `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking updated to ${trimmedNumber}` });
       incr("shopify_tracking_update_succeeded", 1, { fulfillmentGid });
       return { fulfillmentGid, trackingNumberChanged: true };
     }
 
     // Defensive fallthrough: no userErrors and no returned tracking
     // info. Treat as success — Shopify accepted the call.
-    console.log(
-      `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking update accepted (no echoed trackingInfo)`,
-    );
+    logger.info("oms.fulfillment_push_service", { message: `[updateShopifyFulfillmentTracking] fulfillment ${fulfillmentGid} tracking update accepted (no echoed trackingInfo)` });
     incr("shopify_tracking_update_succeeded", 1, { fulfillmentGid });
     return { fulfillmentGid, trackingNumberChanged: true };
   }
@@ -3862,9 +3831,7 @@ export function createFulfillmentPushService(
               status === "CANCELLED" || status === "ERROR" || status === "FAILURE";
           }
         } catch (probeErr: any) {
-          console.warn(
-            `[reconcileShopifyFulfillment] status probe failed for ${fulfillmentGid} (shipment ${shipmentId}): ${probeErr?.message ?? probeErr}`,
-          );
+          logger.warn("oms.fulfillment_push_service", { message: `[reconcileShopifyFulfillment] status probe failed for ${fulfillmentGid} (shipment ${shipmentId}): ${probeErr?.message ?? probeErr}` });
         }
       }
 
@@ -3898,15 +3865,11 @@ export function createFulfillmentPushService(
 
       if (fulfillmentDead) {
         deadFulfillmentIds.push(fulfillmentGid);
-        console.log(
-          `[reconcileShopifyFulfillment] fulfillment ${fulfillmentGid} not live for shipment ${shipmentId}; recreating uncovered quantity`,
-        );
+        logger.info("oms.fulfillment_push_service", { message: `[reconcileShopifyFulfillment] fulfillment ${fulfillmentGid} not live for shipment ${shipmentId}; recreating uncovered quantity` });
         try {
           await cancelShopifyFulfillment(fulfillmentGid);
         } catch (cancelErr: any) {
-          console.warn(
-            `[reconcileShopifyFulfillment] cancel-confirm failed for ${fulfillmentGid} (shipment ${shipmentId}): ${cancelErr?.message ?? cancelErr}`,
-          );
+          logger.warn("oms.fulfillment_push_service", { message: `[reconcileShopifyFulfillment] cancel-confirm failed for ${fulfillmentGid} (shipment ${shipmentId}): ${cancelErr?.message ?? cancelErr}` });
         }
       }
     }
@@ -4300,12 +4263,10 @@ function reconcileFulfillmentOrderLinesFromCandidates(
       allocatable.length > 0 &&
       allocatable[0].assignedLocationId !== pinnedLocation
     ) {
-      console.warn(
-        `[pushShopifyFulfillment] shipment ${shipmentId} item (sku=${rawSku || "(none)"}, ` +
+      logger.warn("oms.fulfillment_push_service", { detail: `[pushShopifyFulfillment] shipment ${shipmentId} item (sku=${rawSku || "(none)"}, ` +
           `lineItemId=${externalLineId ?? "(none)"}) matched a fulfillment ticket at location ` +
           `${allocatable[0].assignedLocationId ?? "(none)"} but shipped from ${pinnedLocation} — ` +
-          `location mismatch, allocating anyway`,
-      );
+          `location mismatch, allocating anyway` });
     }
 
     for (const candidate of allocatable) {
@@ -4436,9 +4397,7 @@ async function tryReadPathA(
         AND COALESCE(LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')), 'shopify') = 'shopify'
     `);
   } catch (err: any) {
-    console.warn(
-      `[pushShopifyFulfillment] Path A read failed for shipment ${shipmentId}: ${err?.message ?? String(err)} — falling back to Path B`,
-    );
+    logger.warn("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] Path A read failed for shipment ${shipmentId}: ${err?.message ?? String(err)} — falling back to Path B` });
     return null;
   }
 
@@ -4497,9 +4456,7 @@ async function getOurShopifyLocationIds(
       if (typeof id === "string" && id.length > 0) ids.push(id);
     }
   } catch (err: any) {
-    console.warn(
-      `[pushShopifyFulfillment] getOurShopifyLocationIds: warehouses query failed: ${err?.message ?? String(err)}`,
-    );
+    logger.warn("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] getOurShopifyLocationIds: warehouses query failed: ${err?.message ?? String(err)}` });
   }
 
   if (channelId != null) {
@@ -4518,9 +4475,7 @@ async function getOurShopifyLocationIds(
         err?.code !== "42703" &&
         !message.includes('column "shopify_location_id" does not exist')
       ) {
-        console.warn(
-          `[pushShopifyFulfillment] getOurShopifyLocationIds: channels query failed: ${message}`,
-        );
+        logger.warn("oms.fulfillment_push_service", { message: `[pushShopifyFulfillment] getOurShopifyLocationIds: channels query failed: ${message}` });
       }
     }
   }

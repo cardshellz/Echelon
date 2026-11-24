@@ -3,6 +3,7 @@ import { z } from "zod";
 import { walmartStatusSchema, type WalmartChannelStatus, type WalmartConnectInput } from "@shared/types/walmart-channel";
 import type { FulfillmentProviderCredentialRecord } from "../../../shipping-engine/fulfillment-routing-and-connections.api";
 import { WalmartApiError } from "./walmart-client";
+import { logger } from "../../../../platform/observability/logger";
 
 const LOCK_NAMESPACE = 94122;
 const positiveId = z.number().int().positive().max(2_147_483_647);
@@ -44,7 +45,7 @@ export class WalmartConnectionRepository {
       if (locked) {
         try { await client.query("SELECT pg_advisory_unlock($1, $2)", [LOCK_NAMESPACE, channelId]); }
         catch (error) {
-          console.error(JSON.stringify({ code: "WALMART_LOCK_RELEASE_FAILED", channelId }));
+          logger.error("WALMART_LOCK_RELEASE_FAILED", { code: "WALMART_LOCK_RELEASE_FAILED", channelId });
           client.release(error instanceof Error ? error : new Error("Walmart lock release failed")); locked = false;
         }
         if (locked) client.release();

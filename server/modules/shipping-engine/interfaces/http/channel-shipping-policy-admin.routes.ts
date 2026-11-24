@@ -15,6 +15,7 @@ import {
   ChannelShippingPolicyAdminService,
 } from "../../application/channel-shipping-policy-admin.service";
 import { PostgresChannelShippingPolicyAdminStore } from "../../infrastructure/channel-shipping-policy.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const idSchema = z.coerce.number().int().positive();
 const optionalCodeSchema = z.string().trim().min(1).max(20).nullable();
@@ -367,11 +368,7 @@ function sendAdminError(
       },
     });
   }
-  console.error(JSON.stringify({
-    code: "SHIPPING_CHANNEL_POLICY_ADMIN_FAILED",
-    action,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  logger.error("SHIPPING_CHANNEL_POLICY_ADMIN_FAILED", { code: "SHIPPING_CHANNEL_POLICY_ADMIN_FAILED", error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({
     error: {
       code: "SHIPPING_CHANNEL_POLICY_ADMIN_FAILED",

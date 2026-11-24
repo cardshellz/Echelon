@@ -1,5 +1,6 @@
 import type { QuantityPublicationCatchupService } from "./quantity-publication-admission.port";
 import { observeRuntimeWork } from "../../../platform/observability/runtime-memory";
+import { logger } from "../../../platform/observability/logger";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const STARTUP_DELAY_MS = 5_000;
@@ -18,7 +19,7 @@ export function startQuantityPublicationCatchupWorker(processor: Processor, opti
   if (!Number.isSafeInteger(intervalMs) || intervalMs < 1 || intervalMs > MAX_INTERVAL_MS) {
     throw new Error("Quantity publication catch-up interval is outside the supported range.");
   }
-  const log: Log = options.log ?? (entry => console.info(JSON.stringify(entry)));
+  const log: Log = options.log ?? (entry => logger.info("inventory-planning.quantity_publication_catchup_worker", { detail: JSON.stringify(entry) }));
   let stopped = false;
   let running: Promise<void> | null = null;
   const tick = (): void => {

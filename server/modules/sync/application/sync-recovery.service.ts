@@ -23,6 +23,7 @@ import {
   recordRunCompleted,
   runBootCatchUpIfBehind,
 } from "../../../infrastructure/scheduler-run-registry";
+import { logger } from "../../../platform/observability/logger";
 
 export interface StageResult {
   name: string;
@@ -110,9 +111,7 @@ export class SyncRecoveryService {
     if (
       stages.some((s) => s.data && Object.values(s.data).some((n) => n > 0))
     ) {
-      console.log(
-        `[SyncRecovery] completed in ${durationMs}ms ${JSON.stringify(stages)}`,
-      );
+      logger.info("sync.recovery_service", { message: `[SyncRecovery] completed in ${durationMs}ms ${JSON.stringify(stages)}` });
     }
     return { startedAt, durationMs, stages, allOk };
   }
@@ -139,7 +138,7 @@ export class SyncRecoveryService {
             : undefined,
       };
     } catch (err: any) {
-      console.error("[SyncRecovery] shopify_reconcile failed:", err);
+      logger.error("sync.recovery_service", { message: "[SyncRecovery] shopify_reconcile failed:", error: err });
       return {
         name: "shopify_reconcile",
         ok: false,
@@ -176,7 +175,7 @@ export class SyncRecoveryService {
             : undefined,
       };
     } catch (err: any) {
-      console.error("[SyncRecovery] shopify_to_oms failed:", err);
+      logger.error("sync.recovery_service", { message: "[SyncRecovery] shopify_to_oms failed:", error: err });
       return {
         name: "shopify_to_oms",
         ok: false,
@@ -199,7 +198,7 @@ export class SyncRecoveryService {
       );
       return { name, ok: true, data: { synced } };
     } catch (err: any) {
-      console.error("[SyncRecovery] oms_to_wms failed:", err);
+      logger.error("sync.recovery_service", { message: "[SyncRecovery] oms_to_wms failed:", error: err });
       return {
         name,
         ok: false,
@@ -257,9 +256,7 @@ export class SyncRecoveryService {
           }
           pushed++;
         } catch (err: any) {
-          console.warn(
-            `[SyncRecovery] wms_to_shipstation failed to push shipment ${id}: ${err.message}`,
-          );
+          logger.warn("sync.recovery_service", { message: `[SyncRecovery] wms_to_shipstation failed to push shipment ${id}: ${err.message}` });
           failed++;
         }
         await new Promise((r) =>
@@ -283,7 +280,7 @@ export class SyncRecoveryService {
             : undefined,
       };
     } catch (err: any) {
-      console.error("[SyncRecovery] wms_to_shipstation sweep failed:", err);
+      logger.error("sync.recovery_service", { message: "[SyncRecovery] wms_to_shipstation sweep failed:", error: err });
       return {
         name,
         ok: false,
@@ -308,11 +305,9 @@ export class SyncRecoveryService {
   ) {
     const intervalMs = intervalMinutes * 60 * 1000;
     const runObserved = () => observeRuntimeWork("orders.sync_recovery", () => this.runAll());
-    console.log(
-      `[SyncRecovery] Scheduled runs every ${intervalMinutes}min (first in ${
+    logger.info("sync.recovery_service", { message: `[SyncRecovery] Scheduled runs every ${intervalMinutes}min (first in ${
         initialDelayMs / 1000
-      }s)`,
-    );
+      }s)` });
 
     const firstTimer = setTimeout(() => {
       // runAll() walks the whole Shopify -> OMS -> WMS pipeline, so replaying it
@@ -325,7 +320,7 @@ export class SyncRecoveryService {
         logPrefix: "[SyncRecovery]",
         run: runObserved,
       }).catch((err) => {
-        console.error("[SyncRecovery] Initial run failed:", err);
+        logger.error("sync.recovery_service", { message: "[SyncRecovery] Initial run failed:", error: err });
       });
 
       const loopTimer = setInterval(() => {
@@ -336,7 +331,7 @@ export class SyncRecoveryService {
             }
           })
           .catch((err) => {
-            console.error("[SyncRecovery] Scheduled run failed:", err);
+            logger.error("sync.recovery_service", { message: "[SyncRecovery] Scheduled run failed:", error: err });
           });
       }, intervalMs);
 

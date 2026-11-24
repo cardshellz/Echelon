@@ -74,7 +74,7 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
       .limit(1);
 
     if (!order) {
-      console.warn(`${LOG_PREFIX} Order ${orderId} not found, skipping push`);
+      logger.warn("oms.mc_push", { message: `${LOG_PREFIX} Order ${orderId} not found, skipping push` });
       return;
     }
 
@@ -92,7 +92,7 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
         channelProvider = channel.provider;
       }
     } catch (e: any) {
-      console.warn(`${LOG_PREFIX} Could not look up channel ${order.channelId}: ${e.message}`);
+      logger.warn("oms.mc_push", { message: `${LOG_PREFIX} Could not look up channel ${order.channelId}: ${e.message}` });
     }
 
     // 3. Read line items
@@ -202,12 +202,12 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
 
     if (resp.ok) {
       const body = await resp.json().catch(() => ({}));
-      console.log(`${LOG_PREFIX} ✅ Pushed ${eventType} for order ${orderId} to MC (action: ${(body as any).action || "ok"})`);
+      logger.info("oms.mc_push", { message: `${LOG_PREFIX} ✅ Pushed ${eventType} for order ${orderId} to MC (action: ${(body as any).action || "ok"})` });
     } else {
-      console.warn(`${LOG_PREFIX} ⚠️ MC returned ${resp.status} for ${eventType} order ${orderId}`);
+      logger.warn("oms.mc_push", { message: `${LOG_PREFIX} ⚠️ MC returned ${resp.status} for ${eventType} order ${orderId}` });
     }
   } catch (err: any) {
-    console.error(`${LOG_PREFIX} ❌ Failed to push ${eventType} for order ${orderId}: ${err.message}`);
+    logger.error("oms.mc_push", { message: `${LOG_PREFIX} ❌ Failed to push ${eventType} for order ${orderId}: ${err.message}` });
     // Never throw — fire-and-forget
   }
 }

@@ -5,6 +5,7 @@ import { channelCatalogItemSchema, channelCatalogLinkSchema, channelCatalogQuery
 import { ChannelIdentityError } from "../domain/channel-identity.domain";
 import { channelCatalogStockRequestSchema, channelCatalogStockSchema, type ChannelCatalogStockItem } from "@shared/types/channel-catalog";
 import { ChannelProviderError } from "../domain/channel-provider.error";
+import { logger } from "../../../platform/observability/logger";
 
 export interface ChannelCatalogAccount {
   channelId: number;
@@ -106,7 +107,7 @@ export class ChannelCatalogService {
           return { sku, quantity, checkedAt: this.now().toISOString(), error: null };
         } catch (error) {
           const code = error instanceof ChannelProviderError ? error.code : "CHANNEL_CATALOG_STOCK_FAILED";
-          console.error(JSON.stringify({ code, operation: "channel_catalog_stock", channelId, sku }));
+          logger.error("channels.channel_catalog_service", { code, operation: "channel_catalog_stock", channelId, sku });
           return { sku, quantity: null, checkedAt: this.now().toISOString(), error: "Could not read stock from Walmart. Refresh listings to try again." };
         }
       })));

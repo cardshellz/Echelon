@@ -6,6 +6,7 @@ import type {
   ShippingFulfillmentProviderDescriptor,
 } from "@shared/types/shipping-fulfillment-routing";
 import { shippingFulfillmentMethodIdentityKey } from "@shared/lib/shipping-fulfillment-method-identity";
+import { logger } from "../../../platform/observability/logger";
 
 const PROVIDER_PATTERN = /^[a-z][a-z0-9_]{1,79}$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,119}$/;
@@ -228,14 +229,7 @@ export class ConnectedFulfillmentMethodCatalogService {
         credential,
       }), credential);
     } catch (error) {
-      console.error(JSON.stringify({
-        timestamp: validDate((this.deps.clock ?? systemClock).now()).toISOString(),
-        level: "error",
-        event: "shipping.fulfillment_provider.catalog_adapter_failed",
-        connectionId: connection.id,
-        provider: connection.provider,
-        errorName: error instanceof Error ? error.name : "UnknownError",
-      }));
+      logger.error("shipping.fulfillment_provider.catalog_adapter_failed", { timestamp: validDate((this.deps.clock ?? systemClock).now()).toISOString(), event: "shipping.fulfillment_provider.catalog_adapter_failed", connectionId: connection.id, provider: connection.provider, errorName: error instanceof Error ? error.name : "UnknownError" });
       return unavailableConnection(
         connection,
         adapter.descriptor.displayName,

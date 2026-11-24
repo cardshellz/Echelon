@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ShipStationLabelCommercialFulfillmentShipment } from "../../shipping/package-allocation-authority.api";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const PROVIDER_SETTLE_MS = 2 * 60 * 1_000;
@@ -93,7 +94,7 @@ export function createShipStationLabelReconciliationService(dependencies: {
   clock: { now(): Date };
   logger?: { error(event: Readonly<Record<string, unknown>>): void };
 }) {
-  const logger = dependencies.logger ?? { error: (event: Readonly<Record<string, unknown>>) => console.error(JSON.stringify(event)) };
+  const logger = dependencies.logger ?? { error: (event: Readonly<Record<string, unknown>>) => platformLogger.error("oms.shipstation_label_reconciliation_service", { error: JSON.stringify(event) }) };
   async function recoverOrders(): Promise<{ recovered: number; deferred: number; reviewRequired: number }> {
     const result = { recovered: 0, deferred: 0, reviewRequired: 0 };
     // Retain only completed void identities, not up to ten orders of raw

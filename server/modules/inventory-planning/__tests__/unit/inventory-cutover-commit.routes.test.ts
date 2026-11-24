@@ -9,6 +9,7 @@ import { InventoryCutoverManifestError } from "../../domain/inventory-cutover-ma
 import { CutoverReconstructionError } from "../../infrastructure/inventory-cutover-reconstruction.repository";
 import { InventoryAvailabilityActivationRepositoryError } from "../../infrastructure/inventory-availability-activation.repository";
 import { InventoryCutoverCaptureError } from "../../infrastructure/inventory-cutover-capture-stage";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 vi.mock("../../../identity", () => ({ hasPermission }));
@@ -36,7 +37,7 @@ describe("cutover review and commit routes", () => {
   let service: { preview: ReturnType<typeof vi.fn>; commit: ReturnType<typeof vi.fn> };
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
     session = { user: { id: "operator-1" } };
     service = { preview: vi.fn(async () => review()), commit: vi.fn(async () => result()) };
     server = await startServer(service as unknown as Pick<InventoryCutoverCommitService, "preview" | "commit">, () => session);
@@ -136,8 +137,8 @@ describe("cutover review and commit routes", () => {
     expect(service.preview).toHaveBeenCalledTimes(1);
     expect(service.commit).not.toHaveBeenCalled();
     expect(JSON.stringify(response.body)).not.toMatch(/secret|password|private|payload/);
-    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toMatch(/secret|password|private|payload/);
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('"event":"inventory_cutover_capture_failed"'));
+    expect(JSON.stringify(getLoggerJsonSpy("error").mock.calls)).not.toMatch(/secret|password|private|payload/);
+    expect(getLoggerJsonSpy("error")).toHaveBeenCalledWith(expect.stringContaining('"event":"inventory_cutover_capture_failed"'));
   });
 
   it("does not trust a spoofed capture-stage exception", async () => {
@@ -174,7 +175,7 @@ describe("cutover review and commit routes", () => {
     const response = await request(server.url + ROOT + "/commit", REQUEST);
     expect(response).toMatchObject({ status: 500, body: { error: { code: "CUTOVER_COMMAND_FAILED" } } });
     expect(JSON.stringify(response.body)).not.toMatch(/secret|password|PRIVATE_FAILURE/);
-    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toMatch(/secret|password/);
+    expect(JSON.stringify(getLoggerJsonSpy("error").mock.calls)).not.toMatch(/secret|password/);
   });
 
   it("rejects misleading or extra service output instead of reporting partial success", async () => {

@@ -24,6 +24,7 @@ import {
   resolveShopifyDropshipWebhookSecrets,
   verifyShopifyDropshipWebhookHmac,
 } from "../../infrastructure/dropship-shopify-webhook-security";
+import { logger as platformLogger } from "../../../../platform/observability/logger";
 
 type RawBodyRequest = Request & { rawBody?: unknown };
 
@@ -282,7 +283,7 @@ function sendDropshipMarketplaceOrderIntakeError(res: Response, error: unknown):
     });
   }
 
-  console.error("[DropshipMarketplaceOrderIntakeRoutes] Unexpected webhook error:", error);
+  platformLogger.error("dropship.marketplace_order_intake_routes", { message: "[DropshipMarketplaceOrderIntakeRoutes] Unexpected webhook error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_MARKETPLACE_ORDER_INTAKE_INTERNAL_ERROR",
@@ -347,11 +348,7 @@ function logShopifyWebhookIgnored(input: {
   reason: string;
   shopDomain: string | null;
 }): void {
-  console.warn(JSON.stringify({
-    code: "DROPSHIP_SHOPIFY_ORDER_WEBHOOK_IGNORED",
-    message: "Shopify dropship order webhook was ignored.",
-    context: input,
-  }));
+  platformLogger.warn("DROPSHIP_SHOPIFY_ORDER_WEBHOOK_IGNORED", { code: "DROPSHIP_SHOPIFY_ORDER_WEBHOOK_IGNORED", message: "Shopify dropship order webhook was ignored.", context: input });
 }
 
 const dropshipMarketplaceOrderIntakeRouteLogger: DropshipLogger =

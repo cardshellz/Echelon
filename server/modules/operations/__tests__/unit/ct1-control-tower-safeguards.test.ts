@@ -33,6 +33,7 @@ import {
 import { startControlTowerProjectionScheduler } from "../../application/control-tower-v2.scheduler";
 import { registerOperationsControlTowerRoutes } from "../../interfaces/http/control-tower.routes";
 import { ControlTowerActionError, executeOperationsControlTowerAction } from "../../application/control-tower.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 interface SimRow {
   id: number;
@@ -428,8 +429,8 @@ describe("CT-1 Control Tower Safeguards & Residual Closure", () => {
   describe("PW-10: Singleton & non-overlapping projection scheduler", () => {
     it("reuses active scheduler handle on duplicate start and skips overlapping ticks while inFlight", async () => {
       vi.useFakeTimers();
-      vi.spyOn(console, "log").mockImplementation(() => undefined);
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      spyLoggerJson("log");
+      const warn = spyLoggerJson("warn");
 
       let resolveFirstRun!: () => void;
       const runMock = vi.mocked(withAdvisoryLock)
@@ -471,7 +472,7 @@ describe("CT-1 Control Tower Safeguards & Residual Closure", () => {
 
   describe("PWF-04: Historical package-content wms_confirmed post-commit enqueue recovery", () => {
     it("classifies post-commit enqueue failure as 503 and allows idempotent wms_confirmed replay after item is projected resolved", async () => {
-      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      spyLoggerJson("error");
       let workItemResolved = false;
       let workItemVersion = 3;
       const pool = {
@@ -579,7 +580,7 @@ describe("CT-1 Control Tower Safeguards & Residual Closure", () => {
 
   describe("Legacy Control Tower action classification & route sanitization", () => {
     it("classifies action validation errors with ControlTowerActionError and sanitizes unexpected route errors to 500", async () => {
-      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      spyLoggerJson("error");
 
       await expect(executeOperationsControlTowerAction({
         deps: { db: { execute: vi.fn(async () => ({ rows: [] })) } },

@@ -35,6 +35,7 @@ import {
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import { catalogStorage } from "../../catalog";
 import { channelsStorage } from "..";
+import { logger } from "../../../platform/observability/logger";
 const storage = { ...catalogStorage, ...channelsStorage };
 
 // ---------------------------------------------------------------------------
@@ -439,7 +440,7 @@ export function createChannelProductPushService(db: any) {
         };
       }
     } catch (error: any) {
-      console.error(`[ChannelPush] Shopify push failed for product ${resolved.productId}:`, error.message);
+      logger.error("channels.product_push_service", { message: `[ChannelPush] Shopify push failed for product ${resolved.productId}:`, error: error.message });
 
       // Record error in listing
       if (existingListing) {

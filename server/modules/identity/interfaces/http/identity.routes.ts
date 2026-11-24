@@ -20,6 +20,7 @@ import {
 } from "../../application/staff-credentials";
 import { staffSessionActor, clearStaffSession, readStaffLifecycleAccess } from "../../application/staff-session";
 import { readStaffCredentialState } from "../../infrastructure/staff-credentials.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const createLoginRateLimiter = () => rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -61,7 +62,7 @@ export function registerAuthRoutes(app: Express) {
 
       req.session.save((err) => {
         if (err) {
-          console.error("Session save error:", err);
+          logger.error("identity.routes", { message: "Session save error:", error: err });
           return res.status(500).json({ error: "Session failed to save" });
         }
         res.json({ user: authenticated.user });
@@ -161,7 +162,7 @@ export function registerAuthRoutes(app: Express) {
       const result = await queryStaffUserList(req.session.user!.id);
       res.set("X-Access-Revision",result.revision).set("Cache-Control","no-store").json(result.users);
     } catch (error) {
-      console.error("Error fetching users:", error);
+      logger.error("identity.routes", { message: "Error fetching users:", error: error });
       res.status(500).json({ error: "Failed to fetch users" });
     }
   });

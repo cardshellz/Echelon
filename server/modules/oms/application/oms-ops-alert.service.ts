@@ -7,6 +7,7 @@ import {
   markOmsOpsAlertSchedulerStarted,
   resetOmsOpsAlertSchedulerHeartbeatForTests,
 } from "./oms-ops-alert-heartbeat";
+import { logger } from "../../../platform/observability/logger";
 
 const LOG_PREFIX = "[OMS Ops Alert]";
 const DEFAULT_COOLDOWN_MS = 30 * 60 * 1000;
@@ -104,9 +105,7 @@ export async function sendOmsOpsAlert(
 
   if (!webhookUrl) {
     const payload = buildOmsOpsAlertPayload(health, decision.criticalIssues);
-    console.warn(
-      `${LOG_PREFIX} critical health detected but OMS_OPS_ALERT_WEBHOOK_URL is not configured\n${payload.content}`,
-    );
+    logger.warn("oms.ops_alert_service", { message: `${LOG_PREFIX} critical health detected but OMS_OPS_ALERT_WEBHOOK_URL is not configured\n${payload.content}` });
     return { sent: false, reason: "webhook_not_configured", signature: decision.signature };
   }
 
@@ -130,7 +129,7 @@ export async function runOmsOpsAlertCheck(dbArg: any = getDefaultDb()): Promise<
   const health = await getOmsOpsHealth(dbArg);
   const result = await sendOmsOpsAlert(health);
   if (result.sent) {
-    console.warn(`${LOG_PREFIX} sent critical alert signature=${result.signature}`);
+    logger.warn("oms.ops_alert_service", { message: `${LOG_PREFIX} sent critical alert signature=${result.signature}` });
   }
   return result;
 }
@@ -154,11 +153,11 @@ export function startOmsOpsAlertScheduler(dbArg: any = getDefaultDb()): void {
       markOmsOpsAlertSchedulerRunSucceeded();
     }).catch((err) => {
       markOmsOpsAlertSchedulerRunFailed(err);
-      console.error(`${LOG_PREFIX} scheduled run error: ${getOmsOpsAlertSchedulerHeartbeat().lastError}`);
+      logger.error("oms.ops_alert_service", { message: `${LOG_PREFIX} scheduled run error: ${getOmsOpsAlertSchedulerHeartbeat().lastError}` });
     });
   };
 
-  console.log(`${LOG_PREFIX} Scheduler started (every 5 minutes, dyno-safe lock)`);
+  logger.info("oms.ops_alert_service", { message: `${LOG_PREFIX} Scheduler started (every 5 minutes, dyno-safe lock)` });
   setTimeout(runLocked, 45_000);
   setInterval(runLocked, 5 * 60 * 1000);
 }

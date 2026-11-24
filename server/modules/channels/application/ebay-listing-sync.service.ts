@@ -475,8 +475,7 @@ export class EbayListingSyncService {
             const diagnostic = ebayListingFailureDiagnostic(error);
             // Log before the final transaction: a failed database commit must not
             // erase the original failure and its exact inventory scope.
-            console.error(JSON.stringify({ event: "ebay_listing_sync_followup", jobId: job.id,
-              productId: job.productId, ...diagnostic }));
+            platformLogger.error("ebay_listing_sync_followup", { event: "ebay_listing_sync_followup", jobId: job.id, productId: job.productId, ...diagnostic });
             // A failed final commit is retained as running. Never overwrite a newer
             // owner's progress after losing this connection or its fencing token.
             await this.store.finish(
@@ -530,8 +529,7 @@ export class EbayListingSyncService {
     } catch (error) {
       // Supplementary stock evidence must not hide the entire listing feed.
       // Report unavailable evidence explicitly; never invent a successful check.
-      console.error(JSON.stringify({ event: "ebay_stock_status_unavailable", jobIds: ids,
-        diagnostic: ebayListingFailureDiagnostic(error) }));
+      platformLogger.error("ebay_stock_status_unavailable", { event: "ebay_stock_status_unavailable", jobIds: ids, diagnostic: ebayListingFailureDiagnostic(error) });
       return jobs.map(job => job.kind === "admission" ? job : { ...job, inventoryReconciliation: {
         state: "unavailable" as const, checkedAt: null, nextCheckAt: null,
         code: "PUBLICATION_RECONCILIATION_STATUS_UNAVAILABLE",

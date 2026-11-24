@@ -5,6 +5,7 @@ import {
 import { createOrderLineCatalogIdentityRepository, type CatalogIdentityDatabase } from "../infrastructure/order-line-catalog-identity.repository";
 import { omsOrderEvents } from "@shared/schema";
 import type { db } from "../../../db";
+import { logger } from "../../../platform/observability/logger";
 
 /** Shared by initial ingest, replay, and order-update handlers; reads use the caller's transaction. */
 export async function resolveOrderLineCatalogIdentity(
@@ -36,8 +37,7 @@ export async function resolveOrderLineCatalogIdentity(
     throw new OrderLineIdentityError("ORDER_LINE_PRODUCT_IDENTITY_CONFLICT", "Resolved variant belongs to a different channel product", { channelId: input.channelId });
   }
   if (!identity && input.externalVariantId) {
-    console.warn(JSON.stringify({ code: "ORDER_LINE_IDENTITY_UNRESOLVED", channelId: input.channelId,
-      externalVariantId: input.externalVariantId, sourceSkuPresent: Boolean(input.sku) }));
+    logger.warn("ORDER_LINE_IDENTITY_UNRESOLVED", { code: "ORDER_LINE_IDENTITY_UNRESOLVED", channelId: input.channelId, externalVariantId: input.externalVariantId, sourceSkuPresent: Boolean(input.sku) });
   }
   return identity;
 }

@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipWalletPolicyService } from "../../application/dropship-wallet-policy-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipWalletPolicyServiceFromEnv } from "../../infrastructure/dropship-wallet-policy.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 /**
  * Admin surface for the staff-managed wallet policy (migrations 0682, 0683,
@@ -101,7 +102,7 @@ function sendDropshipWalletPolicyError(res: Response, error: unknown): Response 
     });
   }
 
-  console.error("[DropshipAdminWalletPolicyRoutes] Unexpected wallet policy error:", error);
+  logger.error("dropship.admin_wallet_policy_routes", { message: "[DropshipAdminWalletPolicyRoutes] Unexpected wallet policy error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_WALLET_POLICY_INTERNAL_ERROR",

@@ -7,6 +7,7 @@ import { QuantityPublicationAdmissionError, type QuantityPublicationScope } from
 import { InventoryAvailabilityRuntimePublicationError } from "./inventory-availability-runtime-publication.service";
 import { reconciliationContentVerificationSchema, type ReconciliationContentVerification,
   type RetainedPublicationEffectEvidence } from "../domain/publication-recovery-evidence";
+import { logger } from "../../../platform/observability/logger";
 export type { ReconciliationContentVerification, RetainedPublicationEffectEvidence } from "../domain/publication-recovery-evidence";
 
 export const EBAY_RECONCILIATION_INTERVAL_MS = 15 * 60_000;
@@ -102,8 +103,7 @@ export class EbayPublicationReconciliationService {
               // This optimization must not turn missing evidence into a match
               // or prevent the pre-existing saved Sync recovery path.
               forceSync = true;
-              console.warn(JSON.stringify({ event: "publication_recovery_effect_evidence_unavailable",
-                watchId: claim.watchId, code: "PUBLICATION_RECOVERY_EFFECT_EVIDENCE_UNAVAILABLE" }));
+              logger.warn("publication_recovery_effect_evidence_unavailable", { event: "publication_recovery_effect_evidence_unavailable", watchId: claim.watchId, code: "PUBLICATION_RECOVERY_EFFECT_EVIDENCE_UNAVAILABLE" });
               await this.store.renew(claim, this.now());
             }
           }
@@ -132,8 +132,7 @@ export class EbayPublicationReconciliationService {
           commandConsumed: contentJobId !== undefined || failure instanceof EbayPublicationContentRefreshRejectedError,
           ...(contentJobId ? { contentJobId } : {}) }, this.now());
       } catch {
-        console.error(JSON.stringify({ event: "ebay_publication_reconciliation_persistence_failed", watchId: claim.watchId,
-          code: "PUBLICATION_RECONCILIATION_PERSISTENCE_FAILED" }));
+        logger.error("ebay_publication_reconciliation_persistence_failed", { event: "ebay_publication_reconciliation_persistence_failed", watchId: claim.watchId, code: "PUBLICATION_RECONCILIATION_PERSISTENCE_FAILED" });
       }
       result.blocked += 1;
     }

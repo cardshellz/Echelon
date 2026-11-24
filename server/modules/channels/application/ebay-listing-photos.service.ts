@@ -15,6 +15,7 @@ import {
   EBAY_LISTING_MAX_PHOTOS, EbayListingPhotoError, assertEbayPhotoUrl, assertEbayPhotoVariants,
   buildEbayListingPhotoPlan, resolveEbayListingPhotoUrls, type EbayListingPhotoPlan, type EbayPhotoVariant,
 } from "../domain/ebay-listing-photos.domain";
+import { logger } from "../../../platform/observability/logger";
 
 export interface EbayListingPhotoRequest {
   productId: number;
@@ -53,9 +54,7 @@ export class ChannelEbayListingPhotoResolver implements EbayListingPhotoResolver
       return plan;
     }
     catch (error) {
-      console.error(JSON.stringify({ event: "ebay_listing_photo_resolution_failed", productId: input.productId, channelId: input.channelId,
-        code: error instanceof EbayListingPhotoError ? error.code : "EBAY_PHOTO_READ_FAILED",
-        context: error instanceof EbayListingPhotoError ? error.context : {} }));
+      logger.error("ebay_listing_photo_resolution_failed", { event: "ebay_listing_photo_resolution_failed", productId: input.productId, channelId: input.channelId, code: error instanceof EbayListingPhotoError ? error.code : "EBAY_PHOTO_READ_FAILED", context: error instanceof EbayListingPhotoError ? error.context : {} });
       throw error;
     }
   }

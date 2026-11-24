@@ -28,6 +28,7 @@ import {
   listingAccountKey,
   ListingPublicationError,
 } from "../domain/listing-publication";
+import { logger } from "../../../platform/observability/logger";
 
 const LOCK_SEED = 2591012;
 const RETRY_INTERVAL_MS = 60_000;
@@ -173,12 +174,7 @@ export class PostgresListingLifecycleRepository implements ListingLifecycleStore
         }
       }
       if (discard)
-        console.error(
-          JSON.stringify({
-            operation: "listing_lifecycle_lock",
-            code: "LISTING_LOCK_RELEASE_FAILED",
-          }),
-        );
+        logger.error("LISTING_LOCK_RELEASE_FAILED", { operation: "listing_lifecycle_lock", code: "LISTING_LOCK_RELEASE_FAILED" });
       client.release(discard);
     }
   }

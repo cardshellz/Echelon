@@ -38,6 +38,7 @@ import { shipmentUnitOptionsRequestSchema } from "@shared/procurement/shipment-u
 import { shipmentLinePatchSchema } from "@shared/procurement/shipment-line-command";
 import { registerInboundShipmentRoutes } from "../../interfaces/http/inbound-shipment.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 let server: Server | undefined;
 let url: string;
@@ -175,7 +176,7 @@ describe("shipment line HTTP command contract", () => {
   });
 
   it("does not mark a failed rejection persistence attempt as safely rejected", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = spyLoggerJson("error");
     service.executeLineCommandInTransaction.mockRejectedValue(new ShipmentTrackingError("Pack changed", 409, { code: "SHIPMENT_UNIT_SOURCE_CHANGED" }));
     mocks.repository.rejectClaim.mockRejectedValue(new Error("connection lost before recording rejection"));
     const result = await send("PATCH", "/api/inbound-shipments/lines/31", {}, { "Idempotency-Key": KEY });
@@ -240,7 +241,7 @@ describe("purchasing-scoped shipment unit preview HTTP contract", () => {
   });
 
   it("sanitizes unexpected read errors and leaves mutation/recovery ownership untouched", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = spyLoggerJson("error");
     try {
       mocks.unitOptions.mockRejectedValue(new Error("private connection credentials must not escape"));
       const response = await send("POST", path, body);

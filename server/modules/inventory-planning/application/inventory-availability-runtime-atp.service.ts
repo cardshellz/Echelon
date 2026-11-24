@@ -11,6 +11,7 @@ import type {
 } from "../../inventory/atp.service.api";
 import { projectCanonicalAtp } from "../domain/inventory-availability-planner";
 import { totalBalanceBaseUnits, type InventoryProductBalances } from "./inventory-product-balances";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 export type InventoryAvailabilityRuntimeAuthority = "legacy" | "canonical";
 
@@ -39,7 +40,7 @@ export interface InventoryAvailabilityRuntimeAtpLogger {
 
 const defaultLogger: InventoryAvailabilityRuntimeAtpLogger = {
   warn(event) {
-    console.warn(JSON.stringify(event));
+    platformLogger.warn("inventory-planning.inventory_availability_runtime_atp_service", { detail: JSON.stringify(event) });
   },
 };
 

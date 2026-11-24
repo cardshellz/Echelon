@@ -4,6 +4,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { ProductDefinitionError, ProductDefinitionService } from "../../application/inventory-product-definition.service";
 import { PostgresProductDefinitionStore } from "../../infrastructure/inventory-product-definition.repository";
 import { InventoryAvailabilityRuntimePublicationError } from "../../application/inventory-availability-runtime-publication.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerProductDefinitionRoutes(app: Express,
   service: Pick<ProductDefinitionService, "review" | "apply" | "progress"> = new ProductDefinitionService(new PostgresProductDefinitionStore()),
@@ -31,6 +32,6 @@ export function sendError(res: Response, error: unknown): void {
   if (["40001", "40P01", "55P03", "57014", "INVENTORY_PUBLICATION_TARGET_BUSY", "QUANTITY_PUBLICATION_DRAIN_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY"].includes(code)) {
     res.status(409).json({ error: { code: "DEFINITION_BUSY", message: "Inventory changed or another operation is in progress. Review again before retrying." } }); return;
   }
-  console.error(JSON.stringify({ event: "product_definition_command_failed", code: /^[A-Z0-9_]{1,100}$/.test(code) ? code : "UNKNOWN" }));
+  logger.error("product_definition_command_failed", { event: "product_definition_command_failed", code: /^[A-Z0-9_]{1,100}$/.test(code) ? code : "UNKNOWN" });
   res.status(500).json({ error: { code: "DEFINITION_COMMAND_FAILED", message: "The result is not confirmed. Retry with the same command key." } });
 }

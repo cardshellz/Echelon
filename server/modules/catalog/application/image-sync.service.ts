@@ -17,6 +17,7 @@ import { createSharedProductPhotoImporter, type SharedImportedPhoto } from "./sh
 import { PgCatalogVariantPublicationPhotoReader, readCatalogPublicationImageIds, readCatalogPublicationImages,
   resolveCatalogPublicationPhotos } from "../infrastructure/catalog-publication-images.reader";
 import { createCatalogPublicImageUrl } from "../domain/catalog-public-image";
+import { logger } from "../../../platform/observability/logger";
 
 const EBAY_CHANNEL_ID = 67;
 
@@ -93,7 +94,7 @@ export function createImageSyncService() {
       return true;
     });
 
-    console.log(`[ImageSync] pullFromEbay: processing ${uniqueListings.length} unique products`);
+    logger.info("catalog.image_sync_service", { message: `[ImageSync] pullFromEbay: processing ${uniqueListings.length} unique products` });
 
     for (const listing of uniqueListings) {
       const result: ImagePullResult = {
@@ -104,7 +105,7 @@ export function createImageSyncService() {
         errors: [],
       };
 
-      console.log(`[ImageSync] Processing product ${listing.productId} (${listing.sku}) - ${listing.ebayUrl || 'NO URL'}`);
+      logger.info("catalog.image_sync_service", { message: `[ImageSync] Processing product ${listing.productId} (${listing.sku}) - ${listing.ebayUrl || 'NO URL'}` });
 
       try {
         if (!listing.ebayItemId) {

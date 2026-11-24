@@ -4,6 +4,7 @@ import type {
 } from "./channel-fulfillment-authority.service";
 
 import { observeRuntimeWork } from "../../../platform/observability/runtime-memory";
+import { logger } from "../../../platform/observability/logger";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const DEFAULT_BATCH_SIZE = 25;
@@ -50,18 +51,12 @@ export async function runChannelFulfillmentCommandWorkerOnce(
     lastSuccessAt = new Date();
     lastError = null;
     if (result.claimed > 0) {
-      console.log(JSON.stringify({
-        code: "CHANNEL_FULFILLMENT_WORKER_BATCH_COMPLETED",
-        ...result,
-      }));
+      logger.info("CHANNEL_FULFILLMENT_WORKER_BATCH_COMPLETED", { code: "CHANNEL_FULFILLMENT_WORKER_BATCH_COMPLETED", ...result });
     }
     return result;
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
-    console.error(JSON.stringify({
-      code: "CHANNEL_FULFILLMENT_WORKER_BATCH_FAILED",
-      error: lastError,
-    }));
+    logger.error("CHANNEL_FULFILLMENT_WORKER_BATCH_FAILED", { code: "CHANNEL_FULFILLMENT_WORKER_BATCH_FAILED", error: lastError });
     throw error;
   } finally {
     runInFlight = false;
@@ -76,7 +71,7 @@ export async function runChannelLabelLifecycleWorkerOnce(service: ChannelFulfill
     labelLifecycleLastError = null;
   } catch (error) {
     labelLifecycleLastError = error instanceof Error ? error.message : String(error);
-    console.error(JSON.stringify({ code: "CHANNEL_LABEL_LIFECYCLE_WORKER_FAILED", error: labelLifecycleLastError }));
+    logger.error("CHANNEL_LABEL_LIFECYCLE_WORKER_FAILED", { code: "CHANNEL_LABEL_LIFECYCLE_WORKER_FAILED", error: labelLifecycleLastError });
   } finally {
     labelLifecycleInFlight = false;
   }

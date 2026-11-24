@@ -8,6 +8,7 @@
 import type { Express } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { getEnterpriseDashboard } from "../../application/enterprise-dashboard.service";
+import { logger } from "../../../../platform/observability/logger";
 
 function startOfDay(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -35,7 +36,7 @@ export function registerEnterpriseDashboardRoutes(app: Express) {
       const dashboard = await getEnterpriseDashboard({ from, to });
       res.json(dashboard);
     } catch (err: any) {
-      console.error("[EnterpriseDashboard] failed:", err);
+      logger.error("procurement.enterprise_dashboard_routes", { message: "[EnterpriseDashboard] failed:", error: err });
       res.status(500).json({ error: "Failed to load enterprise dashboard" });
     }
   });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PickingUseCases } from "../../application/picking.use-cases";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 const progressOwner = vi.hoisted(() => vi.fn());
 vi.mock("../../../wms/infrastructure/picking-progress.repository", () => ({reconcileWmsPickingProgress:progressOwner}));
 
@@ -67,7 +68,7 @@ describe("WMS cartonization shadow", () => {
 
   it("does not block manual handoff when no verified plan can be produced", async () => {
     const { service, storage, ensurePackPlan } = buildService(null);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
 
     const result = await service.markReadyToShip(42, "picker-1");
 
@@ -80,7 +81,7 @@ describe("WMS cartonization shadow", () => {
 
   it("does not write order progress when automatic cartonization fails", async () => {
       const { service, storage } = buildService(null);
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const warn = spyLoggerJson("warn");
 
       (service as any).triggerCartonizationShadow(42);
       await vi.waitFor(() => expect(warn).toHaveBeenCalled());

@@ -25,6 +25,7 @@ import { ensureEbayListingInventoryReady } from "./ebay-listing-inventory-readin
 import { linkEbayListingStockBeforeChange } from "./ebay-listing-stock-link-hook";
 import { linkChannelEbayStock, readEbayStockLinkGaps } from "../../inventory-planning/quantity-publication.api";
 import { EbayListingChangeIntentRepository } from "./ebay-listing-change-intent.repository";
+import { logger } from "../../../platform/observability/logger";
 
 /** The actor of a stock link made by a reviewed listing update or rebuild (its receipt and audit row). */
 const EBAY_LISTING_CHANGE_STOCK_ACTOR = "system:ebay-listing-change";
@@ -274,8 +275,7 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
         // decision and the next review of this product closes it. The applied change must not be reported as failed.
         try { await changeIntents.close({ channelId: EBAY_CHANNEL_ID, productId, reviewToken: openIntentReviewToken, reason: "applied" }, new Date()); }
         catch (closeError) {
-          console.error(JSON.stringify({ event: "ebay_listing_change_intent_close_failed", productId, reason: "applied",
-            message: closeError instanceof Error ? closeError.message : "Unknown error" }));
+          logger.error("ebay_listing_change_intent_close_failed", { event: "ebay_listing_change_intent_close_failed", productId, reason: "applied", message: closeError instanceof Error ? closeError.message : "Unknown error" });
         }
       }
       return { productId, productName, variantCount: variants.length, success: true, status: "success", listingId: result.externalProductId,
@@ -285,8 +285,7 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
         ? new EbayListingSyncError("EBAY_LISTING_PREFLIGHT_FAILED", `Saved listing inputs are invalid: ${caught.issues.map(issue => issue.path.join(".") || "listing").join(", ").slice(0, 300)}. Review this product and its eBay connection settings before publishing.`, { cause: caught })
         : caught;
       let failure = ebayListingPushFailure(productId, error, productName);
-      console.error(JSON.stringify({ event: "ebay_listing_push_failed", productId, code: failure.code, message: failure.error,
-        cause: describeUnclassifiedFailure(error) }));
+      logger.error("ebay_listing_push_failed", { event: "ebay_listing_push_failed", productId, code: failure.code, message: failure.error, cause: describeUnclassifiedFailure(error) });
       // Nothing reached eBay: withdraw the reviewed additions so no size stays selected for stock without a listing.
       // After eBay writes began the size may be on the live listing, so its record stays open and it keeps receiving
       // stock updates until a later review applies or replaces it.
@@ -295,16 +294,14 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
         try { await changeIntents.close({ channelId: EBAY_CHANNEL_ID, productId, reviewToken: openIntentReviewToken, reason: "refused" }, new Date()); }
         catch (closeError) {
           // Reported, not rethrown: the operator needs the original refusal. The next review supersedes the open row.
-          console.error(JSON.stringify({ event: "ebay_listing_change_intent_close_failed", productId, reason: "refused",
-            message: closeError instanceof Error ? closeError.message : "Unknown error" }));
+          logger.error("ebay_listing_change_intent_close_failed", { event: "ebay_listing_change_intent_close_failed", productId, reason: "refused", message: closeError instanceof Error ? closeError.message : "Unknown error" });
         }
       }
       if (command.rebuild?.mode !== "preview" && !(error instanceof EbayListingPushSkipped)
         && failure.code !== "EBAY_LISTING_ALREADY_PUBLISHED") {
         try { await repository.recordFailure(productId, failure.error ?? "Listing publication failed."); }
         catch (persistenceError) {
-          console.error(JSON.stringify({ event: "ebay_listing_push_failure_unsaved", productId, originalCode: failure.code,
-            message: persistenceError instanceof Error ? persistenceError.message : "Unknown persistence error" }));
+          logger.error("ebay_listing_push_failure_unsaved", { event: "ebay_listing_push_failure_unsaved", productId, originalCode: failure.code, message: persistenceError instanceof Error ? persistenceError.message : "Unknown persistence error" });
           failure = ebayListingPushFailure(productId, new EbayListingSyncError("EBAY_SYNC_PERSISTENCE_FAILED",
             `${failure.error} Echelon also could not save this error. Copy these details and retry after database connectivity returns.`), productName);
         }

@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { logger } from "../../../platform/observability/logger";
 
 /** Channel raised by migration 900000059000020450001 when publication work is committed. */
 export const PUBLICATION_WAKE_CHANNEL = "inventory_publication_work";
@@ -23,7 +24,7 @@ export function startPublicationWakeListener(
   if (!Number.isSafeInteger(reconnectDelayMs) || reconnectDelayMs < 1) {
     throw new Error("Publication wake listener reconnect delay must be a positive integer.");
   }
-  const log: Log = options.log ?? (entry => console.info(JSON.stringify(entry)));
+  const log: Log = options.log ?? (entry => logger.info("inventory-planning.publication_wake_listener", { detail: JSON.stringify(entry) }));
   let stopped = false;
   let client: PoolClient | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;

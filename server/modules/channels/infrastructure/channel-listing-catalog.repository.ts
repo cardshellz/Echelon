@@ -17,6 +17,7 @@ import {
   ListingPublicationError,
   listingHash,
 } from "../../marketplace-listings/listing-publication.api";
+import { logger } from "../../../platform/observability/logger";
 
 /** Channels owns catalog projection and its existing shared price rule tables. */
 export class ChannelListingCatalogRepository {
@@ -107,8 +108,7 @@ export class ChannelListingCatalogRepository {
             assetId: omission.assetId, code: omission.code!, message: omission.message!,
           })) };
         if (publicationImages.issues.length) {
-          console.warn(JSON.stringify({ event: "channel_listing.catalog_image_unavailable", channelId,
-            variantId: row.variant_id, images: publicationImages.issues.map(({ assetId, code }) => ({ assetId, code })) }));
+          logger.warn("channel_listing.catalog_image_unavailable", { event: "channel_listing.catalog_image_unavailable", channelId, variantId: row.variant_id, images: publicationImages.issues.map(({ assetId, code }) => ({ assetId, code })) });
         }
         const resolved = await resolveChannelListingPrice(database, {
           channelId,

@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { applyReturnedStock, quarantineReturnedStock, lockInventoryCostGraph, costFingerprint,
   loadReturnCommand, recordReturnCommand, ReturnRestockError, readPhysicalReturnQuantities } from "../../inventory/return-inventory.api";
 import { returnCommandResultSchema } from "@shared/inventory/return-command";
+import { logger } from "../../../platform/observability/logger";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -239,10 +240,7 @@ class ReturnsService {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[RETURNS] Error processing return for order item ${item.orderItemId}:`,
-          message,
-        );
+        logger.error("orders.returns_service", { message: `[RETURNS] Error processing return for order item ${item.orderItemId}:`, error: message });
         // The batch is now transaction-bound to its entitlement fence. Any
         // inventory/audit failure must roll back the batch, not commit a prefix.
         throw err;

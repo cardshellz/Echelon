@@ -6,6 +6,7 @@ import type { DropshipListingPriceService } from "../../application/dropship-lis
 import { DropshipError } from "../../domain/errors";
 import { createDropshipListingPriceService } from "../../infrastructure/dropship-listing-price.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipListingPriceRoutes(app: Express,
   service: Pick<DropshipListingPriceService, "getForMember" | "saveForMember"> = createDropshipListingPriceService()): void {
@@ -49,6 +50,6 @@ function respondError(res: Response, error: unknown): Response {
     console[status >= 500 ? "error" : "warn"](JSON.stringify({ code: error.code, message: "Listing-price request rejected.", context: error.context }));
     return res.status(status).json({ error: { code: error.code, message: error.message } });
   }
-  console.error(JSON.stringify({ code: "DROPSHIP_LISTING_PRICE_INTERNAL_ERROR", message: "Listing-price request failed.", error: error instanceof Error ? error.message : String(error) }));
+  logger.error("DROPSHIP_LISTING_PRICE_INTERNAL_ERROR", { code: "DROPSHIP_LISTING_PRICE_INTERNAL_ERROR", message: "Listing-price request failed.", error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({ error: { code: "DROPSHIP_LISTING_PRICE_INTERNAL_ERROR", message: "The price could not be saved or loaded. Please retry." } });
 }

@@ -6,6 +6,7 @@ import type {
   CarrierTrackingProjectionCursor,
   CarrierTrackingProjectionReader,
 } from "../../infrastructure/carrier-tracking-projection.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 export const CARRIER_TRACKING_PROJECTION_PATH = "/api/internal/carrier-tracking/packages";
 
@@ -96,10 +97,7 @@ export function registerCarrierTrackingProjectionRoutes(
         },
       });
     } catch (error) {
-      console.error("[CarrierTrackingProjection] Read failed", {
-        path: requestPath(request),
-        error: error instanceof Error ? error.message : String(error),
-      });
+      logger.error("shipping.carrier_tracking_projection_routes", { message: "[CarrierTrackingProjection] Read failed", path: requestPath(request), error: error instanceof Error ? error.message : String(error) });
       return response.status(500).json({ error: "Failed to read carrier tracking projection" });
     }
   });

@@ -7,6 +7,7 @@ import type {
   DropshipWorkerSweepName,
 } from "../../application/dropship-worker-ops-service";
 import { createDropshipWorkerOpsServiceFromEnv } from "../../infrastructure/dropship-worker-ops.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipAdminWorkerOpsRoutes(
   app: Express,
@@ -103,7 +104,7 @@ function sendDropshipWorkerOpsError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[DropshipAdminWorkerOpsRoutes] Unexpected worker ops error:", error);
+  logger.error("dropship.admin_worker_ops_routes", { message: "[DropshipAdminWorkerOpsRoutes] Unexpected worker ops error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_WORKER_SWEEP_INTERNAL_ERROR",

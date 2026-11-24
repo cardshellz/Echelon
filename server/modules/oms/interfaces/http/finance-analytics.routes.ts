@@ -9,6 +9,7 @@
 import type { Express } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { getFinanceSummary, getFinanceOrders, getFinanceOrderDetail } from "../../application/finance-analytics.service";
+import { logger } from "../../../../platform/observability/logger";
 
 function startOfDay(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -36,7 +37,7 @@ export function registerFinanceAnalyticsRoutes(app: Express) {
       const summary = await getFinanceSummary(from, to);
       res.json(summary);
     } catch (err: any) {
-      console.error("[FinanceAnalytics] summary failed:", err);
+      logger.error("oms.finance_analytics_routes", { message: "[FinanceAnalytics] summary failed:", error: err });
       res.status(500).json({ error: "Failed to load finance summary" });
     }
   });
@@ -63,7 +64,7 @@ export function registerFinanceAnalyticsRoutes(app: Express) {
       const result = await getFinanceOrders({ from, to, channelId, financialStatus, page, pageSize });
       res.json(result);
     } catch (err: any) {
-      console.error("[FinanceAnalytics] orders failed:", err);
+      logger.error("oms.finance_analytics_routes", { message: "[FinanceAnalytics] orders failed:", error: err });
       res.status(500).json({ error: "Failed to load finance orders" });
     }
   });
@@ -83,7 +84,7 @@ export function registerFinanceAnalyticsRoutes(app: Express) {
       }
       res.json(detail);
     } catch (err: any) {
-      console.error("[FinanceAnalytics] order detail failed:", err);
+      logger.error("oms.finance_analytics_routes", { message: "[FinanceAnalytics] order detail failed:", error: err });
       res.status(500).json({ error: "Failed to load order detail" });
     }
   });

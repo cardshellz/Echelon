@@ -3,6 +3,7 @@ import { costReportDeliveryListSchema, type CostReportDeliveryList, type CostRep
 import { CostReportingRepository } from "../infrastructure/cost-reporting.repository";
 import { parseReportConfiguration, reportFailure, type ReportTransportConfiguration } from "../domain/cost-reporting.domain";
 import { sendCostReport } from "../infrastructure/cost-reporting.transport";
+import { logger } from "../../../platform/observability/logger";
 
 export interface CostReportingDependencies {
   repository: CostReportingRepository;
@@ -49,12 +50,12 @@ export class CostReportingService {
 }
 export function createCostReportingService(repository: CostReportingRepository): CostReportingService {
   return new CostReportingService({repository,configuration:() => parseReportConfiguration(process.env),clock:() => new Date(),newId:randomUUID,send:sendCostReport,
-    log:(event) => console.info(JSON.stringify(event))});
+    log:(event) => logger.info("procurement.cost_reporting_service", { detail: JSON.stringify(event) })});
 }
 
 /** Process-local scheduling is not delivery authority. PostgreSQL owns leases,
  * retries and completion, so several app processes may run this scheduler. */
-export function startCostReportingWorker(service: CostReportingService, log: (event: Record<string,unknown>) => void = (event) => console.error(JSON.stringify(event))): () => Promise<void> {
+export function startCostReportingWorker(service: CostReportingService, log: (event: Record<string,unknown>) => void = (event) => logger.error("procurement.cost_reporting_service", { error: JSON.stringify(event) })): () => Promise<void> {
   const intervalMs = 30_000;
   let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined;
   const run = (): void => {

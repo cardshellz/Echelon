@@ -69,6 +69,7 @@ vi.mock("../../../notifications/in-app-notifications.api", () => mocks.notificat
 
 import { ApLedgerError } from "../../application/ap-ledger.service";
 import { registerInboundShipmentRoutes } from "../../interfaces/http/inbound-shipment.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
   return {
@@ -162,7 +163,7 @@ describe("inbound shipment routes", () => {
     expect(service.getReceivingSetup).not.toHaveBeenCalled();
   });
   it("redacts receiving setup failures and keeps booking unavailable", async () => {
-    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logged = spyLoggerJson("error");
     const service = buildShipmentTrackingMock({ getReceivingSetup: vi.fn().mockRejectedValue(new Error("private SQL connection details")) });
     server = await startServer(buildApp(service));
     const result = await requestJson(server.url, "GET", "/api/inbound-shipments/42/receiving-setup");

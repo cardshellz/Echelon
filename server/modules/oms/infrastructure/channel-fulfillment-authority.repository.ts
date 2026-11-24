@@ -45,6 +45,7 @@ import {
   MAX_INHERITED_COMMERCIAL_INTENTS,
   validateInheritedCommercialIntents,
 } from "../domain/package-allocation-commercial-inheritance.domain";
+import { logger } from "../../../platform/observability/logger";
 
 const positiveIntegerSchema = z.number().int().positive();
 const positiveBigintTextSchema = z.string().regex(/^[1-9]\d*$/).refine(
@@ -4355,7 +4356,7 @@ export function createChannelFulfillmentAuthorityRepository(
         const code = failure.code ?? failure.cause?.code;
         const constraint = failure.constraint ?? failure.cause?.constraint;
         if (attempt>=3 || !(code==='40001'||code==='40P01'||(code==='23505'&&constraint==='package_reconciliation_commands_command_key_key'))) throw error;
-        console.warn(JSON.stringify({code:'PACKAGE_RECONCILIATION_TRANSACTION_RETRY',attempt,postgresCode:code}));
+        logger.warn("PACKAGE_RECONCILIATION_TRANSACTION_RETRY", { code:'PACKAGE_RECONCILIATION_TRANSACTION_RETRY', attempt, postgresCode:code });
       }
     }
   }

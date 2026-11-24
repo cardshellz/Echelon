@@ -6,6 +6,7 @@ import {
   CustomerReturnIntakeError, customerReturnIntakeAddressSchema, customerReturnIntakeResultSchema,
   type CustomerReturnIntakeStore, type CustomerReturnIntakeResult, type PreparedCustomerReturnIntake
 } from "./customer-return-intake.ports";
+import { logger } from "../../../platform/observability/logger";
 
 const id = z.number().int().positive().safe();
 const quantity = id.max(2_147_483_647);
@@ -99,7 +100,7 @@ export class CustomerReturnIntakeService {
         : new CustomerReturnIntakeError("RETURN_INTAKE_UNAVAILABLE", "The return could not be saved. Retry the same request.", 503);
       try {
         if (this.dependencies.reportFailure) this.dependencies.reportFailure({ code: classified.code });
-        else console.error("RETURN_INTAKE_FAILED", { code: classified.code });
+        else logger.error("returns.customer_return_intake_service", { message: "RETURN_INTAKE_FAILED", code: classified.code });
       } catch { /* Reporting must not change command outcome. */ }
       throw classified;
     }

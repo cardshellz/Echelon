@@ -6,6 +6,7 @@ import {
   type PostgresPoolSnapshot,
 } from "./postgres-pool-observability";
 import { resolvePostgresPoolSslConfig } from "../database-pool-config";
+import { logger as platformLogger } from "../platform/observability/logger";
 
 const { Pool } = pg;
 
@@ -191,7 +192,7 @@ function getLockPool(): AdvisoryLockPool {
   });
 
   pgPool.on("error", (error) => {
-    console.error("[AdvisoryLock] Unexpected idle lock client error:", error);
+    platformLogger.error("infrastructure.scheduler_lock", { message: "[AdvisoryLock] Unexpected idle lock client error:", error: error });
   });
 
   lockPool = pgPool;

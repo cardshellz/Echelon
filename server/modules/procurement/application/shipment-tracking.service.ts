@@ -74,6 +74,7 @@ import { readShipmentCancellationEvidence } from "../infrastructure/shipment-can
 import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts, type ShipmentProvisionalLotCounts, type ShipmentAllocationReadEvidence, type ShipmentHealthReadEvidence } from "../infrastructure/shipment-health-evidence.repository";
 import { CostEvidenceError } from "../../inventory/cost-evidence-values.api";
 import { applyShipmentMeasurementCorrection, type ShipmentCostUpdateApplicationResult } from "./shipment-measurement-correction.service";
+import { logger } from "../../../platform/observability/logger";
 
 type ShipmentHealthCostReview = Pick<ShipmentCostReview, "shipmentId" | "lines"> & {
   supplierReviewLineCount: number;
@@ -869,12 +870,7 @@ export function createShipmentTrackingService(
       costApplication = await pushLandedCostsToLots(id, userId);
     } catch (e: any) {
       costApplication = { status: "retry_required", code: "SHIPMENT_LOT_COST_PUSH_FAILED" };
-      console.warn(JSON.stringify({
-        event: "procurement.shipment.close_lot_cost_push_failed",
-        shipmentId: id, actorId: userId ?? null,
-        code: e instanceof ShipmentTrackingError ? e.details?.code ?? "SHIPMENT_LOT_COST_PUSH_FAILED" : "SHIPMENT_LOT_COST_PUSH_FAILED",
-        errorType: e instanceof Error ? e.name : typeof e,
-      }));
+      logger.warn("procurement.shipment.close_lot_cost_push_failed", { event: "procurement.shipment.close_lot_cost_push_failed", shipmentId: id, actorId: userId ?? null, code: e instanceof ShipmentTrackingError ? e.details?.code ?? "SHIPMENT_LOT_COST_PUSH_FAILED" : "SHIPMENT_LOT_COST_PUSH_FAILED", errorType: e instanceof Error ? e.name : typeof e });
     }
     return { ...closed, costApplication };
   }

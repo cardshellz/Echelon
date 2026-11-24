@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { listingFailure, listingFailureStatus } from "../../ebay-listing-errors";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 afterEach(() => vi.restoreAllMocks());
 
 describe("safe listing read diagnostics at the HTTP boundary", () => {
   it("includes the normalized endpoint, failed field and provider reference without copying response data", () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     const providerRead = { provider: "ebay", resource: "offers", method: "GET", kind: "invalid_response",
       httpStatus: 200, requestId: "provider-read-123", issues: [{ path: "offers.0.offerId", code: "invalid_type" }] };
     const error = Object.assign(new Error("private provider body"), { code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID",
@@ -20,7 +21,7 @@ describe("safe listing read diagnostics at the HTTP boundary", () => {
     expect(listingFailureStatus(error)).toBe(500);
   });
   it("does not turn an unrelated database failure into provider diagnostics or expose SQL", () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     const error = Object.assign(new Error("private SQL password"), { code: "23505", context: { body: "private" } });
     const result = listingFailure(error, 20);
     expect(result.code).toBe("EBAY_LISTING_SYNC_FAILED");

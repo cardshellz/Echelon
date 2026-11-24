@@ -5,6 +5,7 @@ import { InventoryCutoverPreflightError, InventoryCutoverPreflightService } from
 import { PostgresInventoryCutoverPreflightRepository } from "../../infrastructure/inventory-cutover-preflight.repository";
 import { WmsCutoverDemandCaptureError } from "../../../wms/cutover-and-dispatch.api";
 import { InventoryCutoverEncumbranceCaptureError } from "../../../inventory/inventory-cutover-encumbrance.repository.api";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerInventoryCutoverPreflightRoutes(
   app: Express,
@@ -29,8 +30,7 @@ export function registerInventoryCutoverPreflightRoutes(
           return res.status(422).json({ error: { code: error.code, message: "The full evidence set exceeds the safe capture bound. No partial cutover report was returned." } });
         }
         const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : null;
-        console.error(JSON.stringify({ event: "inventory_cutover_preflight_failed", code,
-          errorType: error instanceof Error ? error.name : "UnknownError" }));
+        logger.error("inventory_cutover_preflight_failed", { event: "inventory_cutover_preflight_failed", code, errorType: error instanceof Error ? error.name : "UnknownError" });
         const retryable = ["40001", "40P01", "57014"].includes(code ?? "");
         return res.status(retryable ? 503 : 500).json({ error: {
           code: retryable ? "INVENTORY_CUTOVER_CAPTURE_RETRYABLE" : "INVENTORY_CUTOVER_CAPTURE_FAILED",

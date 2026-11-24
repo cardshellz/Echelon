@@ -15,6 +15,7 @@ import {
   InventoryAvailabilityShadowRepositoryError,
   PostgresInventoryAvailabilityShadowRepository,
 } from "../../infrastructure/inventory-availability-shadow.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const positiveIdSchema = z.coerce.number().pipe(
   z.number().int().positive().max(2_147_483_647),
@@ -125,17 +126,11 @@ function sendShadowError(res: Response, error: unknown, action: string): Respons
       });
     }
   }
-  console.error(JSON.stringify({
-    code: "INVENTORY_AVAILABILITY_SHADOW_FAILED",
-    action,
-    errorCode: error instanceof InventoryAvailabilityShadowRepositoryError
+  logger.error("INVENTORY_AVAILABILITY_SHADOW_FAILED", { code: "INVENTORY_AVAILABILITY_SHADOW_FAILED", errorCode: error instanceof InventoryAvailabilityShadowRepositoryError
       ? error.code
       : error instanceof InventoryAvailabilityShadowServiceError
         ? error.code
-        : null,
-    errorName: error instanceof Error ? error.name : typeof error,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+        : null, errorName: error instanceof Error ? error.name : typeof error, error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({
     error: {
       code: "INVENTORY_AVAILABILITY_SHADOW_FAILED",

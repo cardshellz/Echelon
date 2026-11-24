@@ -16,6 +16,7 @@ import { z } from "zod";
 import { ebayOauthTokens } from "@shared/schema";
 import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
 import { ChannelFulfillmentProviderError } from "../../domain/channel-fulfillment-provider.error";
+import { logger } from "../../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -291,9 +292,7 @@ export class EbayAuthService {
     );
     await this.persistTokens(channelId, tokenData, undefined, observedAccount);
 
-    console.log(
-      `[EbayAuth] Successfully exchanged authorization code for channel ${channelId}`,
-    );
+    logger.info("channels.ebay_auth_service", { message: `[EbayAuth] Successfully exchanged authorization code for channel ${channelId}` });
   }
 
   /**
@@ -306,9 +305,7 @@ export class EbayAuthService {
   ): Promise<void> {
     // First, refresh it to get a valid access token
     await this.refreshAccessToken(channelId, refreshToken);
-    console.log(
-      `[EbayAuth] Stored initial refresh token for channel ${channelId}`,
-    );
+    logger.info("channels.ebay_auth_service", { message: `[EbayAuth] Stored initial refresh token for channel ${channelId}` });
   }
 
   // -------------------------------------------------------------------------
@@ -324,10 +321,8 @@ export class EbayAuthService {
     }));
     await this.persistTokens(channelId, tokenData, refreshToken);
 
-    console.log(
-      `[EbayAuth] Access token refreshed for channel ${channelId}, ` +
-      `expires in ${tokenData.expires_in}s`,
-    );
+    logger.info("channels.ebay_auth_service", { detail: `[EbayAuth] Access token refreshed for channel ${channelId}, ` +
+      `expires in ${tokenData.expires_in}s` });
 
     return tokenData.access_token;
   }
@@ -708,17 +703,7 @@ export class EbayAuthService {
       } satisfies EbayProviderAccountClaimOutcome;
     });
 
-    console.info(JSON.stringify({
-      event: "ebay_provider_account_identity_claimed",
-      classification: "durable_provider_account_observation",
-      kind: outcome.kind,
-      channelId,
-      environment: this.config.environment,
-      externalAccountId: outcome.account.externalAccountId,
-      verifiedAt: outcome.account.externalAccountVerifiedAt.toISOString(),
-      idempotencyKey: parsedAudit.idempotencyKey,
-      correlationId: parsedAudit.correlationId,
-    }));
+    logger.info("ebay_provider_account_identity_claimed", { event: "ebay_provider_account_identity_claimed", classification: "durable_provider_account_observation", kind: outcome.kind, channelId, environment: this.config.environment, externalAccountId: outcome.account.externalAccountId, verifiedAt: outcome.account.externalAccountVerifiedAt.toISOString(), idempotencyKey: parsedAudit.idempotencyKey, correlationId: parsedAudit.correlationId });
     return outcome;
   }
 }

@@ -7,6 +7,7 @@ import { registerInventoryCutoverOpeningRoutes } from "../../interfaces/http/inv
 import { isInventoryCutoverOpeningBulkJsonRequest, OPENING_JSON_LIMIT_BYTES } from "../../interfaces/http/inventory-cutover-opening-body.middleware";
 import { installGlobalJsonBodyParser } from "../../../shipping-engine/interfaces/http/rate-table-admin-body.middleware";
 import { openingAssessment, openingSaved, openingSource, openingVerification } from "../fixtures/inventory-cutover-opening-interface.fixture";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 vi.mock("../../../identity", () => ({ hasPermission }));
@@ -18,7 +19,7 @@ describe("authenticated complete opening verification routes", () => {
   let session: { user?: { id?: string } };
   let service: { capture: ReturnType<typeof vi.fn>; preview: ReturnType<typeof vi.fn>; save: ReturnType<typeof vi.fn> };
   beforeEach(async () => {
-    hasPermission.mockReset().mockResolvedValue(true); vi.spyOn(console, "error").mockImplementation(() => undefined);
+    hasPermission.mockReset().mockResolvedValue(true); spyLoggerJson("error");
     session = { user: { id: "operator-1" } };
     service = { capture: vi.fn(async () => openingSource()), preview: vi.fn(async () => openingAssessment()), save: vi.fn(async () => openingSaved()) };
     server = await startServer(service as unknown as Pick<InventoryCutoverOpeningService, "capture" | "preview" | "save">, () => session);
@@ -87,7 +88,7 @@ describe("authenticated complete opening verification routes", () => {
     expect(response.status).toBe(500); expect(JSON.stringify(response.body)).not.toContain("secret");
     service.save.mockResolvedValueOnce({ ...openingSaved(), stockChanged: true });
     expect((await request(server.url + ROOT + "/verify", saveRequest())).status).toBe(500);
-    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain("secret");
+    expect(JSON.stringify(getLoggerJsonSpy("error").mock.calls)).not.toContain("secret");
   });
 });
 

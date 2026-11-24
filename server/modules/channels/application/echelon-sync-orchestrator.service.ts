@@ -317,7 +317,7 @@ class EchelonSyncOrchestrator {
     );
 
     if (allocation.allocations.length === 0) {
-      console.log(`[SyncOrchestrator] No allocations for product ${productId}`);
+      logger.info("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] No allocations for product ${productId}` });
       return results;
     }
 
@@ -403,7 +403,7 @@ class EchelonSyncOrchestrator {
       () => this.getInventorySyncProductIds(),
       channelId,
     );
-    console.log(`[SyncOrchestrator] Syncing inventory for ${productIds.length} products`);
+    logger.info("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Syncing inventory for ${productIds.length} products` });
 
     for (const productId of productIds) {
       try {
@@ -489,7 +489,7 @@ class EchelonSyncOrchestrator {
     // Get adapter
     const adapter = this.adapterRegistry.get(channel.provider);
     if (!adapter) {
-      console.warn(`[SyncOrchestrator] No adapter for provider "${channel.provider}"`);
+      logger.warn("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] No adapter for provider "${channel.provider}"` });
       result.variantsErrored = allocations.length;
       return result;
     }
@@ -519,7 +519,7 @@ class EchelonSyncOrchestrator {
     }
 
     if (assignedWarehouses.length === 0 && channel.provider !== "ebay") {
-      console.log(`[SyncOrchestrator] No enabled warehouses assigned to channel ${channel.name}`);
+      logger.info("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] No enabled warehouses assigned to channel ${channel.name}` });
       return result;
     }
 
@@ -660,7 +660,7 @@ class EchelonSyncOrchestrator {
             }
           }
         } catch (err: any) {
-          console.error(`[SyncOrchestrator] ${channel.provider} push failed: ${err.message}`);
+          logger.error("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] ${channel.provider} push failed: ${err.message}` });
           result.variantsErrored = pushItems.length;
           for (const item of pushItems) {
             await this.recordChannelListingSyncError(channelId, item.variantId, err.message);
@@ -707,7 +707,7 @@ class EchelonSyncOrchestrator {
 
     for (const wh of assignedWarehouses) {
       if (!wh.shopifyLocationId) {
-        console.warn(`[SyncOrchestrator] Warehouse ${wh.warehouseId} (${wh.warehouseName}) has no shopify_location_id — skipping`);
+        logger.warn("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Warehouse ${wh.warehouseId} (${wh.warehouseName}) has no shopify_location_id — skipping` });
         continue;
       }
 
@@ -806,13 +806,11 @@ class EchelonSyncOrchestrator {
 
         totalPushQty += locationQty;
 
-        console.log(
-          `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Inventory Eval: ` +
+        logger.info("channels.echelon_sync_orchestrator_service", { detail: `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Inventory Eval: ` +
           `variant=${a.sku} channel=${channel.name} ` +
           `warehouse=${wh.warehouseName}(${wh.warehouseId}) ` +
           `pushQty=${locationQty} ` +
-          `engineMethod=${a.method}`
-        );
+          `engineMethod=${a.method}` });
       }
 
       if (breakdownItems.length === 0) continue;
@@ -989,7 +987,7 @@ class EchelonSyncOrchestrator {
           }
         }
       } catch (err: any) {
-        console.error(`[SyncOrchestrator] Inventory push failed for channel ${channel.name}: ${err.message}`);
+        logger.error("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Inventory push failed for channel ${channel.name}: ${err.message}` });
         result.variantsErrored += changedItems.length;
       }
     } else if (config.dryRun) {
@@ -1044,7 +1042,7 @@ class EchelonSyncOrchestrator {
     // Check source lock — pricing is always locked, but check anyway for safety
     const pricingLocked = await this.sourceLockService.isFieldLocked(channelId, "pricing");
     if (!pricingLocked) {
-      console.log(`[SyncOrchestrator] Pricing NOT locked for channel ${channelId} — skipping push`);
+      logger.info("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Pricing NOT locked for channel ${channelId} — skipping push` });
       return result;
     }
 
@@ -1098,7 +1096,7 @@ class EchelonSyncOrchestrator {
     const pricingRows = await pricingQuery;
 
     if (pricingRows.length === 0) {
-      console.log(`[SyncOrchestrator] No pricing data for channel ${channelId}`);
+      logger.info("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] No pricing data for channel ${channelId}` });
       return result;
     }
 
@@ -1138,11 +1136,9 @@ class EchelonSyncOrchestrator {
         continue;
       }
 
-      console.log(
-        `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Pricing: ` +
+      logger.info("channels.echelon_sync_orchestrator_service", { detail: `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Pricing: ` +
         `variant=${pr.variantSku} channel=${channel.name} ` +
-        `price=${pr.price}¢ compare_at=${pr.compareAtPrice ?? "none"}`,
-      );
+        `price=${pr.price}¢ compare_at=${pr.compareAtPrice ?? "none"}` });
 
       pushItems.push({
         variantId: pr.productVariantId!,
@@ -1203,7 +1199,7 @@ class EchelonSyncOrchestrator {
           }
         }
       } catch (err: any) {
-        console.error(`[SyncOrchestrator] Pricing push failed for channel ${channel.name}: ${err.message}`);
+        logger.error("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Pricing push failed for channel ${channel.name}: ${err.message}` });
         result.variantsErrored = pushItems.length;
       }
     } else {
@@ -1299,7 +1295,7 @@ class EchelonSyncOrchestrator {
         );
     }
 
-    console.log(`[SyncOrchestrator] Syncing listings for ${productQuery.length} products on channel ${channel.name}`);
+    logger.info("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Syncing listings for ${productQuery.length} products on channel ${channel.name}` });
 
     for (const product of productQuery) {
       result.productsProcessed++;
@@ -1323,10 +1319,8 @@ class EchelonSyncOrchestrator {
             includeImages: channel.provider !== "ebay",
           });
           if (resolved && resolved.isListed) {
-            console.log(
-              `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Listings PUSH: ` +
-              `product="${product.name}" channel=${channel.name} fields=[${pushFields.join(",")}]`,
-            );
+            logger.info("channels.echelon_sync_orchestrator_service", { detail: `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Listings PUSH: ` +
+              `product="${product.name}" channel=${channel.name} fields=[${pushFields.join(",")}]` });
 
             if (!config.dryRun) {
               // Build partial listing payload with only locked fields
@@ -1435,10 +1429,8 @@ class EchelonSyncOrchestrator {
 
         // PULL unlocked fields from Shopify → Echelon
         if (pullFields.length > 0 && product.shopifyProductId) {
-          console.log(
-            `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Listings PULL: ` +
-            `product="${product.name}" channel=${channel.name} fields=[${pullFields.join(",")}]`,
-          );
+          logger.info("channels.echelon_sync_orchestrator_service", { detail: `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Listings PULL: ` +
+            `product="${product.name}" channel=${channel.name} fields=[${pullFields.join(",")}]` });
 
           if (!config.dryRun) {
             const shopifyData = await this.fetchShopifyProductData(channelId, product.shopifyProductId);
@@ -1526,7 +1518,7 @@ class EchelonSyncOrchestrator {
       errors: [],
     };
 
-    console.log(`[SyncOrchestrator] Starting ${config.dryRun ? "DRY RUN" : "LIVE"} full sync`);
+    logger.info("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Starting ${config.dryRun ? "DRY RUN" : "LIVE"} full sync` });
 
     // 1. Inventory sync (runs allocation for all products, pushes to all channels)
     try {
@@ -1538,7 +1530,7 @@ class EchelonSyncOrchestrator {
       result.inventory = inventoryResults;
     } catch (err: any) {
       result.errors.push(`Inventory sync failed: ${err.message}`);
-      console.error("[SyncOrchestrator] Inventory sync failed:", err.message);
+      logger.error("channels.echelon_sync_orchestrator_service", { message: "[SyncOrchestrator] Inventory sync failed:", error: err.message });
     }
 
     // 2. Pricing sync per channel (DISABLED TEMPORARILY)
@@ -1571,7 +1563,7 @@ class EchelonSyncOrchestrator {
 
     result.completedAt = new Date();
     const durationMs = result.completedAt.getTime() - startedAt.getTime();
-    console.log(`[SyncOrchestrator] Full sync completed in ${durationMs}ms`);
+    logger.info("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Full sync completed in ${durationMs}ms` });
 
     return result;
   }
@@ -1601,7 +1593,7 @@ class EchelonSyncOrchestrator {
       .limit(1);
 
     if (!variant) {
-      console.warn(`[SyncOrchestrator] onInventoryChange: variant ${productVariantId} not found`);
+      logger.warn("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] onInventoryChange: variant ${productVariantId} not found` });
       return [];
     }
     if (!isInventoryManagedVariant(variant)) return [];
@@ -1849,9 +1841,7 @@ class EchelonSyncOrchestrator {
       `Quarantined: external resource gone (${error.slice(0, 300)}). Re-link or retire the mapping.`,
     );
     // ERROR level: a human must decide relist-vs-retire; the sweep stops asking.
-    console.error(
-      `[SyncOrchestrator] QUARANTINED inventory mapping channel=${channelId} variant=${productVariantId}: ${reason}`,
-    );
+    logger.error("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] QUARANTINED inventory mapping channel=${channelId} variant=${productVariantId}: ${reason}` });
   }
 
   /**
@@ -1938,7 +1928,7 @@ class EchelonSyncOrchestrator {
         shopifyLocationId: entry.shopifyLocationId ?? null,
       });
     } catch (err: any) {
-      console.warn(`[SyncOrchestrator] Failed to log sync: ${err.message}`);
+      logger.warn("channels.echelon_sync_orchestrator_service", { message: `[SyncOrchestrator] Failed to log sync: ${err.message}` });
     }
   }
 

@@ -15,6 +15,7 @@ import {
   type SyncLogEntry,
 } from "@shared/schema";
 import { updateWarehouseFeedEnabledInWarehouse } from "../../warehouse/cross-module-warehouse-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -180,7 +181,7 @@ class SyncSettingsService {
         source: entry.source,
       });
     } catch (err: any) {
-      console.warn(`[SyncSettings] Failed to write sync log: ${err.message}`);
+      logger.warn("channels.sync_settings_service", { message: `[SyncSettings] Failed to write sync log: ${err.message}` });
     }
   }
 

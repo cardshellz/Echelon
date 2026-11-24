@@ -3,6 +3,7 @@ import { eq, and } from "drizzle-orm";
 import { db } from "../../../../db";
 import { warehousePickZones, warehouses } from "@shared/schema";
 import { requireAuth, requirePermission } from "../../../../routes/middleware";
+import { logger } from "../../../../platform/observability/logger";
 
 /**
  * Pick Zones — read-only admin API (infrastructure-only PR).
@@ -53,7 +54,7 @@ export function registerPickZoneRoutes(app: Express) {
 
       res.json(result);
     } catch (err: any) {
-      console.error("Error listing pick zones:", err);
+      logger.error("warehouse.pick_zones_routes", { message: "Error listing pick zones:", error: err });
       res.status(500).json({ error: "Failed to fetch pick zones" });
     }
   });
@@ -78,7 +79,7 @@ export function registerPickZoneRoutes(app: Express) {
 
       res.json(row);
     } catch (err: any) {
-      console.error("Error fetching pick zone:", err);
+      logger.error("warehouse.pick_zones_routes", { message: "Error fetching pick zone:", error: err });
       res.status(500).json({ error: "Failed to fetch pick zone" });
     }
   });

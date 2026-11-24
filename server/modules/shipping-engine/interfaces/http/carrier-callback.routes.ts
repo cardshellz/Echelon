@@ -68,6 +68,7 @@ import {
 import {
   PostgresChannelShippingPolicyRuntimeStore,
 } from "../../infrastructure/channel-shipping-policy-runtime.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 /** Respond by this deadline even if the quote pipeline is still running. */
 export const RESPONSE_DEADLINE_MS = 2000;
@@ -305,7 +306,7 @@ export function registerCarrierCallbackRoutes(
     };
 
     deadline = setTimeout(() => {
-      console.error("[CarrierCallback] deadline exceeded; returned empty rates");
+      logger.error("shipping-engine.carrier_callback_routes", { message: "[CarrierCallback] deadline exceeded; returned empty rates" });
       incr("shipping_checkout_callback_deadline_exceeded", 1);
       respond([], true);
     }, RESPONSE_DEADLINE_MS);
@@ -317,7 +318,7 @@ export function registerCarrierCallbackRoutes(
       respond(rates, false);
     } catch (error) {
       // computeCheckoutRates is defensive; this is the belt-and-suspenders.
-      console.error("[CarrierCallback] unexpected failure:", error);
+      logger.error("shipping-engine.carrier_callback_routes", { message: "[CarrierCallback] unexpected failure:", error: error });
       respond([], false);
     } finally {
       if (deadline !== undefined) {
@@ -465,14 +466,14 @@ export async function computeCheckoutRates(
       computeDurationMs,
     }).catch((error) => {
       incr("shipping_checkout_callback_snapshot_failed", 1);
-      console.error("[CarrierCallback] snapshot persistence failed:", error);
+      logger.error("shipping-engine.carrier_callback_routes", { message: "[CarrierCallback] snapshot persistence failed:", error: error });
     });
     return wire.deliveredRates;
   };
 
   const parsed = parseShopifyRateRequest(body);
   if (!parsed.ok) {
-    console.error(`[CarrierCallback] ${parsed.error}`);
+    logger.error("shipping-engine.carrier_callback_routes", { message: `[CarrierCallback] ${parsed.error}` });
     return finalize({
       body, request: null, parcelPlan: null, rates: null,
       shopifyRates: [], warnings: [parsed.error], disposition: "invalid_request",
@@ -485,7 +486,7 @@ export async function computeCheckoutRates(
 
   const ownership = resolveShopifyCheckoutRateOwnership(request.destCountry);
   if (!ownership.ok) {
-    console.error(`[CarrierCallback] ${ownership.message}`);
+    logger.error("shipping-engine.carrier_callback_routes", { message: `[CarrierCallback] ${ownership.message}` });
     return finalize({
       body,
       request,
@@ -534,7 +535,7 @@ export async function computeCheckoutRates(
       `channel shipping policy lookup failed: ${
         error instanceof Error ? error.message : String(error)
       }`;
-    console.error("[CarrierCallback] channel policy lookup failed:", error);
+    logger.error("shipping-engine.carrier_callback_routes", { message: "[CarrierCallback] channel policy lookup failed:", error: error });
     return finalize({
       body,
       request,
@@ -548,13 +549,7 @@ export async function computeCheckoutRates(
     });
   }
   if (!channelRouting.ok) {
-    console.error(JSON.stringify({
-      code: "SHIPPING_CHECKOUT_CHANNEL_POLICY_UNAVAILABLE",
-      reasonCode: channelRouting.code,
-      message: channelRouting.message,
-      channelId: channelRouting.channel?.id ?? null,
-      destinationCountry: request.destCountry,
-    }));
+    logger.error("SHIPPING_CHECKOUT_CHANNEL_POLICY_UNAVAILABLE", { code: "SHIPPING_CHECKOUT_CHANNEL_POLICY_UNAVAILABLE", reasonCode: channelRouting.code, message: channelRouting.message, channelId: channelRouting.channel?.id ?? null, destinationCountry: request.destCountry });
     return finalize({
       body,
       request,
@@ -573,14 +568,7 @@ export async function computeCheckoutRates(
     const warning =
       `${ownership.countryCode} checkout rates are managed by Shopify; `
       + "Echelon did not quote this destination.";
-    console.info(JSON.stringify({
-      code: "SHIPPING_CHECKOUT_DESTINATION_DELEGATED",
-      destinationCountry: ownership.countryCode,
-      rateOwner: "shopify",
-      decisionSource: shippingDecision.source,
-      policyId: shippingDecision.policyId,
-      routeId: shippingDecision.routeId,
-    }));
+    logger.info("SHIPPING_CHECKOUT_DESTINATION_DELEGATED", { code: "SHIPPING_CHECKOUT_DESTINATION_DELEGATED", destinationCountry: ownership.countryCode, rateOwner: "shopify", decisionSource: shippingDecision.source, policyId: shippingDecision.policyId, routeId: shippingDecision.routeId });
     return finalize({
       body,
       request,
@@ -597,13 +585,7 @@ export async function computeCheckoutRates(
     const warning =
       `shipping policy route ${shippingDecision.routeId} disables checkout `
       + `shipping to ${request.destCountry}`;
-    console.info(JSON.stringify({
-      code: "SHIPPING_CHECKOUT_DESTINATION_DISABLED",
-      channelId: channelRouting.channel?.id ?? null,
-      policyId: shippingDecision.policyId,
-      routeId: shippingDecision.routeId,
-      destinationCountry: request.destCountry,
-    }));
+    logger.info("SHIPPING_CHECKOUT_DESTINATION_DISABLED", { code: "SHIPPING_CHECKOUT_DESTINATION_DISABLED", channelId: channelRouting.channel?.id ?? null, policyId: shippingDecision.policyId, routeId: shippingDecision.routeId, destinationCountry: request.destCountry });
     return finalize({
       body,
       request,
@@ -622,13 +604,7 @@ export async function computeCheckoutRates(
   ) {
     const warning =
       `active engine-quoted route ${shippingDecision.routeId} has no pricing program`;
-    console.error(JSON.stringify({
-      code: "SHIPPING_CHECKOUT_CHANNEL_POLICY_INVALID",
-      channelId: channelRouting.channel?.id ?? null,
-      policyId: shippingDecision.policyId,
-      routeId: shippingDecision.routeId,
-      message: warning,
-    }));
+    logger.error("SHIPPING_CHECKOUT_CHANNEL_POLICY_INVALID", { code: "SHIPPING_CHECKOUT_CHANNEL_POLICY_INVALID", channelId: channelRouting.channel?.id ?? null, policyId: shippingDecision.policyId, routeId: shippingDecision.routeId, message: warning });
     return finalize({
       body,
       request,
@@ -647,15 +623,9 @@ export async function computeCheckoutRates(
     request.items.map((item) => item.sku),
   );
   if (!rolloutDecision.shouldQuote) {
-    console.info(JSON.stringify({
-      code: "SHOPIFY_CHECKOUT_RATE_ROLLOUT_BYPASSED",
-      mode: rolloutDecision.mode,
-      reasonCode: rolloutDecision.reasonCode,
-      destinationCountry: request.destCountry,
-      ...(rolloutDecision.deniedSkus
+    logger.info("SHOPIFY_CHECKOUT_RATE_ROLLOUT_BYPASSED", { code: "SHOPIFY_CHECKOUT_RATE_ROLLOUT_BYPASSED", mode: rolloutDecision.mode, reasonCode: rolloutDecision.reasonCode, destinationCountry: request.destCountry, ...(rolloutDecision.deniedSkus
         ? { deniedSkus: rolloutDecision.deniedSkus }
-        : {}),
-    }));
+        : {}) });
     return finalize({
       body,
       request,
@@ -685,7 +655,7 @@ export async function computeCheckoutRates(
         catalogWeightBySku = await dependencies.loadCatalogWeightsBySku(skus);
       }
     } catch (error) {
-      console.error("[CarrierCallback] catalog weight lookup failed; using channel weights:", error);
+      logger.error("shipping-engine.carrier_callback_routes", { message: "[CarrierCallback] catalog weight lookup failed; using channel weights:", error: error });
       warnings.push("Echelon catalog weight lookup failed; used channel weights");
     }
     const weightedLines = resolveShipmentLineWeights(
@@ -743,7 +713,7 @@ export async function computeCheckoutRates(
         new Date(),
       );
     } catch (error) {
-      console.error("[CarrierCallback] promise lookup failed; rates returned without delivery dates:", error);
+      logger.error("shipping-engine.carrier_callback_routes", { message: "[CarrierCallback] promise lookup failed; rates returned without delivery dates:", error: error });
       warnings.push(`promise lookup failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
@@ -759,7 +729,7 @@ export async function computeCheckoutRates(
       channelRouting,
     });
   } catch (error) {
-    console.error("[CarrierCallback] quote pipeline failed:", error);
+    logger.error("shipping-engine.carrier_callback_routes", { message: "[CarrierCallback] quote pipeline failed:", error: error });
     warnings.push(`quote pipeline failed: ${error instanceof Error ? error.message : String(error)}`);
     return finalize({
       body,
@@ -869,7 +839,7 @@ async function persistCheckoutSnapshot(input: PersistCheckoutSnapshotInput): Pro
     });
   } catch (error) {
     incr("shipping_checkout_callback_snapshot_failed", 1);
-    console.error("[CarrierCallback] snapshot persist failed:", error);
+    logger.error("shipping-engine.carrier_callback_routes", { message: "[CarrierCallback] snapshot persist failed:", error: error });
   }
 }
 

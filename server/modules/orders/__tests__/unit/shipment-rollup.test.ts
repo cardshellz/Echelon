@@ -42,6 +42,7 @@ import {
   handleAddressChangeOnShipment,
   handleCustomerCancelOnShipment,
 } from "../../application/shipment-rollup";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // ─── Scripted DB mock ────────────────────────────────────────────────
 
@@ -355,7 +356,7 @@ describe("markShipmentShipped", () => {
       if (i === 1) throw new Error("history table locked");
       return updateResponse;
     });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errSpy = spyLoggerJson("error");
 
     const result = await markShipmentShipped(
       { execute } as any,
@@ -714,7 +715,7 @@ describe("markShipmentShipped", () => {
     const reconcile = vi.fn(async () => {
       throw new Error("shopify api 500");
     });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errSpy = spyLoggerJson("error");
 
     const result = await markShipmentShipped(
       mock.db,
@@ -1014,7 +1015,7 @@ describe("markShipmentCancelled", () => {
     const removeFromList = vi.fn(async () => {
       throw new Error("ss api 500");
     });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errSpy = spyLoggerJson("error");
 
     const result = await markShipmentCancelled(
       mock.db,
@@ -1155,7 +1156,7 @@ describe("markShipmentCancelled", () => {
         { rows: [shipmentRow({ status: "planned" })] },
         { rows: [{ id: 501 }] },
       ]);
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const errorSpy = spyLoggerJson("error");
       const engineCancel = vi.fn(async () => ({ state: "cancelled" as const }));
       const result = await markShipmentCancelled(mock.db, 501, "customer_cancel", {
         now: NOW,
@@ -1574,7 +1575,7 @@ describe("markShipmentVoided", () => {
       if (i === 1) throw new Error("history table locked");
       return updateResponse;
     });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errSpy = spyLoggerJson("error");
 
     const result = await markShipmentVoided({ execute } as any, 501, "ss_void", {
       now: NOW,
@@ -1701,7 +1702,7 @@ describe("markShipmentVoided", () => {
     const cancel = vi.fn(async () => {
       throw new Error("shopify api 500");
     });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const errSpy = spyLoggerJson("error");
 
     const result = await markShipmentVoided(mock.db, 501, "ss_void", {
       now: NOW,

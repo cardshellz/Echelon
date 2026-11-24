@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { refreshShortClaims, retryConfirmedPickCorrections } from "../../application/oms-flow-reconciliation.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 function deps(refreshShortClaimSupply?: ReturnType<typeof vi.fn>) {
   return {
@@ -20,7 +21,7 @@ describe("refreshShortClaims", () => {
     const refresh = vi.fn()
       .mockResolvedValueOnce({ outcome: "refreshed", claimId: "10", idempotentReplay: false })
       .mockResolvedValueOnce({ outcome: "declined", code: "CLAIM_SUPPLY_REFRESH_NO_IMPROVEMENT", message: "none" });
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
     await expect(refreshShortClaims(db([63658, 63669]), deps(refresh)))
       .resolves.toEqual({ refreshed: 1, declined: 1, failed: 0 });
     expect(refresh.mock.calls.map(([orderId]) => orderId)).toEqual([63658, 63669]);
@@ -31,8 +32,8 @@ describe("refreshShortClaims", () => {
     const refresh = vi.fn()
       .mockRejectedValueOnce(Object.assign(new Error("boom"), { code: "CLAIM_REPLACEMENT_RETRY_EXHAUSTED" }))
       .mockResolvedValueOnce({ outcome: "refreshed", claimId: "11", idempotentReplay: false });
-    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = spyLoggerJson("error");
+    const log = spyLoggerJson("log");
     await expect(refreshShortClaims(db([1, 2]), deps(refresh))).rejects.toThrow("short-claim refresh failed for 1 order(s)");
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(String(error.mock.calls[0][0])).toContain("CLAIM_REPLACEMENT_RETRY_EXHAUSTED");
@@ -48,7 +49,7 @@ describe("retryConfirmedPickCorrections", () => {
 
   it("delegates one bounded sweep to the correction owner", async () => {
     const retryConfirmedPicks = vi.fn(async () => ({ resolved: 2, waiting: 3 }));
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
     await expect(retryConfirmedPickCorrections({ ...deps(undefined), pickCorrections: { retryConfirmedPicks } }))
       .resolves.toEqual({ resolved: 2, waiting: 3 });
     expect(retryConfirmedPicks).toHaveBeenCalledWith(50);

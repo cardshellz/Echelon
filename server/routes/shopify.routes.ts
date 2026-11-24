@@ -32,6 +32,7 @@ import {
 } from "../modules/oms/shopify-intake.api";
 import { retireDeletedShopifyProduct } from "../modules/catalog/application/shopify-product-retirement.service";
 import { sendShopifyProductSyncFailure } from "./shopify-product-sync.response";
+import { logger } from "../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Shopify carrier-name → canonical carrier code mapping (§6 Commit 26).
@@ -95,7 +96,7 @@ async function receiveShopifyRouteWebhook(
     await markWebhookProcessing(db, receipt.id);
     return { receipt, shouldProcess: true };
   } catch (err: any) {
-    console.error(`[${topic}] webhook inbox write failed: ${err?.message ?? err}`);
+    logger.error("routes.shopify_routes", { message: `[${topic}] webhook inbox write failed: ${err?.message ?? err}` });
     if (!res.headersSent) {
       res.status(500).json({ error: "Webhook inbox unavailable" });
     }
@@ -135,13 +136,7 @@ async function handleFulfillmentWebhookFailure(input: {
     if (input.sourceInboxId) {
       await markWebhookSucceeded(retryDb, input.sourceInboxId).catch(() => undefined);
     }
-    console.log(JSON.stringify({
-      event: "shopify_fulfillment_ingress_recovery_owned",
-      topic: input.topic,
-      sourceEventId: input.sourceEventId,
-      shopDomain: input.shopDomain,
-      processingStatus: recoveryOwnedStatus,
-    }));
+    logger.info("shopify_fulfillment_ingress_recovery_owned", { event: "shopify_fulfillment_ingress_recovery_owned", topic: input.topic, sourceEventId: input.sourceEventId, shopDomain: input.shopDomain, processingStatus: recoveryOwnedStatus });
     if (!input.res.headersSent) {
       return input.res.status(200).json({
         received: true,
@@ -154,7 +149,7 @@ async function handleFulfillmentWebhookFailure(input: {
 
   if (input.sourceInboxId) {
     await markWebhookFailed(retryDb, input.sourceInboxId, input.error).catch((markErr: any) => {
-      console.error(`[${input.topic}] failed to mark inbox ${input.sourceInboxId} failed: ${markErr?.message ?? markErr}`);
+      logger.error("routes.shopify_routes", { message: `[${input.topic}] failed to mark inbox ${input.sourceInboxId} failed: ${markErr?.message ?? markErr}` });
     });
   }
 
@@ -174,9 +169,7 @@ async function handleFulfillmentWebhookFailure(input: {
         sourceInboxId: input.sourceInboxId ?? null,
       });
     } catch (enqueueError: any) {
-      console.error(
-        `[${input.topic}] failed to enqueue retry: ${enqueueError?.message ?? enqueueError}`,
-      );
+      logger.error("routes.shopify_routes", { message: `[${input.topic}] failed to enqueue retry: ${enqueueError?.message ?? enqueueError}` });
     }
   }
 
@@ -197,7 +190,7 @@ export function registerShopifyRoutes(app: Express) {
       const result = await productImport.syncContentAndAssets();
       res.json(result);
     } catch (error: any) {
-      console.error("Shopify sync error:", error);
+      logger.error("routes.shopify_routes", { message: "Shopify sync error:", error: error });
       res.status(500).json({
         error: "Failed to sync with Shopify",
         message: error.message
@@ -219,7 +212,7 @@ export function registerShopifyRoutes(app: Express) {
   // This reads from the unified OMS Hub and extracts the WMS operational subset
   app.post("/api/orders/sync-from-oms", requireAuth, async (req, res) => {
     try {
-      console.log("Starting sync from oms_orders to operational WMS orders...");
+      logger.info("routes.shopify_routes", { message: "Starting sync from oms_orders to operational WMS orders..." });
 
       const allChannels = await storage.getAllChannels();
       const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
@@ -326,10 +319,10 @@ export function registerShopifyRoutes(app: Express) {
         created++;
       }
 
-      console.log(`Sync complete: ${created} created, ${skipped} skipped`);
+      logger.info("routes.shopify_routes", { message: `Sync complete: ${created} created, ${skipped} skipped` });
       res.json({ success: true, created, skipped });
     } catch (error) {
-      console.error("Error syncing from raw tables:", error);
+      logger.error("routes.shopify_routes", { message: "Error syncing from raw tables:", error: error });
       res.status(500).json({ error: "Failed to sync from raw tables" });
     }
   });
@@ -338,13 +331,13 @@ export function registerShopifyRoutes(app: Express) {
   // Updates orders and order_items based on shopify_orders.fulfillment_status
   app.post("/api/shopify/sync-statuses-from-shopify", requireAuth, async (req, res) => {
     try {
-      console.log("Syncing order statuses from Shopify fulfillment data...");
+      logger.info("routes.shopify_routes", { message: "Syncing order statuses from Shopify fulfillment data..." });
       const startTime = Date.now();
 
       await storage.syncFulfilledStatusesFromShopify();
 
       const elapsed = Date.now() - startTime;
-      console.log(`Status sync complete in ${elapsed}ms`);
+      logger.info("routes.shopify_routes", { message: `Status sync complete in ${elapsed}ms` });
 
       res.json({
         success: true,
@@ -352,7 +345,7 @@ export function registerShopifyRoutes(app: Express) {
         elapsed: `${elapsed}ms`
       });
     } catch (error) {
-      console.error("Error syncing statuses from Shopify:", error);
+      logger.error("routes.shopify_routes", { message: "Error syncing statuses from Shopify:", error: error });
       res.status(500).json({ error: "Failed to sync statuses from Shopify" });
     }
   });
@@ -361,13 +354,13 @@ export function registerShopifyRoutes(app: Express) {
   // Uses efficient UPDATE FROM JOIN to process thousands of orders at once
   app.post("/api/orders/backfill-orders-from-oms", requireAuth, async (req, res) => {
     try {
-      console.log("Starting backfill of operational orders from oms_orders...");
+      logger.info("routes.shopify_routes", { message: "Starting backfill of operational orders from oms_orders..." });
       const startTime = Date.now();
 
       const result = await storage.backfillOrdersFromOms();
 
       const elapsed = Date.now() - startTime;
-      console.log(`Backfill complete in ${elapsed}ms. Updated ${result.updated} orders.`);
+      logger.info("routes.shopify_routes", { message: `Backfill complete in ${elapsed}ms. Updated ${result.updated} orders.` });
 
       // Count remaining (orders that couldn't be matched)
       const remaining = await storage.countOrdersMissingShippingData();
@@ -383,7 +376,7 @@ export function registerShopifyRoutes(app: Express) {
           : `All ${result.updated} orders backfilled!`
       });
     } catch (error) {
-      console.error("Error backfilling orders:", error);
+      logger.error("routes.shopify_routes", { message: "Error backfilling orders:", error: error });
       res.status(500).json({ error: "Failed to backfill orders" });
     }
   });
@@ -392,7 +385,7 @@ export function registerShopifyRoutes(app: Express) {
   // Processes ALL orders automatically by looping through all pages
   app.post("/api/shopify/backfill-customer-names", requireAuth, async (req, res) => {
     try {
-      console.log("Starting FULL customer name backfill from Shopify API...");
+      logger.info("routes.shopify_routes", { message: "Starting FULL customer name backfill from Shopify API..." });
 
       const SHOPIFY_SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
       const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
@@ -420,7 +413,7 @@ export function registerShopifyRoutes(app: Express) {
           url = `https://${shopDomain}/admin/api/2024-01/orders.json?limit=250&page_info=${encodeURIComponent(pageInfo)}`;
         }
 
-        console.log(`Fetching page ${pagesProcessed + 1}...`);
+        logger.info("routes.shopify_routes", { message: `Fetching page ${pagesProcessed + 1}...` });
         const response = await fetch(url, {
           headers: {
             "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
@@ -429,7 +422,7 @@ export function registerShopifyRoutes(app: Express) {
         });
 
         if (!response.ok) {
-          console.error(`Shopify API error: ${response.status}`);
+          logger.error("routes.shopify_routes", { message: `Shopify API error: ${response.status}` });
           return res.status(500).json({ error: `Shopify API error: ${response.status}` });
         }
 
@@ -437,11 +430,11 @@ export function registerShopifyRoutes(app: Express) {
         const shopifyOrders = data.orders || [];
 
         if (shopifyOrders.length === 0) {
-          console.log("No more orders to process");
+          logger.info("routes.shopify_routes", { message: "No more orders to process" });
           break;
         }
 
-        console.log(`Processing ${shopifyOrders.length} orders...`);
+        logger.info("routes.shopify_routes", { message: `Processing ${shopifyOrders.length} orders...` });
 
         // Extract next page cursor from Link header
         const linkHeader = response.headers.get('Link');
@@ -489,7 +482,7 @@ export function registerShopifyRoutes(app: Express) {
 
         // No more pages
         if (!nextPageInfo) {
-          console.log("Reached end of Shopify orders");
+          logger.info("routes.shopify_routes", { message: "Reached end of Shopify orders" });
           break;
         }
 
@@ -503,7 +496,7 @@ export function registerShopifyRoutes(app: Express) {
       const remaining = await storage.countOmsRawOrdersMissingCustomerName();
 
       const finished = !pageInfo;
-      console.log(`Backfill: ${pagesProcessed} pages, ${totalUpdated} updated, ${totalSkipped} not in DB, ${remaining} remaining, ${elapsed}s`);
+      logger.info("routes.shopify_routes", { message: `Backfill: ${pagesProcessed} pages, ${totalUpdated} updated, ${totalSkipped} not in DB, ${remaining} remaining, ${elapsed}s` });
 
       // Auto-continue: trigger next batch in background before responding
       if (!finished && pageInfo) {
@@ -513,10 +506,10 @@ export function registerShopifyRoutes(app: Express) {
 
         // Fire and forget - don't await
         fetch(continueUrl, { method: 'POST' }).catch(err => {
-          console.error('Auto-continue failed:', err);
+          logger.error("routes.shopify_routes", { message: 'Auto-continue failed:', error: err });
         });
 
-        console.log(`Auto-continuing to next batch...`);
+        logger.info("routes.shopify_routes", { message: `Auto-continuing to next batch...` });
       }
 
       res.json({
@@ -534,7 +527,7 @@ export function registerShopifyRoutes(app: Express) {
           `Processed ${pagesProcessed} pages. Auto-continuing in background...`
       });
     } catch (error) {
-      console.error("Error backfilling customer names:", error);
+      logger.error("routes.shopify_routes", { message: "Error backfilling customer names:", error: error });
       res.status(500).json({ error: "Failed to backfill customer names" });
     }
   });
@@ -542,7 +535,7 @@ export function registerShopifyRoutes(app: Express) {
   // Shopify Orders Sync - DEPRECATED: Use sync-from-raw-tables instead
   // Orders now flow through: shopify_orders table -> sync-from-raw-tables -> orders table
   app.post("/api/shopify/sync-orders", requireAuth, async (req, res) => {
-    console.log("[DEPRECATED] /api/shopify/sync-orders called - redirecting to sync-from-raw-tables");
+    logger.info("routes.shopify_routes", { message: "[DEPRECATED] /api/shopify/sync-orders called - redirecting to sync-from-raw-tables" });
     res.status(410).json({
       error: "This endpoint is deprecated",
       message: "Orders are now synced from shopify_orders table. Use POST /api/shopify/sync-from-raw-tables instead.",
@@ -565,18 +558,18 @@ export function registerShopifyRoutes(app: Express) {
       for (const status of fulfillmentStatuses) {
         const order = activeOrders.find(o => o.externalOrderId === status.shopifyOrderId);
         if (!order) {
-          console.log(`Fulfillment sync: No local order found for Shopify ID ${status.shopifyOrderId}`);
+          logger.info("routes.shopify_routes", { message: `Fulfillment sync: No local order found for Shopify ID ${status.shopifyOrderId}` });
           continue;
         }
 
-        console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.externalOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
+        logger.info("routes.shopify_routes", { message: `Fulfillment sync: Order ${order.orderNumber} (${order.externalOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}` });
 
         // If FULLY fulfilled in Shopify (all line items), mark as shipped
         // For partial fulfillments, we rely on webhooks to track individual line items
         if (status.fulfillmentStatus === "fulfilled") {
           await storage.updateOrderStatus(order.id, "shipped");
           shipped++;
-          console.log(`Order ${order.orderNumber} marked as shipped (fully fulfilled in Shopify)`);
+          logger.info("routes.shopify_routes", { message: `Order ${order.orderNumber} marked as shipped (fully fulfilled in Shopify)` });
         }
         // If cancelled in Shopify, mark as cancelled and release bin reservations
         else if (status.cancelledAt) {
@@ -590,10 +583,10 @@ export function registerShopifyRoutes(app: Express) {
               { disposition: "cancel" },
             );
           } catch (e) {
-            console.error(`Failed to release reservations for cancelled order ${order.orderNumber}:`, e);
+            logger.error("routes.shopify_routes", { message: `Failed to release reservations for cancelled order ${order.orderNumber}:`, error: e });
           }
           cancelled++;
-          console.log(`Order ${order.orderNumber} marked as cancelled`);
+          logger.info("routes.shopify_routes", { message: `Order ${order.orderNumber} marked as cancelled` });
         }
       }
 
@@ -640,7 +633,7 @@ export function registerShopifyRoutes(app: Express) {
               binLocation.imageUrl || null
             );
             updated++;
-            console.log(`Reconcile: Updated item ${item.sku} in order ${order.orderNumber} to location ${binLocation.location}`);
+            logger.info("routes.shopify_routes", { message: `Reconcile: Updated item ${item.sku} in order ${order.orderNumber} to location ${binLocation.location}` });
           }
         }
       }
@@ -648,7 +641,7 @@ export function registerShopifyRoutes(app: Express) {
     }
     if (updated > 0) {
       broadcastOrdersUpdated();
-      console.log(`Location reconcile: Updated ${updated} items out of ${checked} checked`);
+      logger.info("routes.shopify_routes", { message: `Location reconcile: Updated ${updated} items out of ${checked} checked` });
     }
 
     return { updated, checked };
@@ -657,18 +650,18 @@ export function registerShopifyRoutes(app: Express) {
   // Dedicated fulfillment sync endpoint
   app.post("/api/shopify/sync-fulfillments", requireAuth, async (req, res) => {
     try {
-      console.log("Starting fulfillment status sync...");
+      logger.info("routes.shopify_routes", { message: "Starting fulfillment status sync..." });
 
       const result = await syncFulfillmentStatus();
 
-      console.log(`Fulfillment sync complete: ${result.shipped} shipped, ${result.cancelled} cancelled out of ${result.checked} checked`);
+      logger.info("routes.shopify_routes", { message: `Fulfillment sync complete: ${result.shipped} shipped, ${result.cancelled} cancelled out of ${result.checked} checked` });
 
       res.json({
         success: true,
         ...result,
       });
     } catch (error: any) {
-      console.error("Fulfillment sync error:", error);
+      logger.error("routes.shopify_routes", { message: "Fulfillment sync error:", error: error });
       res.status(500).json({
         error: "Failed to sync fulfillment status",
         message: error.message
@@ -741,7 +734,7 @@ export function registerShopifyRoutes(app: Express) {
     try {
       const { verified, shopDomain } = await verifyChannelWebhook(req);
       if (!verified) {
-        console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
+        logger.error("routes.shopify_routes", { message: `Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}` });
         res.status(401).json({ error: "Invalid signature" });
         return;
       }
@@ -761,7 +754,7 @@ export function registerShopifyRoutes(app: Express) {
         res.status(200).json({ received: true, inboxId: inboxReceiptId });
       }
     } catch (error: any) {
-      console.error(`[${topic}] webhook error:`, error);
+      logger.error("routes.shopify_routes", { message: `[${topic}] webhook error:`, error: error });
       if (inboxReceiptId !== null) {
         const inboxDb = await resolveRouteWebhookDb(app, req);
         await markWebhookFailed(inboxDb, inboxReceiptId, error).catch(() => undefined);
@@ -773,7 +766,7 @@ export function registerShopifyRoutes(app: Express) {
             sourceInboxId: inboxReceiptId,
             lastError: error?.message ?? String(error),
           }).catch((enqueueErr: any) => {
-            console.error(`[${topic}] failed to enqueue inbox retry: ${enqueueErr?.message ?? enqueueErr}`);
+            logger.error("routes.shopify_routes", { message: `[${topic}] failed to enqueue inbox retry: ${enqueueErr?.message ?? enqueueErr}` });
           });
         }
       }
@@ -790,7 +783,7 @@ export function registerShopifyRoutes(app: Express) {
       for (const { sku, name, status } of skus) {
         await storage.upsertProductLocationBySku(sku, name, status);
       }
-      console.log(`Webhook: Created/updated ${skus.length} SKUs from product create`);
+      logger.info("routes.shopify_routes", { message: `Webhook: Created/updated ${skus.length} SKUs from product create` });
     });
   });
 
@@ -800,7 +793,7 @@ export function registerShopifyRoutes(app: Express) {
       for (const { sku, name, status } of skus) {
         await storage.upsertProductLocationBySku(sku, name, status);
       }
-      console.log(`Webhook: Updated ${skus.length} SKUs from product update`);
+      logger.info("routes.shopify_routes", { message: `Webhook: Updated ${skus.length} SKUs from product update` });
     });
   });
 
@@ -811,13 +804,7 @@ export function registerShopifyRoutes(app: Express) {
       // Retire the mapping instead, and resolve SKUs from our own catalog.
       const deletedShopifyProductId = payload?.id;
       const result = await retireDeletedShopifyProduct(deletedShopifyProductId);
-      console.log(JSON.stringify({
-        event: "shopify_product_deleted",
-        shopifyProductId: result.shopifyProductId,
-        mappingsRetired: result.mappingsRetired,
-        pickLocationsRemoved: result.pickLocationsRemoved,
-        retiredProductIds: result.retiredProductIds,
-      }));
+      logger.info("shopify_product_deleted", { event: "shopify_product_deleted", shopifyProductId: result.shopifyProductId, mappingsRetired: result.mappingsRetired, pickLocationsRemoved: result.pickLocationsRemoved, retiredProductIds: result.retiredProductIds });
     });
   });
 
@@ -832,12 +819,12 @@ export function registerShopifyRoutes(app: Express) {
   ): Promise<boolean> {
     const order = await storage.getOrderByExternalId(shopifyOrderId);
     if (!order) {
-      console.log(`Fulfillment ${source}: No order found for Shopify ID ${shopifyOrderId}`);
+      logger.info("routes.shopify_routes", { message: `Fulfillment ${source}: No order found for Shopify ID ${shopifyOrderId}` });
       return false;
     }
 
     if (order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
-      console.log(`Fulfillment ${source}: Order ${order.orderNumber} already ${order.warehouseStatus}, skipping`);
+      logger.info("routes.shopify_routes", { message: `Fulfillment ${source}: Order ${order.orderNumber} already ${order.warehouseStatus}, skipping` });
       return false;
     }
 
@@ -850,22 +837,22 @@ export function registerShopifyRoutes(app: Express) {
       const updated = await storage.updateItemFulfilledQuantity(Number(shopifyLineItemId), fulfilledQty);
       if (updated) {
         itemsUpdated++;
-        console.log(`Fulfillment ${source}: Updated line item ${shopifyLineItemId} +${fulfilledQty} fulfilled (now ${updated.fulfilledQuantity}/${updated.quantity})`);
+        logger.info("routes.shopify_routes", { message: `Fulfillment ${source}: Updated line item ${shopifyLineItemId} +${fulfilledQty} fulfilled (now ${updated.fulfilledQuantity}/${updated.quantity})` });
       }
     }
 
-    console.log(`Fulfillment ${source}: Updated ${itemsUpdated} line items for order ${order.orderNumber}`);
+    logger.info("routes.shopify_routes", { message: `Fulfillment ${source}: Updated ${itemsUpdated} line items for order ${order.orderNumber}` });
 
     // Check if ALL items we track are now fully fulfilled
     const allFulfilled = await storage.areAllItemsFulfilled(order.id);
 
     if (allFulfilled) {
       await storage.updateOrderStatus(order.id, "shipped");
-      console.log(`Fulfillment ${source}: Order ${order.orderNumber} marked as SHIPPED (all physical items fulfilled)`);
+      logger.info("routes.shopify_routes", { message: `Fulfillment ${source}: Order ${order.orderNumber} marked as SHIPPED (all physical items fulfilled)` });
       broadcastOrdersUpdated();
       return true;
     } else {
-      console.log(`Fulfillment ${source}: Order ${order.orderNumber} not yet fully fulfilled, waiting for more shipments`);
+      logger.info("routes.shopify_routes", { message: `Fulfillment ${source}: Order ${order.orderNumber} not yet fully fulfilled, waiting for more shipments` });
       return false;
     }
   }
@@ -882,7 +869,7 @@ export function registerShopifyRoutes(app: Express) {
 
     if (orderStatus?.cancelledAt) {
       await storage.updateOrderStatus(order.id, "cancelled");
-      console.log(`Order ${order.orderNumber} marked as cancelled via ${source}`);
+      logger.info("routes.shopify_routes", { message: `Order ${order.orderNumber} marked as cancelled via ${source}` });
       broadcastOrdersUpdated();
     }
     // Note: We no longer auto-ship based on Shopify's overall status
@@ -919,7 +906,7 @@ export function registerShopifyRoutes(app: Express) {
       shopDomain = verification.shopDomain;
 
       if (!verification.verified) {
-        console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
+        logger.error("routes.shopify_routes", { message: `Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}` });
         return res.status(401).json({ error: "Invalid signature" });
       }
       webhookVerified = true;
@@ -937,9 +924,7 @@ export function registerShopifyRoutes(app: Express) {
       const lineItemCount = Array.isArray(payload?.line_items)
         ? payload.line_items.length
         : 0;
-      console.log(
-        `[fulfillments/create] received: fulfillment=${fulfillmentId} order=${shopifyOrderId} status=${status} line_items=${lineItemCount}`,
-      );
+      logger.info("routes.shopify_routes", { message: `[fulfillments/create] received: fulfillment=${fulfillmentId} order=${shopifyOrderId} status=${status} line_items=${lineItemCount}` });
 
       const service = app.locals.services?.channelFulfillmentIngress;
       if (!service) {
@@ -962,18 +947,7 @@ export function registerShopifyRoutes(app: Express) {
         },
       );
       await markWebhookSucceeded(inboxDb, sourceInboxId);
-      console.log(
-        JSON.stringify({
-          event: "shopify_fulfillment_ingress_accepted",
-          topic: "fulfillments/create",
-          fulfillmentId: String(fulfillmentId),
-          actionable: outcome.actionable,
-          processingStatus: outcome.result?.processingStatus ?? "ignored",
-          receiptId: outcome.result?.receiptId ?? null,
-          physicalShipmentId: outcome.result?.physicalShipmentId ?? null,
-          replayed: outcome.result?.replayed ?? false,
-        }),
-      );
+      logger.info("shopify_fulfillment_ingress_accepted", { event: "shopify_fulfillment_ingress_accepted", topic: "fulfillments/create", fulfillmentId: String(fulfillmentId), actionable: outcome.actionable, processingStatus: outcome.result?.processingStatus ?? "ignored", receiptId: outcome.result?.receiptId ?? null, physicalShipmentId: outcome.result?.physicalShipmentId ?? null, replayed: outcome.result?.replayed ?? false });
       if (!res.headersSent) {
         return res.status(200).json({
           received: true,
@@ -985,9 +959,7 @@ export function registerShopifyRoutes(app: Express) {
         });
       }
     } catch (error: any) {
-      console.error(
-        `[fulfillments/create] unhandled error: ${error?.message ?? error}`,
-      );
+      logger.error("routes.shopify_routes", { message: `[fulfillments/create] unhandled error: ${error?.message ?? error}` });
       return handleFulfillmentWebhookFailure({
         app,
         req,
@@ -1034,7 +1006,7 @@ export function registerShopifyRoutes(app: Express) {
       shopDomain = verification.shopDomain;
 
       if (!verification.verified) {
-        console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
+        logger.error("routes.shopify_routes", { message: `Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}` });
         return res.status(401).json({ error: "Invalid signature" });
       }
       webhookVerified = true;
@@ -1049,9 +1021,7 @@ export function registerShopifyRoutes(app: Express) {
       const fulfillmentId = payload?.id ?? "<missing>";
       const shopifyOrderId = payload?.order_id ?? "<missing>";
       const status = payload?.status ?? "<missing>";
-      console.log(
-        `[fulfillments/update] received: fulfillment=${fulfillmentId} order=${shopifyOrderId} status=${status}`,
-      );
+      logger.info("routes.shopify_routes", { message: `[fulfillments/update] received: fulfillment=${fulfillmentId} order=${shopifyOrderId} status=${status}` });
 
       const service = req.app.locals.services?.channelFulfillmentIngress;
       if (!service) {
@@ -1074,18 +1044,7 @@ export function registerShopifyRoutes(app: Express) {
         },
       );
       await markWebhookSucceeded(inboxDb, sourceInboxId);
-      console.log(
-        JSON.stringify({
-          event: "shopify_fulfillment_ingress_accepted",
-          topic: "fulfillments/update",
-          fulfillmentId: String(fulfillmentId),
-          actionable: outcome.actionable,
-          processingStatus: outcome.result?.processingStatus ?? "ignored",
-          receiptId: outcome.result?.receiptId ?? null,
-          physicalShipmentId: outcome.result?.physicalShipmentId ?? null,
-          replayed: outcome.result?.replayed ?? false,
-        }),
-      );
+      logger.info("shopify_fulfillment_ingress_accepted", { event: "shopify_fulfillment_ingress_accepted", topic: "fulfillments/update", fulfillmentId: String(fulfillmentId), actionable: outcome.actionable, processingStatus: outcome.result?.processingStatus ?? "ignored", receiptId: outcome.result?.receiptId ?? null, physicalShipmentId: outcome.result?.physicalShipmentId ?? null, replayed: outcome.result?.replayed ?? false });
       if (!res.headersSent) {
         return res.status(200).json({
           received: true,
@@ -1097,9 +1056,7 @@ export function registerShopifyRoutes(app: Express) {
         });
       }
     } catch (error: any) {
-      console.error(
-        `[fulfillments/update] unhandled error: ${error?.message ?? error}`,
-      );
+      logger.error("routes.shopify_routes", { message: `[fulfillments/update] unhandled error: ${error?.message ?? error}` });
       return handleFulfillmentWebhookFailure({
         app,
         req,
@@ -1121,7 +1078,7 @@ export function registerShopifyRoutes(app: Express) {
   // Order create webhook - DISABLED: Orders sync from shopify_orders/shopify_order_items tables instead
   // Keeping endpoint in place for future use if needed
   app.post("/api/shopify/webhooks/orders/create", async (req: Request, res: Response) => {
-    console.log("[ORDER WEBHOOK] Received orders/create webhook - DISABLED, use sync-from-raw-tables instead");
+    logger.info("routes.shopify_routes", { message: "[ORDER WEBHOOK] Received orders/create webhook - DISABLED, use sync-from-raw-tables instead" });
     try {
       const { verified } = await verifyChannelWebhook(req);
       if (!verified) return res.status(401).json({ error: "Invalid signature" });
@@ -1129,21 +1086,21 @@ export function registerShopifyRoutes(app: Express) {
       // Webhook disabled - orders come from shopify_orders table via sync-from-raw-tables
       res.status(200).json({ received: true, note: "Webhook disabled, use sync-from-raw-tables" });
     } catch (error) {
-      console.error("Order create webhook error:", error);
+      logger.error("routes.shopify_routes", { message: "Order create webhook error:", error: error });
       res.status(500).json({ error: "Webhook processing failed" });
     }
   });
 
   // Order fulfilled webhook - DISABLED: Status updates sync from shopify_orders table instead
   app.post("/api/shopify/webhooks/orders/fulfilled", async (req: Request, res: Response) => {
-    console.log("[ORDER WEBHOOK] Received orders/fulfilled webhook - DISABLED");
+    logger.info("routes.shopify_routes", { message: "[ORDER WEBHOOK] Received orders/fulfilled webhook - DISABLED" });
     try {
       const { verified } = await verifyChannelWebhook(req);
       if (!verified) return res.status(401).json({ error: "Invalid signature" });
 
       res.status(200).json({ received: true, note: "Webhook disabled" });
     } catch (error) {
-      console.error("Order fulfilled webhook error:", error);
+      logger.error("routes.shopify_routes", { message: "Order fulfilled webhook error:", error: error });
       res.status(500).json({ error: "Webhook processing failed" });
     }
   });
@@ -1154,21 +1111,21 @@ export function registerShopifyRoutes(app: Express) {
       const result = await runReconciliationNow();
       res.json(result);
     } catch (error: any) {
-      console.error("[RECONCILE] Manual trigger failed:", error);
+      logger.error("routes.shopify_routes", { message: "[RECONCILE] Manual trigger failed:", error: error });
       res.status(500).json({ error: error.message });
     }
   });
 
   // Order cancelled webhook - DISABLED: Status updates sync from shopify_orders table instead
   app.post("/api/shopify/webhooks/orders/cancelled", async (req: Request, res: Response) => {
-    console.log("[ORDER WEBHOOK] Received orders/cancelled webhook - DISABLED");
+    logger.info("routes.shopify_routes", { message: "[ORDER WEBHOOK] Received orders/cancelled webhook - DISABLED" });
     try {
       const { verified } = await verifyChannelWebhook(req);
       if (!verified) return res.status(401).json({ error: "Invalid signature" });
 
       res.status(200).json({ received: true, note: "Webhook disabled" });
     } catch (error) {
-      console.error("Order cancelled webhook error:", error);
+      logger.error("routes.shopify_routes", { message: "Order cancelled webhook error:", error: error });
       res.status(500).json({ error: "Webhook processing failed" });
     }
   });

@@ -21,6 +21,7 @@ import {
 import type { CustomerReturnLiveService } from "./customer-return-live.service";
 import type { CustomerReturnLabelSettingsService } from "./customer-return-label-settings.service";
 import type { CustomerReturnLabelsService } from "./customer-return-labels.service";
+import { logger } from "../../../platform/observability/logger";
 
 export interface ReturnSubmissionCommand {
   request: CustomerReturnLabelSubmitInput;
@@ -222,9 +223,9 @@ export class CustomerReturnSubmissionService {
       // provider payloads, or exception messages. Reporting cannot change intent.
       try {
         if (this.dependencies.reportFailure) this.dependencies.reportFailure(event);
-        else console.error(JSON.stringify(event));
+        else logger.error("returns.customer_return_submission_service", { error: JSON.stringify(event) });
       } catch {
-        console.error(JSON.stringify({ ...event, reportingFailed: true }));
+        logger.error("returns.customer_return_submission_service", { ...event, reportingFailed: true });
       }
       // Only known validation failures prove preparation did not authorize a return.
       // Unknown database/transport failures retain the original durable intent.

@@ -4,6 +4,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { ChannelCatalogService } from "../../application/channel-catalog.service";
 import { ChannelIdentityError } from "../../domain/channel-identity.domain";
 import { ChannelProviderError } from "../../domain/channel-provider.error";
+import { logger } from "../../../../platform/observability/logger";
 
 export interface ChannelCatalogDirectory {
   forChannel(channelId: number): Promise<ChannelCatalogService>;
@@ -30,7 +31,7 @@ export function sendCatalogError(res: Response, error: unknown): void {
   // Provider errors expose only their pre-sanitized application message.
   const providerError = error instanceof ChannelProviderError;
   const code = known || providerError ? String(error.code) : error instanceof z.ZodError ? "CHANNEL_CATALOG_INPUT_INVALID" : "CHANNEL_CATALOG_FAILED";
-  console.error(JSON.stringify({ code, operation: "channel_catalog" }));
+  logger.error("channels.channel_catalog_routes", { code, operation: "channel_catalog" });
   res.status(error instanceof z.ZodError ? 400 : known ? error.failureClass === "transient" ? 503 : 409 : providerError ? error.retryable ? 503 : 409 : 500)
     .json({ code, error: known || providerError ? error.message : "The channel catalog operation could not be completed" });
 }

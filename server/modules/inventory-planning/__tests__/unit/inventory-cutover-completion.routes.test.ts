@@ -7,6 +7,7 @@ import { InventoryCutoverCompletionService } from "../../application/inventory-c
 import { InventoryCutoverCommitError } from "../../application/inventory-cutover-commit.service";
 import { CUTOVER_COMPLETION_NOW as NOW, CUTOVER_COMPLETION_REQUEST as REQUEST,
   completionResult, completionVerification } from "../fixtures/inventory-cutover-completion.fixture";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 vi.mock("../../../identity", () => ({ hasPermission }));
@@ -22,7 +23,7 @@ describe("cutover verification and finish HTTP boundaries", () => {
   };
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
     session = { user: { id: "operator-1" } };
     service = { verify: vi.fn(async () => completionVerification()), finish: vi.fn(async () => completionResult()) };
     server = await startServer(service, () => session);
@@ -116,7 +117,7 @@ describe("cutover verification and finish HTTP boundaries", () => {
     const response = await request(server.url + ROOT + "/finish", REQUEST);
     expect(response).toMatchObject({ status: 500, body: { error: { code: "CUTOVER_COMMAND_FAILED" } } });
     expect(JSON.stringify(response.body)).not.toMatch(/secret|token|PRIVATE_FAILURE/);
-    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toMatch(/secret|token/);
+    expect(JSON.stringify(getLoggerJsonSpy("error").mock.calls)).not.toMatch(/secret|token/);
   });
 
   it("rejects contradictory/extra service responses instead of exposing partial completion", async () => {

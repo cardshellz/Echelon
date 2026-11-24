@@ -13,6 +13,7 @@ import { CustomerReturnLiveError } from "../../application/customer-return-live-
 import type { CustomerReturnLabelSettingsService } from "../../application/customer-return-label-settings.service";
 import type { CustomerReturnLabelsService } from "../../application/customer-return-labels.service";
 import type { CustomerReturnSubmissionService } from "../../application/customer-return-submission.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export interface CustomerReturnLabelRouteServices {
   settings: Pick<CustomerReturnLabelSettingsService, "get" | "save" | "control">;
@@ -79,15 +80,10 @@ export function registerCustomerReturnLabelRoutes(
         try {
           (
             dependencies.report ??
-            ((event) => console.error(JSON.stringify(event)))
+            ((event) => logger.error("returns.customer_return_label_routes", { error: JSON.stringify(event) }))
           )({ operation, code });
         } catch {
-          console.error(
-            JSON.stringify({
-              operation,
-              code: "RETURN_LABEL_REPORTING_FAILED",
-            }),
-          );
+          logger.error("RETURN_LABEL_REPORTING_FAILED", { operation, code: "RETURN_LABEL_REPORTING_FAILED" });
         }
         res
           .status(known ? error.status : 503)

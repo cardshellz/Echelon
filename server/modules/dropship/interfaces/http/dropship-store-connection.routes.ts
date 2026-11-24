@@ -15,6 +15,7 @@ import {
   requireDropshipSensitiveActionProof,
 } from "./dropship-auth.routes";
 import { buildDropshipPortalOAuthRedirect } from "./dropship-oauth-redirect";
+import { logger } from "../../../../platform/observability/logger";
 
 const DROPSHIP_PORTAL_URL = process.env.DROPSHIP_PORTAL_URL || "https://cardshellz.io";
 
@@ -138,7 +139,7 @@ function sendDropshipStoreConnectionError(res: Response, error: unknown): Respon
     });
   }
 
-  console.error("[DropshipStoreConnection] Unexpected store connection error:", error);
+  logger.error("dropship.store_connection_routes", { message: "[DropshipStoreConnection] Unexpected store connection error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_STORE_CONNECTION_INTERNAL_ERROR",

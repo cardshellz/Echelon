@@ -33,6 +33,7 @@ import {
   type ShipStationShipment,
   type ShipStationShipmentItemOwnership,
 } from "./shipstation-contracts";
+import { logger } from "../../../platform/observability/logger";
 
 export function createShipStationNotifyPackageResolution(ctx: ShipStationRuntimeContext) {
   const { db, withOrderShipmentLock } = ctx;
@@ -97,14 +98,10 @@ export function createShipStationNotifyPackageResolution(ctx: ShipStationRuntime
         ? parsedCarrierCostCents
         : undefined;
       if (shipment.shipmentCost != null && parsedCarrierCostCents === null) {
-        console.error(JSON.stringify({
-          code: "SHIPSTATION_SHIPMENT_COST_INVALID",
-          message: "ShipStation shipment cost could not be converted to integer cents.",
-          context: {
+        logger.error("SHIPSTATION_SHIPMENT_COST_INVALID", { code: "SHIPSTATION_SHIPMENT_COST_INVALID", message: "ShipStation shipment cost could not be converted to integer cents.", context: {
             shipstationShipmentId: shipment.shipmentId,
             shipmentCost: shipment.shipmentCost,
-          },
-        }));
+          } });
       }
       return {
         kind: "shipped",
@@ -273,9 +270,7 @@ export function createShipStationNotifyPackageResolution(ctx: ShipStationRuntime
     `);
     const parent = parentResult?.rows?.[0];
     if (!parent) {
-      console.error(
-        `[SHIP_NOTIFY resolve] orderKey references missing WMS shipment ${shipmentId} — cannot resolve (SS orderId=${shipment.orderId})`,
-      );
+      logger.error("oms.shipstation_notify_package_resolution", { message: `[SHIP_NOTIFY resolve] orderKey references missing WMS shipment ${shipmentId} — cannot resolve (SS orderId=${shipment.orderId})` });
       return { row: null, handled: false };
     }
 
@@ -294,19 +289,15 @@ export function createShipStationNotifyPackageResolution(ctx: ShipStationRuntime
       `);
       const sibling = siblingResult?.rows?.[0];
       if (sibling) {
-        console.warn(
-          `[SHIP_NOTIFY resolve] Parent shipment ${shipmentId} is ${parentStatus}, ` +
-            `resolved to active sibling ${sibling.id} for WMS order ${parent.order_id}`,
-        );
+        logger.warn("oms.shipstation_notify_package_resolution", { detail: `[SHIP_NOTIFY resolve] Parent shipment ${shipmentId} is ${parentStatus}, ` +
+            `resolved to active sibling ${sibling.id} for WMS order ${parent.order_id}` });
         return { row: sibling, handled: false };
       }
 
-      console.error(
-        `[SHIP_NOTIFY resolve] SHIP_NOTIFY for SS orderId=${shipment.orderId} ` +
+      logger.error("oms.shipstation_notify_package_resolution", { error: `[SHIP_NOTIFY resolve] SHIP_NOTIFY for SS orderId=${shipment.orderId} ` +
           `(orderKey=echelon-wms-shp-${shipmentId}) has no active WMS shipment. ` +
           `Parent ${shipmentId} is '${parentStatus}', no active siblings on order ${parent.order_id}. ` +
-          `Requires manual review — WMS will NOT auto-create a shipment from inbound data.`,
-      );
+          `Requires manual review — WMS will NOT auto-create a shipment from inbound data.` });
       await db.execute(sql`
         INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
         SELECT oo.id, 'ship_notify_unresolved',
@@ -376,11 +367,9 @@ export function createShipStationNotifyPackageResolution(ctx: ShipStationRuntime
           currentPhysicalShipmentRef: parent.external_fulfillment_id ?? null,
           currentTrackingNumber: parent.tracking_number ?? null,
         });
-        console.warn(
-          `[SHIP_NOTIFY resolve] Blocked ShipStation shipment ${shipment.shipmentId} ` +
+        logger.warn("oms.shipstation_notify_package_resolution", { detail: `[SHIP_NOTIFY resolve] Blocked ShipStation shipment ${shipment.shipmentId} ` +
             `from terminal WMS shipment ${parent.id}; the distinct physical package ` +
-            `cannot authorize additional fulfillment.`,
-        );
+            `cannot authorize additional fulfillment.` });
         return { row: null, handled: true };
       }
     }
@@ -439,11 +428,9 @@ export function createShipStationNotifyPackageResolution(ctx: ShipStationRuntime
 
       if (needsMappingUpdate) {
         if (drifted) {
-          console.warn(
-            `[SHIP_NOTIFY resolve] Shipment ${shipmentId} SS orderId drifted: ` +
+          logger.warn("oms.shipstation_notify_package_resolution", { detail: `[SHIP_NOTIFY resolve] Shipment ${shipmentId} SS orderId drifted: ` +
               `DB has ${existingSsOrderId}, SHIP_NOTIFY carries ${incomingSsOrderId}. ` +
-              `Adopting incoming mapping and flagging for review (duplicate SS order).`,
-          );
+              `Adopting incoming mapping and flagging for review (duplicate SS order).` });
         }
         await adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms(db, {
           shipmentId,
@@ -462,10 +449,8 @@ export function createShipStationNotifyPackageResolution(ctx: ShipStationRuntime
     // Genuine partial package on an ACTIVE parent: fork the WMS's own child
     // split row so the unshipped remainder stays tracked.
     if (!externalFulfillmentId) {
-      console.error(
-        `[SHIP_NOTIFY resolve] Partial package for shipment ${shipmentId} has no usable ` +
-          `SS shipmentId — cannot dedupe replays, refusing to create a split row`,
-      );
+      logger.error("oms.shipstation_notify_package_resolution", { error: `[SHIP_NOTIFY resolve] Partial package for shipment ${shipmentId} has no usable ` +
+          `SS shipmentId — cannot dedupe replays, refusing to create a split row` });
       return { row: null, handled: false };
     }
 
@@ -1033,9 +1018,7 @@ export function createShipStationNotifyPackageResolution(ctx: ShipStationRuntime
     }
 
     if (groups.length > 1) {
-      console.warn(
-        `[ShipStation Webhook V2] ShipStation shipment ${shipment.shipmentId} spans ${groups.length} WMS order(s); applying shared tracking to each order shipment.`,
-      );
+      logger.warn("oms.shipstation_notify_package_resolution", { message: `[ShipStation Webhook V2] ShipStation shipment ${shipment.shipmentId} spans ${groups.length} WMS order(s); applying shared tracking to each order shipment.` });
     }
 
     if (groups.length > 0) return groups;

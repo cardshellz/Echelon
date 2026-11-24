@@ -6,6 +6,7 @@ import { FinancialCommandError } from "../../../../platform/commands/transaction
 import { CostEvidenceError } from "../../../inventory/cost-evidence-values.api";
 import { ApLedgerError } from "../../application/ap-ledger.service";
 import type { createInvoiceCostReviewCommands } from "../../application/invoice-cost-review.service";
+import { logger } from "../../../../platform/observability/logger";
 
 /** HTTP validates identity and transport only; the command rechecks persisted
  * authority and the complete reviewed effect under transaction-held locks. */
@@ -29,8 +30,7 @@ export function registerInvoiceCostReviewRoute(app: Express, commands: ReturnTyp
       }
       if (error instanceof ApLedgerError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       if (error instanceof CostEvidenceError) return res.status(409).json({ error: error.message, details: { code: error.code } });
-      console.error(JSON.stringify({ event: "procurement.invoice.cost_approval_failed", lineId: parsed.data, actorId,
-        errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.invoice.cost_approval_failed", { event: "procurement.invoice.cost_approval_failed", lineId: parsed.data, actorId, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(503).json({ error: "The supplier cost update could not be confirmed. Retry the saved approval to check its result." });
     }
   });

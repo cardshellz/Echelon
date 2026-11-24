@@ -17,6 +17,7 @@ import { createCustomerReturnLiveService } from "./customer-return-live.composit
 import { createCustomerReturnLabelServices } from "./customer-return-label.composition";
 import { PostgresCustomerReturnSettingsStore } from "./customer-return-label-settings.repository";
 import { CustomerReturnGuestOrdersService } from "../application/customer-return-guest-orders.service";
+import { logger } from "../../../platform/observability/logger";
 
 export async function createCustomerReturnGuestService(config: ReturnCustomerAuthConfig) {
   // Separate authentication key: the existing recovery-storage key must never
@@ -48,13 +49,13 @@ export async function createGuestReturnServices(purchase: GuestPurchase) {
   const settings = new PostgresCustomerReturnSettingsStore(db);
   const orders = new CustomerReturnCustomerOrdersService({ principal, access, live,
       choices: { read: async () => { throw new CustomerReturnCustomerAccessError("RETURN_GUEST_ORDER_ONLY", "Verify another order to view its items.", 403); } },
-      shippingVersion: () => settings.customerVersion(purchase.channelId), reportUnavailableOrder: context => console.warn(JSON.stringify({ event: "guest_return_order_unavailable", ...context })) });
+      shippingVersion: () => settings.customerVersion(purchase.channelId), reportUnavailableOrder: context => logger.warn("guest_return_order_unavailable", { event: "guest_return_order_unavailable", ...context }) });
   return {
     orders: new CustomerReturnGuestOrdersService({ omsOrderId: purchase.omsOrderId, access, orders }),
     operations: new CustomerReturnCustomerOperationsService({ principal: { ...principal, orderScope: { omsOrderId: purchase.omsOrderId, externalOrderId: purchase.externalOrderId } },
       orderAccess: access, ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool), submissions: internal.submissions, labels: internal.labels,
       historyProgress: new PostgresCustomerReturnProgressReader(pool),
-      reportHistoryUnavailable: () => console.warn(JSON.stringify({ event: "guest_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: purchase.channelId, omsOrderId: purchase.omsOrderId })),
+      reportHistoryUnavailable: () => logger.warn("guest_return_history_progress_unavailable", { event: "guest_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: purchase.channelId, omsOrderId: purchase.omsOrderId }),
       workflows: new PostgresCustomerReturnWorkflowStore(pool), now: () => new Date() }),
     download: internal.download,
   };

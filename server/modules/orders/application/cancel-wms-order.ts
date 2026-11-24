@@ -23,6 +23,7 @@
  */
 import { cancelOrder, completeOrder, type TransitionResult, type TransitionRequest } from "./order-status-core";
 import { clearWmsOrderAssignedPickerInWms } from "../../wms/wms-order-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 export interface ReservationReleaser {
   releaseOrderReservation(
@@ -115,16 +116,12 @@ async function releaseOrderReservationBestEffort(
     releasedItems = rel.released;
     releaseFailed = rel.failed.length > 0;
     if (releaseFailed) {
-      console.error(
-        `[${logTag}] Partial reservation release for order ${orderId} (${reason}): ` +
-          rel.failed.map((f) => `${f.sku}: ${f.reason}`).join(", "),
-      );
+      logger.error("orders.cancel_wms_order", { error: `[${logTag}] Partial reservation release for order ${orderId} (${reason}): ` +
+          rel.failed.map((f) => `${f.sku}: ${f.reason}`).join(", ") });
     }
   } catch (err: any) {
     releaseFailed = true;
-    console.error(
-      `[${logTag}] Reservation release failed for order ${orderId} (${reason}): ${err?.message ?? String(err)}`,
-    );
+    logger.error("orders.cancel_wms_order", { message: `[${logTag}] Reservation release failed for order ${orderId} (${reason}): ${err?.message ?? String(err)}` });
   }
   return { releasedItems, releaseFailed };
 }

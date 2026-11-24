@@ -26,6 +26,7 @@ import {
   type ShipStationApiRequester,
 } from "../application/shipstation-api-request";
 import type { SessionAdvisoryLockRunner } from "../../../infrastructure/session-advisory-lock";
+import { logger } from "../../../platform/observability/logger";
 
 export {
   ShipStationRateLimitError,
@@ -370,10 +371,7 @@ export async function resolveShipStationIds(
         }
       }
     } catch (err) {
-      console.warn(
-        `[ShipStation] shipping_config lookup failed for channel ${args.channelId}, using defaults:`,
-        err,
-      );
+      logger.warn("oms.shipstation_contracts", { message: `[ShipStation] shipping_config lookup failed for channel ${args.channelId}, using defaults:`, error: err });
     }
   }
 
@@ -395,10 +393,7 @@ export async function resolveShipStationIds(
         }
       }
     } catch (err) {
-      console.warn(
-        `[ShipStation] shipping_config lookup failed for warehouse ${args.warehouseId}, using defaults:`,
-        err,
-      );
+      logger.warn("oms.shipstation_contracts", { message: `[ShipStation] shipping_config lookup failed for warehouse ${args.warehouseId}, using defaults:`, error: err });
     }
   }
 

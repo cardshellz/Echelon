@@ -60,6 +60,7 @@ import {
   updateChannelAllocationRuleInTx,
   updateChannelWarehouseAssignmentInTx,
 } from "../../infrastructure/channel-legacy-admin.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 type ChannelRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -143,7 +144,7 @@ export function registerChannelRoutes(app: Express) {
       const feeds = await storage.getChannelFeedsByChannel(channelType);
       res.json(feeds);
     } catch (error) {
-      console.error("Error fetching channel feeds:", error);
+      logger.error("channels.routes", { message: "Error fetching channel feeds:", error: error });
       res.status(500).json({ error: "Failed to fetch feeds" });
     }
   });
@@ -235,7 +236,7 @@ export function registerChannelRoutes(app: Express) {
         },
       );
     } catch (error: any) {
-      console.error("Error enabling channel feed:", error);
+      logger.error("channels.routes", { message: "Error enabling channel feed:", error: error });
       const busy = publicationSelectionBusyIssue(error);
       if (busy) return res.status(409).json({ ...busy, error: busy.message });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
@@ -308,7 +309,7 @@ export function registerChannelRoutes(app: Express) {
         ...order, channel: order.channelId ? channelMap.get(order.channelId) ?? null : null,
       })) });
     } catch (error) {
-      console.error("Error fetching OMS orders:", error);
+      logger.error("channels.routes", { message: "Error fetching OMS orders:", error: error });
       res.status(500).json({ error: "Failed to fetch orders" });
     }
   }));
@@ -481,14 +482,14 @@ export function registerChannelRoutes(app: Express) {
         return res.status(400).json({ code: error.code, error: error.message, field: "shippingCountry" });
       }
       if (error instanceof WmsOrderInvariantError) {
-        console.error("[manual-order] WMS invariant violation:", error);
+        logger.error("channels.routes", { message: "[manual-order] WMS invariant violation:", error: error });
         return res.status(500).json({
           error: "WMS order invariant violation",
           field: error.field,
           message: error.message,
         });
       }
-      console.error("Error creating manual order:", error);
+      logger.error("channels.routes", { message: "Error creating manual order:", error: error });
       res.status(500).json({ error: "Failed to create order" });
     }
   });
@@ -579,7 +580,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json({ ...order, items, channel, financials, memberPlan });
     } catch (error) {
-      console.error("Error fetching order:", error);
+      logger.error("channels.routes", { message: "Error fetching order:", error: error });
       res.status(500).json({ error: "Failed to fetch order" });
     }
   });
@@ -649,7 +650,7 @@ export function registerChannelRoutes(app: Express) {
       const updatedOrder = await storage.getOrderById(id);
       res.json(updatedOrder);
     } catch (error) {
-      console.error("Error updating order:", error);
+      logger.error("channels.routes", { message: "Error updating order:", error: error });
       res.status(500).json({ error: "Failed to update order" });
     }
   });
@@ -680,7 +681,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json(enrichedChannels);
     } catch (error) {
-      console.error("Error fetching channels:", error);
+      logger.error("channels.routes", { message: "Error fetching channels:", error: error });
       res.status(500).json({ error: "Failed to fetch channels" });
     }
   });
@@ -706,7 +707,7 @@ export function registerChannelRoutes(app: Express) {
         partnerProfile: partnerProfile || null
       });
     } catch (error) {
-      console.error("Error fetching channel:", error);
+      logger.error("channels.routes", { message: "Error fetching channel:", error: error });
       res.status(500).json({ error: "Failed to fetch channel" });
     }
   });
@@ -735,7 +736,7 @@ export function registerChannelRoutes(app: Express) {
         : await createChannel();
       res.status(201).json(channel);
     } catch (error) {
-      console.error("Error creating channel:", error);
+      logger.error("channels.routes", { message: "Error creating channel:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to create channel" });
     }
@@ -763,7 +764,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json(channel);
     } catch (error) {
-      console.error("Error updating channel:", error);
+      logger.error("channels.routes", { message: "Error updating channel:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to update channel" });
     }
@@ -781,7 +782,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting channel:", error);
+      logger.error("channels.routes", { message: "Error deleting channel:", error: error });
       res.status(500).json({ error: "Failed to delete channel" });
     }
   });
@@ -805,7 +806,7 @@ export function registerChannelRoutes(app: Express) {
       res.json(toPublicChannelConnection(connection));
     } catch (error) {
       if (error instanceof EbayBusinessPolicyError) return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
-      console.error("Error updating channel connection:", error);
+      logger.error("channels.routes", { message: "Error updating channel connection:", error: error });
       res.status(500).json({ error: "Failed to update channel connection" });
     }
   });
@@ -893,7 +894,7 @@ export function registerChannelRoutes(app: Express) {
           }));
         }
       } catch (locErr) {
-        console.warn("Could not fetch Shopify locations:", locErr);
+        logger.warn("channels.routes", { message: "Could not fetch Shopify locations:", detail: locErr });
       }
 
       // Fetch current warehouse mappings
@@ -920,7 +921,7 @@ export function registerChannelRoutes(app: Express) {
         feeds: { created: feedsCreated, updated: feedsUpdated, requiresDestinationMapping: true },
       });
     } catch (error) {
-      console.error("Error setting up Shopify connection:", error);
+      logger.error("channels.routes", { message: "Error setting up Shopify connection:", error: error });
       res.status(500).json({ error: "Failed to setup Shopify connection" });
     }
   });
@@ -971,7 +972,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json({ locations: locationsList, mappings: mappingsList });
     } catch (error) {
-      console.error("Error fetching Shopify locations:", error);
+      logger.error("channels.routes", { message: "Error fetching Shopify locations:", error: error });
       res.status(500).json({ error: "Failed to fetch Shopify locations" });
     }
   });
@@ -1011,7 +1012,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json({ success: true, mappings: updatedMappings });
     } catch (error) {
-      console.error("Error saving location mappings:", error);
+      logger.error("channels.routes", { message: "Error saving location mappings:", error: error });
       res.status(500).json({ error: "Failed to save location mappings" });
     }
   });
@@ -1037,7 +1038,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json(profile);
     } catch (error) {
-      console.error("Error updating partner profile:", error);
+      logger.error("channels.routes", { message: "Error updating partner profile:", error: error });
       res.status(500).json({ error: "Failed to update partner profile" });
     }
   });
@@ -1058,7 +1059,7 @@ export function registerChannelRoutes(app: Express) {
       }
       res.json(resolved);
     } catch (error) {
-      console.error("Error previewing product:", error);
+      logger.error("channels.routes", { message: "Error previewing product:", error: error });
       res.status(500).json({ error: "Failed to preview product" });
     }
   });
@@ -1264,7 +1265,7 @@ export function registerChannelRoutes(app: Express) {
           if (i + BATCH < rows.length) await new Promise((r) => setTimeout(r, 200));
         }
 
-        console.log(`[ImagePush] Complete: ${updated} updated, ${skipped} skipped, ${errors} errors`);
+        logger.info("channels.routes", { message: `[ImagePush] Complete: ${updated} updated, ${skipped} skipped, ${errors} errors` });
         // Send result only if not already responded (background mode)
         if (!res.headersSent) {
           res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 5) });
@@ -1273,7 +1274,7 @@ export function registerChannelRoutes(app: Express) {
         client.release();
       }
     } catch (error: any) {
-      console.error("[ImagePush] Error:", error);
+      logger.error("channels.routes", { message: "[ImagePush] Error:", error: error });
       if (!res.headersSent) res.status(500).json({ error: error?.message || "Failed to push images" });
     }
   });
@@ -1305,7 +1306,7 @@ export function registerChannelRoutes(app: Express) {
       }
       res.json(statuses);
     } catch (error) {
-      console.error("Error fetching channel status:", error);
+      logger.error("channels.routes", { message: "Error fetching channel status:", error: error });
       res.status(500).json({ error: "Failed to fetch channel status" });
     }
   });
@@ -1363,7 +1364,7 @@ export function registerChannelRoutes(app: Express) {
 
         res.json({ listings });
       } catch (error) {
-        console.error("Error fetching channel listings:", error);
+        logger.error("channels.routes", { message: "Error fetching channel listings:", error: error });
         res.status(500).json({ error: "Failed to fetch channel listings" });
       }
     },
@@ -1380,7 +1381,7 @@ export function registerChannelRoutes(app: Express) {
       const override = await storage.getChannelProductOverride(channelId, productId);
       res.json(override || null);
     } catch (error) {
-      console.error("Error fetching product override:", error);
+      logger.error("channels.routes", { message: "Error fetching product override:", error: error });
       res.status(500).json({ error: "Failed to fetch override" });
     }
   });
@@ -1396,7 +1397,7 @@ export function registerChannelRoutes(app: Express) {
       });
       res.json(override);
     } catch (error) {
-      console.error("Error saving product override:", error);
+      logger.error("channels.routes", { message: "Error saving product override:", error: error });
       const busy = publicationSelectionBusyIssue(error);
       if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: "Failed to save override" });
@@ -1410,7 +1411,7 @@ export function registerChannelRoutes(app: Express) {
       const deleted = await storage.deleteChannelProductOverride(channelId, productId);
       res.json({ deleted });
     } catch (error) {
-      console.error("Error deleting product override:", error);
+      logger.error("channels.routes", { message: "Error deleting product override:", error: error });
       const busy = publicationSelectionBusyIssue(error);
       if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: "Failed to delete override" });
@@ -1536,7 +1537,7 @@ export function registerChannelRoutes(app: Express) {
       const reservations = await storage.getChannelReservations(channelId);
       res.json(reservations);
     } catch (error) {
-      console.error("Error fetching reservations:", error);
+      logger.error("channels.routes", { message: "Error fetching reservations:", error: error });
       res.status(500).json({ error: "Failed to fetch reservations" });
     }
   });
@@ -1566,7 +1567,7 @@ export function registerChannelRoutes(app: Express) {
       );
       res.json(reservation);
     } catch (error) {
-      console.error("Error creating reservation:", error);
+      logger.error("channels.routes", { message: "Error creating reservation:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to create reservation" });
     }
@@ -1587,7 +1588,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting reservation:", error);
+      logger.error("channels.routes", { message: "Error deleting reservation:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to delete reservation" });
     }
@@ -1701,7 +1702,7 @@ export function registerChannelRoutes(app: Express) {
         },
       );
     } catch (error: any) {
-      console.error("Error fetching product allocation:", error);
+      logger.error("channels.routes", { message: "Error fetching product allocation:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to fetch product allocation" });
     }
@@ -2331,7 +2332,7 @@ export function registerChannelRoutes(app: Express) {
         },
       );
     } catch (error: any) {
-      console.error("Error building allocation grid:", error);
+      logger.error("channels.routes", { message: "Error building allocation grid:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to build allocation grid" });
     }
@@ -2365,7 +2366,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json(rows);
     } catch (error: any) {
-      console.error("Error fetching warehouse assignments:", error);
+      logger.error("channels.routes", { message: "Error fetching warehouse assignments:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch warehouse assignments" });
     }
   });
@@ -2395,7 +2396,7 @@ export function registerChannelRoutes(app: Express) {
       if (error.code === "23505") {
         return res.status(409).json({ error: "This warehouse is already assigned to this channel" });
       }
-      console.error("Error creating warehouse assignment:", error);
+      logger.error("channels.routes", { message: "Error creating warehouse assignment:", error: error });
       res.status(500).json({ error: error.message || "Failed to create warehouse assignment" });
     }
   });
@@ -2425,7 +2426,7 @@ export function registerChannelRoutes(app: Express) {
       if (!updated) return res.status(404).json({ error: "Assignment not found" });
       res.json(updated);
     } catch (error: any) {
-      console.error("Error updating warehouse assignment:", error);
+      logger.error("channels.routes", { message: "Error updating warehouse assignment:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update warehouse assignment" });
     }
@@ -2445,7 +2446,7 @@ export function registerChannelRoutes(app: Express) {
       if (!deleted) return res.status(404).json({ error: "Assignment not found" });
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error deleting warehouse assignment:", error);
+      logger.error("channels.routes", { message: "Error deleting warehouse assignment:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to delete warehouse assignment" });
     }
@@ -2514,7 +2515,7 @@ export function registerChannelRoutes(app: Express) {
       const rows = await (query as any).orderBy(channelAllocationRules.channelId, channelAllocationRules.productId, channelAllocationRules.productVariantId);
       res.json(rows);
     } catch (error: any) {
-      console.error("Error fetching allocation rules:", error);
+      logger.error("channels.routes", { message: "Error fetching allocation rules:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch allocation rules" });
     }
   });
@@ -2555,7 +2556,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json(rows);
     } catch (error: any) {
-      console.error("Error fetching channel allocation rules:", error);
+      logger.error("channels.routes", { message: "Error fetching channel allocation rules:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch channel allocation rules" });
     }
   });
@@ -2607,7 +2608,7 @@ export function registerChannelRoutes(app: Express) {
         const { inventoryPublicationWork } = req.app.locals.services;
         if (inventoryPublicationWork) {
           inventoryPublicationWork.syncProduct(created.productId, "allocation_rule_created")
-            .catch((err: any) => console.warn(`[AllocationRule] Post-create sync failed: ${err.message}`));
+            .catch((err: any) => logger.warn("channels.routes", { message: `[AllocationRule] Post-create sync failed: ${err.message}` }));
         }
       }
 
@@ -2617,7 +2618,7 @@ export function registerChannelRoutes(app: Express) {
       if (error.code === "23505") {
         return res.status(409).json({ error: "A rule already exists for this channel/product/variant combination" });
       }
-      console.error("Error creating allocation rule:", error);
+      logger.error("channels.routes", { message: "Error creating allocation rule:", error: error });
       res.status(500).json({ error: error.message || "Failed to create allocation rule" });
     }
   });
@@ -2664,13 +2665,13 @@ export function registerChannelRoutes(app: Express) {
         const { inventoryPublicationWork } = req.app.locals.services;
         if (inventoryPublicationWork) {
           inventoryPublicationWork.syncProduct(updated.productId, "allocation_rule_updated")
-            .catch((err: any) => console.warn(`[AllocationRule] Post-update sync failed: ${err.message}`));
+            .catch((err: any) => logger.warn("channels.routes", { message: `[AllocationRule] Post-update sync failed: ${err.message}` }));
         }
       }
 
       res.json(updated);
     } catch (error: any) {
-      console.error("Error updating allocation rule:", error);
+      logger.error("channels.routes", { message: "Error updating allocation rule:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update allocation rule" });
     }
@@ -2690,7 +2691,7 @@ export function registerChannelRoutes(app: Express) {
       if (!deleted) return res.status(404).json({ error: "Rule not found" });
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error deleting allocation rule:", error);
+      logger.error("channels.routes", { message: "Error deleting allocation rule:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to delete allocation rule" });
     }
@@ -2726,7 +2727,7 @@ export function registerChannelRoutes(app: Express) {
       res.json(report);
     } catch (error: any) {
       // runShopifyWeightBackfill never throws — this guards the route plumbing itself.
-      console.error("Error running Shopify weight backfill:", error);
+      logger.error("channels.routes", { message: "Error running Shopify weight backfill:", error: error });
       res.status(500).json({ error: error?.message || "Failed to run Shopify weight backfill" });
     }
   });
@@ -2760,7 +2761,7 @@ export function registerChannelRoutes(app: Express) {
         avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
       });
     } catch (error: any) {
-      console.error("Error fetching product velocity:", error);
+      logger.error("channels.routes", { message: "Error fetching product velocity:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch velocity" });
     }
   });

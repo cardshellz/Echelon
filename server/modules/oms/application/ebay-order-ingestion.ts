@@ -51,6 +51,7 @@ import {
   ensureChannelOrderQueuedForWmsSync,
   ingestAndRoute,
 } from "./channel-order-ingest-and-route";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -311,14 +312,14 @@ export function startEbayOrderPolling(
 
   async function poll() {
     if (pollInFlight) {
-      console.warn("[eBay Orders] Previous poll is still running; overlapping poll skipped");
+      logger.warn("oms.ebay_order_ingestion", { message: "[eBay Orders] Previous poll is still running; overlapping poll skipped" });
       return;
     }
     pollInFlight = true;
     try {
       await observeRuntimeWork("channels.ebay_order_poll", () => pollEbayOrders(omsService, ebayApiClient));
     } catch (err: any) {
-      console.error(`[eBay Orders] Poll error: ${err.message}`);
+      logger.error("oms.ebay_order_ingestion", { message: `[eBay Orders] Poll error: ${err.message}` });
     } finally {
       pollInFlight = false;
     }
@@ -329,7 +330,7 @@ export function startEbayOrderPolling(
 
   // Then every 5 minutes
   pollInterval = setInterval(poll, POLL_INTERVAL_MS);
-  console.log(`[eBay Orders] Polling started — every ${POLL_INTERVAL_MS / 1000}s`);
+  logger.info("oms.ebay_order_ingestion", { message: `[eBay Orders] Polling started — every ${POLL_INTERVAL_MS / 1000}s` });
 }
 
 export function stopEbayOrderPolling() {
@@ -358,9 +359,7 @@ export async function pollEbayOrders(
     try {
       await markEbayOrderPollFailureInDatabase(database, error);
     } catch (checkpointError: any) {
-      console.error(
-        `[eBay Orders] Failed to record poll checkpoint error: ${checkpointError.message}`,
-      );
+      logger.error("oms.ebay_order_ingestion", { message: `[eBay Orders] Failed to record poll checkpoint error: ${checkpointError.message}` });
     }
     throw error;
   }
@@ -453,16 +452,14 @@ async function runEbayOrderPoll(
 
               if (existing && existing.status !== normalizedOrder.status) {
                 if (cancelEvent && existing.status !== "cancelled") {
-                  console.log(`[eBay Orders] Order ${ebayOrder.orderId} cancelled on eBay — updating OMS`);
+                  logger.info("oms.ebay_order_ingestion", { message: `[eBay Orders] Order ${ebayOrder.orderId} cancelled on eBay — updating OMS` });
                   const cancelVerdict = await transitionOmsOrderStatus(database, result.id, {
                     to: "cancelled",
                     driver: "channel",
                     reason: cancelEvent.reason ?? "ebay_cancel",
                   });
                   if (cancelVerdict.outcome === "blocked_by_state") {
-                    console.warn(
-                      `[eBay Orders] Blocked late eBay cancellation on OMS order ${result.id} (${ebayOrder.orderId}): ${cancelVerdict.reason}`,
-                    );
+                    logger.warn("oms.ebay_order_ingestion", { message: `[eBay Orders] Blocked late eBay cancellation on OMS order ${result.id} (${ebayOrder.orderId}): ${cancelVerdict.reason}` });
                   } else {
                     try {
                       const wmsOrder = await database.execute(sql`
@@ -476,12 +473,12 @@ async function runEbayOrderPoll(
                         await cancelWmsOrder(database, Number(wmsOrder.rows[0].id), "ebay_cancel");
                       }
                     } catch (e: any) {
-                      console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
+                      logger.error("oms.ebay_order_ingestion", { message: `[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}` });
                     }
                   }
                 }
                 if (refundEvent && existing.financialStatus !== refundEvent.financialStatus) {
-                  console.log(`[eBay Orders] Order ${ebayOrder.orderId} ${refundEvent.financialStatus} on eBay — updating OMS`);
+                  logger.info("oms.ebay_order_ingestion", { message: `[eBay Orders] Order ${ebayOrder.orderId} ${refundEvent.financialStatus} on eBay — updating OMS` });
                   const refundAmountCents =
                     refundEvent.financialStatus === "refunded"
                       ? (existing.totalCents ?? refundEvent.refundAmountCents)
@@ -506,7 +503,7 @@ async function runEbayOrderPoll(
       } catch (err: any) {
         const message = err?.message || String(err);
         failedOrders.push({ orderId: ebayOrder.orderId, error: message });
-        console.error(`[eBay Orders] Failed to ingest order ${ebayOrder.orderId}: ${message}`);
+        logger.error("oms.ebay_order_ingestion", { message: `[eBay Orders] Failed to ingest order ${ebayOrder.orderId}: ${message}` });
         await recordChannelOrderFailure(database, {
           provider: "ebay",
           channelId: EBAY_CHANNEL_ID,
@@ -555,14 +552,12 @@ async function runEbayOrderPoll(
   });
 
   if (totalIngested > 0) {
-    console.log(`[eBay Orders] Poll complete — ${totalIngested} new order(s) ingested`);
+    logger.info("oms.ebay_order_ingestion", { message: `[eBay Orders] Poll complete — ${totalIngested} new order(s) ingested` });
   }
 
-  console.log(
-    `[eBay Orders] Poll checkpoint advanced - mode=${window.deepScan ? "deep" : "incremental"} `
+  logger.info("oms.ebay_order_ingestion", { detail: `[eBay Orders] Poll checkpoint advanced - mode=${window.deepScan ? "deep" : "incremental"} `
     + `window=${window.startDate.toISOString()}..${window.endDate.toISOString()} `
-    + `seen=${ordersSeen} ingested=${totalIngested}`,
-  );
+    + `seen=${ordersSeen} ingested=${totalIngested}` });
   return totalIngested;
 }
 
@@ -714,7 +709,7 @@ export function createEbayOrderWebhookHandler(
       }
 
       const topic = payload.metadata?.topic;
-      console.log(`[eBay Webhook] Received notification: ${topic}`);
+      logger.info("oms.ebay_order_ingestion", { message: `[eBay Webhook] Received notification: ${topic}` });
 
       let inbox: { id: number } | null = null;
       try {
@@ -722,17 +717,17 @@ export function createEbayOrderWebhookHandler(
         inbox = { id: receipt.id };
 
         if (!receipt.inserted && receipt.status === "succeeded") {
-          console.log(`[eBay Webhook] Duplicate already succeeded (inbox=${receipt.id}), skipping`);
+          logger.info("oms.ebay_order_ingestion", { message: `[eBay Webhook] Duplicate already succeeded (inbox=${receipt.id}), skipping` });
           return res.status(200).json({ status: "ok", duplicate: true });
         }
         if (!receipt.inserted && receipt.status === "processing") {
-          console.log(`[eBay Webhook] Duplicate already processing (inbox=${receipt.id}), skipping`);
+          logger.info("oms.ebay_order_ingestion", { message: `[eBay Webhook] Duplicate already processing (inbox=${receipt.id}), skipping` });
           return res.status(200).json({ status: "ok", duplicate: true });
         }
 
         await markWebhookProcessing(db, receipt.id);
       } catch (err: any) {
-        console.error(`[eBay Webhook] Inbox write failed: ${err.message}`);
+        logger.error("oms.ebay_order_ingestion", { message: `[eBay Webhook] Inbox write failed: ${err.message}` });
         return res.status(500).json({ error: "webhook inbox unavailable" });
       }
 
@@ -778,9 +773,9 @@ export function createEbayOrderWebhookHandler(
               },
             });
 
-            console.log(`[eBay Webhook] Processed order ${orderId}`);
+            logger.info("oms.ebay_order_ingestion", { message: `[eBay Webhook] Processed order ${orderId}` });
           } catch (err: any) {
-            console.error(`[eBay Webhook] Failed to process order ${orderId}: ${err.message}`);
+            logger.error("oms.ebay_order_ingestion", { message: `[eBay Webhook] Failed to process order ${orderId}: ${err.message}` });
             await recordChannelOrderFailure(db, {
               provider: "ebay",
               channelId: EBAY_CHANNEL_ID,
@@ -792,7 +787,7 @@ export function createEbayOrderWebhookHandler(
             }, err);
             if (inbox) {
               await markWebhookFailed(db, inbox.id, err).catch((markErr: any) => {
-                console.error(`[eBay Webhook] Failed to mark inbox ${inbox?.id} failed: ${markErr.message}`);
+                logger.error("oms.ebay_order_ingestion", { message: `[eBay Webhook] Failed to mark inbox ${inbox?.id} failed: ${markErr.message}` });
               });
             }
             // P0.6: a failed notification must not dead-end at the 200 ACK —
@@ -810,7 +805,7 @@ export function createEbayOrderWebhookHandler(
                 ON CONFLICT DO NOTHING
               `);
             } catch (queueErr: any) {
-              console.error(`[eBay Webhook] Retry enqueue failed for ${orderId}: ${queueErr.message}`);
+              logger.error("oms.ebay_order_ingestion", { message: `[eBay Webhook] Retry enqueue failed for ${orderId}: ${queueErr.message}` });
               return res.status(500).json({ error: "retry enqueue failed" });
             }
             return res.status(200).json({ status: "ok", processing: "queued_for_retry" });
@@ -825,7 +820,7 @@ export function createEbayOrderWebhookHandler(
       // Always acknowledge the webhook
       res.status(200).json({ status: "ok" });
     } catch (err: any) {
-      console.error(`[eBay Webhook] Error: ${err.message}`);
+      logger.error("oms.ebay_order_ingestion", { message: `[eBay Webhook] Error: ${err.message}` });
       res.status(500).json({ error: "Internal error" });
     }
   };

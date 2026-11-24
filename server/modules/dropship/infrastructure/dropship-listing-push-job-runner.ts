@@ -159,14 +159,10 @@ export async function runDropshipListingPushSweep(input: {
       processed += 1;
     } catch (error) {
       failed += 1;
-      console.error(JSON.stringify({
-        code: "DROPSHIP_LISTING_PUSH_SWEEP_JOB_FAILED",
-        message: "Dropship listing push sweep failed to process a job.",
-        context: {
+      logger.error("DROPSHIP_LISTING_PUSH_SWEEP_JOB_FAILED", { code: "DROPSHIP_LISTING_PUSH_SWEEP_JOB_FAILED", message: "Dropship listing push sweep failed to process a job.", context: {
           jobId,
           error: error instanceof Error ? error.message : String(error),
-        },
-      }));
+        } });
     }
     // A run whose chunk job just ended (or that was stopped while it ran) finishes now, not after the rest of the
     // batch (verify V1): reconcile and finish only, under the same lock as the steps above; it is index-driven.
@@ -249,19 +245,11 @@ export function startDropshipListingPushWorker(): void {
       await withAdvisoryLock(DROPSHIP_LISTING_PUSH_WORKER_LOCK_ID, async () => {
         const result = await runDropshipListingPushSweep({ recovery });
         if (result.processed > 0 || result.failed > 0) {
-          console.info(JSON.stringify({
-            code: "DROPSHIP_LISTING_PUSH_SWEEP_COMPLETED",
-            message: "Dropship listing push sweep completed.",
-            context: result,
-          }));
+          logger.info("DROPSHIP_LISTING_PUSH_SWEEP_COMPLETED", { code: "DROPSHIP_LISTING_PUSH_SWEEP_COMPLETED", message: "Dropship listing push sweep completed.", context: result });
         }
       });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "DROPSHIP_LISTING_PUSH_SWEEP_FAILED",
-        message: "Dropship listing push sweep failed.",
-        context: buildSchedulerFailureContext(error),
-      }));
+      logger.error("DROPSHIP_LISTING_PUSH_SWEEP_FAILED", { code: "DROPSHIP_LISTING_PUSH_SWEEP_FAILED", message: "Dropship listing push sweep failed.", context: buildSchedulerFailureContext(error) });
     }
   };
 
@@ -270,11 +258,7 @@ export function startDropshipListingPushWorker(): void {
     intervalMs,
     run: runLockedSweep,
   });
-  console.info(JSON.stringify({
-    code: "DROPSHIP_LISTING_PUSH_WORKER_STARTED",
-    message: "Dropship listing push worker started.",
-    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
-  }));
+  logger.info("DROPSHIP_LISTING_PUSH_WORKER_STARTED", { code: "DROPSHIP_LISTING_PUSH_WORKER_STARTED", message: "Dropship listing push worker started.", context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" } });
 }
 
 /**

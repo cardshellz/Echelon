@@ -10,6 +10,7 @@ import {
   controlTowerProjectorInitialDelayMs,
   startControlTowerProjectionScheduler,
 } from "../../application/control-tower-v2.scheduler";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -29,7 +30,7 @@ describe("Control Tower projector schedule", () => {
 
   it("keeps every five-minute run off the startup-aligned shipping cadence", async () => {
     vi.useFakeTimers();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    spyLoggerJson("log");
     const runProjection = vi.mocked(withAdvisoryLock).mockResolvedValue(null);
     const handle = startControlTowerProjectionScheduler({
       environment: { CONTROL_TOWER_PROJECTOR_INTERVAL_MS: "300000" },
@@ -53,7 +54,7 @@ describe("Control Tower projector schedule", () => {
 
   it("does not run if stopped before the initial delay", async () => {
     vi.useFakeTimers();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    spyLoggerJson("log");
     const runProjection = vi.mocked(withAdvisoryLock).mockResolvedValue(null);
     const handle = startControlTowerProjectionScheduler({
       environment: { CONTROL_TOWER_PROJECTOR_INTERVAL_MS: "300000" },
@@ -66,8 +67,8 @@ describe("Control Tower projector schedule", () => {
 
   it("reports a failed run and continues on the next interval", async () => {
     vi.useFakeTimers();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("log");
+    const error = spyLoggerJson("error");
     const runProjection = vi.mocked(withAdvisoryLock)
       .mockRejectedValueOnce(new Error("database unavailable"))
       .mockResolvedValue(null);

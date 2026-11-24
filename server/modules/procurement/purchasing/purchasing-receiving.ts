@@ -45,6 +45,7 @@ import {
   PurchasingError,
   type PurchasingBaseContext,
 } from "./purchasing.types";
+import { logger } from "../../../platform/observability/logger";
 
 export type ShipmentReceiptExistingState =
   | { kind: "none" }
@@ -157,8 +158,7 @@ export function createPurchasingReceiving(
         });
       }
       if (error instanceof PoDirectCustodySourceError || error instanceof ShipmentReceiptCoverageError) {
-        console.warn(JSON.stringify({ event: "procurement.receiving.custody_admission_rejected", command: "create_po_receipt",
-          actorId: userId ?? null, purchaseOrderId, code: error.details.code }));
+        logger.warn("procurement.receiving.custody_admission_rejected", { event: "procurement.receiving.custody_admission_rejected", command: "create_po_receipt", actorId: userId ?? null, purchaseOrderId, code: error.details.code });
         // Lifecycle HTTP commands forward the purchasing owner's typed error.
         throw new PurchasingError(error.message, error.statusCode, error.details);
       }
@@ -353,10 +353,7 @@ export function createPurchasingReceiving(
         postingStateKnown: true,
       };
     } catch (error) {
-      console.warn("[Procurement] Failed to inspect shipment receipt posting summary", {
-        receivingOrderId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      logger.warn("procurement.purchasing_receiving", { message: "[Procurement] Failed to inspect shipment receipt posting summary", receivingOrderId, error: error instanceof Error ? error.message : String(error) });
       return fallback;
     }
   }
@@ -1308,7 +1305,7 @@ export function createPurchasingReceiving(
       try {
         await detectQtyVariance(result.purchaseOrderId);
       } catch (error) {
-        console.error("[po-exceptions] qty variance detection failed after receiving close:", error);
+        logger.error("procurement.purchasing_receiving", { message: "[po-exceptions] qty variance detection failed after receiving close:", error: error });
       }
     }
   }

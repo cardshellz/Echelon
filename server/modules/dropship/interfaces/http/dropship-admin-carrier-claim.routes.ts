@@ -6,6 +6,7 @@ import {
 } from "../../application/dropship-carrier-claim-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipCarrierClaimServiceFromEnv } from "../../infrastructure/dropship-carrier-claim.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipAdminCarrierClaimRoutes(
   app: Express,
@@ -75,7 +76,7 @@ function sendError(res: Response, error: unknown): Response {
       error: { code: error.code, message: error.message, context: error.context },
     });
   }
-  console.error("[DropshipCarrierClaimRoutes] Unexpected error:", error);
+  logger.error("dropship.admin_carrier_claim_routes", { message: "[DropshipCarrierClaimRoutes] Unexpected error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_CARRIER_CLAIM_INTERNAL_ERROR",

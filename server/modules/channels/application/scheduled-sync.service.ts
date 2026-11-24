@@ -18,6 +18,7 @@
  */
 
 import type { EchelonSyncOrchestrator, FullSyncResult, SyncOrchestratorConfig } from "./echelon-sync-orchestrator.service";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -81,19 +82,17 @@ class ScheduledSyncService {
    */
   start(): void {
     if (this.timer) {
-      console.log("[ScheduledSync] Already running");
+      logger.info("channels.scheduled_sync_service", { message: "[ScheduledSync] Already running" });
       return;
     }
 
     if (!this.config.enabled) {
-      console.log("[ScheduledSync] Not enabled — call enable() first or pass enabled: true");
+      logger.info("channels.scheduled_sync_service", { message: "[ScheduledSync] Not enabled — call enable() first or pass enabled: true" });
       return;
     }
 
-    console.log(
-      `[ScheduledSync] Starting — interval=${this.config.intervalMs}ms ` +
-      `dryRun=${this.config.dryRun} enabled=${this.config.enabled}`,
-    );
+    logger.info("channels.scheduled_sync_service", { detail: `[ScheduledSync] Starting — interval=${this.config.intervalMs}ms ` +
+      `dryRun=${this.config.dryRun} enabled=${this.config.enabled}` });
 
     this.timer = setInterval(() => this.tick(), this.config.intervalMs);
 
@@ -108,7 +107,7 @@ class ScheduledSyncService {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
-      console.log("[ScheduledSync] Stopped");
+      logger.info("channels.scheduled_sync_service", { message: "[ScheduledSync] Stopped" });
     }
   }
 
@@ -150,7 +149,7 @@ class ScheduledSyncService {
       this.stop();
     }
 
-    console.log(`[ScheduledSync] Config updated:`, this.config);
+    logger.info("channels.scheduled_sync_service", { message: `[ScheduledSync] Config updated:`, detail: this.config });
   }
 
   /**
@@ -193,14 +192,14 @@ class ScheduledSyncService {
 
     // Single-flight lock: skip if already running
     if (this.running) {
-      console.log("[ScheduledSync] Skipping tick — previous cycle still running");
+      logger.info("channels.scheduled_sync_service", { message: "[ScheduledSync] Skipping tick — previous cycle still running" });
       return;
     }
 
     try {
       await this.executeSyncCycle({ dryRun: this.config.dryRun });
     } catch (err: any) {
-      console.error(`[ScheduledSync] Cycle failed: ${err.message}`);
+      logger.error("channels.scheduled_sync_service", { message: `[ScheduledSync] Cycle failed: ${err.message}` });
       this.totalErrors++;
     }
   }
@@ -212,7 +211,7 @@ class ScheduledSyncService {
     this.running = true;
     const startTime = Date.now();
 
-    console.log(`[ScheduledSync] Cycle starting (${config.dryRun ? "DRY RUN" : "LIVE"})`);
+    logger.info("channels.scheduled_sync_service", { message: `[ScheduledSync] Cycle starting (${config.dryRun ? "DRY RUN" : "LIVE"})` });
 
     try {
       const result = await this.orchestrator.runFullSync(config);
@@ -232,12 +231,10 @@ class ScheduledSyncService {
       const listingsPushed = result.listings.reduce((s, r) => s + r.pushed, 0);
       const listingsPulled = result.listings.reduce((s, r) => s + r.pulled, 0);
 
-      console.log(
-        `[ScheduledSync] Cycle complete in ${this.lastRunDurationMs}ms — ` +
+      logger.info("channels.scheduled_sync_service", { detail: `[ScheduledSync] Cycle complete in ${this.lastRunDurationMs}ms — ` +
         `inventory=${inventoryPushed} pricing=${pricingPushed} ` +
         `listings_pushed=${listingsPushed} listings_pulled=${listingsPulled} ` +
-        `errors=${result.errors.length}`,
-      );
+        `errors=${result.errors.length}` });
 
       return result;
     } finally {

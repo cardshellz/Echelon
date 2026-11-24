@@ -670,7 +670,7 @@ export function createServices(
   const shopifyLabelLifecycle = createShopifyLabelLifecycleService({
     repository: createShopifyLabelLifecycleRepository(db), providerClients: fulfillmentProviderClients,
     runExclusive: withAdvisoryLock, clock: { now: () => new Date() },
-    logger: { info: event => console.log(JSON.stringify(event)), error: event => console.error(JSON.stringify(event)) },
+    logger: { info: event => platformLogger.info("services.index", { detail: JSON.stringify(event) }), error: event => platformLogger.error("services.index", { error: JSON.stringify(event) }) },
   });
   const fulfillmentPush = createFulfillmentPushService(db, null, {
     runExclusive: withAdvisoryLock,
@@ -745,9 +745,9 @@ export function createServices(
         pool: databasePool,
         clock: systemCarrierTrackingClock,
         logger: {
-          info: (event) => console.log(JSON.stringify(event)),
-          warn: (event) => console.warn(JSON.stringify(event)),
-          error: (event) => console.error(JSON.stringify(event)),
+          info: (event) => platformLogger.info("services.index", { detail: JSON.stringify(event) }),
+          warn: (event) => platformLogger.warn("services.index", { detail: JSON.stringify(event) }),
+          error: (event) => platformLogger.error("services.index", { error: JSON.stringify(event) }),
         },
       }),
       reviewRepository: createPackageAllocationLabelCommercialReviewRepository(db),

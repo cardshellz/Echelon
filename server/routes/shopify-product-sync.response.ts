@@ -1,5 +1,6 @@
 import type { Response } from "express";
 import { publicationSelectionBusyIssue } from "../modules/inventory-planning/publication-selection-work.api";
+import { logger } from "../platform/observability/logger";
 
 export function sendShopifyProductSyncFailure(response: Response, error: unknown): void {
   const busy = publicationSelectionBusyIssue(error);
@@ -10,6 +11,6 @@ export function sendShopifyProductSyncFailure(response: Response, error: unknown
       partialChangesPossible: true });
     return;
   }
-  console.error(JSON.stringify({ code: "SHOPIFY_PRODUCT_SYNC_FAILED", errorType: error instanceof Error ? error.name : typeof error }));
+  logger.error("SHOPIFY_PRODUCT_SYNC_FAILED", { code: "SHOPIFY_PRODUCT_SYNC_FAILED", errorType: error instanceof Error ? error.name : typeof error });
   response.status(500).json({ code: "SHOPIFY_PRODUCT_SYNC_FAILED", error: "Failed to sync products from Shopify", partialChangesPossible: true });
 }

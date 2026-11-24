@@ -3,13 +3,14 @@ import { requirePermission } from "../../../../routes/middleware";
 import { ChannelDefinitionError, ChannelDefinitionService } from "../../application/inventory-channel-definition.service";
 import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
 import { sendError } from "./inventory-product-definition.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerChannelDefinitionRoutes(app: Express,
   service: Pick<ChannelDefinitionService, "review" | "apply" | "progress"> = new ChannelDefinitionService(new PostgresChannelDefinitionStore()),
 ): void {
   const respond = (res: Parameters<typeof sendError>[0], error: unknown) => {
     if (error instanceof ChannelDefinitionError) {
-      if (error.status >= 500) console.error(JSON.stringify({ event: "channel_definition_command_failed", code: error.code }));
+      if (error.status >= 500) logger.error("channel_definition_command_failed", { event: "channel_definition_command_failed", code: error.code });
       res.status(error.status).json({ error: { code: error.code, message: error.message } });
       return;
     }

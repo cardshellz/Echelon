@@ -332,7 +332,6 @@ describe("WmsSyncService pick priority for other orders (unchanged)", () => {
 
   it("scores the shipping base alone and records a failed lookup when the membership read fails", async () => {
     harness.execute.mockRejectedValue(new Error("connection terminated"));
-    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     const result = await determinePriority(createService(), shopifyOrder());
 
@@ -342,8 +341,7 @@ describe("WmsSyncService pick priority for other orders (unchanged)", () => {
       memberPlanColor: null,
       legacyMember: { outcome: "lookup_failed" },
     });
-    expect(consoleWarn).toHaveBeenCalledOnce();
-    consoleWarn.mockRestore();
+    expect(harness.warn).toHaveBeenCalledOnce();
   });
 
   it("scores a non-member with the shipping base alone", async () => {

@@ -4,6 +4,7 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReturnPolicyAdminError, type ReturnPolicyAdminService } from "../../application/return-policy-admin.service";
 import { registerReturnPolicyAdminRoutes } from "../../interfaces/http/return-policy-admin.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const { requirePermissionMock } = vi.hoisted(() => ({
   requirePermissionMock: vi.fn(
@@ -174,7 +175,7 @@ describe("return policy admin routes", () => {
   });
 
   it("fails closed on malformed preview output without exposing raw dependency errors", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       service.previewArchive.mockResolvedValue({ ...archivePreview(), revision: "invalid" });
       expect(await jsonRequest(`${server.url}/api/returns/admin/policies/42/archive-preview`)).toMatchObject({

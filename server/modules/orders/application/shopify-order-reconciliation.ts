@@ -43,6 +43,7 @@ import { resolveProviderCountryCode } from "@shared/country-code";
 import { eq } from "drizzle-orm";
 import { envPositiveInteger } from "../../../infrastructure/scheduler-config";
 import { normalizeShopifyOrderGid } from "../domain/shopify-order-id";
+import { logger } from "../../../platform/observability/logger";
 
 // Re-export for registration in index.ts
 export { startShopifyReconciliation };
@@ -196,7 +197,7 @@ async function shopifyGet(
         response.headers.get("Retry-After") || "2",
         10,
       );
-      console.warn(`[RECONCILE] Rate limited, waiting ${retryAfter}s`);
+      logger.warn("orders.shopify_order_reconciliation", { message: `[RECONCILE] Rate limited, waiting ${retryAfter}s` });
       await delay(retryAfter * 1000);
       continue;
     }
@@ -357,14 +358,12 @@ async function reconcileExistingOmsOrderReadiness(
     readiness.quantityMismatches > 0 ||
     readiness.protectedLines > 0
   ) {
-    console.warn(
-      `[RECONCILE] Shopify readiness for ${order.name} was partially skipped ` +
+    logger.warn("orders.shopify_order_reconciliation", { detail: `[RECONCILE] Shopify readiness for ${order.name} was partially skipped ` +
         JSON.stringify({
           missingLines: readiness.missingLines,
           quantityMismatches: readiness.quantityMismatches,
           protectedLines: readiness.protectedLines,
-        }),
-    );
+        }) });
   }
 
   if (readiness.wmsSyncRequired) {
@@ -491,9 +490,7 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
     `);
   }
 
-  console.log(
-    `[RECONCILE] Created shopify_orders row for ${order.name} (${shopifyId}, source: ${order.source_name})`,
-  );
+  logger.info("orders.shopify_order_reconciliation", { message: `[RECONCILE] Created shopify_orders row for ${order.name} (${shopifyId}, source: ${order.source_name})` });
   return shopifyId;
 }
 
@@ -552,7 +549,7 @@ async function runReconciliation(): Promise<ReconciliationResult> {
   };
 
   if (isRunning) {
-    console.log("[RECONCILE] Already running, skipping");
+    logger.info("orders.shopify_order_reconciliation", { message: "[RECONCILE] Already running, skipping" });
     return result;
   }
 
@@ -570,9 +567,7 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     // Overlap by 5 minutes to catch race conditions.
     const fetchSince = new Date(lastCheck.getTime() - 5 * 60 * 1000);
 
-    console.log(
-      `[RECONCILE] Fetching Shopify orders since ${fetchSince.toISOString()}`,
-    );
+    logger.info("orders.shopify_order_reconciliation", { message: `[RECONCILE] Fetching Shopify orders since ${fetchSince.toISOString()}` });
     const shopifyOrders = await fetchOrdersFromShopify(fetchSince);
     result.checked = shopifyOrders.length;
     const recentlyCheckedOmsOrderIds = new Set<number>();
@@ -647,9 +642,7 @@ async function runReconciliation(): Promise<ReconciliationResult> {
           }
         } catch (err: any) {
           result.failed++;
-          console.error(
-            `[RECONCILE] Failed to reconcile ${order.name} (${orderId}): ${err.message}`,
-          );
+          logger.error("orders.shopify_order_reconciliation", { message: `[RECONCILE] Failed to reconcile ${order.name} (${orderId}): ${err.message}` });
         }
 
         await delay(100);
@@ -686,19 +679,13 @@ async function runReconciliation(): Promise<ReconciliationResult> {
           }, evidence.data);
           if (replay.changed) result.paidReplaysQueued++;
           if (replay.reason) {
-            console.warn(JSON.stringify({
-              event: "shopify_paid_recovery_requires_review",
-              omsOrderId: candidate.omsOrderId,
-              reason: replay.reason,
-            }));
+            logger.warn("shopify_paid_recovery_requires_review", { event: "shopify_paid_recovery_requires_review", omsOrderId: candidate.omsOrderId, reason: replay.reason });
           }
         }
         await reconcileReadiness(order, candidate.omsOrderId);
       } catch (err: any) {
         result.failed++;
-        console.error(
-          `[RECONCILE] Delayed readiness recovery failed for Shopify order ${candidate.shopifyOrderId}: ${err.message}`,
-        );
+        logger.error("orders.shopify_order_reconciliation", { message: `[RECONCILE] Delayed readiness recovery failed for Shopify order ${candidate.shopifyOrderId}: ${err.message}` });
       }
 
       await delay(100);
@@ -714,23 +701,19 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     if (result.failed === 0) {
       await setLastCheckTime(new Date());
     } else {
-      console.error(
-        `[RECONCILE] ${result.failed} order(s) failed; checkpoint was not advanced`,
-      );
+      logger.error("orders.shopify_order_reconciliation", { message: `[RECONCILE] ${result.failed} order(s) failed; checkpoint was not advanced` });
     }
 
     const durationMs = Date.now() - startTime;
     if (result.reconciled > 0 || result.readinessAdvanced > 0 || result.paidReplaysQueued > 0) {
-      console.log(
-        `[RECONCILE] Imported ${result.reconciled} order(s), advanced ` +
+      logger.info("orders.shopify_order_reconciliation", { detail: `[RECONCILE] Imported ${result.reconciled} order(s), advanced ` +
           `${result.readinessAdvanced} readiness unit(s), requested ` +
-          `${result.wmsSyncRequested} WMS sync(s), queued ${result.paidReplaysQueued} paid replay(s) in ${durationMs}ms`,
-      );
+          `${result.wmsSyncRequested} WMS sync(s), queued ${result.paidReplaysQueued} paid replay(s) in ${durationMs}ms` });
     }
 
     return result;
   } catch (err: any) {
-    console.error(`[RECONCILE] Error: ${err.message}`);
+    logger.error("orders.shopify_order_reconciliation", { message: `[RECONCILE] Error: ${err.message}` });
     throw err;
   } finally {
     isRunning = false;
@@ -758,12 +741,10 @@ async function runCancellationReconciliation(): Promise<void> {
   try {
     const result = await wmsSyncService.reconcileCancellations();
     if (result.cancelled > 0) {
-      console.log(
-        `[RECONCILE] Cancellation sweep: ${result.cancelled} cancelled, ${result.failed} failed`,
-      );
+      logger.info("orders.shopify_order_reconciliation", { message: `[RECONCILE] Cancellation sweep: ${result.cancelled} cancelled, ${result.failed} failed` });
     }
   } catch (err: any) {
-    console.error(`[RECONCILE] Cancellation sweep failed: ${err.message}`);
+    logger.error("orders.shopify_order_reconciliation", { message: `[RECONCILE] Cancellation sweep failed: ${err.message}` });
   }
 }
 
@@ -778,7 +759,7 @@ function startShopifyReconciliation() {
       try {
         await runReconciliation();
       } catch (err: any) {
-        console.error(`[RECONCILE] Initial run failed: ${err.message}`);
+        logger.error("orders.shopify_order_reconciliation", { message: `[RECONCILE] Initial run failed: ${err.message}` });
       }
 
       await runCancellationReconciliation();
@@ -788,7 +769,7 @@ function startShopifyReconciliation() {
         try {
           await runReconciliation();
         } catch (err: any) {
-          console.error(`[RECONCILE] Scheduled run failed: ${err.message}`);
+          logger.error("orders.shopify_order_reconciliation", { message: `[RECONCILE] Scheduled run failed: ${err.message}` });
         }
 
         await runCancellationReconciliation();
@@ -797,9 +778,7 @@ function startShopifyReconciliation() {
     3 * 60 * 1000,
   );
 
-  console.log(
-    "[RECONCILE] Shopify order reconciliation scheduled (every 15 min, first run in 3 min)",
-  );
+  logger.info("orders.shopify_order_reconciliation", { message: "[RECONCILE] Shopify order reconciliation scheduled (every 15 min, first run in 3 min)" });
 }
 
 /**

@@ -10,6 +10,7 @@ import { dropshipListingConfigReadOnlyError } from "../../application/dropship-l
 import { DropshipError } from "../../domain/errors";
 import { createDropshipEbayListingSetupServiceFromEnv } from "../../infrastructure/dropship-ebay-listing-setup.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 /** Single writes, per member (Listing settings design 8.8). */
 export const LISTING_SETUP_WRITES_PER_MINUTE = 60;
@@ -163,7 +164,7 @@ function sendDropshipEbayListingSetupError(res: Response, error: unknown): Respo
     });
   }
 
-  console.error("[DropshipEbayListingSetup] Unexpected eBay listing setup error:", error);
+  logger.error("dropship.ebay_listing_setup_routes", { message: "[DropshipEbayListingSetup] Unexpected eBay listing setup error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_EBAY_LISTING_SETUP_INTERNAL_ERROR",

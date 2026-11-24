@@ -33,6 +33,7 @@ import {
   readPickPrioritySettings,
   upsertPickPrioritySetting,
 } from "../modules/warehouse/pick-priority-settings.api";
+import { logger } from "../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Shape
@@ -127,10 +128,7 @@ async function recomputeAndQueueActiveSortRankSync(
       queued++;
     } catch (err: any) {
       failed++;
-      console.error(
-        `[PickPriority] Failed to queue ShipStation sort_rank sync for WMS order ${orderId}:`,
-        err?.message ?? err,
-      );
+      logger.error("routes.pick_priority_routes", { message: `[PickPriority] Failed to queue ShipStation sort_rank sync for WMS order ${orderId}:`, error: err?.message ?? err });
     }
   }
 
@@ -157,7 +155,7 @@ export function registerPickPriorityRoutes(app: Express): void {
         const payload: PickPriorityPayload = { shippingBase, slaDefaultDays, plans, channels };
         res.json(payload);
       } catch (err: any) {
-        console.error("[PickPriority] GET failed:", err.message);
+        logger.error("routes.pick_priority_routes", { message: "[PickPriority] GET failed:", error: err.message });
         res.status(500).json({ error: err.message });
       }
     },
@@ -246,11 +244,11 @@ export function registerPickPriorityRoutes(app: Express): void {
         res.json({ shippingBase, slaDefaultDays, plans, channels, sortRankSync });
       } catch (err: any) {
         const status = /must be (a number|between)/.test(err.message) ? 400 : 500;
-        console.error("[PickPriority] PATCH failed:", err.message);
+        logger.error("routes.pick_priority_routes", { message: "[PickPriority] PATCH failed:", error: err.message });
         res.status(status).json({ error: err.message });
       }
     },
   );
 
-  console.log("[PickPriority] Admin routes registered at /api/admin/pick-priority");
+  logger.info("routes.pick_priority_routes", { message: "[PickPriority] Admin routes registered at /api/admin/pick-priority" });
 }

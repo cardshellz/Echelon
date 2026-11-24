@@ -1,5 +1,6 @@
 import type { VariantAvailabilityBatchResult } from "./variant-availability-sync.service";
 import { observeRuntimeWork } from "../../../platform/observability/runtime-memory";
+import { logger } from "../../../platform/observability/logger";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const LOG_PREFIX = "[Variant Availability Worker]";
@@ -38,7 +39,7 @@ function positiveIntegerEnv(name: string, fallback: number): number {
   if (!raw) return fallback;
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    console.warn(`${LOG_PREFIX} Ignoring invalid ${name}; using ${fallback}`);
+    logger.warn("channels.variant_availability_sync_worker", { message: `${LOG_PREFIX} Ignoring invalid ${name}; using ${fallback}` });
     return fallback;
   }
   return parsed;
@@ -55,12 +56,12 @@ export async function runVariantAvailabilityWorkerTick(
     lastSuccessAt = new Date();
     lastError = null;
     if (result.claimed > 0) {
-      console.info(`${LOG_PREFIX} Batch complete`, result);
+      logger.info("channels.variant_availability_sync_worker", { message: `${LOG_PREFIX} Batch complete`, detail: result });
     }
     return "success";
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
-    console.error(`${LOG_PREFIX} Worker tick failed`, error);
+    logger.error("channels.variant_availability_sync_worker", { message: `${LOG_PREFIX} Worker tick failed`, error: error });
     return "error";
   } finally {
     inFlight = false;
@@ -71,7 +72,7 @@ export function startVariantAvailabilitySyncWorker(
   processor: VariantAvailabilityProcessor,
 ): void {
   if (timer) {
-    console.warn(`${LOG_PREFIX} Worker already started; ignoring duplicate start`);
+    logger.warn("channels.variant_availability_sync_worker", { message: `${LOG_PREFIX} Worker already started; ignoring duplicate start` });
     return;
   }
   startedAt = new Date();
@@ -82,5 +83,5 @@ export function startVariantAvailabilitySyncWorker(
   const run = () => void runVariantAvailabilityWorkerTick(processor);
   setTimeout(run, Math.min(intervalMs, 5_000));
   timer = setInterval(run, intervalMs);
-  console.info(`${LOG_PREFIX} Started durable worker`, { intervalMs });
+  logger.info("channels.variant_availability_sync_worker", { message: `${LOG_PREFIX} Started durable worker`, intervalMs });
 }

@@ -21,6 +21,7 @@ import { createDropshipCostChangeNoticeServiceFromEnv } from "./dropship-cost-ch
 import { isDropshipCostDetectionWorkerEnabled } from "./dropship-cost-detection-config";
 import { createDropshipCostDetectionServiceFromEnv } from "./dropship-cost-detection.factory";
 import { startDropshipWorkerSchedule } from "./dropship-worker-schedule";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * .ops cost detection worker (docs/DROPSHIP-COST-CHANGE-CONTROLS.md, C2, C4
@@ -104,37 +105,21 @@ export function startDropshipCostDetectionWorker(): void {
         const result = await runDropshipCostDetectionTick({ vendorsPerTick });
         // A tick that found no pass due is the normal quiet case: not logged.
         if (result.outcome !== "not_due") {
-          console.info(JSON.stringify({
-            code: "DROPSHIP_COST_DETECTION_TICK_COMPLETED",
-            message: "Dropship cost detection tick completed.",
-            context: result,
-          }));
+          logger.info("DROPSHIP_COST_DETECTION_TICK_COMPLETED", { code: "DROPSHIP_COST_DETECTION_TICK_COMPLETED", message: "Dropship cost detection tick completed.", context: result });
         }
         // Notices go out after detection, and cover changes acceptance recorded too.
         const notices = await runDropshipCostNoticePass({ groupsPerPass });
         if (notices.groupsProcessed > 0 || notices.groupsFailed > 0) {
-          console.info(JSON.stringify({
-            code: "DROPSHIP_COST_NOTICE_PASS_COMPLETED",
-            message: "Dropship cost change notice pass completed.",
-            context: notices,
-          }));
+          logger.info("DROPSHIP_COST_NOTICE_PASS_COMPLETED", { code: "DROPSHIP_COST_NOTICE_PASS_COMPLETED", message: "Dropship cost change notice pass completed.", context: notices });
         }
         // Listing actions last: they act on increases already in force, whoever recorded them.
         const actions = await runDropshipCostListingActionPass({ entriesPerPass, holdsPerPass });
         if (actions.vendorsProcessed > 0 || actions.vendorsFailed > 0 || actions.holds.reviewed > 0 || actions.holds.vendorsFailed > 0) {
-          console.info(JSON.stringify({
-            code: "DROPSHIP_COST_LISTING_ACTION_PASS_COMPLETED",
-            message: "Dropship cost change listing action pass completed.",
-            context: actions,
-          }));
+          logger.info("DROPSHIP_COST_LISTING_ACTION_PASS_COMPLETED", { code: "DROPSHIP_COST_LISTING_ACTION_PASS_COMPLETED", message: "Dropship cost change listing action pass completed.", context: actions });
         }
       });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "DROPSHIP_COST_DETECTION_TICK_FAILED",
-        message: "Dropship cost detection tick failed.",
-        context: buildSchedulerFailureContext(error),
-      }));
+      logger.error("DROPSHIP_COST_DETECTION_TICK_FAILED", { code: "DROPSHIP_COST_DETECTION_TICK_FAILED", message: "Dropship cost detection tick failed.", context: buildSchedulerFailureContext(error) });
     }
   };
 
@@ -143,11 +128,7 @@ export function startDropshipCostDetectionWorker(): void {
     intervalMs,
     run: runLockedSweep,
   });
-  console.info(JSON.stringify({
-    code: "DROPSHIP_COST_DETECTION_STARTED",
-    message: "Dropship cost detection worker started.",
-    context: { intervalMs, initialDelayMs, vendorsPerTick, groupsPerPass, entriesPerPass, holdsPerPass, schedulingMode: "completion_delayed_non_overlapping" },
-  }));
+  logger.info("DROPSHIP_COST_DETECTION_STARTED", { code: "DROPSHIP_COST_DETECTION_STARTED", message: "Dropship cost detection worker started.", context: { intervalMs, initialDelayMs, vendorsPerTick, groupsPerPass, entriesPerPass, holdsPerPass, schedulingMode: "completion_delayed_non_overlapping" } });
 }
 
 function defaultWorkerId(): string {
@@ -164,11 +145,7 @@ function envBoundedInteger(name: string, fallback: number, max: number): number 
   const value = Number(process.env[name]);
   if (!Number.isInteger(value) || value <= 0) return fallback;
   if (value > max) {
-    console.warn(JSON.stringify({
-      code: "DROPSHIP_COST_DETECTION_CONFIG_IGNORED",
-      message: "A dropship cost detection batch setting exceeds its ceiling; the default is used.",
-      context: { variable: name, value, max, fallback },
-    }));
+    logger.warn("DROPSHIP_COST_DETECTION_CONFIG_IGNORED", { code: "DROPSHIP_COST_DETECTION_CONFIG_IGNORED", message: "A dropship cost detection batch setting exceeds its ceiling; the default is used.", context: { variable: name, value, max, fallback } });
     return fallback;
   }
   return value;

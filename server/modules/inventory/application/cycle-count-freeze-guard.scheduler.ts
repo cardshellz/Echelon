@@ -6,6 +6,7 @@ import {
   recordRunCompleted,
   runBootCatchUpIfBehind,
 } from "../../../infrastructure/scheduler-run-registry";
+import { logger } from "../../../platform/observability/logger";
 
 const LOG_PREFIX = "[Cycle-Count Freeze Guard]";
 const FREEZE_GUARD_LOCK_ID = 90210;
@@ -58,10 +59,8 @@ export async function runCycleCountFreezeGuard(dbArg: any = db): Promise<{ relea
     if (ids.length === 0) return { released: 0 };
 
     for (const r of stale.rows as any[]) {
-      console.warn(
-        `${LOG_PREFIX} Releasing stale freeze on ${r.location_code} (location ${r.location_id}) — ` +
-          `cycle count ${r.cycle_count_id} in_progress since ${r.created_at} (> ${maxAgeDays}d); replenishment was blocked.`,
-      );
+      logger.warn("inventory.cycle_count_freeze_guard_scheduler", { detail: `${LOG_PREFIX} Releasing stale freeze on ${r.location_code} (location ${r.location_id}) — ` +
+          `cycle count ${r.cycle_count_id} in_progress since ${r.created_at} (> ${maxAgeDays}d); replenishment was blocked.` });
     }
 
     // ids are integers read back from our own DB — safe to inline.
@@ -77,19 +76,17 @@ export async function runCycleCountFreezeGuard(dbArg: any = db): Promise<{ relea
       WHERE id IN (${idList}) AND status = 'in_progress'
     `);
 
-    console.warn(`${LOG_PREFIX} Released ${stale.rows.length} stale freeze(s) across ${ids.length} count(s).`);
+    logger.warn("inventory.cycle_count_freeze_guard_scheduler", { message: `${LOG_PREFIX} Released ${stale.rows.length} stale freeze(s) across ${ids.length} count(s).` });
     return { released: stale.rows.length };
   } catch (err: any) {
-    console.error(`${LOG_PREFIX} Error: ${err?.message ?? err}`);
+    logger.error("inventory.cycle_count_freeze_guard_scheduler", { message: `${LOG_PREFIX} Error: ${err?.message ?? err}` });
     return { released: 0 };
   }
 }
 
 export function startCycleCountFreezeGuard(dbArg: any = db): void {
   if (process.env.DISABLE_SCHEDULERS === "true") return;
-  console.log(
-    `${LOG_PREFIX} Scheduler started (every 6h, max freeze age ${getFreezeMaxAgeDays()}d, dyno-safe lock)`,
-  );
+  logger.info("inventory.cycle_count_freeze_guard_scheduler", { message: `${LOG_PREFIX} Scheduler started (every 6h, max freeze age ${getFreezeMaxAgeDays()}d, dyno-safe lock)` });
 
   // Boot run (staggered after other schedulers), but only when a scheduled run
   // was genuinely missed. A 6h job replayed on every deploy is pure waste.
@@ -102,7 +99,7 @@ export function startCycleCountFreezeGuard(dbArg: any = db): void {
         logPrefix: LOG_PREFIX,
         run: () => runCycleCountFreezeGuard(dbArg),
       });
-    }).catch((err) => console.error(`${LOG_PREFIX} Boot run error: ${err.message}`));
+    }).catch((err) => logger.error("inventory.cycle_count_freeze_guard_scheduler", { message: `${LOG_PREFIX} Boot run error: ${err.message}` }));
   }, 20000);
 
   // Every 6 hours thereafter. Recording here too is what keeps the timestamp
@@ -111,6 +108,6 @@ export function startCycleCountFreezeGuard(dbArg: any = db): void {
     withAdvisoryLock(FREEZE_GUARD_LOCK_ID, async () => {
       await runCycleCountFreezeGuard(dbArg);
       await recordRunCompleted(dbArg, FREEZE_GUARD_JOB_KEY);
-    }).catch((err) => console.error(`${LOG_PREFIX} Scheduled run error: ${err.message}`));
+    }).catch((err) => logger.error("inventory.cycle_count_freeze_guard_scheduler", { message: `${LOG_PREFIX} Scheduled run error: ${err.message}` }));
   }, FREEZE_GUARD_INTERVAL_MS);
 }

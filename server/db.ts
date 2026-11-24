@@ -10,6 +10,7 @@ import {
   getPostgresPoolSnapshot,
   type PostgresPoolSnapshot,
 } from "./infrastructure/postgres-pool-observability";
+import { logger } from "./platform/observability/logger";
 
 const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
 
@@ -48,7 +49,7 @@ export function getDatabasePoolSnapshot(): PostgresPoolSnapshot {
 }
 
 pool.on("error", (error) => {
-  console.error("[DatabasePool] Unexpected idle client error:", error);
+  logger.error("server.db", { message: "[DatabasePool] Unexpected idle client error:", error: error });
 });
 
 /**

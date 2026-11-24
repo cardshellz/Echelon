@@ -54,6 +54,7 @@ import { decideImportedShopifyProductMapping } from "../../catalog/shopify-produ
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import { assertLegacyQuantityImportAllowed } from "../../inventory/legacy-quantity-import.api";
+import { logger } from "../../../platform/observability/logger";
 
 type DrizzleDb = {
   execute: (query: import("drizzle-orm").SQL) => Promise<unknown>;
@@ -235,7 +236,7 @@ class CatalogBackfillService {
       return result;
     }
 
-    console.log(`[CatalogBackfill] Starting ${isDryRun ? "DRY RUN" : "LIVE"} backfill for channel ${channel.name} (${options.channelId})`);
+    logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Starting ${isDryRun ? "DRY RUN" : "LIVE"} backfill for channel ${channel.name} (${options.channelId})` });
 
     // Fetch products from Shopify
     let shopifyProducts: ShopifyProductRaw[];
@@ -246,7 +247,7 @@ class CatalogBackfillService {
       return result;
     }
 
-    console.log(`[CatalogBackfill] Fetched ${shopifyProducts.length} products from Shopify`);
+    logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Fetched ${shopifyProducts.length} products from Shopify` });
     result.products.total = shopifyProducts.length;
 
     // Process each Shopify product
@@ -265,7 +266,7 @@ class CatalogBackfillService {
         }
       } catch (err: any) {
         result.errors.push(`Error processing Shopify product ${shopifyProduct.id}: ${err.message}`);
-        console.error(`[CatalogBackfill] Error processing product ${shopifyProduct.id}:`, err.message);
+        logger.error("channels.catalog_backfill_service", { message: `[CatalogBackfill] Error processing product ${shopifyProduct.id}:`, error: err.message });
       }
     }
 
@@ -276,34 +277,30 @@ class CatalogBackfillService {
         await this.backfillInventory(options.channelId, result);
       } catch (err: any) {
         result.errors.push(`Inventory backfill failed: ${err.message}`);
-        console.error(`[CatalogBackfill] Inventory backfill error:`, err.message);
-        console.error(`[CatalogBackfill] Inventory backfill stack:`, err.stack);
+        logger.error("channels.catalog_backfill_service", { message: `[CatalogBackfill] Inventory backfill error:`, error: err.message });
+        logger.error("channels.catalog_backfill_service", { message: `[CatalogBackfill] Inventory backfill stack:`, error: err.stack });
       }
     } else if (shouldBackfillInventory && isDryRun) {
-      console.log(`[CatalogBackfill] Inventory backfill skipped (dry run)`);
+      logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Inventory backfill skipped (dry run)` });
     }
 
     result.success = result.errors.length === 0;
-    console.log(
-      `[CatalogBackfill] Complete: ${result.products.created} products created, ${result.products.updated} updated, ` +
+    logger.info("channels.catalog_backfill_service", { detail: `[CatalogBackfill] Complete: ${result.products.created} products created, ${result.products.updated} updated, ` +
       `${result.variants.created} variants created, ${result.variants.updated} updated, ` +
       `${result.feeds.created} feeds created, ${result.listings.created} listings created, ` +
       `${result.inventory.imported} inventory records imported, ${result.inventory.skipped} skipped (Echelon trusted), ` +
-      `${result.errors.length} errors`,
-    );
+      `${result.errors.length} errors` });
 
     // Log reconciliation report
     if (result.reconciliation.length > 0) {
-      console.log(`[CatalogBackfill] === INVENTORY RECONCILIATION REPORT ===`);
-      console.log(`[CatalogBackfill] Variants with inventory in BOTH Echelon and Shopify: ${result.reconciliation.length}`);
+      logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] === INVENTORY RECONCILIATION REPORT ===` });
+      logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Variants with inventory in BOTH Echelon and Shopify: ${result.reconciliation.length}` });
       for (const row of result.reconciliation) {
         const deltaStr = row.delta > 0 ? `+${row.delta}` : String(row.delta);
-        console.log(
-          `[CatalogBackfill]   SKU ${row.sku ?? "N/A"} (variant ${row.echelonVariantId}): ` +
-          `Echelon=${row.echelonQty}, Shopify=${row.shopifyQty}, delta=${deltaStr}`,
-        );
+        logger.info("channels.catalog_backfill_service", { detail: `[CatalogBackfill]   SKU ${row.sku ?? "N/A"} (variant ${row.echelonVariantId}): ` +
+          `Echelon=${row.echelonQty}, Shopify=${row.shopifyQty}, delta=${deltaStr}` });
       }
-      console.log(`[CatalogBackfill] === END RECONCILIATION REPORT ===`);
+      logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] === END RECONCILIATION REPORT ===` });
     }
 
     return result;
@@ -397,12 +394,7 @@ class CatalogBackfillService {
           `Shopify mapping conflict for Echelon product ${existing.id}: ` +
           `${mappingDecision.existingProductId} cannot be replaced by ${mappingDecision.incomingProductId} during backfill`,
         );
-        console.warn(JSON.stringify({
-          event: "shopify_import_mapping_conflict",
-          code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
-          source: "catalog_backfill",
-          ...conflict,
-        }));
+        logger.warn("shopify_import_mapping_conflict", { event: "shopify_import_mapping_conflict", code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT", source: "catalog_backfill", ...conflict });
         return null;
       }
 
@@ -421,7 +413,7 @@ class CatalogBackfillService {
         echelonProduct = existing;
       }
       result.products.updated++;
-      console.log(`[CatalogBackfill] Updated product: ${shopifyProduct.title} (Echelon ID ${existing.id})`);
+      logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Updated product: ${shopifyProduct.title} (Echelon ID ${existing.id})` });
     } else {
       // Create new product
       if (!isDryRun) {
@@ -441,7 +433,7 @@ class CatalogBackfillService {
         echelonProduct = { id: -1 } as Product; // Placeholder for dry run
       }
       result.products.created++;
-      console.log(`[CatalogBackfill] Created product: ${shopifyProduct.title} (SKU: ${baseSku})`);
+      logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Created product: ${shopifyProduct.title} (SKU: ${baseSku})` });
     }
 
     if (!echelonProduct) return null;
@@ -575,14 +567,7 @@ class CatalogBackfillService {
           `Shopify variant ${shopifyVariantId} (${sku}) is already assigned to ` +
           `Echelon product ${existingVariant.productId}, not product ${productId}`,
         );
-        console.warn(JSON.stringify({
-          event: "shopify_variant_parent_conflict",
-          code: "SHOPIFY_VARIANT_ALREADY_ASSIGNED_TO_DIFFERENT_PRODUCT",
-          shopifyVariantId,
-          sku,
-          existingEchelonProductId: existingVariant.productId,
-          requestedEchelonProductId: productId,
-        }));
+        logger.warn("shopify_variant_parent_conflict", { event: "shopify_variant_parent_conflict", code: "SHOPIFY_VARIANT_ALREADY_ASSIGNED_TO_DIFFERENT_PRODUCT", shopifyVariantId, sku, existingEchelonProductId: existingVariant.productId, requestedEchelonProductId: productId });
         return null;
       }
       if (!isCustomerSellableVariant(existingVariant)) {
@@ -590,13 +575,7 @@ class CatalogBackfillService {
         result.errors.push(
           `Shopify variant ${shopifyVariantId} (${sku}) matches internal-only Echelon variant ${existingVariant.id}; it was not linked`,
         );
-        console.warn(JSON.stringify({
-          event: "shopify_variant_internal_only_conflict",
-          code: "VARIANT_INTERNAL_ONLY",
-          shopifyVariantId,
-          sku,
-          productVariantId: existingVariant.id,
-        }));
+        logger.warn("shopify_variant_internal_only_conflict", { event: "shopify_variant_internal_only_conflict", code: "VARIANT_INTERNAL_ONLY", shopifyVariantId, sku, productVariantId: existingVariant.id });
         return null;
       }
       if (!isDryRun) {
@@ -790,12 +769,12 @@ class CatalogBackfillService {
     // Catalog/mapping import may continue, but this old stock-seeding path ends
     // at the same one-way quantity cutover as every other direct balance writer.
     await assertLegacyQuantityImportAllowed(this.db, "Shopify quantity backfill");
-    console.log(`[CatalogBackfill] Starting inventory backfill...`);
+    logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Starting inventory backfill...` });
 
     // 1. Resolve default warehouse and location for new inventory records
     const defaultLocation = await this.resolveDefaultWarehouseLocation();
     if (!defaultLocation) {
-      console.warn(`[CatalogBackfill] No default warehouse/location found — skipping inventory backfill`);
+      logger.warn("channels.catalog_backfill_service", { message: `[CatalogBackfill] No default warehouse/location found — skipping inventory backfill` });
       result.errors.push("No default warehouse or pick location found for inventory backfill");
       return;
     }
@@ -825,9 +804,7 @@ class CatalogBackfillService {
         if (variant) {
           if (!isInventoryManagedVariant(variant)) {
             result.inventory.skipped++;
-            console.log(
-              `[CatalogBackfill] Variant ${variant.sku ?? variant.id}: digital or inventory-untracked, skipping warehouse inventory import`,
-            );
+            logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Variant ${variant.sku ?? variant.id}: digital or inventory-untracked, skipping warehouse inventory import` });
             continue;
           }
           variantInfos.push({
@@ -840,7 +817,7 @@ class CatalogBackfillService {
     }
 
     if (variantInfos.length === 0) {
-      console.log(`[CatalogBackfill] No variants to check for inventory backfill`);
+      logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] No variants to check for inventory backfill` });
       return;
     }
 
@@ -868,9 +845,7 @@ class CatalogBackfillService {
       if (echelonInventoryMap.has(vi.echelonVariantId)) {
         variantsWithEchelonInventory.push(vi);
         const echelonQty = echelonInventoryMap.get(vi.echelonVariantId)!;
-        console.log(
-          `[CatalogBackfill] Variant ${vi.sku ?? vi.echelonVariantId}: Echelon has inventory (${echelonQty} units), keeping`,
-        );
+        logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Variant ${vi.sku ?? vi.echelonVariantId}: Echelon has inventory (${echelonQty} units), keeping` });
       } else {
         variantsNeedingImport.push(vi);
       }
@@ -892,18 +867,14 @@ class CatalogBackfillService {
     // 6. Import inventory for variants that have NO Echelon record
     for (const vi of variantsNeedingImport) {
       if (!vi.shopifyInventoryItemId) {
-        console.warn(
-          `[CatalogBackfill] Variant ${vi.sku ?? vi.echelonVariantId}: no shopifyInventoryItemId — cannot fetch Shopify level`,
-        );
+        logger.warn("channels.catalog_backfill_service", { message: `[CatalogBackfill] Variant ${vi.sku ?? vi.echelonVariantId}: no shopifyInventoryItemId — cannot fetch Shopify level` });
         result.inventory.noShopifyData++;
         continue;
       }
 
       const shopifyQty = shopifyInventoryMap.get(vi.shopifyInventoryItemId);
       if (shopifyQty === undefined) {
-        console.warn(
-          `[CatalogBackfill] Variant ${vi.sku ?? vi.echelonVariantId}: no Shopify inventory data returned`,
-        );
+        logger.warn("channels.catalog_backfill_service", { message: `[CatalogBackfill] Variant ${vi.sku ?? vi.echelonVariantId}: no Shopify inventory data returned` });
         result.inventory.noShopifyData++;
         continue;
       }
@@ -917,9 +888,7 @@ class CatalogBackfillService {
         shopifyInventoryItemId: vi.shopifyInventoryItemId,
       });
 
-      console.log(
-        `[CatalogBackfill] Variant ${vi.sku ?? vi.echelonVariantId}: no Echelon inventory, importing Shopify level (${qtyToImport} units)`,
-      );
+      logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Variant ${vi.sku ?? vi.echelonVariantId}: no Echelon inventory, importing Shopify level (${qtyToImport} units)` });
       result.inventory.imported++;
     }
 
@@ -948,11 +917,9 @@ class CatalogBackfillService {
       result.inventory.skipped++;
     }
 
-    console.log(
-      `[CatalogBackfill] Inventory backfill complete: ${result.inventory.imported} imported, ` +
+    logger.info("channels.catalog_backfill_service", { detail: `[CatalogBackfill] Inventory backfill complete: ${result.inventory.imported} imported, ` +
       `${result.inventory.skipped} skipped (not imported), ${result.inventory.noShopifyData} no Shopify data, ` +
-      `${result.reconciliation.length} reconciliation entries`,
-    );
+      `${result.reconciliation.length} reconciliation entries` });
   }
 
   /**
@@ -1046,9 +1013,7 @@ class CatalogBackfillService {
     // Create a default virtual location for backfill
     const newLocation = await insertBackfillDefaultWarehouseLocationInWarehouse(this.db, warehouse.id);
 
-    console.log(
-      `[CatalogBackfill] Created default location BACKFILL-DEFAULT in warehouse ${warehouse.code} (ID ${warehouse.id})`,
-    );
+    logger.info("channels.catalog_backfill_service", { message: `[CatalogBackfill] Created default location BACKFILL-DEFAULT in warehouse ${warehouse.code} (ID ${warehouse.id})` });
 
     return {
       warehouseId: warehouse.id,
@@ -1122,9 +1087,7 @@ class CatalogBackfillService {
           }
         }
       } catch (err: any) {
-        console.error(
-          `[CatalogBackfill] Failed to fetch Shopify inventory levels for batch starting at index ${i}: ${err.message}`,
-        );
+        logger.error("channels.catalog_backfill_service", { message: `[CatalogBackfill] Failed to fetch Shopify inventory levels for batch starting at index ${i}: ${err.message}` });
         // Continue with remaining batches — don't fail the entire backfill
       }
 
@@ -1181,7 +1144,7 @@ class CatalogBackfillService {
 
     if (response.status === 429) {
       const retryAfter = parseInt(response.headers.get("Retry-After") || "2", 10);
-      console.warn(`[CatalogBackfill] Rate limited on inventory fetch, waiting ${retryAfter}s`);
+      logger.warn("channels.catalog_backfill_service", { message: `[CatalogBackfill] Rate limited on inventory fetch, waiting ${retryAfter}s` });
       await this.delay(retryAfter * 1000);
       // Retry once after waiting
       const retryResponse = await fetch(url, {
@@ -1245,7 +1208,7 @@ class CatalogBackfillService {
 
       if (response.status === 429) {
         const retryAfter = parseInt(response.headers.get("Retry-After") || "2", 10);
-        console.warn(`[CatalogBackfill] Rate limited, waiting ${retryAfter}s`);
+        logger.warn("channels.catalog_backfill_service", { message: `[CatalogBackfill] Rate limited, waiting ${retryAfter}s` });
         await this.delay(retryAfter * 1000);
         continue;
       }

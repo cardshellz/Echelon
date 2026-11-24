@@ -6,6 +6,7 @@ import { financialCommandFromRequest } from "../../../../platform/commands/http-
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 import { ProductMergeError, ProductMergeService } from "../../application/product-merge.service";
 import { PostgresProductMergeRepository } from "../../infrastructure/product-merge.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 /**
  * HTTP interface for the product merge. Routes parse, authorize and translate
@@ -21,9 +22,9 @@ import { PostgresProductMergeRepository } from "../../infrastructure/product-mer
 const MERGE_PERMISSION = ["inventory", "update"] as const;
 
 const structuredLogger = {
-  info: (event: Record<string, unknown>) => console.log(JSON.stringify(event)),
-  warn: (event: Record<string, unknown>) => console.warn(JSON.stringify(event)),
-  error: (event: Record<string, unknown>) => console.error(JSON.stringify(event)),
+  info: (event: Record<string, unknown>) => logger.info("catalog.product_merge_routes", { detail: JSON.stringify(event) }),
+  warn: (event: Record<string, unknown>) => logger.warn("catalog.product_merge_routes", { detail: JSON.stringify(event) }),
+  error: (event: Record<string, unknown>) => logger.error("catalog.product_merge_routes", { error: JSON.stringify(event) }),
 };
 
 export function createProductMergeService(reservation: unknown, inventoryCore: unknown): ProductMergeService {
@@ -64,8 +65,7 @@ function sendError(res: Response, error: unknown): Response {
   if (error instanceof FinancialCommandError) {
     return res.status(error.statusCode).json({ error: error.message, code: error.code });
   }
-  console.error(JSON.stringify({ level: "error", action: "product_merge.request_failed", outcome: "failed",
-    error_code: "PRODUCT_MERGE_FAILED", message: error instanceof Error ? error.message : "Unknown failure" }));
+  logger.error("product_merge.request_failed", { outcome: "failed", error_code: "PRODUCT_MERGE_FAILED", message: error instanceof Error ? error.message : "Unknown failure" });
   return res.status(500).json({ error: "The merge request failed. Open the merge run to see its state, then resume.",
     code: "PRODUCT_MERGE_FAILED" });
 }

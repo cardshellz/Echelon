@@ -7,6 +7,7 @@ import {
   PackageReconciliationService,
 } from "../modules/oms/channel-fulfillment-authority.api";
 import { createShipStationPackageReconciliationClient, type ShipStationPackageReconciliationClient } from "../modules/shipping/shipstation-provider-reconciliation.api";
+import { logger as platformLogger } from "../platform/observability/logger";
 
 export function createPackageReconciliationService(dependencies: {
   database: Pick<typeof applicationDb,"execute"|"transaction">;
@@ -18,8 +19,8 @@ export function createPackageReconciliationService(dependencies: {
 }) {
   const repository=createChannelFulfillmentAuthorityRepository(dependencies.database);
   const clock=dependencies.clock??{now:()=>new Date()};
-  const logger=dependencies.logger??{info:(event:Readonly<Record<string,unknown>>)=>console.log(JSON.stringify(event)),
-    error:(event:Readonly<Record<string,unknown>>)=>console.error(JSON.stringify(event))};
+  const logger=dependencies.logger??{info:(event:Readonly<Record<string,unknown>>)=>platformLogger.info("services.package_reconciliation", { detail: JSON.stringify(event) }),
+    error:(event:Readonly<Record<string,unknown>>)=>platformLogger.error("services.package_reconciliation", { error: JSON.stringify(event) })};
   return new PackageReconciliationService({
     repository:{loadPackageReconciliationSnapshot:ids=>repository.loadPackageReconciliationSnapshot!(ids),
       reconcilePackages:(command,now)=>repository.reconcilePackages!(command,now),

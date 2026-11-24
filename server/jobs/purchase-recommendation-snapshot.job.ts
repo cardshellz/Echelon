@@ -10,6 +10,7 @@ import {
   sanitizePurchasePipelineJobError,
   type PurchasePipelineJobRunLifecycleService,
 } from "../modules/procurement/planning-and-pipeline-jobs.api";
+import { logger } from "../platform/observability/logger";
 
 const SCHEDULED_RECOMMENDATION_ACTOR = "system:scheduled-purchase-recommendations";
 const defaultJobLifecycle = createPurchasePipelineJobRunLifecycleService(
@@ -92,10 +93,10 @@ export async function runPurchaseRecommendationSnapshotJob(options: {
         ...failure,
       });
     } catch (lifecycleError) {
-      console.error("[PurchaseRecommendationSnapshot] Failed to persist job failure", {
+      logger.error("jobs.purchase_recommendation_snapshot_job", { message: "[PurchaseRecommendationSnapshot] Failed to persist job failure", context: {
         jobRunId: jobRun.run.id,
         ...sanitizePurchasePipelineJobError(lifecycleError),
-      });
+      } });
     }
     throw error;
   }

@@ -54,6 +54,7 @@ import {
   markOutboundShipmentShippedRowInWms,
   markOutboundShipmentVoidedRowInWms,
 } from "../../wms/outbound-shipment-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 // ─── Public types ────────────────────────────────────────────────────
 
@@ -338,9 +339,7 @@ export async function markShipmentShipped(
           (${shipmentId}, ${current.tracking_number}, ${current.carrier}, ${now}, ${meta.trackingNumber}, ${now})
       `);
     } catch (err: any) {
-      console.error(
-        `[markShipmentShipped] history insert failed for shipment ${shipmentId} (old=${current.tracking_number}, new=${meta.trackingNumber}): ${err?.message ?? err}`,
-      );
+      logger.error("orders.shipment_rollup", { message: `[markShipmentShipped] history insert failed for shipment ${shipmentId} (old=${current.tracking_number}, new=${meta.trackingNumber}): ${err?.message ?? err}` });
     }
   }
 
@@ -389,9 +388,7 @@ export async function markShipmentShipped(
         url: meta.trackingUrl ?? undefined,
       });
     } catch (err: any) {
-      console.error(
-        `[markShipmentShipped] Shopify fulfillment convergence failed for shipment ${shipmentId}: ${err?.message ?? err}`,
-      );
+      logger.error("orders.shipment_rollup", { message: `[markShipmentShipped] Shopify fulfillment convergence failed for shipment ${shipmentId}: ${err?.message ?? err}` });
     }
   }
 
@@ -475,9 +472,7 @@ export async function markShipmentCancelled(
     current.status === "lost" ||
     current.shipped_at != null
   ) {
-    console.warn(
-      `[markShipmentCancelled] refused: shipment ${shipmentId} is '${current.status}' (shipped_at=${String(current.shipped_at ?? null)}); not cancelling`,
-    );
+    logger.warn("orders.shipment_rollup", { message: `[markShipmentCancelled] refused: shipment ${shipmentId} is '${current.status}' (shipped_at=${String(current.shipped_at ?? null)}); not cancelling` });
     return {
       wmsOrderId: current.order_id,
       changed: false,
@@ -516,9 +511,7 @@ export async function markShipmentCancelled(
       // as unverified, and the ShipStation queue sweeper retries the provider
       // cancel for cancelled shipments.
       lookupFailed = true;
-      console.error(
-        `[markShipmentCancelled] engine lookup failed for shipment ${shipmentId}; provider cancel unverified: ${err?.message ?? err}`,
-      );
+      logger.error("orders.shipment_rollup", { message: `[markShipmentCancelled] engine lookup failed for shipment ${shipmentId}; provider cancel unverified: ${err?.message ?? err}` });
     }
   }
   const needsProviderStop =
@@ -548,18 +541,14 @@ export async function markShipmentCancelled(
           providerOutcome = cancelResult.state;
         }
       } catch (err: any) {
-        console.error(
-          `[markShipmentCancelled] engine cancel failed for shipment ${shipmentId} (ref=${ref.engineOrderRef}): ${err?.message ?? err}`,
-        );
+        logger.error("orders.shipment_rollup", { message: `[markShipmentCancelled] engine cancel failed for shipment ${shipmentId} (ref=${ref.engineOrderRef}): ${err?.message ?? err}` });
         providerOutcome = "unverified";
       }
     }
   }
 
   if (providerOutcome === "already_shipped") {
-    console.warn(
-      `[markShipmentCancelled] refused: provider reported shipment ${shipmentId} (ref=${ref?.engineOrderRef ?? "unknown"}) is already_shipped; not cancelling`,
-    );
+    logger.warn("orders.shipment_rollup", { message: `[markShipmentCancelled] refused: provider reported shipment ${shipmentId} (ref=${ref?.engineOrderRef ?? "unknown"}) is already_shipped; not cancelling` });
     return {
       wmsOrderId: current.order_id,
       changed: false,
@@ -598,9 +587,7 @@ export async function markShipmentCancelled(
     latest.status === "shipped" || latest.shipped_at != null
       ? "refused_already_shipped"
       : "refused_terminal";
-  console.warn(
-    `[markShipmentCancelled] refused at final write: shipment ${shipmentId} became '${latest.status}' (shipped_at=${String(latest.shipped_at ?? null)}) during cancellation`,
-  );
+  logger.warn("orders.shipment_rollup", { message: `[markShipmentCancelled] refused at final write: shipment ${shipmentId} became '${latest.status}' (shipped_at=${String(latest.shipped_at ?? null)}) during cancellation` });
   return {
     wmsOrderId: latest.order_id,
     changed: false,
@@ -875,9 +862,7 @@ export async function markShipmentVoided(
           (${shipmentId}, ${current.tracking_number}, ${current.carrier}, ${now}, ${safeReason}, ${now})
       `);
     } catch (err: any) {
-      console.error(
-        `[markShipmentVoided] history insert failed for shipment ${shipmentId} (tracking=${current.tracking_number}): ${err?.message ?? err}`,
-      );
+      logger.error("orders.shipment_rollup", { message: `[markShipmentVoided] history insert failed for shipment ${shipmentId} (tracking=${current.tracking_number}): ${err?.message ?? err}` });
     }
   }
 
@@ -896,9 +881,7 @@ export async function markShipmentVoided(
     try {
       await opts.fulfillmentPush.cancelShopifyFulfillmentsForShipment(shipmentId);
     } catch (err: any) {
-      console.error(
-        `[markShipmentVoided] Shopify fulfillment cancel failed for shipment ${shipmentId}: ${err?.message ?? err}`,
-      );
+      logger.error("orders.shipment_rollup", { message: `[markShipmentVoided] Shopify fulfillment cancel failed for shipment ${shipmentId}: ${err?.message ?? err}` });
     }
   } else if (
     typeof shopifyFulfillmentId === "string" &&
@@ -910,9 +893,7 @@ export async function markShipmentVoided(
         shopifyFulfillmentId,
       );
     } catch (err: any) {
-      console.error(
-        `[markShipmentVoided] Shopify fulfillment cancel failed for shipment ${shipmentId} (fulfillment ${shopifyFulfillmentId}): ${err?.message ?? err}`,
-      );
+      logger.error("orders.shipment_rollup", { message: `[markShipmentVoided] Shopify fulfillment cancel failed for shipment ${shipmentId} (fulfillment ${shopifyFulfillmentId}): ${err?.message ?? err}` });
     }
   }
 
@@ -1178,9 +1159,7 @@ export async function cancelStaleShipmentsIfFullyCovered(
 
   const cancelledCount = cancelResult?.rows?.length ?? 0;
   if (cancelledCount > 0) {
-    console.log(
-      `[ShipmentRollup] Cancelled ${cancelledCount} stale shipment(s) for fully-covered order ${wmsOrderId}`,
-    );
+    logger.info("orders.shipment_rollup", { message: `[ShipmentRollup] Cancelled ${cancelledCount} stale shipment(s) for fully-covered order ${wmsOrderId}` });
   }
   return cancelledCount > 0;
 }

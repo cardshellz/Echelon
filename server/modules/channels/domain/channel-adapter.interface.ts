@@ -13,6 +13,7 @@ import type {
   ShippingChannelAdapterCapabilities,
 } from "@shared/types/shipping-channel-routing";
 import type { ChannelPackageFacts } from "@shared/catalog/shipping-package";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Canonical Types — channel-agnostic data structures
@@ -424,7 +425,7 @@ export class ChannelAdapterRegistry {
       throw new Error(`Adapter already registered for provider "${adapter.providerKey}"`);
     }
     this.adapters.set(adapter.providerKey, adapter);
-    console.log(`[AdapterRegistry] Registered adapter: ${adapter.adapterName} (${adapter.providerKey})`);
+    logger.info("channels.channel_adapter_interface", { message: `[AdapterRegistry] Registered adapter: ${adapter.adapterName} (${adapter.providerKey})` });
   }
 
   get(providerKey: string): IChannelAdapter | undefined {

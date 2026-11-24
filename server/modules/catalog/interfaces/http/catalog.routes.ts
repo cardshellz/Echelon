@@ -199,6 +199,7 @@ import {
 } from "../../../warehouse/bin-assignment.api";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../../../routes/middleware";
+import { logger } from "../../../../platform/observability/logger";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
 
@@ -506,7 +507,7 @@ export async function registerProductRoutes(app: Express) {
 
       res.json(productsWithData);
     } catch (error) {
-      console.error("Error fetching products:", error);
+      logger.error("catalog.routes", { message: "Error fetching products:", error: error });
       res.status(500).json({ error: "Failed to fetch products" });
     }
   });
@@ -540,7 +541,7 @@ export async function registerProductRoutes(app: Express) {
         .orderBy(asc(productCategories.sortOrder), asc(productCategories.name));
       res.json(categories);
     } catch (error) {
-      console.error("Error fetching product categories:", error);
+      logger.error("catalog.routes", { message: "Error fetching product categories:", error: error });
       res.status(500).json({ error: "Failed to fetch product categories" });
     }
   });
@@ -607,7 +608,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         .orderBy(asc(shippingGroups.sortOrder), asc(shippingGroups.name));
       res.json(groups);
     } catch (error) {
-      console.error("Error fetching shipping groups:", error);
+      logger.error("catalog.routes", { message: "Error fetching shipping groups:", error: error });
       res.status(500).json({ error: "Failed to fetch shipping groups" });
     }
   });
@@ -660,7 +661,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       res.json({ rows, total, page, limit });
     } catch (error) {
-      console.error("Error listing shipping-group products:", error);
+      logger.error("catalog.routes", { message: "Error listing shipping-group products:", error: error });
       res.status(500).json({ error: "Failed to list products" });
     }
   });
@@ -802,7 +803,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (Number.isInteger(error?.statusCode)) {
         return res.status(error.statusCode).json({ error: error.message });
       }
-      console.error("Error assigning shipping group:", error);
+      logger.error("catalog.routes", { message: "Error assigning shipping group:", error: error });
       res.status(500).json({ error: "Failed to assign shipping group" });
     }
   });
@@ -825,7 +826,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       res.status(201).json(group);
     } catch (error: any) {
       if (error?.code === "23505") return res.status(409).json({ error: "Shipping group code already exists" });
-      console.error("Error creating shipping group:", error);
+      logger.error("catalog.routes", { message: "Error creating shipping group:", error: error });
       res.status(500).json({ error: "Failed to create shipping group" });
     }
   });
@@ -850,7 +851,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       });
       res.json(group);
     } catch (error) {
-      console.error("Error updating shipping group:", error);
+      logger.error("catalog.routes", { message: "Error updating shipping group:", error: error });
       res.status(500).json({ error: "Failed to update shipping group" });
     }
   });
@@ -876,7 +877,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (error?.code === "23505") {
         return res.status(409).json({ error: "Category already exists" });
       }
-      console.error("Error creating product category:", error);
+      logger.error("catalog.routes", { message: "Error creating product category:", error: error });
       res.status(500).json({ error: "Failed to create product category" });
     }
   });
@@ -897,7 +898,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       res.json({ ...product, productId: product.id, variants, assets });
     } catch (error) {
-      console.error("Error fetching product:", error);
+      logger.error("catalog.routes", { message: "Error fetching product:", error: error });
       res.status(500).json({ error: "Failed to fetch product" });
     }
   });
@@ -921,7 +922,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           context: error.context,
         });
       }
-      console.error("Error loading Shopify product mapping:", error);
+      logger.error("catalog.routes", { message: "Error loading Shopify product mapping:", error: error });
       res.status(500).json({ error: "Failed to load Shopify product mapping" });
     }
   });
@@ -953,7 +954,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           context: error.context,
         });
       }
-      console.error("Error repairing Shopify product mapping:", error);
+      logger.error("catalog.routes", { message: "Error repairing Shopify product mapping:", error: error });
       res.status(500).json({ error: "Failed to repair Shopify product mapping" });
     }
   });
@@ -1008,7 +1009,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (error?.message?.includes("category")) {
         return res.status(400).json({ error: error.message });
       }
-      console.error("Error creating product:", error);
+      logger.error("catalog.routes", { message: "Error creating product:", error: error });
       res.status(500).json({ error: "Failed to create product" });
     }
   });
@@ -1027,7 +1028,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         return res.status(error.statusCode).json({ error: error.message, ...(error.details ?? {}) });
       }
       if (sendSelectionBusy(res, error)) return;
-      console.error("Error duplicating product:", error);
+      logger.error("catalog.routes", { message: "Error duplicating product:", error: error });
       res.status(500).json({ error: "Failed to duplicate product" });
     }
   });
@@ -1257,10 +1258,8 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
 
       if (newProductSku && updateResult.renamedFrom && updateResult.renamedVariants > 0) {
-        console.log(
-          `[SKU CASCADE] Product base SKU ${updateResult.renamedFrom} -> ${newProductSku}, ` +
-          `updated ${updateResult.renamedVariants} variants and cached references atomically`,
-        );
+        logger.info("catalog.routes", { detail: `[SKU CASCADE] Product base SKU ${updateResult.renamedFrom} -> ${newProductSku}, ` +
+          `updated ${updateResult.renamedVariants} variants and cached references atomically` });
       }
 
       const existingVariants = await storage.getProductVariantsByProductId(id);
@@ -1285,7 +1284,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (error?.message?.includes("category")) {
         return res.status(400).json({ error: error.message });
       }
-      console.error("Error updating product:", error);
+      logger.error("catalog.routes", { message: "Error updating product:", error: error });
       res.status(500).json({ error: "Failed to update product", detail: error?.message || String(error) });
     }
   });
@@ -1377,7 +1376,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       return res.json({ blocked: hasBlockers, dependencies, product: { id: product.id, sku: product.sku, name: product.name } });
     } catch (error) {
       if (sendSelectionBusy(res, error)) return;
-      console.error("Error archiving product:", error);
+      logger.error("catalog.routes", { message: "Error archiving product:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       res.status(500).json({ error: "Failed to archive product" });
@@ -1404,7 +1403,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       res.json({ success: true });
     } catch (error: any) {
       if (sendSelectionBusy(res, error)) return;
-      console.error("Error deleting product:", error);
+      logger.error("catalog.routes", { message: "Error deleting product:", error: error });
       if (error.message && error.message.includes("foreign key constraint")) {
         return res.status(400).json({ error: "Cannot completely delete this product because it has historical records linked to it (e.g. cycle counts, transactions, or purchase orders). Please Archive it instead." });
       }
@@ -1421,7 +1420,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const rows = await storage.getProductInventoryByProductId(productId);
       res.json(rows);
     } catch (error) {
-      console.error("Error fetching product inventory:", error);
+      logger.error("catalog.routes", { message: "Error fetching product inventory:", error: error });
       res.status(500).json({ error: "Failed to fetch product inventory" });
     }
   });
@@ -1435,7 +1434,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const assets = await storage.getProductAssetsByProductId(productId);
       res.json(assets);
     } catch (error) {
-      console.error("Error fetching product assets:", error);
+      logger.error("catalog.routes", { message: "Error fetching product assets:", error: error });
       res.status(500).json({ error: "Failed to fetch assets" });
     }
   });
@@ -1467,7 +1466,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       });
       res.status(201).json(asset);
     } catch (error) {
-      console.error("Error creating product asset:", error);
+      logger.error("catalog.routes", { message: "Error creating product asset:", error: error });
       res.status(500).json({ error: "Failed to create asset" });
     }
   });
@@ -1489,7 +1488,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
       res.json(asset);
     } catch (error) {
-      console.error("Error updating product asset:", error);
+      logger.error("catalog.routes", { message: "Error updating product asset:", error: error });
       res.status(500).json({ error: "Failed to update asset" });
     }
   });
@@ -1503,7 +1502,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting product asset:", error);
+      logger.error("catalog.routes", { message: "Error deleting product asset:", error: error });
       res.status(500).json({ error: "Failed to delete asset" });
     }
   });
@@ -1528,7 +1527,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (error instanceof ProductAssetError) {
         return res.status(error.status).json({ error: error.message, code: error.code });
       }
-      console.error("Error setting primary asset:", error);
+      logger.error("catalog.routes", { message: "Error setting primary asset:", error: error });
       res.status(500).json({ error: "Failed to set primary asset" });
     }
   });
@@ -1542,7 +1541,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const variants = await storage.getAllProductVariants(includeInactive);
       res.json(variants);
     } catch (error) {
-      console.error("Error fetching all variants:", error);
+      logger.error("catalog.routes", { message: "Error fetching all variants:", error: error });
       res.status(500).json({ error: "Failed to fetch variants" });
     }
   });
@@ -1573,7 +1572,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       res.json(variants);
     } catch (error) {
-      console.error("Error fetching variants:", error);
+      logger.error("catalog.routes", { message: "Error fetching variants:", error: error });
       res.status(500).json({ error: "Failed to fetch variants" });
     }
   });
@@ -1626,7 +1625,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
             : {}),
         });
       }
-      console.error("Error creating variant:", error);
+      logger.error("catalog.routes", { message: "Error creating variant:", error: error });
       res.status(500).json({ error: "Failed to create variant" });
     }
   });
@@ -1777,7 +1776,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
 
       if (updateResult.renamed) {
-        console.log(`[SKU CASCADE] Variant ${id} cached references synchronized atomically`);
+        logger.info("catalog.routes", { message: `[SKU CASCADE] Variant ${id} cached references synchronized atomically` });
       }
 
       res.json(updateResult.variant);
@@ -1809,7 +1808,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           error: "Remove customer-facing variant dependencies before marking it internal-only.",
         });
       }
-      console.error("Error updating variant:", error);
+      logger.error("catalog.routes", { message: "Error updating variant:", error: error });
       res.status(500).json({ error: "Failed to update variant" });
     }
   });
@@ -1859,7 +1858,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (Number.isInteger(error?.statusCode)) {
         return res.status(error.statusCode).json({ error: error.message });
       }
-      console.error("Error bulk updating variant package attributes:", error);
+      logger.error("catalog.routes", { message: "Error bulk updating variant package attributes:", error: error });
       res.status(500).json({ error: "Failed to bulk update variant package attributes" });
     }
   });
@@ -1903,7 +1902,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (Number.isInteger(error?.statusCode)) {
         return res.status(error.statusCode).json({ error: error.message });
       }
-      console.error("Error bulk updating catalog variant package attributes:", error);
+      logger.error("catalog.routes", { message: "Error bulk updating catalog variant package attributes:", error: error });
       res.status(500).json({ error: "Failed to bulk update variant package attributes" });
     }
   });
@@ -2169,7 +2168,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     } catch (error: any) {
       const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
       if (statusCode >= 500) {
-        console.error("Error searching Shopify variants:", error);
+        logger.error("catalog.routes", { message: "Error searching Shopify variants:", error: error });
       }
       res.status(statusCode).json({ error: error?.message || "Failed to search Shopify variants" });
     }
@@ -2461,7 +2460,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     } catch (error: any) {
       const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
       if (statusCode >= 500) {
-        console.error("Error linking Shopify variant:", error);
+        logger.error("catalog.routes", { message: "Error linking Shopify variant:", error: error });
       }
       res.status(statusCode).json({
         error: error?.message || "Failed to link Shopify variant",
@@ -2484,7 +2483,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
     } catch (error) {
       if (sendSelectionBusy(res, error)) return;
-      console.error("Error merging variants:", error);
+      logger.error("catalog.routes", { message: "Error merging variants:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       res.status(500).json({ error: "Failed to merge variants" });
@@ -2552,7 +2551,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       return res.json({ blocked: hasBlockers, dependencies, variant: { id: variant.id, sku: variant.sku, name: variant.name } });
     } catch (error) {
       if (sendSelectionBusy(res, error)) return;
-      console.error("Error archiving variant:", error);
+      logger.error("catalog.routes", { message: "Error archiving variant:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
       if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       res.status(500).json({ error: "Failed to archive variant" });
@@ -2569,7 +2568,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       res.json({ success: true });
     } catch (error) {
       if (sendSelectionBusy(res, error)) return;
-      console.error("Error deleting variant:", error);
+      logger.error("catalog.routes", { message: "Error deleting variant:", error: error });
       res.status(500).json({ error: "Failed to delete variant" });
     }
   });
@@ -2639,7 +2638,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       res.json(outcome);
     } catch (error) {
-      console.error("Error bulk updating parent variants:", error);
+      logger.error("catalog.routes", { message: "Error bulk updating parent variants:", error: error });
       res.status(500).json({ error: "Failed to bulk update parent variants" });
     }
   });
@@ -2653,7 +2652,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const locations = await storage.getProductLocationsByProductId(productId);
       res.json(locations);
     } catch (error: any) {
-      console.error("Error fetching locations for product:", error);
+      logger.error("catalog.routes", { message: "Error fetching locations for product:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch locations" });
     }
   });
@@ -2671,7 +2670,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
       res.json(updated);
     } catch (error: any) {
-      console.error("Error setting primary location:", error);
+      logger.error("catalog.routes", { message: "Error setting primary location:", error: error });
       res.status(500).json({ error: error.message || "Failed to set primary location" });
     }
   });
@@ -2702,7 +2701,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           },
         });
       }
-      console.error("Error fetching bin assignments:", error);
+      logger.error("catalog.routes", { message: "Error fetching bin assignments:", error: error });
       res.status(500).json({ error: "Failed to fetch bin assignments" });
     }
   });
@@ -2718,7 +2717,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (error instanceof BinAssignmentValidationError) {
         return res.status(400).json({ error: error.message, code: error.code });
       }
-      console.error("Error upserting bin assignment:", error);
+      logger.error("catalog.routes", { message: "Error upserting bin assignment:", error: error });
       res.status(500).json({ error: error.message || "Failed to update bin assignment" });
     }
   });
@@ -2732,7 +2731,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       res.status(204).end();
     } catch (error: any) {
-      console.error("Error deleting bin assignment:", error);
+      logger.error("catalog.routes", { message: "Error deleting bin assignment:", error: error });
       res.status(500).json({ error: "Failed to delete bin assignment" });
     }
   });
@@ -2747,7 +2746,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const results = await binAssignment.importAssignments(assignments);
       res.json(results);
     } catch (error: any) {
-      console.error("Error importing bin assignments:", error);
+      logger.error("catalog.routes", { message: "Error importing bin assignments:", error: error });
       res.status(500).json({ error: "Failed to import bin assignments" });
     }
   });
@@ -2759,7 +2758,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       res.setHeader("Content-Disposition", "attachment; filename=bin-assignments.csv");
       res.send(csv);
     } catch (error: any) {
-      console.error("Error exporting bin assignments:", error);
+      logger.error("catalog.routes", { message: "Error exporting bin assignments:", error: error });
       res.status(500).json({ error: "Failed to export bin assignments" });
     }
   });
@@ -2793,7 +2792,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
       res.send(row.file_data);
     } catch (error: any) {
-      console.error("Error serving asset file:", error);
+      logger.error("catalog.routes", { message: "Error serving asset file:", error: error });
       res.status(500).json({ error: "Failed to serve file" });
     }
   });
@@ -2822,7 +2821,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           : asset.url,
       });
     } catch (error: any) {
-      console.error("Error getting asset:", error);
+      logger.error("catalog.routes", { message: "Error getting asset:", error: error });
       res.status(500).json({ error: "Failed to get asset" });
     }
   });
@@ -2841,7 +2840,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   app.post("/api/images/pull/ebay", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const { productIds } = req.body;
-      console.log(`[ImageSync] Pulling images from eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+      logger.info("catalog.routes", { message: `[ImageSync] Pulling images from eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}` });
 
       // A failed authenticated read cannot become an unscoped page scrape.
       let ebayAccessToken: string;
@@ -2853,7 +2852,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         ebayAccessToken = await authService.getAccessToken(67);
         ebayEnvironment = authService.getEnvironment();
       } catch (authErr: any) {
-        console.warn(JSON.stringify({ event: "catalog_photo_import_auth_failed", provider: "ebay" }));
+        logger.warn("catalog_photo_import_auth_failed", { event: "catalog_photo_import_auth_failed", provider: "ebay" });
         return res.status(503).json({ code: "EBAY_AUTH_REQUIRED", error: "Reconnect eBay before importing its listing photos." });
       }
 
@@ -2864,15 +2863,15 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       imageSync.pullFromEbay(productIds, ebayAccessToken, ebayEnvironment).then((results) => {
         const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
         const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
-        console.log(`[ImageSync] pullFromEbay complete: ${results.length} products, ${totalAdded} images added, ${totalErrors} errors`);
+        logger.info("catalog.routes", { message: `[ImageSync] pullFromEbay complete: ${results.length} products, ${totalAdded} images added, ${totalErrors} errors` });
         results.filter(r => r.errors.length > 0).forEach(r => {
-          console.log(`[ImageSync]   ${r.sku}: errors=${JSON.stringify(r.errors)}`);
+          logger.info("catalog.routes", { message: `[ImageSync]   ${r.sku}: errors=${JSON.stringify(r.errors)}` });
         });
       }).catch((err) => {
-        console.error("[ImageSync] pullFromEbay background error:", err.message);
+        logger.error("catalog.routes", { message: "[ImageSync] pullFromEbay background error:", error: err.message });
       });
     } catch (error: any) {
-      console.error("Error pulling eBay images:", error);
+      logger.error("catalog.routes", { message: "Error pulling eBay images:", error: error });
       res.status(500).json({ error: error.message || "Failed to pull eBay images" });
     }
   });
@@ -2892,13 +2891,13 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         return res.status(500).json({ error: "Shopify credentials not configured" });
       }
 
-      console.log(`[ImageSync] Pulling images from Shopify${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+      logger.info("catalog.routes", { message: `[ImageSync] Pulling images from Shopify${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}` });
       const results = await imageSync.pullFromShopify(shopDomain, accessToken, productIds);
       const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
       const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
       res.json({ results, summary: { products: results.length, imagesAdded: totalAdded, errors: totalErrors } });
     } catch (error: any) {
-      console.error("Error pulling Shopify images:", error);
+      logger.error("catalog.routes", { message: "Error pulling Shopify images:", error: error });
       res.status(500).json({ error: error.message || "Failed to pull Shopify images" });
     }
   });
@@ -2923,22 +2922,22 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         return res.status(500).json({ error: "Shopify credentials not configured" });
       }
 
-      console.log(`[ImageSync] === PUSH STARTED ===`);
-      console.log(`[ImageSync] Domain: ${shopDomain}`);
-      console.log(`[ImageSync] Product IDs: ${productIds?.join(", ") || "ALL"}`);
+      logger.info("catalog.routes", { message: `[ImageSync] === PUSH STARTED ===` });
+      logger.info("catalog.routes", { message: `[ImageSync] Domain: ${shopDomain}` });
+      logger.info("catalog.routes", { message: `[ImageSync] Product IDs: ${productIds?.join(", ") || "ALL"}` });
 
       const results = await imageSync.pushToShopify(shopDomain, accessToken, productIds);
       const totalPushed = results.reduce((sum, r) => sum + r.imagesPushed, 0);
       const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
 
-      console.log(`[ImageSync] === RESULT: ${totalPushed} pushed, ${totalErrors} errors ===`);
+      logger.info("catalog.routes", { message: `[ImageSync] === RESULT: ${totalPushed} pushed, ${totalErrors} errors ===` });
       for (const r of results) {
-        console.log(`[ImageSync]   ${r.sku}: pushed=${r.imagesPushed}, errors=${JSON.stringify(r.errors)}`);
+        logger.info("catalog.routes", { message: `[ImageSync]   ${r.sku}: pushed=${r.imagesPushed}, errors=${JSON.stringify(r.errors)}` });
       }
 
       res.json({ results, summary: { products: results.length, imagesPushed: totalPushed, errors: totalErrors } });
     } catch (error: any) {
-      console.error("[ImageSync] === FATAL ERROR ===", error.message, error.stack);
+      logger.error("catalog.routes", { message: "[ImageSync] === FATAL ERROR ===", details: [error.message, error.stack] });
       res.status(500).json({ error: error.message || "Failed to push images to Shopify" });
     }
   });

@@ -32,6 +32,7 @@ import {
   insertVirtual3plWarehouseLocationInWarehouse,
   updateWarehouseInventorySyncStatusInWarehouse,
 } from "../../warehouse/cross-module-warehouse-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 export class FreezeViolationError extends AppError {
   constructor(locationId: number) {
@@ -279,8 +280,7 @@ export class InventoryUseCases {
 
   triggerNotifyChange(productVariantId: number, triggeredBy: string): void {
     void this.publishInventoryChange(productVariantId, triggeredBy).catch(error => {
-      console.error(JSON.stringify({ event: "inventory_change_notification_failed", productVariantId, triggeredBy,
-        message: error instanceof Error ? error.message : String(error) }));
+      logger.error("inventory_change_notification_failed", { event: "inventory_change_notification_failed", productVariantId, triggeredBy, message: error instanceof Error ? error.message : String(error) });
     });
   }
 

@@ -5,6 +5,7 @@
  */
 
 import { runProcurementHealthEscalationJob } from "./procurement-health-escalation.job";
+import { logger } from "../platform/observability/logger";
 
 function parseOptionalInt(value: string | undefined): number | undefined {
   if (!value) return undefined;
@@ -23,17 +24,17 @@ runProcurementHealthEscalationJob({
   force: parseBoolean(process.env.PROCUREMENT_HEALTH_ESCALATION_FORCE),
 })
   .then((result) => {
-    console.log(JSON.stringify({
+    logger.info("jobs.run_procurement_health_escalation", { detail: JSON.stringify({
       mode: result.mode,
       status: result.health.status,
       critical: result.health.critical,
       warning: result.health.warning,
       total: result.health.total,
       escalation: result.escalation,
-    }, null, 2));
+    }, null, 2) });
     process.exit(0);
   })
   .catch((err) => {
-    console.error("[Procurement health] Escalation scheduler run failed:", err);
+    logger.error("jobs.run_procurement_health_escalation", { message: "[Procurement health] Escalation scheduler run failed:", error: err });
     process.exit(1);
   });

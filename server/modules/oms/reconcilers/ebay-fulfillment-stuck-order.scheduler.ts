@@ -8,6 +8,7 @@ import {
   toEngineRef,
   type ShippingEngine,
 } from "../../shipping/engine-and-reconcile.api";
+import { logger } from "../../../platform/observability/logger";
 
 export const EBAY_FULFILLMENT_RECONCILE_LOCK_ID = 918503;
 
@@ -47,9 +48,7 @@ export function startEbayFulfillmentStuckOrderScheduler(
       `);
       if (!stuckOrders.rows?.length) return;
 
-      console.log(
-        `[eBay Reconcile] Found ${stuckOrders.rows.length} stuck orders, checking engine...`,
-      );
+      logger.info("oms.ebay_fulfillment_stuck_order_scheduler", { message: `[eBay Reconcile] Found ${stuckOrders.rows.length} stuck orders, checking engine...` });
 
       for (const order of stuckOrders.rows) {
         try {
@@ -58,9 +57,7 @@ export function startEbayFulfillmentStuckOrderScheduler(
             ref = toEngineRef(Number(order.oms_shipstation_order_id));
           }
           if (!ref) {
-            console.warn(
-              `[eBay Reconcile] No engine ref for OMS order ${order.id} — skipping`,
-            );
+            logger.warn("oms.ebay_fulfillment_stuck_order_scheduler", { message: `[eBay Reconcile] No engine ref for OMS order ${order.id} — skipping` });
             continue;
           }
 
@@ -68,15 +65,7 @@ export function startEbayFulfillmentStuckOrderScheduler(
           if (engineState && engineState.status === "shipped") {
             const orderNumber = String(order.external_order_number ?? "").trim();
             if (!engine.applyInboundShipmentAuthority || !orderNumber) {
-              console.error(
-                JSON.stringify({
-                  code: "EBAY_RECONCILE_PHYSICAL_AUTHORITY_UNAVAILABLE",
-                  omsOrderId: Number(order.id),
-                  externalOrderId: order.external_order_id ?? null,
-                  orderNumber: orderNumber || null,
-                  engine: engine.engineName,
-                }),
-              );
+              logger.error("EBAY_RECONCILE_PHYSICAL_AUTHORITY_UNAVAILABLE", { code: "EBAY_RECONCILE_PHYSICAL_AUTHORITY_UNAVAILABLE", omsOrderId: Number(order.id), externalOrderId: order.external_order_id ?? null, orderNumber: orderNumber || null, engine: engine.engineName });
               continue;
             }
 
@@ -84,23 +73,15 @@ export function startEbayFulfillmentStuckOrderScheduler(
               engineRef: ref,
               orderNumber,
             });
-            console.log(
-              JSON.stringify({
-                code: "EBAY_RECONCILE_PHYSICAL_AUTHORITY_APPLIED",
-                omsOrderId: Number(order.id),
-                externalOrderId: order.external_order_id ?? null,
-                orderNumber,
-                processedPhysicalShipments: processed,
-              }),
-            );
+            logger.info("EBAY_RECONCILE_PHYSICAL_AUTHORITY_APPLIED", { code: "EBAY_RECONCILE_PHYSICAL_AUTHORITY_APPLIED", omsOrderId: Number(order.id), externalOrderId: order.external_order_id ?? null, orderNumber, processedPhysicalShipments: processed });
           }
         } catch (e: any) {
-          console.warn(`[eBay Reconcile] Failed to check order ${order.id}: ${e.message}`);
+          logger.warn("oms.ebay_fulfillment_stuck_order_scheduler", { message: `[eBay Reconcile] Failed to check order ${order.id}: ${e.message}` });
         }
         await new Promise((r) => setTimeout(r, 500));
       }
     } catch (err: any) {
-      console.warn("[eBay Reconcile] Sweep error:", err?.message);
+      logger.warn("oms.ebay_fulfillment_stuck_order_scheduler", { message: "[eBay Reconcile] Sweep error:", error: err?.message });
     }
   };
 

@@ -35,6 +35,7 @@ import type { CustomerReturnBoxMeasurements } from "./customer-return-box-measur
 import type { PackageHistoryReadPort } from "@shared/shipping/package-history";
 import { projectHistoricalReturnBoxes } from "./customer-return-package-history";
 import { MAX_RETURN_ORIGINAL_BOXES, type CustomerReturnBoxOption } from "@shared/returns/customer-return-parcel";
+import { logger } from "../../../platform/observability/logger";
 
 const MAX_OBSERVATION_AGE_MS = 120_000;
 export interface CustomerReturnLiveDependencies {
@@ -179,8 +180,8 @@ export class CustomerReturnLiveService {
         // Package-history outages do not change eligibility. Customers can
         // enter their actual box size; the classified diagnostic is observable.
         const event = { operation: "original_box_dimensions" as const, code: "RETURN_BOX_HISTORY_UNAVAILABLE" };
-        try { (this.dependencies.reportBoxDiagnostic ?? (value => console.warn(JSON.stringify(value))))(event); }
-        catch { console.warn(JSON.stringify(event)); }
+        try { (this.dependencies.reportBoxDiagnostic ?? (value => logger.warn("returns.customer_return_live_service", { detail: JSON.stringify(value) })))(event); }
+        catch { logger.warn("returns.customer_return_live_service", { detail: JSON.stringify(event) }); }
       }
     }
     const finalRaw = await this.dependencies.local.read(lookup);

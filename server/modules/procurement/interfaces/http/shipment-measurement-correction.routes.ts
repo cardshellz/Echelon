@@ -7,6 +7,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { ShipmentTrackingError } from "../../application/shipment-tracking.service";
 import { ShipmentMeasurementCorrectionError } from "../../infrastructure/shipment-measurement-correction.repository";
 import type { createShipmentMeasurementCorrectionService } from "../../application/shipment-measurement-correction.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerShipmentMeasurementRoutes(app: Express, service: ReturnType<typeof createShipmentMeasurementCorrectionService>) {
   const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostWorkflowIdSchema);
@@ -23,8 +24,7 @@ export function registerShipmentMeasurementRoutes(app: Express, service: ReturnT
         return res.status(409).json({ code: error.code, error: error.message });
       if (error instanceof ShipmentTrackingError || error instanceof ShipmentPhysicalValuesError)
         return res.status(error.statusCode).json({ code: error.details?.code, error: error.message });
-      console.error(JSON.stringify({ event: "procurement.shipment.measurement_review_failed", shipmentId: parsed.data, actorId: actor,
-        action, code: "SHIPMENT_MEASUREMENTS_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment.measurement_review_failed", { event: "procurement.shipment.measurement_review_failed", shipmentId: parsed.data, actorId: actor, code: "SHIPMENT_MEASUREMENTS_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error });
       return res.status(503).json({ code: "SHIPMENT_MEASUREMENTS_UNAVAILABLE", error: "The complete measurement and cost review could not be loaded. Reload and try again." });
     }
   }

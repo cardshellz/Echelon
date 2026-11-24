@@ -9,6 +9,7 @@ import type { DropshipOrderRejectionService } from "../../application/dropship-o
 import type { DropshipVendorProvisioningService } from "../../application/dropship-vendor-provisioning-service";
 import { registerDropshipOrderRoutes } from "../../interfaces/http/dropship-order.routes";
 import { makeDropshipOrderOpsDetail } from "../fixtures/order-ops-detail.fixture";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 
@@ -32,7 +33,7 @@ describe("dropship vendor order routes: payment hold summary", () => {
     summaryInputs = [];
     summaryError = null;
     detailInputs = [];
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    spyLoggerJson("error");
     const orderOpsService = {
       getPaymentHoldSummary: async (input: unknown) => {
         summaryInputs.push(input);
@@ -127,12 +128,12 @@ describe("dropship vendor order routes: order detail", () => {
   let server: { url: string; close: () => Promise<void> };
   let detailInputs: unknown[];
   let detail: DropshipOrderOpsIntakeDetail;
-  let consoleError: ReturnType<typeof vi.spyOn>;
+  let consoleError: ReturnType<typeof spyLoggerJson>;
 
   beforeEach(async () => {
     detailInputs = [];
     detail = makeDropshipOrderOpsDetail();
-    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    consoleError = spyLoggerJson("error");
     const orderOpsService = {
       getIntakeDetail: async (input: unknown) => {
         detailInputs.push(input);
@@ -213,7 +214,7 @@ describe("dropship vendor order routes: order detail", () => {
     });
     expect(consoleError).toHaveBeenCalledTimes(1);
     const logged = JSON.parse(String(consoleError.mock.calls[0][0]));
-    expect(logged).toEqual({
+    expect(logged).toMatchObject({
       level: "error",
       code: "DROPSHIP_VENDOR_ORDER_DETAIL_CONTRACT_INVALID",
       message: "Order detail did not fit the vendor contract; nothing was sent.",

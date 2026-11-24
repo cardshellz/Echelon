@@ -73,12 +73,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       const cause = error instanceof Error ? error.cause ?? error : error;
       const databaseCode = cause && typeof cause === "object" && "code" in cause
         && typeof cause.code === "string" && /^[A-Z0-9]{5}$/.test(cause.code) ? cause.code : null;
-      console.error(JSON.stringify({
-        event: "procurement.shipment_cost.command_failed", operation,
-        resourceId: operation === "create" ? req.params.id : req.params.costId,
-        actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_TRANSIENT_FAILURE",
-        databaseCode, errorType: error instanceof Error ? error.name : typeof error,
-      }));
+      logger.error("procurement.shipment_cost.command_failed", { event: "procurement.shipment_cost.command_failed", operation, resourceId: operation === "create" ? req.params.id : req.params.costId, actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_TRANSIENT_FAILURE", databaseCode, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(500).json({ code: "SHIPMENT_COST_TRANSIENT_FAILURE", error: "The charge command could not be completed. Retry with the same command key." });
     }
   }
@@ -112,12 +107,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       const cause = error instanceof Error ? error.cause ?? error : error;
       const databaseCode = cause && typeof cause === "object" && "code" in cause
         && typeof cause.code === "string" && /^[A-Z0-9]{5}$/.test(cause.code) ? cause.code : null;
-      console.error(JSON.stringify({
-        event: "procurement.shipment_line.command_failed", operation,
-        resourceId: (operation === "update" || operation === "delete") ? req.params.lineId : req.params.id,
-        actorId: getActorId(req) ?? null, code: "SHIPMENT_LINE_TRANSIENT_FAILURE",
-        databaseCode, errorType: error instanceof Error ? error.name : typeof error,
-      }));
+      logger.error("procurement.shipment_line.command_failed", { event: "procurement.shipment_line.command_failed", operation, resourceId: (operation === "update" || operation === "delete") ? req.params.lineId : req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_LINE_TRANSIENT_FAILURE", databaseCode, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(500).json({ code: "SHIPMENT_LINE_TRANSIENT_FAILURE", error: "The shipment line command could not be completed. Retry with the same command key." });
     }
   }
@@ -137,7 +127,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       res.json(result);
     } catch (error) {
       if (error instanceof ShipmentTrackingError && error.statusCode < 500) return res.status(error.statusCode).json({ error: error.message });
-      console.error(JSON.stringify({ event: "procurement.shipment_health.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_health.failed", { event: "procurement.shipment_health.failed", errorType: error instanceof Error ? error.name : typeof error });
       res.status(500).json({ code: "SHIPMENT_HEALTH_UNAVAILABLE", error: "Shipment cost health could not be verified. Retry the overview." });
     }
   });
@@ -147,7 +137,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       res.json(await shipmentTracking.getShipmentPage(req.query));
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_LIST_QUERY_INVALID", error: "Invalid shipment filters or page." });
-      console.error(JSON.stringify({ event: "procurement.shipment_list.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_list.failed", { event: "procurement.shipment_list.failed", errorType: error instanceof Error ? error.name : typeof error });
       res.status(500).json({ code: "SHIPMENT_LIST_UNAVAILABLE", error: "Shipments could not be verified. Retry the work list." });
     }
   });
@@ -183,8 +173,7 @@ export function registerInboundShipmentRoutes(app: Express) {
     } catch (error: unknown) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_RECEIVING_SETUP_INPUT_INVALID", error: "Enter a valid shipment ID." });
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message });
-      console.error(JSON.stringify({ event: "procurement.shipment_receiving_setup.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_RECEIVING_SETUP_UNAVAILABLE",
-        errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_receiving_setup.failed", { event: "procurement.shipment_receiving_setup.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_RECEIVING_SETUP_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error });
       res.status(503).json({ code: "SHIPMENT_RECEIVING_SETUP_UNAVAILABLE", error: "Receiving setup could not be verified. Refresh before booking or shipping." });
     }
   });
@@ -210,8 +199,7 @@ export function registerInboundShipmentRoutes(app: Express) {
         for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
         return res.status(error.statusCode).json({ code: error.code, error: error.message, details: error.details });
       }
-      console.error(JSON.stringify({ event: "procurement.shipment_create.failed", actorId: getActorId(req) ?? null,
-        code: "SHIPMENT_CREATE_TRANSIENT_FAILURE", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_create.failed", { event: "procurement.shipment_create.failed", actorId: getActorId(req) ?? null, code: "SHIPMENT_CREATE_TRANSIENT_FAILURE", errorType: error instanceof Error ? error.name : typeof error });
       return res.status(500).json({ code: "SHIPMENT_CREATE_TRANSIENT_FAILURE", error: "Shipment creation could not be confirmed. Retry the saved request with the same command key." });
     }
   });
@@ -247,7 +235,7 @@ export function registerInboundShipmentRoutes(app: Express) {
     } catch (error: any) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_TRANSITION_INPUT_INVALID", error: "Enter a valid shipment ID." });
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
-      console.error(JSON.stringify({ event: "procurement.shipment_booking.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_BOOKING_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_booking.failed", { event: "procurement.shipment_booking.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_BOOKING_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error });
       res.status(503).json({ code: "SHIPMENT_BOOKING_UNAVAILABLE", error: "Booking could not be verified. Reload the shipment before retrying." });
     }
   });
@@ -260,7 +248,7 @@ export function registerInboundShipmentRoutes(app: Express) {
     } catch (error: any) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_TRANSITION_INPUT_INVALID", error: "Enter a valid shipment ID." });
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
-      console.error(JSON.stringify({ event: "procurement.shipment_departure.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_DEPARTURE_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_departure.failed", { event: "procurement.shipment_departure.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_DEPARTURE_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error });
       res.status(503).json({ code: "SHIPMENT_DEPARTURE_UNAVAILABLE", error: "Shipping could not be verified. Reload the shipment before retrying." });
     }
   });
@@ -322,8 +310,7 @@ export function registerInboundShipmentRoutes(app: Express) {
     } catch (error: unknown) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_CLOSE_ID_INVALID", error: "Choose a valid shipment." });
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
-      console.error(JSON.stringify({ event: "procurement.shipment.close_failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null,
-        code: "SHIPMENT_CLOSE_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment.close_failed", { event: "procurement.shipment.close_failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_CLOSE_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error });
       return res.status(503).json({ code: "SHIPMENT_CLOSE_UNAVAILABLE", error: "The shipment close could not be confirmed. Reload its saved status before retrying." });
     }
   });
@@ -339,9 +326,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({
         code: error.details?.code, error: error.message, details: error.details,
       });
-      console.error(JSON.stringify({ event: "procurement.shipment.cancellation_failed", shipmentId: req.params.id,
-        actorId: req.session.user?.id ?? null, code: "SHIPMENT_CANCELLATION_UNAVAILABLE",
-        errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment.cancellation_failed", { event: "procurement.shipment.cancellation_failed", shipmentId: req.params.id, actorId: req.session.user?.id ?? null, code: "SHIPMENT_CANCELLATION_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error });
       res.status(503).json({ code: "SHIPMENT_CANCELLATION_UNAVAILABLE",
         error: "Shipment cancellation could not be verified. Reload the shipment before trying again." });
     }
@@ -357,7 +342,7 @@ export function registerInboundShipmentRoutes(app: Express) {
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_UNIT_OPTIONS_INPUT_INVALID", error: "Provide a valid shipment ID and between 1 and 500 source rows." });
       if (error instanceof ShipmentUnitOptionsError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
-      console.error(JSON.stringify({ event: "procurement.shipment_unit_options.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_unit_options.failed", { event: "procurement.shipment_unit_options.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(503).json({ code: "SHIPMENT_UNIT_OPTIONS_UNAVAILABLE", error: "Receive units could not be verified. Retry the preview." });
     }
   });
@@ -442,8 +427,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "AP_INVOICE_LINK_INPUT_INVALID", error: "Choose a valid charge, invoice and explicit invoice line." });
       if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
       if (error instanceof FinancialCommandError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
-      console.error(JSON.stringify({ event: "procurement.shipment_invoice.ownership_failed", action, costId: req.params.costId,
-        actorId: req.session?.user?.id ?? null, code: "AP_INVOICE_OWNERSHIP_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_invoice.ownership_failed", { event: "procurement.shipment_invoice.ownership_failed", costId: req.params.costId, actorId: req.session?.user?.id ?? null, code: "AP_INVOICE_OWNERSHIP_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error });
       return res.status(503).json({ code: "AP_INVOICE_OWNERSHIP_UNAVAILABLE", error: "Invoice ownership could not be confirmed. Reload the shipment before retrying." });
     }
   }
@@ -463,9 +447,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       res.vary("X-Shipment-Cost-Review-Version");
       return res.json(shipmentCostReviewResponse(result,req.get("X-Shipment-Cost-Review-Version")));
     } catch (error) {
-      console.error(JSON.stringify({ event: "procurement.shipment_cost.review_failed", shipmentId: id.data,
-        actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_REVIEW_UNAVAILABLE",
-        errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_cost.review_failed", { event: "procurement.shipment_cost.review_failed", shipmentId: id.data, actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_REVIEW_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error });
       return res.status(500).json({ code: "SHIPMENT_COST_REVIEW_UNAVAILABLE", error: "Saved cost results could not be loaded. Reload the cost review." });
     }
   });
@@ -492,9 +474,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       const cause = error instanceof Error ? error.cause ?? error : error;
       const databaseCode = cause && typeof cause === "object" && "code" in cause
         && typeof cause.code === "string" && /^[A-Z0-9]{5}$/.test(cause.code) ? cause.code : null;
-      console.error(JSON.stringify({ event: "procurement.shipment_cost.update_failed", shipmentId: req.params.id,
-        actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_UPDATE_FAILED", databaseCode,
-        errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_cost.update_failed", { event: "procurement.shipment_cost.update_failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_UPDATE_FAILED", databaseCode, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(500).json({ code: "SHIPMENT_COST_UPDATE_FAILED",
         error: "The cost update could not be completed. Reload the saved results and retry." });
     }
@@ -554,3 +534,4 @@ export function registerInboundShipmentRoutes(app: Express) {
 
 }
 import { shipmentCostReviewResponse } from "@shared/procurement/shipment-cost-review-version";
+import { logger } from "../../../../platform/observability/logger";

@@ -6,6 +6,7 @@ import type { AuthRole, AuthPermission, InsertAuthPermission } from "@shared/sch
 import { assertRolePermissionEditSupported, parseRolePermissionEdit } from "../domain/role-permission-edit";
 import { assertRoleAssignmentTargets, parseRoleAssignment } from "../domain/role-assignment";
 import { ensureDefaultShopifyChannelSeeded } from "../../channels/channel-registry-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 type Tx = typeof db | any; // Drizzle transaction or db instance
 type IdentityTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -60,7 +61,7 @@ export async function updateUser(id: string, data: { displayName?: string; role?
   if (data.password !== undefined) updateData.password = data.password;
   if (data.active !== undefined) updateData.active = data.active;
   if (Object.keys(updateData).length === 0) return undefined;
-  
+
   const result = await tx.update(users).set(updateData).where(eq(users.id, id)).returning();
   return result[0];
 }
@@ -93,7 +94,7 @@ export async function getUserPermissions(userId: string, tx: Tx = db): Promise<s
     // JSONB null (like any other stored constraint) must not become global.
     .where(and(eq(authUserRoles.userId, userId), eq(users.active, 1),
       isNull(authRolePermissions.constraints)));
-  
+
   const permSet = new Set(permissions.map((p: any) => `${p.resource}:${p.action}`));
   return effectiveStaffCapabilities(Array.from(permSet) as string[]);
 }
@@ -196,10 +197,10 @@ export async function assignUserRoles(userId: string, roleIds: number[], tx: Ide
 /** Seed functionalities mapping to DB directly */
 
 export async function seedDefaultChannels() {
-  console.log("Checking default channels...");
+  logger.info("identity.repository", { message: "Checking default channels..." });
   try {
     await ensureDefaultShopifyChannelSeeded(db);
   } catch (error) {
-    console.warn("Could not seed default channels:", error);
+    logger.warn("identity.repository", { message: "Could not seed default channels:", error: error });
   }
 }

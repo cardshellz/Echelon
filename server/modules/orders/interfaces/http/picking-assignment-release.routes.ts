@@ -6,6 +6,7 @@ import type { Order } from "@shared/schema";
 import { requireAuth, requirePermission } from "../../../../routes/middleware";
 import { broadcastOrdersUpdated } from "../../../../websocket";
 import type { ReleasePickingAssignmentCommand } from "../../application/picking-assignment-release.service";
+import { logger } from "../../../../platform/observability/logger";
 
 interface AssignmentReleaseService {
   releaseOrder(id: number, command: Omit<ReleasePickingAssignmentCommand, "orderId">): Promise<Order>;
@@ -30,12 +31,7 @@ export function registerPickingAssignmentReleaseRoutes(app: Express, service: As
       res.json(order);
     } catch (error) {
       const operational = error instanceof AppError && error.isOperational;
-      console.error(JSON.stringify({
-        event: "picking_assignment_release_failed", orderId: req.params.id,
-        actorId: req.session.user?.id,
-        code: operational ? error.code : "PICKING_RELEASE_FAILED",
-        message: error instanceof Error ? error.message : "Unknown release failure",
-      }));
+      logger.error("picking_assignment_release_failed", { event: "picking_assignment_release_failed", orderId: req.params.id, actorId: req.session.user?.id, code: operational ? error.code : "PICKING_RELEASE_FAILED", message: error instanceof Error ? error.message : "Unknown release failure" });
       res.status(operational ? error.statusCode : 500).json({
         code: operational ? error.code : "PICKING_RELEASE_FAILED",
         error: operational ? error.message : "Could not release the picking assignment. Refresh the queue before retrying.",

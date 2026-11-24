@@ -2,6 +2,7 @@
 
 import { sanitizePurchasePipelineJobError } from "../modules/procurement/planning-and-pipeline-jobs.api";
 import { runPurchaseForecastBacktestingJob } from "./purchase-forecast-backtesting.job";
+import { logger } from "../platform/observability/logger";
 
 function parseLimit(value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === "") return undefined;
@@ -24,19 +25,16 @@ function parseMaxBatches(value: string | undefined): number {
 async function main() {
   const limit = parseLimit(process.env.PURCHASE_FORECAST_EVALUATION_LIMIT);
   const maxBatches = parseMaxBatches(process.env.PURCHASE_FORECAST_EVALUATION_MAX_BATCHES);
-  console.log(JSON.stringify(
+  logger.info("jobs.run_purchase_forecast_backtesting", { detail: JSON.stringify(
     await runPurchaseForecastBacktestingJob({ limit, maxBatches }),
     null,
     2,
-  ));
+  ) });
 }
 
 main()
   .then(() => process.exit(0))
   .catch((error) => {
-    console.error(
-      "[PurchaseForecastBacktesting] Scheduled evaluation failed",
-      sanitizePurchasePipelineJobError(error),
-    );
+    logger.error("jobs.run_purchase_forecast_backtesting", { message: "[PurchaseForecastBacktesting] Scheduled evaluation failed", error: sanitizePurchasePipelineJobError(error) });
     process.exit(1);
   });

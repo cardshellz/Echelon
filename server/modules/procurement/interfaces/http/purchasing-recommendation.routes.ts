@@ -1179,7 +1179,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         lastComputedAt: new Date().toISOString(),
       });
     } catch (error) {
-      console.error("Error fetching purchasing dashboard KPIs:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching purchasing dashboard KPIs:", error: error });
       res.status(500).json({ error: "Failed to fetch purchasing dashboard KPIs" });
     }
   });
@@ -1206,7 +1206,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         ...buildSupplierSetupGaps(recommendationResult),
       });
     } catch (error) {
-      console.error("Error fetching supplier setup gaps:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching supplier setup gaps:", error: error });
       res.status(500).json({ error: "Failed to fetch supplier setup gaps" });
     }
   });
@@ -1234,7 +1234,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         observationCount: result.observations.length,
       });
     } catch (error) {
-      console.error("Error generating purchasing recommendation run:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error generating purchasing recommendation run:", error: error });
       res.status(500).json({ error: "Failed to generate purchasing recommendations" });
     }
   });
@@ -1385,7 +1385,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
     } catch (error) {
       if (error instanceof RfqSourcingSnapshotError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
-      console.error("Error fetching purchasing recommendation queue:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching purchasing recommendation queue:", error: error });
       res.status(500).json({ error: "Failed to fetch purchasing recommendations" });
     }
   });
@@ -1437,7 +1437,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
         return res.status(error.statusCode).json({ code: error.code, error: error.message });
       }
-      console.error("Error creating purchasing RFQ batch:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error creating purchasing RFQ batch:", error: error });
       const statusCode = Number(error?.statusCode);
       if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
         return res.status(statusCode).json({
@@ -1459,7 +1459,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const result = await listRequestForQuotes(db, query.data);
       res.json(result);
     } catch (error) {
-      console.error("Error fetching purchasing RFQ list:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching purchasing RFQ list:", error: error });
       res.status(500).json({ error: "Failed to fetch RFQs" });
     }
   });
@@ -1487,7 +1487,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         ...buildForecastInputGapDiagnostics(recommendationResult, { limit }),
       });
     } catch (error) {
-      console.error("Error fetching forecast input gaps:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching forecast input gaps:", error: error });
       res.status(500).json({ error: "Failed to fetch forecast input gaps" });
     }
   });
@@ -1551,7 +1551,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         items,
       });
     } catch (error) {
-      console.error("Error fetching recommendation review queue:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching recommendation review queue:", error: error });
       res.status(500).json({ error: "Failed to fetch recommendation review queue" });
     }
   });
@@ -1568,7 +1568,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         decisions,
       });
     } catch (error) {
-      console.error("Error fetching recommendation decisions:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching recommendation decisions:", error: error });
       res.status(500).json({ error: "Failed to fetch recommendation decisions" });
     }
   });
@@ -1593,7 +1593,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         ...acceptedQueue,
       });
     } catch (error) {
-      console.error("Error fetching accepted recommendation queue:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching accepted recommendation queue:", error: error });
       res.status(500).json({ error: "Failed to fetch accepted recommendation queue" });
     }
   });
@@ -1782,7 +1782,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           decisions: result.decisions.map(normalizeRecommendationDecision),
         });
       } catch (error) {
-        console.error("Error creating PO from accepted recommendation queue:", error);
+        logger.error("procurement.purchasing_recommendation_routes", { message: "Error creating PO from accepted recommendation queue:", error: error });
         const statusCode = Number((error as any)?.statusCode);
         if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
           return res.status(statusCode).json({
@@ -1903,7 +1903,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         decision: normalizeRecommendationDecision(created),
       });
     } catch (error) {
-      console.error("Error recording recommendation decision:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error recording recommendation decision:", error: error });
       const statusCode = Number((error as any)?.statusCode);
       if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
         return res.status(statusCode).json({
@@ -1923,7 +1923,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const result = await runAutoDraftJob({ triggeredBy: "manual", triggeredByUser: userId });
       res.json(result);
     } catch (error: any) {
-      console.error("Error running auto-draft:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error running auto-draft:", error: error });
       const statusCode = Number(error?.statusCode);
       if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
         return res.status(statusCode).json({
@@ -1975,7 +1975,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         lookbackDays,
       });
     } catch (error) {
-      console.error("Error fetching reorder analysis:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching reorder analysis:", error: error });
       res.status(500).json({ error: "Failed to fetch reorder analysis" });
     }
   });
@@ -1990,7 +1990,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       await storage.updateVelocityLookbackDays(days);
       res.json({ ok: true, days });
     } catch (error) {
-      console.error("Error updating velocity lookback:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error updating velocity lookback:", error: error });
       res.status(500).json({ error: "Failed to update velocity lookback" });
     }
   });
@@ -2008,7 +2008,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       const data = await storage.getDashboardData(lookbackDays);
       res.json(data);
     } catch (error) {
-      console.error("Error fetching purchasing dashboard:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching purchasing dashboard:", error: error });
       res.status(500).json({ error: "Failed to fetch dashboard data" });
     }
   });
@@ -2029,7 +2029,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
 
       res.json({ rules: rulesWithCounts, totalExcluded });
     } catch (error) {
-      console.error("Error fetching exclusion rules:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching exclusion rules:", error: error });
       res.status(500).json({ error: "Failed to fetch exclusion rules" });
     }
   });
@@ -2058,7 +2058,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       if (error?.message?.includes("unique") || error?.code === "23505") {
         return res.status(409).json({ error: "Rule already exists" });
       }
-      console.error("Error creating exclusion rule:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error creating exclusion rule:", error: error });
       res.status(500).json({ error: "Failed to create exclusion rule" });
     }
   });
@@ -2073,7 +2073,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       }
       res.json({ ok: true });
     } catch (error) {
-      console.error("Error deleting exclusion rule:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error deleting exclusion rule:", error: error });
       res.status(500).json({ error: "Failed to delete exclusion rule" });
     }
   });
@@ -2115,7 +2115,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       }
       res.json({ field, values });
     } catch (error: any) {
-      console.error("Error fetching field values:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching field values:", error: error });
       res.status(500).json({ error: "Failed to fetch field values" });
     }
   });
@@ -2131,7 +2131,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       await storage.setProductReorderExcluded(productId, excluded);
       res.json({ ok: true });
     } catch (error) {
-      console.error("Error toggling product exclusion:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error toggling product exclusion:", error: error });
       res.status(500).json({ error: "Failed to update product exclusion" });
     }
   });
@@ -2142,7 +2142,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       const run = await storage.getLatestAutoDraftRun();
       res.json(run ? normalizeAutoDraftRun(run) : null);
     } catch (error) {
-      console.error("Error fetching auto-draft status:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching auto-draft status:", error: error });
       res.status(500).json({ error: "Failed to fetch auto-draft status" });
     }
   });
@@ -2157,7 +2157,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         runs: runs.map(normalizeAutoDraftRun),
       });
     } catch (error) {
-      console.error("Error fetching auto-draft run history:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching auto-draft run history:", error: error });
       res.status(500).json({ error: "Failed to fetch auto-draft run history" });
     }
   });
@@ -2175,7 +2175,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         thresholds: settings.stalePoThresholds,
       }));
     } catch (error) {
-      console.error(JSON.stringify({ code: "AUTO_DRAFT_FINANCIAL_REVIEW_READ_FAILED", errorType: error instanceof Error ? error.name : "Unknown" }));
+      logger.error("AUTO_DRAFT_FINANCIAL_REVIEW_READ_FAILED", { code: "AUTO_DRAFT_FINANCIAL_REVIEW_READ_FAILED", errorType: error instanceof Error ? error.name : "Unknown" });
       res.status(500).json({ error: "Failed to fetch stale auto-draft PO diagnostics" });
     }
   });
@@ -2186,7 +2186,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       const { startAutoDraftJob } = await import("../../../../jobs/auto-draft.job");
       const started = await startAutoDraftJob({ triggeredBy: "manual", triggeredByUser: req.session.user!.id });
       void started.completion
-        .catch((err: any) => console.error("[Auto-draft] manual run failed:", err));
+        .catch((err: any) => logger.error("procurement.purchasing_recommendation_routes", { message: "[Auto-draft] manual run failed:", error: err }));
 
       res.status(202).json({
         message: "Auto-draft job started",
@@ -2194,7 +2194,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         interruptedRunIds: started.interruptedRunIds,
       });
     } catch (error: any) {
-      console.error("Error triggering auto-draft:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error triggering auto-draft:", error: error });
       const statusCode = Number(error?.statusCode);
       if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
         return res.status(statusCode).json({
@@ -2213,7 +2213,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       const settings = await storage.getAutoDraftSettings();
       res.json(settings);
     } catch (error) {
-      console.error("Error fetching auto-draft settings:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error fetching auto-draft settings:", error: error });
       res.status(500).json({ error: "Failed to fetch settings" });
     }
   });
@@ -2305,7 +2305,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
       });
       res.json({ ok: true });
     } catch (error) {
-      console.error("Error updating auto-draft settings:", error);
+      logger.error("procurement.purchasing_recommendation_routes", { message: "Error updating auto-draft settings:", error: error });
       res.status(500).json({ error: "Failed to update settings" });
     }
   });

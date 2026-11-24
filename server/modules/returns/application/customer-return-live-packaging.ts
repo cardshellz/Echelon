@@ -7,6 +7,7 @@ import { customerReturnPackageDimensionsInputSchema, CustomerReturnPackageDimens
   type CustomerReturnStoredPackageDimensionsReader } from "./customer-return-package-dimensions.ports";
 import { customerReturnLocalInspectionSnapshotSchema, type CustomerReturnLocalInspectionSnapshot } from "./customer-return-local-inspection.ports";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
+import { logger } from "../../../platform/observability/logger";
 
 interface BoxCandidate extends CustomerReturnPackageDimensionsInput {
   id: string;
@@ -155,7 +156,7 @@ function tracking(value: string | null): string | null { return value?.replace(/
 function providerId(resource: "Order" | "LineItem", value: string): string | null {
   try { return gid(resource, value); } catch { return null; }
 }
-function defaultReporter(event: ReturnBoxDiagnostic): void { console.warn(JSON.stringify(event)); }
+function defaultReporter(event: ReturnBoxDiagnostic): void { logger.warn("returns.customer_return_live_packaging", { detail: JSON.stringify(event) }); }
 function safeReport(report: ReturnBoxReporter, code: string): void {
   try { report({ operation: "original_box_dimensions", code }); }
   catch { defaultReporter({ operation: "original_box_dimensions", code: "RETURN_BOX_DIAGNOSTIC_FAILED" }); }

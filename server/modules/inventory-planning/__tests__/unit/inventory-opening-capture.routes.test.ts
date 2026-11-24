@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 import { registerInventoryOpeningCaptureRoutes } from "../../interfaces/http/inventory-opening-capture.routes";
 import type { InventoryOpeningCapturePort } from "../../application/inventory-opening-capture.port";
 import { InventoryCutoverOpeningError } from "../../application/inventory-cutover-opening.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 const {hasPermission}=vi.hoisted(()=>({hasPermission:vi.fn(async()=>true)}));
 vi.mock("../../../identity",()=>({hasPermission}));
 const id="0f1b4b41-6cad-4caa-a3dd-d591179a6d84";
@@ -47,7 +48,7 @@ describe("capture queue authenticated HTTP boundary",()=>{
   it("reports offline workers and redacts unexpected database failures",async()=>{
     jobs.enqueue.mockRejectedValueOnce(new InventoryCutoverOpeningError("CUTOVER_CAPTURE_WORKER_OFFLINE","Worker offline",503));
     expect(await (await post(root,{idempotencyKey:id})).json()).toEqual({error:{code:"CUTOVER_CAPTURE_WORKER_OFFLINE",message:"Worker offline"}});
-    const log=vi.spyOn(console,"error").mockImplementation(()=>undefined);
+    const log=spyLoggerJson("error");
     jobs.status.mockRejectedValueOnce(new Error("secret query"));
     const result=await fetch(`${root}/${id}`);expect(result.status).toBe(503);
     expect(JSON.stringify(await result.json())).not.toContain("secret");expect(JSON.stringify(log.mock.calls)).not.toContain("secret");

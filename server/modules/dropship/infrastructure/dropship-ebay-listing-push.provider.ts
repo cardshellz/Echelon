@@ -157,8 +157,8 @@ const platformEventLogger = {
 };
 
 const defaultScopeBusyLogger = {
-  debug: (event: Record<string, unknown>) => console.debug(JSON.stringify({ level: "debug", ...event })),
-  warn: (event: Record<string, unknown>) => console.warn(JSON.stringify({ level: "warn", ...event })),
+  debug: (event: Record<string, unknown>) => platformLogger.debug("dropship.ebay_listing_push_provider", { ...event }),
+  warn: (event: Record<string, unknown>) => platformLogger.warn("dropship.ebay_listing_push_provider", { ...event }),
 };
 
 export class EbayDropshipListingPushProvider implements DropshipMarketplaceListingPushProvider {

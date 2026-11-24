@@ -25,6 +25,7 @@ import { observeChannelMerchandiseQuantity } from "../domain/channel-merchandise
 import { channelMerchandiseDemandReduction } from "../domain/channel-merchandise-demand";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "../infrastructure/shopify-merchandise-snapshot";
 import type { EngineCancelResult } from "../../shipping/engine-and-reconcile.api";
+import { logger } from "../../../platform/observability/logger";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 
@@ -1459,7 +1460,7 @@ export async function applyShopifyRefundCascade(
   }
 
   for (const warning of internal.warnings) {
-    console.warn(`${logPrefix} ${warning}`);
+    logger.warn("oms.shopify_refund_cascade_service", { message: `${logPrefix} ${warning}` });
   }
 
   const changed =

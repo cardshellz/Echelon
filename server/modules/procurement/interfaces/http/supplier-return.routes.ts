@@ -10,6 +10,7 @@ import { supplierReturnDifferenceReader } from "../../application/supplier-retur
 import { supplierReturnReviewCommands, SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE } from "../../application/supplier-return-difference.commands";
 import { supplierReturnReader } from "../../application/supplier-return.service";
 import { supplierReturnCommands, SUPPLIER_RETURN_COMMAND_SCOPE } from "../../application/supplier-return.commands";
+import { logger } from "../../../../platform/observability/logger";
 
 const actor = (req: Request): string => {
   // Same identity that requirePermission validates; never substitute a second actor source.
@@ -28,8 +29,7 @@ function failure(res: Response, error: unknown) {
   if (error instanceof SupplierReturnError || error instanceof CostEvidenceError) {
     return res.status(error.statusCode).json({ error: error.message, details: { code: error.code } });
   }
-  console.error(JSON.stringify({ event: "procurement.supplier_return.failed", code: "SUPPLIER_RETURN_OPERATION_FAILED", actorId: actor(res.req), method: res.req.method, route: res.req.route?.path,
-    error: error instanceof Error ? { name: error.name, message: error.message } : { name: "UnknownFailure" } }));
+  logger.error("procurement.supplier_return.failed", { event: "procurement.supplier_return.failed", code: "SUPPLIER_RETURN_OPERATION_FAILED", actorId: actor(res.req), method: res.req.method, route: res.req.route?.path, error: error instanceof Error ? { name: error.name, message: error.message } : { name: "UnknownFailure" } });
   return res.status(500).json({ error: "Unable to verify or complete this supplier return. Retain any submitted request key and retry.",
     details: { code: "SUPPLIER_RETURN_OPERATION_FAILED" } });
 }

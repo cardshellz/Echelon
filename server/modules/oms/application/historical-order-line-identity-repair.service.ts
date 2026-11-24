@@ -27,6 +27,7 @@ import {
   type HistoricalIdentityRepairDatabase,
   type HistoricalIdentityRepairRepository,
 } from "../infrastructure/historical-order-line-identity-repair.repository";
+import { logger } from "../../../platform/observability/logger";
 
 const operatorSchema = z.string().trim().min(1).max(120)
   .regex(/^[^\u0000-\u001f\u007f]*$/);
@@ -396,11 +397,7 @@ export class HistoricalOrderLineIdentityRepairService {
           this.now(),
         );
       } catch (recordError) {
-        console.error(JSON.stringify({
-          code: "REPAIR_FAILURE_RECORD_FAILED",
-          commandId: command.id,
-          error: safeErrorMessage(recordError),
-        }));
+        logger.error("REPAIR_FAILURE_RECORD_FAILED", { code: "REPAIR_FAILURE_RECORD_FAILED", commandId: command.id, error: safeErrorMessage(recordError) });
       }
       throw new HistoricalIdentityRepairError(
         "REPAIR_CLAIM_RECONCILIATION_FAILED",

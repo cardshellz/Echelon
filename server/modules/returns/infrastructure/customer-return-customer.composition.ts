@@ -11,6 +11,7 @@ import { createCustomerReturnLabelServices } from "./customer-return-label.compo
 import { PostgresCustomerReturnSettingsStore } from "./customer-return-label-settings.repository";
 import { CachedCustomerReturnOrderChoicesReader } from "./customer-return-order-choices.reader";
 import { PostgresOrderActionProjectionStore } from "../../customer-account/order-action-projection.api";
+import { logger } from "../../../platform/observability/logger";
 
 /** Call only after verifying the request's customer session. The private label
  * services stay behind the exact order/RMA/command ownership boundary. */
@@ -27,15 +28,12 @@ export async function createCustomerReturnCustomerServices(session: CustomerRetu
     orders: new CustomerReturnCustomerOrdersService({ principal, access, live,
       choices: new CachedCustomerReturnOrderChoicesReader({ principal,
         projection: new PostgresOrderActionProjectionStore(pool), now: () => new Date() }),
-      reportUnavailableOrder: (context) => console.warn(JSON.stringify({
-        event: "return_customer_order_unavailable", code: "RETURN_ORDER_INSPECTION_UNAVAILABLE",
-        channelId: context.channelId, omsOrderId: context.omsOrderId, reason: context.reason, causeCode: context.causeCode,
-      })),
+      reportUnavailableOrder: (context) => logger.warn("return_customer_order_unavailable", { event: "return_customer_order_unavailable", code: "RETURN_ORDER_INSPECTION_UNAVAILABLE", channelId: context.channelId, omsOrderId: context.omsOrderId, reason: context.reason, causeCode: context.causeCode }),
       shippingVersion: () => settings.customerVersion(principal.channelId) }),
     operations: new CustomerReturnCustomerOperationsService({ principal, orderAccess: access,
       ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool),
       historyProgress: new PostgresCustomerReturnProgressReader(pool),
-      reportHistoryUnavailable: () => console.warn(JSON.stringify({ event: "customer_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: principal.channelId })),
+      reportHistoryUnavailable: () => logger.warn("customer_return_history_progress_unavailable", { event: "customer_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: principal.channelId }),
       submissions: internal.submissions, labels: internal.labels, workflows: new PostgresCustomerReturnWorkflowStore(pool), now: () => new Date() }),
     download: internal.download,
   };

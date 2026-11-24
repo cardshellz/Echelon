@@ -25,6 +25,7 @@ import type {
   StoredListingUpdate,
 } from "./listing-update-ports";
 import { ChannelProviderError } from "../../channels/channel-provider.error.api";
+import { logger } from "../../../platform/observability/logger";
 
 const REVIEW_LIFETIME_MS = 15 * 60_000;
 const actorSchema = z.string().trim().min(1).max(200);
@@ -316,17 +317,11 @@ export class ListingUpdateService {
         }
       } catch (error) {
         failed++;
-        console.error(
-          JSON.stringify({
-            operation: "listing_update_worker",
-            id: record.view.id,
-            code:
+        logger.error("marketplace-listings.listing_update_service", { operation: "listing_update_worker", id: record.view.id, code:
               error instanceof ListingPublicationError ||
               error instanceof ChannelProviderError
                 ? error.code
-                : "LISTING_UPDATE_WORKER_FAILED",
-          }),
-        );
+                : "LISTING_UPDATE_WORKER_FAILED" });
         // A lease loss or failed receipt commit must never turn a sent request back into a queued request.
         if (
           !(

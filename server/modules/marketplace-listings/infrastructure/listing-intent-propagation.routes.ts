@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requirePermission } from "../../../routes/middleware";
 import { requireDropshipAuth } from "../../dropship/dropship-auth.routes.api";
 import { listingIntentPropagationRepository as repository } from "../../../listing-intent-propagation.composition";
+import { logger } from "../../../platform/observability/logger";
 
 const id = z.coerce.number().int().positive().max(2_147_483_647);
 const deliveryId = z.string().regex(/^[1-9][0-9]{0,18}$/);
@@ -22,7 +23,7 @@ async function respond(
       });
       return;
     }
-    console.error(JSON.stringify({ event: "listing_intent_status_failed" }));
+    logger.error("listing_intent_status_failed", { event: "listing_intent_status_failed" });
     res.status(500).json({
       code: "LISTING_INTENT_STATUS_UNAVAILABLE",
       message: "Saved listing changes could not be loaded. Try again.",

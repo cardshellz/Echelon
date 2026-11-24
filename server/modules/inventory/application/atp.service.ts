@@ -13,6 +13,7 @@ import {
   type ProductInventoryStrategy,
 } from "@shared/catalog/inventory-strategy";
 import type { VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
+import { logger } from "../../../platform/observability/logger";
 
 // ============================================================================
 // Types
@@ -176,13 +177,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
           dbOverride,
         );
       } catch (error: any) {
-        console.error(JSON.stringify({
-          event: "recipe_atp_calculation_failed",
-          productVariantId: variant.id,
-          warehouseId: warehouseId ?? null,
-          errorCode: error?.code ?? "RECIPE_ATP_UNKNOWN_ERROR",
-          errorMessage: error?.message ?? String(error),
-        }));
+        logger.error("recipe_atp_calculation_failed", { event: "recipe_atp_calculation_failed", productVariantId: variant.id, warehouseId: warehouseId ?? null, errorCode: error?.code ?? "RECIPE_ATP_UNKNOWN_ERROR", errorMessage: error?.message ?? String(error) });
       }
       const atpBase = atpUnits * variant.unitsPerVariant;
       if (!Number.isSafeInteger(atpBase) || atpBase < 0) {
@@ -355,7 +350,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
     // Include hub + spoke warehouses
     const idList = sql.join(variantIds.map(id => sql`${id}`), sql`, `);
     const rows = await this.db.execute(sql`
-      SELECT 
+      SELECT
         il.product_variant_id,
         SUM(GREATEST(il.variant_qty - il.reserved_qty, 0)) as atp
       FROM inventory.inventory_levels il

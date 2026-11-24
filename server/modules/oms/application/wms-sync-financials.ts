@@ -14,6 +14,7 @@ import {
   CurrencyValidationError,
 } from "@shared/validation/currency";
 import { WmsSyncValidationError } from "@shared/errors/wms-sync-errors";
+import { logger } from "../../../platform/observability/logger";
 
 // Minimal structural types — match the shape of the OMS Drizzle rows
 // this service reads without tying the helpers to the full row type
@@ -67,9 +68,7 @@ export function validateOmsOrderFinancials(
     try {
       ensureCents(field, value);
     } catch (err) {
-      console.error(
-        `[WmsSync] Financial validation failed for OMS order ${omsOrderId}: field=${field} value=${JSON.stringify(value)}`,
-      );
+      logger.error("oms.wms_sync_financials", { message: `[WmsSync] Financial validation failed for OMS order ${omsOrderId}: field=${field} value=${JSON.stringify(value)}` });
       throw new WmsSyncValidationError(omsOrderId, field, value);
     }
   };
@@ -88,9 +87,7 @@ export function validateOmsOrderFinancials(
   try {
     ensureCurrencyCode("omsOrder.currency", omsOrder.currency);
   } catch (err) {
-    console.error(
-      `[WmsSync] Financial validation failed for OMS order ${omsOrderId}: field=omsOrder.currency value=${JSON.stringify(omsOrder.currency)}`,
-    );
+    logger.error("oms.wms_sync_financials", { message: `[WmsSync] Financial validation failed for OMS order ${omsOrderId}: field=omsOrder.currency value=${JSON.stringify(omsOrder.currency)}` });
     throw new WmsSyncValidationError(
       omsOrderId,
       "omsOrder.currency",

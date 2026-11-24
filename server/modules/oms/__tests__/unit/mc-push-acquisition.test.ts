@@ -46,7 +46,7 @@ vi.mock("@shared/schema", () => ({
 }));
 vi.mock("drizzle-orm", () => ({ eq: vi.fn() }));
 vi.mock("../../../../platform/observability/logger", () => ({
-  logger: { error: fixture.logError },
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: fixture.logError },
 }));
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";

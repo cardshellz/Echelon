@@ -18,6 +18,7 @@ import {
 } from "../domain/inventory-channel-exposure";
 import { projectCanonicalAtpWarehouseBreakdown } from "../domain/inventory-availability-planner";
 import type { InventoryAvailabilityRuntimeAuthority } from "./inventory-availability-runtime-atp.service";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
 
@@ -106,7 +107,7 @@ export interface InventoryChannelExposureRuntimeLogger {
 
 const defaultLogger: InventoryChannelExposureRuntimeLogger = {
   warn(event) {
-    console.warn(JSON.stringify(event));
+    platformLogger.warn("inventory-planning.inventory_channel_exposure_runtime_service", { detail: JSON.stringify(event) });
   },
 };
 

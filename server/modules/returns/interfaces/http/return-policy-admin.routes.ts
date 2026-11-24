@@ -20,6 +20,7 @@ import {
   ReturnPolicyAdminService,
 } from "../../application/return-policy-admin.service";
 import { PostgresReturnPolicyAdminStore } from "../../infrastructure/return-policy.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const nullablePositiveInteger = z.number().int().positive().nullable();
 const publicScopeSchema = z.object({
@@ -186,9 +187,6 @@ function sendError(res: Response, error: unknown, fallbackCode: string, fallback
       error: { code: error.code, message: error.message, context: error.context },
     });
   }
-  console.error(JSON.stringify({
-    code: fallbackCode,
-    message: fallbackMessage,
-  }));
+  logger.error("returns.return_policy_admin_routes", { code: fallbackCode, message: fallbackMessage });
   return res.status(500).json({ error: { code: fallbackCode, message: fallbackMessage } });
 }
