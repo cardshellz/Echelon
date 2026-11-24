@@ -24,7 +24,7 @@ vi.mock("../../../../db", () => ({
   db: mockDb,
 }));
 
-import { sweepShipStationQueue } from "../../shipstation-sweeper";
+import { sweepShipStationQueue } from "../../application/shipstation-sweeper";
 
 function sqlText(query: any): string {
   const chunks: unknown[] = query?.queryChunks ?? [];

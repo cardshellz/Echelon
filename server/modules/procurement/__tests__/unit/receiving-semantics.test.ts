@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { ReceivingService } from "../../../../modules/procurement/receiving.service";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
+import { ReceivingService } from "../../application/receiving.service";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 function sqlToStr(query: any): string {

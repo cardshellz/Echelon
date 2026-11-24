@@ -3,14 +3,14 @@ import { omsOrderLines, omsOrders } from "@shared/schema";
 
 const ports = vi.hoisted(() => ({ recordAuthority: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {} }));
-vi.mock("../../oms-line-authority-ledger", () => ({ recordOmsLineAuthorityEvent: ports.recordAuthority }));
-vi.mock("../../order-line-catalog-identity.service", () => ({
+vi.mock("../../application/oms-line-authority-ledger", () => ({ recordOmsLineAuthorityEvent: ports.recordAuthority }));
+vi.mock("../../application/order-line-catalog-identity.service", () => ({
   resolveOrderLineCatalogIdentity: async () => null,
   orderLineInventoryIdentitySnapshot: () => ({}),
   recordOrderLineCatalogIdentity: async () => undefined,
 }));
-import { createOmsService } from "../../oms.service";
-import { __test__ } from "../../oms-webhooks";
+import { createOmsService } from "../../application/oms.service";
+import { __test__ } from "../../application/oms-webhooks";
 
 beforeEach(() => {
   vi.clearAllMocks();

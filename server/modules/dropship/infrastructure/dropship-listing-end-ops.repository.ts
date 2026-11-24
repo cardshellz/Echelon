@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
-import { readCatalogStockSelectionFactsForVariants } from "../../catalog/infrastructure/catalog-stock-selection.reader";
+import { readCatalogStockSelectionFactsForVariants } from "../../catalog/catalog-stock-selection.reader.api";
 import {
   LISTING_END_OPS_ERROR_CODES,
   LISTING_END_REQUEST_REASONS,

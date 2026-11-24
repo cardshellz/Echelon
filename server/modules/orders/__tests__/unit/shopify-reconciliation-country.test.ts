@@ -3,8 +3,8 @@ import { PgDialect } from "drizzle-orm/pg-core";
 
 const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), bridge: vi.fn(), readiness: vi.fn(), sync: vi.fn(), gap: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: ports }));
-vi.mock("../../../oms/shopify-bridge", () => ({ bridgeShopifyOrderToOms: ports.bridge }));
-vi.mock("../../../oms/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
+vi.mock("../../../oms/application/shopify-bridge", () => ({ bridgeShopifyOrderToOms: ports.bridge }));
+vi.mock("../../../oms/application/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
 vi.mock("../../../oms/infrastructure/channel-authority-gap.repository", () => ({ recordChannelAuthorityGap: ports.gap }));
 import { initReconciliation, runReconciliationNow } from "../../application/shopify-order-reconciliation";
 

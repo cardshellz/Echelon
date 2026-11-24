@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Express, Request, Response } from "express";
-import type { InboundTrackingService } from "../../inbound-tracking.service";
-import { InboundTrackingError } from "../../inbound-tracking.domain";
-vi.mock("../../inbound-tracking.runtime",()=>({getInboundTrackingService:vi.fn()}));
+import type { InboundTrackingService } from "../../application/inbound-tracking.service";
+import { InboundTrackingError } from "../../domain/inbound-tracking.domain";
+vi.mock("../../application/inbound-tracking.runtime",()=>({getInboundTrackingService:vi.fn()}));
 vi.mock("../../../../routes/middleware",()=>({requirePermission:vi.fn((resource:string,action:string)=>({resource,action}))}));
-import { registerInboundTrackingRoutes } from "../../inbound-tracking.routes";
+import { registerInboundTrackingRoutes } from "../../interfaces/http/inbound-tracking.routes";
 function setup(){
   const definitions=new Map<string,unknown[]>();
   const app={get:(path:string,...handlers:unknown[])=>definitions.set(`GET ${path}`,handlers),put:(path:string,...handlers:unknown[])=>definitions.set(`PUT ${path}`,handlers),post:(path:string,...handlers:unknown[])=>definitions.set(`POST ${path}`,handlers)};

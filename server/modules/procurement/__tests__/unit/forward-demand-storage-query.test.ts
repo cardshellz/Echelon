@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const STORAGE_SRC = readFileSync(
-  resolve(__dirname, "../../procurement.storage.ts"),
+  resolve(__dirname, "../../infrastructure/procurement.storage.ts"),
   "utf8",
 );
 

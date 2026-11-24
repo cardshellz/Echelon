@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { startInventoryPublicationSweepScheduler } from "../../inventory-publication-sweep.scheduler";
+import { startInventoryPublicationSweepScheduler } from "../../application/inventory-publication-sweep.scheduler";
 
 afterEach(() => {
   vi.useRealTimers();

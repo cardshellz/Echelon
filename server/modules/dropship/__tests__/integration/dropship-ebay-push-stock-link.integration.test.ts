@@ -41,7 +41,7 @@ import { DropshipListingPushWorkerService } from "../../application/dropship-lis
 import { DropshipListingPushRecoveryService } from "../../application/dropship-listing-push-recovery-service";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import type { DropshipMarketplaceCredentialRepository, DropshipMarketplaceStoreCredentials } from "../../infrastructure/dropship-marketplace-credentials";
-import * as destinationHealth from "../../../oms/dropship-stock-destination-health";
+import * as destinationHealth from "../../../oms/application/dropship-stock-destination-health";
 import { FakeEbayInventory } from "../fixtures/fake-ebay-inventory";
 import { fixedImageInspector } from "../../../catalog/__tests__/fixtures/catalog-image-inspector.fixture";
 import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";

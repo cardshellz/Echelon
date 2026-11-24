@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { recoverShopifyWritebackDebt } from "../../fulfillment-sweeper.scheduler";
-import type { ShopifyFulfillmentSnapshot } from "../../shopify-fulfillment-snapshot";
+import { recoverShopifyWritebackDebt } from "../../application/fulfillment-sweeper.scheduler";
+import type { ShopifyFulfillmentSnapshot } from "../../application/shopify-fulfillment-snapshot";
 
 function candidate(id: number, orderNumber: string) {
   return {

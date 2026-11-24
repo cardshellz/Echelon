@@ -12,11 +12,11 @@ import {
   dropshipStockDestinationHeldSampleSql,
   dropshipStockDestinationMissingCountSql,
   dropshipStockDestinationMissingSampleSql,
-} from "../../dropship-stock-destination-health";
+} from "../../application/dropship-stock-destination-health";
 import { dropshipStockDestinationSourceReadySql } from "../../../inventory-planning/infrastructure/dropship-stock-destination-source-ready.sql";
-import { getOmsOpsHealth } from "../../ops-health.service";
+import { getOmsOpsHealth } from "../../application/ops-health.service";
 import { DROPSHIP_EBAY_PUBLISHED_OFFER_PUSH_IN_FLIGHT } from "../../../dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
-import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
+import { evaluateOmsOpsAlert } from "../../application/oms-ops-alert.service";
 
 // Fix PR 2a-2 (plan F2 2.7, Q1 default): the critical issue that reaches the ops
 // alert webhook when a managed Dropship eBay store has no single live destination.

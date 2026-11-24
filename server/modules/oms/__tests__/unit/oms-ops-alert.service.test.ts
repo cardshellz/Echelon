@@ -5,12 +5,12 @@ import {
   evaluateOmsOpsAlert,
   resetOmsOpsAlertStateForTests,
   sendOmsOpsAlert,
-} from "../../oms-ops-alert.service";
-import { getEbayOrderPollHeartbeat } from "../../ebay-order-poll-heartbeat";
-import { getOmsFlowReconciliationSchedulerHeartbeat } from "../../oms-flow-reconciliation.service";
-import { getOmsOpsAlertSchedulerHeartbeat } from "../../oms-ops-alert-heartbeat";
-import type { OmsOpsHealthSummary } from "../../ops-health.service";
-import { getWebhookRetryWorkerHeartbeat } from "../../webhook-retry.worker";
+} from "../../application/oms-ops-alert.service";
+import { getEbayOrderPollHeartbeat } from "../../application/ebay-order-poll-heartbeat";
+import { getOmsFlowReconciliationSchedulerHeartbeat } from "../../application/oms-flow-reconciliation.service";
+import { getOmsOpsAlertSchedulerHeartbeat } from "../../application/oms-ops-alert-heartbeat";
+import type { OmsOpsHealthSummary } from "../../application/ops-health.service";
+import { getWebhookRetryWorkerHeartbeat } from "../../application/webhook-retry.worker";
 
 function health(overrides: Partial<OmsOpsHealthSummary> = {}): OmsOpsHealthSummary {
   return {

@@ -5,7 +5,7 @@ import { Pool, type PoolClient } from "pg";
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
-import { loadArchonSnapshot } from "../server/modules/oms/archon-order-delivery";
+import { loadArchonSnapshot } from "../server/modules/oms/application/archon-order-delivery";
 const date = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/)

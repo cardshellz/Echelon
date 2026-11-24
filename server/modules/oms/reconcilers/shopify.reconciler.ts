@@ -8,11 +8,11 @@ import {
 import {
   handoffLegacyShipmentToChannelFulfillment,
   isChannelFulfillmentHandoffComplete,
-} from "../channel-fulfillment-authority.handoff";
-import type { ChannelFulfillmentIngressService } from "../channel-fulfillment-ingress.service";
-import { processShopifyFulfillmentIngress } from "../shopify-fulfillment-ingress.adapter";
-import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
-import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../channel-fulfillment-notification.policy";
+} from "../application/channel-fulfillment-authority.handoff";
+import type { ChannelFulfillmentIngressService } from "../application/channel-fulfillment-ingress.service";
+import { processShopifyFulfillmentIngress } from "../infrastructure/shopify-fulfillment-ingress.adapter";
+import type { ChannelFulfillmentAuthorityService } from "../application/channel-fulfillment-authority.service";
+import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../domain/channel-fulfillment-notification.policy";
 
 interface ShopifyFulfillmentStatusResponse {
   order?: {

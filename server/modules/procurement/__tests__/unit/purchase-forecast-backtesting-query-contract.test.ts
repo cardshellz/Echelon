@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(
-  resolve(process.cwd(), "server/modules/procurement/purchase-forecast-backtesting.repository.ts"),
+  resolve(process.cwd(), "server/modules/procurement/infrastructure/purchase-forecast-backtesting.repository.ts"),
   "utf8",
 );
 

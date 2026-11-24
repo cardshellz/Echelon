@@ -4,7 +4,7 @@ import {
   EbayTrackingConflictError,
   isEbayTrackingConflictError,
   recordEbayTrackingConflict,
-} from "../../channel-fulfillment-conflict";
+} from "../../application/channel-fulfillment-conflict";
 
 const INPUT = {
   omsOrderId: 244780,

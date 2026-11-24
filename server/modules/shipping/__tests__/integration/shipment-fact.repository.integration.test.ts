@@ -6,8 +6,8 @@ import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { ShipmentFactRepository } from "../../shipment-fact.repository";
-import type { ShipmentFact } from "../../shipment-fact.domain";
+import { ShipmentFactRepository } from "../../infrastructure/shipment-fact.repository";
+import type { ShipmentFact } from "../../domain/shipment-fact.domain";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

@@ -3,9 +3,9 @@ import {
   buildPackageHistory,
   packageHistoryNativeRevision,
   PackageHistoryError,
-} from "../../package-history.domain";
-import { PackageHistoryWorker } from "../../package-history.worker";
-import type { PackageHistoryStore } from "../../package-history.ports";
+} from "../../domain/package-history.domain";
+import { PackageHistoryWorker } from "../../application/package-history.worker";
+import type { PackageHistoryStore } from "../../application/package-history.ports";
 import { parsePackageHistoryBackfillOptions } from "../../../../../scripts/lib/package-history-backfill-options";
 
 import { historyFixture } from "../support/package-history-fixtures";

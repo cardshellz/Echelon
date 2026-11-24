@@ -3,9 +3,9 @@ import {
   admitEbayListingSyncProducts,
   type EbayListingSyncAdmissionDependencies,
   type EbayListingSyncAdmissionProduct,
-} from "../../ebay-listing-sync-admission";
-import { captureExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
-import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
+} from "../../application/ebay-listing-sync-admission";
+import { captureExistingEbayListingIdentity } from "../../application/ebay-existing-listing-identity";
+import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../domain/ebay-listing-sync.domain";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 
 const now = "2026-10-09T20:00:00.000Z";

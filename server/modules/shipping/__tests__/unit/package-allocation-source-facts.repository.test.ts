@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
-import { PackageAllocationSourceIdentityError } from "../../package-allocation-source-identity.domain";
-import { packageAllocationSourceFactsQuery, readPackageAllocationSourceFacts } from "../../package-allocation-source-facts.repository";
+import { PackageAllocationSourceIdentityError } from "../../domain/package-allocation-source-identity.domain";
+import { packageAllocationSourceFactsQuery, readPackageAllocationSourceFacts } from "../../infrastructure/package-allocation-source-facts.repository";
 
 const facts = {
   source_wms_shipment_item_id: 501, shipment_request_item_id: "9001",

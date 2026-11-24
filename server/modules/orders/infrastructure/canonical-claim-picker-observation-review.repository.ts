@@ -1,6 +1,6 @@
 import type {
   CanonicalClaimPickerObservationReviewPort,
-} from "../../inventory-planning/application/canonical-claim-picker-observation-review.port";
+} from "../../inventory-planning/canonical-claim-picker-observation-review.port.api";
 import { insertPickerObservationReviewAllocationExceptionInWms } from "../../wms/wms-order-mutations.api";
 
 function positiveInteger(value: number, field: string): number {

@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createHistoricalShipStationContentsClient,
   HistoricalShipStationContentsClientError,
-} from "../../historical-shipstation-contents-audit.client";
-import type { HistoricalShipStationExpectedContentsEvidence } from "../../historical-shipstation-contents-recovery.domain";
+} from "../../infrastructure/historical-shipstation-contents-audit.client";
+import type { HistoricalShipStationExpectedContentsEvidence } from "../../domain/historical-shipstation-contents-recovery.domain";
 
 const expectedContents: HistoricalShipStationExpectedContentsEvidence = {
   kind: "available",

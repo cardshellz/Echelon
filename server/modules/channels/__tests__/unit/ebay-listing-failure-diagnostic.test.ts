@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ebayListingFailureDiagnostic } from "../../ebay-listing-failure-diagnostic";
-import { syncFailure } from "../../ebay-listing-sync.domain";
+import { ebayListingFailureDiagnostic } from "../../application/ebay-listing-failure-diagnostic";
+import { syncFailure } from "../../domain/ebay-listing-sync.domain";
 
 describe("saved listing failure diagnostics", () => {
   it.each([

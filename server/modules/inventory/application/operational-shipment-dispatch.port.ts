@@ -1,4 +1,4 @@
-import type { InventoryAvailabilityTransactionQueryClient } from "../../inventory-planning/application/inventory-availability-transaction-query.port";
+import type { InventoryAvailabilityTransactionQueryClient } from "../../inventory-planning/inventory-availability-transaction-query.port.api";
 import type { OperationalShipmentRequest, OperationalShipmentResult, OperationalShipmentSource } from "../domain/operational-shipment-dispatch";
 export interface OperationalShipmentSourceOwner {
   lockSource(client: InventoryAvailabilityTransactionQueryClient, request: OperationalShipmentRequest): Promise<OperationalShipmentSource>;

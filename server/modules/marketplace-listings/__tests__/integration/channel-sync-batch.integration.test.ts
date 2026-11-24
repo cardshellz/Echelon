@@ -1,6 +1,6 @@
 import { ChannelListingSyncService } from "../../application/channel-listing-sync.service";
 import { EbayChannelListingSyncAdapter, syncResultForJob } from "../../../channels/adapters/ebay/ebay-channel-listing-sync.adapter";
-import { admitEbayPublication } from "../../../channels/ebay-publication-admission.service";
+import { admitEbayPublication } from "../../../channels/application/ebay-publication-admission.service";
 import {
   afterAll,
   beforeAll,
@@ -35,9 +35,9 @@ import {
   type SyncDestination,
 } from "../../domain/channel-sync-batch";
 import { PostgresEbayListingSyncRepository } from "../../../channels/infrastructure/ebay-listing-sync.repository";
-import { EbayListingSyncService } from "../../../channels/ebay-listing-sync.service";
+import { EbayListingSyncService } from "../../../channels/application/ebay-listing-sync.service";
 import { EbaySyncBatchAdapter } from "../../../channels/adapters/ebay/ebay-sync-batch.adapter";
-import { admitEbayListingSyncProducts } from "../../../channels/ebay-listing-sync-admission";
+import { admitEbayListingSyncProducts } from "../../../channels/application/ebay-listing-sync-admission";
 import { syncIdentity } from "../../../channels/__tests__/fixtures/ebay-listing-sync.fixture";
 vi.mock("../../../../db", () => ({ pool: {} }));
 const configured =

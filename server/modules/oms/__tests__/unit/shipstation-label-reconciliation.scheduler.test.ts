@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { startShipStationLabelReconciliationScheduler } from "../../shipstation-label-reconciliation.scheduler";
+import { startShipStationLabelReconciliationScheduler } from "../../application/shipstation-label-reconciliation.scheduler";
 afterEach(() => vi.useRealTimers());
 it("runs in a bounded independent lane, prevents overlap, and stops", async () => {
   vi.useFakeTimers();

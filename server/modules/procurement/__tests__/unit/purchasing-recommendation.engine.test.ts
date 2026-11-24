@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   generatePurchasingRecommendations,
   passesAutoDraftApprovalPolicy,
-} from "../../purchasing-recommendation.engine";
+} from "../../application/purchasing-recommendation.engine";
 // Type-only import: no runtime dependency on the context service (or the db it loads).
-import type { PurchasingRecommendationContext } from "../../purchasing-recommendation-context.service";
+import type { PurchasingRecommendationContext } from "../../application/purchasing-recommendation-context.service";
 
 describe("purchasing recommendation engine", () => {
   it("produces an explainable actionable recommendation using vendor lead time and per-piece ordering", () => {

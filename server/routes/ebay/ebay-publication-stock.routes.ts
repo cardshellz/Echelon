@@ -1,7 +1,7 @@
 import type { Router } from "express";
 import { z } from "zod";
 import { ebayPublicationStockResultSchema } from "@shared/types/ebay-publication-stock";
-import type { EbayPublicationStockService } from "../../modules/channels/ebay-publication-stock.service";
+import type { EbayPublicationStockService } from "../../modules/channels/application/ebay-publication-stock.service";
 import { requireAuth, requirePermission } from "../middleware";
 import { listingFailure, listingFailureStatus } from "./ebay-listing-errors";
 const productIdSchema = z.coerce.number().int().positive().max(2147483647);

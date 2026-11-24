@@ -4,9 +4,9 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { WalmartChannelService } from "./walmart-channel.service";
 import type { WalmartOrderPollService } from "./walmart-order-poll.service";
 import { WalmartApiError } from "./walmart-client";
-import type { ChannelCatalogDirectory } from "../../channel-catalog.routes";
-import { sendCatalogError } from "../../channel-catalog.routes";
-import { ChannelIdentityError } from "../../channel-identity.domain";
+import type { ChannelCatalogDirectory } from "../../interfaces/http/channel-catalog.routes";
+import { sendCatalogError } from "../../interfaces/http/channel-catalog.routes";
+import { ChannelIdentityError } from "../../domain/channel-identity.domain";
 import { walmartMappingSchema } from "@shared/types/walmart-channel";
 
 export function registerWalmartChannelRoutes(app: Express): void {

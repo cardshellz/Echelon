@@ -17,7 +17,7 @@ vi.mock("../../../middleware", () => ({
   requireAuth: vi.fn(),
   requirePermission: () => vi.fn(),
 }));
-vi.mock("../../../../modules/channels/ebay-business-policies", () => ({
+vi.mock("../../../../modules/channels/application/ebay-business-policies", () => ({
   ebayBusinessPolicies: { resolveProductPolicies: ports.resolvePolicies },
 }));
 import { registerEbayListingRulesRoutes } from "../../../ebay-listing-rules.routes";

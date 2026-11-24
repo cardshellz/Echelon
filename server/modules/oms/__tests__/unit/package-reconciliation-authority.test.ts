@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
-import { applyPackageReconciliation, type PackageReconciliationCommand } from "../../package-reconciliation.repository";
+import { applyPackageReconciliation, type PackageReconciliationCommand } from "../../infrastructure/package-reconciliation.repository";
 
 const command: PackageReconciliationCommand = {
   commandKey: "test-adoption", expectedSnapshotHash: "a".repeat(64), expectedPlanHash: "b".repeat(64),

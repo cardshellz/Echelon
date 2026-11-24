@@ -11,7 +11,7 @@ import {
   hasChosenReceiveVariant,
   isOpenPoLine,
   isProductPoLine,
-} from "../../receive-configuration-policy";
+} from "../../application/receive-configuration-policy";
 
 describe("receive configuration policy", () => {
   describe("hasChosenReceiveVariant", () => {

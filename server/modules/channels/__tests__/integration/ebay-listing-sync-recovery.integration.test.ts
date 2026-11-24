@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import { ChannelProviderReadError, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 import type { Pool } from "pg";
-import { EbayListingRecoveryService } from "../../ebay-listing-recovery.service";
+import { EbayListingRecoveryService } from "../../application/ebay-listing-recovery.service";
 import { PostgresEbayListingRecoveryContinuation } from "../../infrastructure/ebay-listing-recovery-continuation";
 import { EbayAutomaticPublicationRecoveryService } from "../../../inventory-planning/application/ebay-automatic-publication-recovery.service";
 import { PostgresEbayAutomaticPublicationRecoveryRepository } from "../../../inventory-planning/infrastructure/ebay-automatic-publication-recovery.repository";
@@ -41,7 +41,7 @@ import { PostgresEbayListingSyncRepository } from "../../infrastructure/ebay-lis
 import {
   EbayListingSyncService,
   EbayExistingListingSyncExecution,
-} from "../../ebay-listing-sync.service";
+} from "../../application/ebay-listing-sync.service";
 import {
   EbayMarketplaceListingConnector,
   type EbayListingLifecycleClient,
@@ -50,18 +50,18 @@ import {
   executeAdmittedEbayQuantityRequest,
   type EbayQuantityRequestAdmission,
   type EbayQuantityHttpRequest,
-} from "../../quantity-publication-request";
+} from "../../application/quantity-publication-request";
 import { executeEbayQuantityHttp } from "../../adapters/ebay/ebay-quantity-http";
 import {
   syncIdentity,
   syncProviderFixture,
 } from "../fixtures/ebay-listing-sync.fixture";
-import { EbayListingSyncError, type EbayListingSyncIdentity, type StoredEbayListingSyncJob } from "../../ebay-listing-sync.domain";
-import { resolveExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
-import { hasOutstandingEbayListingWork } from "../../channel-stock-selection";
+import { EbayListingSyncError, type EbayListingSyncIdentity, type StoredEbayListingSyncJob } from "../../domain/ebay-listing-sync.domain";
+import { resolveExistingEbayListingIdentity } from "../../application/ebay-existing-listing-identity";
+import { hasOutstandingEbayListingWork } from "../../channel-stock-selection.api";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 import { publicationCompletionFixture } from "../fixtures/ebay-publication-completion.fixture";
-import { buildEbayRouteListingDraft } from "../../ebay-listing-draft";
+import { buildEbayRouteListingDraft } from "../../application/ebay-listing-draft";
 import { prepareEbayListingPackages } from "../../adapters/ebay/ebay-listing-package";
 import { EBAY_US_STANDARD_PACKAGE_TYPE } from "../../adapters/ebay/ebay-package-classification";
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";

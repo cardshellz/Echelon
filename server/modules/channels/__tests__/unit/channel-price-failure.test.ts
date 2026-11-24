@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ChannelPricingResolutionError } from "../../channel-pricing-resolver";
-import { syncFailure } from "../../ebay-listing-sync.domain";
+import { ChannelPricingResolutionError } from "../../application/channel-pricing-resolver";
+import { syncFailure } from "../../domain/ebay-listing-sync.domain";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 
 describe("price source failures through the existing sync owner", () => {

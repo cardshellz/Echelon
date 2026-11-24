@@ -30,12 +30,12 @@ describe("non-stock items (track_inventory=false)", () => {
   });
 
   it("reservation skips untracked variants", () => {
-    const src = read("../../../channels/reservation.service.ts");
+    const src = read("../../../channels/application/reservation.service.ts");
     expect(src).toContain("variant.trackInventory === false");
   });
 
   it("catalog import delegates tracking policy to Catalog and excludes untracked inventory imports", () => {
-    const src = read("../../../channels/catalog-backfill.service.ts");
+    const src = read("../../../channels/application/catalog-backfill.service.ts");
     // Import behavior for product defaults, explicit overrides, digital variants,
     // and replay is exercised against PostgreSQL in inventory-tracking-policy.integration.test.ts.
     expect(src).toContain("shopifyVariant.requires_shipping !== false");

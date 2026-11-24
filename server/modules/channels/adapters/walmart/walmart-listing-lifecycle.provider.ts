@@ -1,7 +1,7 @@
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
-import type { ListingLifecycleProvider } from "../../../marketplace-listings/application/listing-lifecycle-ports";
-import { listingAccountKey } from "../../../marketplace-listings/domain/listing-publication";
-import type { InventoryPublicationTargetVariantHoldService } from "../../../inventory-planning/application/inventory-publication-target-variant-hold.service";
+import type { ListingLifecycleProvider } from "../../../marketplace-listings/listing-lifecycle-ports.api";
+import { listingAccountKey } from "../../../marketplace-listings/listing-publication.api";
+import type { InventoryPublicationTargetVariantHoldService } from "../../../inventory-planning/inventory-publication-target-variant-hold.service.api";
 import {
   walmartListingAccount,
   type WalmartChannelService,

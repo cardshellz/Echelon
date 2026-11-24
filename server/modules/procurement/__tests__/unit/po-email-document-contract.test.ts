@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inspectPoEmailDocument, poEmailDocumentHash } from "../../po-email-document-contract";
+import { inspectPoEmailDocument, poEmailDocumentHash } from "../../application/po-email-document-contract";
 
 describe("supplier email document content verification", () => {
   const html = "<html>Supplier quote — café 📦</html>";

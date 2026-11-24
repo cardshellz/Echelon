@@ -44,7 +44,7 @@ function readShipStationSource(): string {
         .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
     : [];
   return [
-    readFileSync(resolve(__dirname, "../../shipstation.service.ts"), "utf-8"),
+    readFileSync(resolve(__dirname, "../../application/shipstation.service.ts"), "utf-8"),
     ...subFiles,
   ].join("\n");
 }
@@ -53,7 +53,7 @@ import {
   createShipStationService,
   type ManualShipmentContentsAuthority,
   type ManualShipmentNotificationInput,
-} from "../../shipstation.service";
+} from "../../application/shipstation.service";
 
 // ─── Mock helpers ────────────────────────────────────────────────────
 

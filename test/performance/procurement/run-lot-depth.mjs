@@ -40,7 +40,7 @@ try {
   report.identity=fixture.identity;report.schema=await fixture.metadata();
   await fixture.readOnly(true);
   const before=await fixture.fingerprint();
-  const {loadProcurementHealthSummary}=await load('server/modules/procurement/procurement-health-summary.service.ts');
+  const {loadProcurementHealthSummary}=await load('server/modules/procurement/application/procurement-health-summary.service.ts');
   const {inventoryStorage}=await load('server/modules/inventory/index.ts');
   const owners=[
     ['landed-health',()=>fixture.harness.shipment.getLandedCostHealth({limit:250})],

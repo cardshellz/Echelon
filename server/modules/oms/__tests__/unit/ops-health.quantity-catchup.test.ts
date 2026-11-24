@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { QUANTITY_CATCHUP_HEALTH_CHECKS, quantityCatchupHealthChecks } from "../../../inventory-planning/quantity-catchup-health.api";
-import { getOmsOpsHealth } from "../../ops-health.service";
-import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
+import { getOmsOpsHealth } from "../../application/ops-health.service";
+import { evaluateOmsOpsAlert } from "../../application/oms-ops-alert.service";
 
 // Channels PR5 (PLAN-CH-v3 section 6 Ops Health): OMS embeds inventory planning's published catch-up checks. The SQL
 // runs against PostgreSQL in quantity-publication-catchup-parking.integration.test.ts.

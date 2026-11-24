@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ChannelProviderReadError } from "@shared/channel-provider-read";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
 import type { EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 
 const offerSchema = z.object({

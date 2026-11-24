@@ -12,12 +12,12 @@ import { Pool } from "pg";
 
 import { createAuthorityAwareInventoryAtpService } from "../server/modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { createAuthorityAwareInventoryPublicationService } from "../server/modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
-import { createAllocationEngine } from "../server/modules/channels/allocation-engine.service";
-import { createSourceLockService } from "../server/modules/channels/source-lock.service";
+import { createAllocationEngine } from "../server/modules/channels/application/allocation-engine.service";
+import { createSourceLockService } from "../server/modules/channels/application/source-lock.service";
 import { createShopifyAdapter } from "../server/modules/channels/adapters/shopify.adapter";
-import { ChannelAdapterRegistry } from "../server/modules/channels/channel-adapter.interface";
-import { createChannelProductPushService } from "../server/modules/channels/product-push.service";
-import { createEchelonSyncOrchestrator } from "../server/modules/channels/echelon-sync-orchestrator.service";
+import { ChannelAdapterRegistry } from "../server/modules/channels/domain/channel-adapter.interface";
+import { createChannelProductPushService } from "../server/modules/channels/application/product-push.service";
+import { createEchelonSyncOrchestrator } from "../server/modules/channels/application/echelon-sync-orchestrator.service";
 
 async function main() {
   const databaseUrl = process.env.DATABASE_URL;

@@ -7,10 +7,10 @@ function readNormalizedSource(path: string): string {
 }
 
 const storageSource = readNormalizedSource(
-  resolve(__dirname, "../../procurement.storage.ts"),
+  resolve(__dirname, "../../infrastructure/procurement.storage.ts"),
 );
 const handoffRepositorySource = readNormalizedSource(
-  resolve(__dirname, "../../recommendation-po-handoff.repository.ts"),
+  resolve(__dirname, "../../infrastructure/recommendation-po-handoff.repository.ts"),
 );
 
 describe("supplier quote recommendation query", () => {

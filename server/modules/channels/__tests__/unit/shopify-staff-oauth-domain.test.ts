@@ -7,7 +7,7 @@ import {
   parseAndVerifyShopifyStaffOAuthCallback,
   parseShopifyStaffOAuthConfig,
 } from "../../domain/shopify-staff-oauth";
-import { ShopifyStaffOAuthError } from "../../shopify-staff-oauth.types";
+import { ShopifyStaffOAuthError } from "../../domain/shopify-staff-oauth.types";
 
 const env = { SHOPIFY_API_KEY: "fixture-client", SHOPIFY_API_SECRET: "fixture-secret-only" };
 const config = parseShopifyStaffOAuthConfig(env);

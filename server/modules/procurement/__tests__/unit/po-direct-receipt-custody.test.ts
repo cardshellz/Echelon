@@ -3,7 +3,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { assertPoDirectCustodyAdmission, inspectPoDirectCustodyEvidence, PoDirectCustodySourceError,
   type PoDirectCustodyObservation, type PoDirectCustodyAcceptance, type PoDirectCustodyEvidence,
   type PoDirectReceiptLine, type PoDirectUnidentifiedAcceptance } from "../../domain/po-direct-receipt-custody";
-import { assertPoDirectReceiptCustodyAdmission, readPoDirectCustodySources } from "../../po-direct-receipt-custody.repository";
+import { assertPoDirectReceiptCustodyAdmission, readPoDirectCustodySources } from "../../infrastructure/po-direct-receipt-custody.repository";
 
 function observation(changes: Partial<PoDirectCustodyObservation> = {}): PoDirectCustodyObservation {
   return { id: 90, receivingOrderId: 60, receivingLineId: 70, purchaseOrderId: 10, inboundShipmentId: null,

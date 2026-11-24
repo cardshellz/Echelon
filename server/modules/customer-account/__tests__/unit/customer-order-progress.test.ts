@@ -3,7 +3,7 @@ import { customerOrderProgressSchema } from "@shared/customer-account/order-prog
 import {
   presentCarrierPackageStatus,
   presentCustomerDelivery,
-} from "../../../shipping/customer-delivery-progress";
+} from "../../../shipping/domain/customer-delivery-progress";
 import {
   presentCustomerReturn,
   presentCustomerReturnRefund,

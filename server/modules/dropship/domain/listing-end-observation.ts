@@ -1,4 +1,4 @@
-import type { EbayListingInspection } from "../../marketplace-listings/domain/ebay-listing-inspection";
+import type { EbayListingInspection } from "../../marketplace-listings/ebay-listing-inspection.api";
 import { classifyInspectionIssue, LISTING_END_CODES, type ListingEndFailure } from "./listing-end-errors";
 
 /**

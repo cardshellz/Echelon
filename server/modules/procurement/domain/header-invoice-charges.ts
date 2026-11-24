@@ -1,6 +1,6 @@
 import type { SupplierHeaderSource, SupplierHeaderShare } from "@shared/procurement/supplier-header-costs";
 import { readIntegerCents } from "@shared/money-read";
-import { CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { CostEvidenceError } from "../../inventory/cost-evidence-values.api";
 
 /** The bill line stays unchanged. Its explicitly allocated header share is
  * accepted by the same shipment-charge writer as a regular freight review. */

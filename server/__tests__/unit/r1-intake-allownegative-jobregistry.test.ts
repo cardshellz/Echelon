@@ -30,7 +30,7 @@ describe("Batch R-1 — P3.1 Cancel/Refund Adapter Wiring, P0.8 3PL Shortfall Cl
   });
 
   describe("P3.1 — Shopify orders/cancelled and refunds/create route through ChannelOrderAdapter", () => {
-    const omsWebhooksSrc = readRepoFile("server/modules/oms/oms-webhooks.ts");
+    const omsWebhooksSrc = readRepoFile("server/modules/oms/application/oms-webhooks.ts");
     const adapter = createShopifyOrderIntakeAdapter();
 
     it("wires shopifyOrderIntakeAdapter.normalizeCancel in orders/cancelled and normalizeRefund in refunds/create", () => {

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import { createReservationService } from "../../../channels/reservation.service";
+import { createReservationService } from "../../../channels/application/reservation.service";
 import { InventoryAvailabilityClaimService } from "../../application/inventory-availability-claim.service";
 import * as claimExecutionApi from "../../claim-execution.api";
 import * as cutoverRetiredWorkApi from "../../cutover-retired-work.api";
@@ -99,7 +99,7 @@ describe("Priority 6 Batch PLAN-2: Inventory-Planning API Boundaries, Reservatio
         "utf8",
       );
       const wmsSyncSrc = fs.readFileSync(
-        path.resolve(process.cwd(), "server/modules/oms/wms-sync.service.ts"),
+        path.resolve(process.cwd(), "server/modules/oms/application/wms-sync.service.ts"),
         "utf8",
       );
       const repairSrc = fs.readFileSync(
@@ -112,8 +112,8 @@ describe("Priority 6 Batch PLAN-2: Inventory-Planning API Boundaries, Reservatio
 
       expect(runtimeClaimServiceSrc).toContain('from "../reservation-authority.api"');
       expect(runtimeClaimServiceSrc).not.toContain("channels/reservation.service");
-      expect(wmsSyncSrc).toContain('from "../inventory-planning/reservation-authority.api"');
-      expect(wmsSyncSrc).not.toContain('from "../channels/reservation.service"');
+      expect(wmsSyncSrc).toContain('from "../../inventory-planning/reservation-authority.api"');
+      expect(wmsSyncSrc).not.toContain("channels/reservation.service");
       expect(repairSrc).toContain('from "../../inventory-planning/reservation-authority.api"');
       expect(repairSrc).not.toContain("channels/reservation.service");
     });

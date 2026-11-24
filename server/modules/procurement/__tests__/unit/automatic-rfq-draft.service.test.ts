@@ -3,7 +3,7 @@ import {
   createAutomaticRfqDraftService,
   normalizeAutomaticRfqDraftPolicy,
   planAutomaticRfqDrafts,
-} from "../../automatic-rfq-draft.service";
+} from "../../application/automatic-rfq-draft.service";
 
 function recommendation(overrides: Record<string, unknown> = {}) {
   return {

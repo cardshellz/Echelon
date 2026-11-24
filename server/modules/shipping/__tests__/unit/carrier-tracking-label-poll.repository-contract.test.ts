@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repositorySource = readFileSync(
-  join(here, "..", "..", "carrier-tracking.repository.ts"),
+  join(here, "..", "..", "infrastructure/carrier-tracking.repository.ts"),
   "utf8",
 );
 const migrationSource = readFileSync(

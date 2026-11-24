@@ -5,7 +5,7 @@ import type { Pool } from "pg";
 import { vi } from "vitest";
 import { installEbayPublicationInventoryFixture } from "./ebay-publication-inventory.fixture";
 import { WALMART_INVENTORY_NOW } from "./walmart-publication-inventory.fixture";
-import { captureEbayListingSourceIdentity, resolveExistingEbayListingIdentity } from "../../../channels/ebay-existing-listing-identity";
+import { captureEbayListingSourceIdentity, resolveExistingEbayListingIdentity } from "../../../channels/application/ebay-existing-listing-identity";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 import type { EbayRegistrationReadTransport } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
 import { ensureEbayPublicationReady } from "../../infrastructure/ebay-publication-readiness.repository";

@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import * as schema from "@shared/schema";
 import { defaultPurchasePlanningPolicy } from "@shared/procurement/purchase-planning-policy";
 import { fixtureForeignKeys, fixtureTable } from "./shipment-line-fixture";
-import { DEFAULT_PURCHASING_FORECAST_POLICY } from "../../purchasing-forecast-policy";
+import { DEFAULT_PURCHASING_FORECAST_POLICY } from "../../application/purchasing-forecast-policy";
 
 // Only replace the application database handle and the separate planning-policy
 // service. The storage methods, canonical resolver, SQL and transactions are real.
@@ -15,7 +15,7 @@ const runtime = vi.hoisted(() => ({
   afterResolution: undefined as (() => Promise<void>) | undefined,
 }));
 vi.mock("../../../../db", () => ({ get db() { return runtime.database; } }));
-vi.mock("../../purchase-planning-policy.runtime", () => ({
+vi.mock("../../application/purchase-planning-policy.runtime", () => ({
   getPurchasePlanningPolicyService: () => ({
     read: async () => ({ policy: defaultPurchasePlanningPolicy(), revision: 12 }),
   }),
@@ -33,8 +33,8 @@ vi.mock("../../../warehouse/settings.api", async (importOriginal) => {
     },
   };
 });
-import { procurementMethods } from "../../procurement.storage";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import { procurementMethods } from "../../infrastructure/procurement.storage";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

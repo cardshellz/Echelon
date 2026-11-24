@@ -33,7 +33,7 @@ vi.mock("../../ebay-utils", () => ({
   atpService: { getAtpPerVariant: fixture.quantityRead },
   ebayListingPhotoResolver: { resolve: fixture.resolvePhotos },
 }));
-vi.mock("../../../../modules/channels/ebay-business-policies", () => ({ ebayBusinessPolicies: { resolveProductPolicies: fixture.resolvePolicies } }));
+vi.mock("../../../../modules/channels/application/ebay-business-policies", () => ({ ebayBusinessPolicies: { resolveProductPolicies: fixture.resolvePolicies } }));
 import { registerEbaySettingsRoutes } from "../../../ebay-settings.routes";
 
 type Handler = (request: Request, response: Response) => Promise<void>;

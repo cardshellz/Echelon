@@ -1,6 +1,6 @@
-import { protectEbayPolicyWriteBoundary } from "../../../channels/interfaces/ebay-policy-write-boundary";
+import { protectEbayPolicyWriteBoundary } from "../../../channels/ebay-policy-write-boundary.api";
 import type { Express, Response } from "express";
-import { sendInventoryQuantityError, validateInventoryCommandKey } from "../../../inventory/interfaces/quantity-command.middleware";
+import { sendInventoryQuantityError, validateInventoryCommandKey } from "../../../inventory/quantity-command.middleware.api";
 import { CatalogInventoryCommandError } from "../../application/catalog-inventory-command.service";
 import { createCatalogInventoryCommandService } from "../../infrastructure/catalog-inventory-command.repository";
 import { renameDerivedVariantSkus } from "../../application/product-sku-rename";
@@ -1552,12 +1552,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const productId = parseInt(req.params.productId);
       const vendorId = req.query.vendorId ? parseInt(req.query.vendorId as string) : undefined;
       const variants = await storage.getProductVariantsByProductId(productId);
-      
+
       if (vendorId && !isNaN(vendorId)) {
         // Look up vendor products to get vendor-specific pricing
         const vendorProducts = await req.app.locals.services.purchasing.getVendorProducts({ vendorId, productId });
         const enrichedVariants = variants.map(v => {
-          const vp = vendorProducts.find((vp: any) => vp.productVariantId === v.id) || 
+          const vp = vendorProducts.find((vp: any) => vp.productVariantId === v.id) ||
                      vendorProducts.find((vp: any) => vp.productVariantId === null);
           return {
             ...v,

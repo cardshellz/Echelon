@@ -7,7 +7,7 @@ import {
   type DropshipEbayStockReadinessInput,
   type DropshipEbayStockReadinessResult,
 } from "../../inventory-planning/quantity-publication.api";
-import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/domain/listing-registration-plan";
+import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/listing-registration-plan.api";
 import { DropshipError } from "../domain/errors";
 import {
   STOCK_LINK_MAX_ATTEMPTS,

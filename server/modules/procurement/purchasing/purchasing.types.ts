@@ -2,8 +2,8 @@ import type { CommandAuthorityActor, PurchaseApprovalActor } from "../../identit
 import type { ProcurementSettingsSnapshot } from "@shared/procurement/procurement-settings";
 import type { PoLineType, PoPhysicalStatus } from "@shared/schema/procurement.schema";
 import type { PoLinePricingInput } from "@shared/utils/po-line-pricing";
-import type { PurchaseOrderEntryTransaction } from "../purchase-order-entry.repository";
-import type { RfqAllocationOverrideEvidence } from "../purchasing-rfq-allocation";
+import type { PurchaseOrderEntryTransaction } from "../infrastructure/purchase-order-entry.repository";
+import type { RfqAllocationOverrideEvidence } from "../application/purchasing-rfq-allocation";
 
 export const PG_INTEGER_MAX = 2_147_483_647;
 export const MAX_INLINE_PO_LINES = 2_000;

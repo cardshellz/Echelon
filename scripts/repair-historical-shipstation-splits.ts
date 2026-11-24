@@ -5,8 +5,8 @@ import {
   runHistoricalShipStationSplitRepair,
   type HistoricalSplitRepairFlags,
   type HistoricalSplitRepairMode,
-} from "../server/modules/oms/historical-shipstation-split-repair.service";
-import type { ShipStationShipment } from "../server/modules/oms/shipstation.service";
+} from "../server/modules/oms/application/historical-shipstation-split-repair.service";
+import type { ShipStationShipment } from "../server/modules/oms/application/shipstation.service";
 
 const DEFAULT_LIMIT = 25;
 const DEFAULT_CONCURRENCY = 2;
@@ -370,7 +370,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     { createShipStationTrackingEventsClient },
   ] = await Promise.all([
     import("../server/db"),
-    import("../server/modules/oms/historical-shipstation-split-repair.repository"),
+    import("../server/modules/oms/infrastructure/historical-shipstation-split-repair.repository"),
     import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
     import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
     import("../server/modules/shipping/shipstation-tracking-transport.api"),

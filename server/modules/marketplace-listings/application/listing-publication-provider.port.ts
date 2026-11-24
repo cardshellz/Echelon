@@ -8,8 +8,8 @@ import type {
   ListingTaxonomy,
 } from "@shared/types/channel-listing-publication";
 import type { ChannelCatalogItem } from "@shared/types/channel-catalog";
-import { ChannelProviderError } from "../../channels/channel-provider.error";
-import type { ListingSetupIntent } from "../../inventory-planning/application/listing-setup-intent";
+import { ChannelProviderError } from "../../channels/channel-provider.error.api";
+import type { ListingSetupIntent } from "../../inventory-planning/listing-setup-intent.api";
 
 /** Only adapter evidence may distinguish a terminal rejection from an unknown write. */
 export class ListingSubmissionError extends ChannelProviderError {

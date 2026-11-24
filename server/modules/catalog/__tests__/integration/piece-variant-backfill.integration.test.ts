@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { planReceiptUnits } from "../../../procurement/receiving-unit-contract";
+import { planReceiptUnits } from "../../../procurement/application/receiving-unit-contract";
 import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,

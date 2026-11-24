@@ -2,10 +2,10 @@ import type {
   IChannelAdapter, ChannelListingPayload, PricingPushItem, ChannelOrder,
   FulfillmentPayload, CancellationPayload, InventoryPushItem, InventoryPushResult,
   InventoryReadItem, InventoryReadResult, InventoryPublicationContext,
-} from "../../channel-adapter.interface";
+} from "../../domain/channel-adapter.interface";
 import { WalmartChannelService, walmartListingAccount } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";
-import type { InventoryPublicationSupplyReader } from "../../../inventory-planning/application/inventory-publication-supply-read.port";
+import type { InventoryPublicationSupplyReader } from "../../../inventory-planning/inventory-publication-supply-read.port.api";
 
 export class WalmartAdapter implements IChannelAdapter {
   readonly adapterName = "Walmart US";

@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { readChannelStockSelection } from "../../channel-stock-selection";
+import { readChannelStockSelection } from "../../channel-stock-selection.api";
 import { EbayListingChangeIntentRepository } from "../../infrastructure/ebay-listing-change-intent.repository";
 
 // The real migration, so its constraints and partial unique index are what the repository is tested against.

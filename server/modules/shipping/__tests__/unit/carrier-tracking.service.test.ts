@@ -3,16 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   normalizeShipStationTrackingWebhook,
   type NormalizedCarrierTrackingEvent,
-} from "../../carrier-tracking.domain";
+} from "../../domain/carrier-tracking.domain";
 import type {
   CarrierTrackingRepository,
   CarrierTrackingTransaction,
   StoredCarrierTrackingReconciliationEvent,
-} from "../../carrier-tracking.repository";
-import { CarrierDispatchAuthorityError } from "../../carrier-dispatch-authority";
-import { CarrierTrackingService, type CarrierTrackingLogger } from "../../carrier-tracking.service";
-import { ShipStationTrackingEventsError } from "../../shipstation-tracking-events.client";
-import { ShipStationTrackingSubscriptionError } from "../../shipstation-tracking-subscriptions.client";
+} from "../../infrastructure/carrier-tracking.repository";
+import { CarrierDispatchAuthorityError } from "../../application/carrier-dispatch-authority";
+import { CarrierTrackingService, type CarrierTrackingLogger } from "../../application/carrier-tracking.service";
+import { ShipStationTrackingEventsError } from "../../infrastructure/shipstation-tracking-events.client";
+import { ShipStationTrackingSubscriptionError } from "../../infrastructure/shipstation-tracking-subscriptions.client";
 
 const now = new Date("2026-07-20T12:00:00.000Z");
 

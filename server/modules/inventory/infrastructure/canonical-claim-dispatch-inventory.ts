@@ -7,7 +7,7 @@ import type {
   CanonicalClaimInventoryDispatchPort,
   CanonicalClaimInventoryDispatchResult,
   CanonicalClaimTransactionClient,
-} from "../../inventory-planning/application/canonical-claim-inventory.port";
+} from "../../inventory-planning/canonical-claim-inventory.port.api";
 
 const MAX_COST_ROWS = 10_000;
 const POSTGRES_INTEGER_MAX = BigInt(2_147_483_647);

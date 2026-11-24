@@ -12,8 +12,8 @@ import {
   ShipStationTransientError,
   SS_RATE_LIMITED,
   SS_REQUEST_TIMEOUT,
-} from "../../shipstation-api-request";
-import { SS_PUSH_INVALID_SHIPMENT } from "../../shipstation.service";
+} from "../../application/shipstation-api-request";
+import { SS_PUSH_INVALID_SHIPMENT } from "../../application/shipstation.service";
 
 type ScriptedResponse =
   | { status: 429; reset?: string; retryAfter?: string }

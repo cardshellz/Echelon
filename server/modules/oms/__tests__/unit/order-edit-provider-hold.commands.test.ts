@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   retireOrderEditProviderHolds,
   transferOrderEditProviderHolds,
-} from "../../order-edit-provider-hold.commands";
+} from "../../application/order-edit-provider-hold.commands";
 
 const fromOperationId = "00000000-0000-4000-8000-000000000001";
 const toOperationId = "00000000-0000-4000-8000-000000000002";

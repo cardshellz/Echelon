@@ -44,7 +44,7 @@ describe("verified opening evidence migration contract", () => {
     const manifest = new Set<string>([...INVENTORY_CUTOVER_CONFIGURATION_TABLES, ...INVENTORY_CUTOVER_OPERATIONAL_TABLES]);
     const files = ["inventory/infrastructure/inventory-cutover-reconstruction.reader.ts",
       "inventory/infrastructure/inventory-cutover-encumbrance.repository.ts", "wms/infrastructure/inventory-cutover-reconstruction.reader.ts",
-      "oms/inventory-cutover-reconstruction.reader.ts", "orders/infrastructure/inventory-cutover-reconstruction-cost.reader.ts"];
+      "oms/infrastructure/inventory-cutover-reconstruction.reader.ts", "orders/infrastructure/inventory-cutover-reconstruction-cost.reader.ts"];
     const missing = files.flatMap(file => {
       const source = readFileSync(resolve(process.cwd(), "server/modules", file), "utf8");
       return [...source.matchAll(/\b(?:FROM|JOIN)\s+((?:inventory|wms|oms|warehouse|catalog)\.[a-z_]+)/gi)]

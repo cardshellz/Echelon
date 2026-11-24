@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const source = fs.readFileSync(
-  resolve(__dirname, "../../flow-waterfall.service.ts"),
+  resolve(__dirname, "../../application/flow-waterfall.service.ts"),
   "utf8",
 );
 

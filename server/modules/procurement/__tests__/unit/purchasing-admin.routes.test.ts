@@ -33,7 +33,7 @@ vi.mock("../../../../modules/catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
-vi.mock("../../purchasing.service", () => ({
+vi.mock("../../application/purchasing.service", () => ({
   PurchasingError: class PurchasingError extends Error {
     statusCode: number;
     details?: Record<string, unknown>;
@@ -46,8 +46,8 @@ vi.mock("../../purchasing.service", () => ({
   },
 }));
 
-import { registerPurchasingAdminRoutes } from "../../purchasing-admin.routes";
-import { PurchasingError } from "../../purchasing.service";
+import { registerPurchasingAdminRoutes } from "../../interfaces/http/purchasing-admin.routes";
+import { PurchasingError } from "../../application/purchasing.service";
 
 function buildPurchasingMock(overrides: Record<string, any> = {}) {
   return {

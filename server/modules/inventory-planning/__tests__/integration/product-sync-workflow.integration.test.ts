@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { createStockLinkDatabase, createLiveShopifyTarget, installStockLinkConnectionColumns,
   installStockLinkTickColumns, addShopifyFeed, readStockLinkCheck } from "../fixtures/stock-link.fixture";
-import { createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source";
+import { createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source.api";
 import { createChannelEbayStockLinkSource } from "../../../channels/infrastructure/ebay-stock-link-source";
 import type { StockLinkAdapter } from "../../application/stock-link.ports";
 import type { StockLinkStoreItem } from "@shared/types/stock-link";

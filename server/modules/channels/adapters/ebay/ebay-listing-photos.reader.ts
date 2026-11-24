@@ -1,6 +1,6 @@
 import type { EbayInventoryItem, EbayInventoryItemGroup } from "./ebay-types";
-import type { EbayPhotoVariant, EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
-import { assertEbayPhotoUrl, assertEbayPhotoVariants } from "../../ebay-listing-photos.domain";
+import type { EbayPhotoVariant, EbayListingPhotoPlan } from "../../domain/ebay-listing-photos.domain";
+import { assertEbayPhotoUrl, assertEbayPhotoVariants } from "../../domain/ebay-listing-photos.domain";
 
 export interface EbayListingPhotoReadClient {
   getInventoryItem(sku: string): Promise<EbayInventoryItem | null>;

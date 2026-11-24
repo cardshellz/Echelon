@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findEbaySyncContentMismatch, syncContentIntentHash } from "../../ebay-listing-sync-content";
+import { findEbaySyncContentMismatch, syncContentIntentHash } from "../../application/ebay-listing-sync-content";
 import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 
 describe("eBay content intent and readback", () => {

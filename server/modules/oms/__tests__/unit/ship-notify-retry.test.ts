@@ -91,11 +91,11 @@ import {
   dispatchShopifyFulfillmentRetry,
   dispatchDelayedTrackingPush,
   dispatchEbayWebhookRetry,
-} from "../../webhook-retry.worker";
-import { ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../shipstation.service";
+} from "../../application/webhook-retry.worker";
+import { ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../application/shipstation.service";
 
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
-  resolve(__dirname, "../../webhook-retry.worker.ts"),
+  resolve(__dirname, "../../application/webhook-retry.worker.ts"),
   "utf8",
 );
 
@@ -2239,7 +2239,7 @@ describe("dispatchShopifyFulfillmentRetry :: canonical adoption", () => {
 
   it("keeps the worker error-code literal aligned with the provider adapter", () => {
     const fulfillmentPushSource = readFileSync(
-      resolve(__dirname, "../../fulfillment-push.service.ts"),
+      resolve(__dirname, "../../application/fulfillment-push.service.ts"),
       "utf8",
     );
     const exported = fulfillmentPushSource.match(

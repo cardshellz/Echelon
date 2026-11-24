@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { buildSupplierPoDocument } from "../../server/modules/procurement/supplier-po-document";
-import { renderPoHtml } from "../../server/modules/procurement/po-document";
+import { buildSupplierPoDocument } from "../../server/modules/procurement/application/supplier-po-document";
+import { renderPoHtml } from "../../server/modules/procurement/application/po-document";
 import { supplierDocumentSource } from "../../server/modules/procurement/__tests__/fixtures/supplier-po-document.fixture";
 import { installFixtures, po } from "./procurement-fixtures";
 

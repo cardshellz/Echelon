@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EbayExistingListingSyncExecution, EbayListingSyncService, type EbayListingExecutionContext,
-  type EbayListingSyncStore } from "../../ebay-listing-sync.service";
-import { storedEbayListingSyncJobSchema, syncFailure } from "../../ebay-listing-sync.domain";
+  type EbayListingSyncStore } from "../../application/ebay-listing-sync.service";
+import { storedEbayListingSyncJobSchema, syncFailure } from "../../domain/ebay-listing-sync.domain";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import { syncIdentity, syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 

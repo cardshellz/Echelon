@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { HmacDropshipOAuthStateSigner } from "../../infrastructure/dropship-oauth-state-signer";
 import { DropshipStoreConnectionService } from "../../application/dropship-store-connection-service";
 import { createDropshipPartnerOrderIntakeAdapter } from "../../oms-channel-resolver.api";
-import { ChannelOrderBoundaryValidationError } from "../../../channels/channel-adapter.interface";
+import { ChannelOrderBoundaryValidationError } from "../../../channels/domain/channel-adapter.interface";
 import { paginateEbayFulfillmentOrders } from "../../../channels/ebay-connector.api";
 
 const REPO_ROOT = path.resolve(__dirname, "../../../../..");

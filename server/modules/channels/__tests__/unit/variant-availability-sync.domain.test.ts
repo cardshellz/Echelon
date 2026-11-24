@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveVariantAvailabilityTarget } from "../../variant-availability-sync.domain";
+import { resolveVariantAvailabilityTarget } from "../../domain/variant-availability-sync.domain";
 
 const ELIGIBLE_INPUT = {
   desiredActive: true,

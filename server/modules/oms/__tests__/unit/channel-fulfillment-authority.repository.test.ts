@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createChannelFulfillmentAuthorityRepository,
   type MaterializePhysicalPackageInput,
-} from "../../channel-fulfillment-authority.repository";
+} from "../../infrastructure/channel-fulfillment-authority.repository";
 
 const dialect = new PgDialect();
 

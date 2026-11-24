@@ -3,10 +3,10 @@ import type { InclusionSyncHandoff } from "./ebay-inclusion-sync";
 import { z } from "zod";
 import { ebayProductExclusionRequestSchema, ebayProductExclusionResultSchema, type EbayProductExclusionResult } from "@shared/types/ebay-listing-exclusion";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
-import { setCatalogEbayProductExclusion } from "../../catalog/domain/channel-listing-intent";
-import { EbayListingSyncError, type EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
+import { setCatalogEbayProductExclusion } from "../../catalog/channel-listing-intent.api";
+import { EbayListingSyncError, type EbayListingSyncIdentity } from "../domain/ebay-listing-sync.domain";
 import { PostgresEbayListingSyncRepository } from "./ebay-listing-sync.repository";
-import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE as lockNamespace, ebayListingWorkflowLockKey } from "../ebay-listing-workflow-lock";
+import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE as lockNamespace, ebayListingWorkflowLockKey } from "../application/ebay-listing-workflow-lock";
 
 const idSchema = z.number().int().positive().max(2_147_483_647);
 interface ExclusionReceipt {

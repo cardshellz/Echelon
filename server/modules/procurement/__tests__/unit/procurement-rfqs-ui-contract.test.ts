@@ -12,14 +12,14 @@ const readSource = (relativePath: string): string =>
 
 const page = readSource("client/src/pages/ProcurementRfqs.tsx");
 const panel = readSource("client/src/features/purchasing/RfqWorkflowPanel.tsx");
-const workflowRoutes = readSource("server/modules/procurement/rfq-workflow.routes.ts");
+const workflowRoutes = readSource("server/modules/procurement/interfaces/http/rfq-workflow.routes.ts");
 const app = readSource("client/src/App.tsx");
-const routes = readSource("server/modules/procurement/purchasing-recommendation.routes.ts");
-const rfqService = readSource("server/modules/procurement/purchasing-rfq.service.ts");
+const routes = readSource("server/modules/procurement/interfaces/http/purchasing-recommendation.routes.ts");
+const rfqService = readSource("server/modules/procurement/application/purchasing-rfq.service.ts");
 const commandClient = readSource("client/src/lib/rfq-command.ts");
 const commandHook = readSource("client/src/features/purchasing/use-rfq-commands.ts");
 const listContract = readSource("shared/procurement/rfq-work-list.ts");
-const listRepository = readSource("server/modules/procurement/rfq-work-list.repository.ts");
+const listRepository = readSource("server/modules/procurement/infrastructure/rfq-work-list.repository.ts");
 const reorderEnginePage = readSource("client/src/pages/ReorderEngine.tsx");
 const automationPage = readSource("client/src/pages/ProcurementAutomation.tsx");
 const runsPage = readSource("client/src/pages/ProcurementRuns.tsx");

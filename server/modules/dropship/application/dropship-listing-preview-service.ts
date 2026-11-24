@@ -1,4 +1,4 @@
-import { EBAY_LISTING_MAX_PHOTOS } from "../../channels/ebay-listing-photos.domain";
+import { EBAY_LISTING_MAX_PHOTOS } from "../../channels/ebay-listing-photos.domain.api";
 import { createHash } from "crypto";
 import { listingPriceFollowsRules, resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import { decideDropshipListingAccess } from "../../../../shared/dropship/listing-access";
@@ -8,11 +8,11 @@ import type { ResolvedListingContent } from "../../../../shared/dropship/listing
 import type { EbayCategorySource } from "../../../../shared/dropship/ebay-category-rules";
 import { z } from "zod";
 import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
-import type { CatalogImageFile } from "../../catalog/infrastructure/catalog-media.reader";
+import type { CatalogImageFile } from "../../catalog/catalog-media.reader.api";
 import type {
   CatalogVariantPublicationPhotoReader,
   CatalogVariantPublicationPhotos,
-} from "../../catalog/infrastructure/catalog-publication-images.reader";
+} from "../../catalog/catalog-publication-images.reader.api";
 import { enrichDropshipListingRows, type DropshipListingPresentationDependencies } from "./dropship-listing-presentation";
 import type {
   DropshipSourcePlatform,

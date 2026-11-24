@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
+import { storedEbayListingSyncJobSchema } from "../../domain/ebay-listing-sync.domain";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -47,8 +47,8 @@ vi.mock("../../../inventory-planning/application/quantity-publication", () => ({
     constructor(readonly code: string, message: string) { super(message); }
   },
 }));
-vi.mock("../../ebay-listing-sync.service", async importOriginal => {
-  const actual = await importOriginal<typeof import("../../ebay-listing-sync.service")>();
+vi.mock("../../application/ebay-listing-sync.service", async importOriginal => {
+  const actual = await importOriginal<typeof import("../../application/ebay-listing-sync.service")>();
   return { ...actual, EbayListingSyncService: class {
     async enqueue(identity: { productId: number }, actor: string, key: string) {
       fixture.queued.push({ identity, actor, key });

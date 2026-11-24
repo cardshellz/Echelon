@@ -1,6 +1,6 @@
 import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import type { Page } from "@playwright/test";
-import { generatePurchasingRecommendations } from "../../server/modules/procurement/purchasing-recommendation.engine";
+import { generatePurchasingRecommendations } from "../../server/modules/procurement/application/purchasing-recommendation.engine";
 import { defaultPurchasePlanningPolicy } from "../../shared/procurement/purchase-planning-policy";
 import { installFixtures } from "./procurement-fixtures";
 import { forecastBacktestReportSchema, purchaseRecommendationPipelineHealthSchema } from "../../client/src/features/purchasing/forecastBacktesting";

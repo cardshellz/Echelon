@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createShipStationLabelReconciliationClient, shipStationQueryDate } from "../../shipstation-label-reconciliation.client";
-import type { ShipStationApiRequester } from "../../shipstation-api-request";
+import { createShipStationLabelReconciliationClient, shipStationQueryDate } from "../../infrastructure/shipstation-label-reconciliation.client";
+import type { ShipStationApiRequester } from "../../application/shipstation-api-request";
 
 const label = { shipmentId: 460595426, orderId: 790960007, orderKey: "echelon-wms-shp-17763", orderNumber: "63261 / 63300",
   carrierCode: "fedex", serviceCode: "fedex_ground", trackingNumber: "877510065050", shipmentCost: 0,

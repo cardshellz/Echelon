@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PoFinancialEvidenceInput } from "../../domain/po-financial-evidence";
-import { createPurchaseOrderListService } from "../../purchase-order-list.service";
+import { createPurchaseOrderListService } from "../../application/purchase-order-list.service";
 
 function harness(count = 3) {
   const rows = Array.from({ length: count }, (_, index) => ({ id: index + 1, financialStatus: "paid", paidTotalCents: 999 }));

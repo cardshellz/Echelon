@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import type { RetainedPublicationEffectEvidence, ReconciliationContentVerification } from "../../../inventory-planning/domain/publication-recovery-evidence";
-import { syncIdentityHash, type EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
+import type { RetainedPublicationEffectEvidence, ReconciliationContentVerification } from "../../../inventory-planning/publication-recovery-evidence.api";
+import { syncIdentityHash, type EbayListingSyncIdentity } from "../../domain/ebay-listing-sync.domain";
 import { buildEbayQuantityUpdateRequest } from "./ebay-quantity-update";
 
 /** eBay's bulk endpoint also accepts prices. A request is stock-only only when

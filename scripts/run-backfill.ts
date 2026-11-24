@@ -4,7 +4,7 @@
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import { createCatalogBackfillService } from "../server/modules/channels/catalog-backfill.service";
+import { createCatalogBackfillService } from "../server/modules/channels/application/catalog-backfill.service";
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes("--dry-run");
@@ -43,7 +43,7 @@ async function main() {
     console.log("\n=== BACKFILL RESULTS ===");
     console.log(`Products: ${result.products.created} created, ${result.products.updated} updated, ${result.products.skipped} skipped, ${result.products.failed} failed (${result.products.total} total)`);
     console.log(`Variants: ${result.variants.created} created, ${result.variants.updated} updated, ${result.variants.skipped} skipped, ${result.variants.failed} failed (${result.variants.total} total)`);
-    
+
     if (result.inventory) {
       console.log(`Inventory: ${result.inventory.imported} imported, ${result.inventory.skipped} skipped (had Echelon data), ${result.inventory.noShopifyData} no Shopify data`);
     }

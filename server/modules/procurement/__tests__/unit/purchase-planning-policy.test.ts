@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { defaultPurchasePlanningPolicy, parsePurchasePlanningPolicy, purchasePlanningPolicySchema } from "@shared/procurement/purchase-planning-policy";
-import { generatePurchasingRecommendations, type PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
-import { buildPurchasingForecastPolicyCohort } from "../../purchasing-forecast-policy";
-import { buildPurchaseForecastObservations } from "../../purchase-recommendation-snapshot.service";
+import { generatePurchasingRecommendations, type PurchasingRecommendationRawRow } from "../../application/purchasing-recommendation.engine";
+import { buildPurchasingForecastPolicyCohort } from "../../application/purchasing-forecast-policy";
+import { buildPurchaseForecastObservations } from "../../application/purchase-recommendation-snapshot.service";
 
 const row: PurchasingRecommendationRawRow = { product_id: 10, variant_id: 100, base_sku: "STOCK", product_name: "Stock item", total_pieces: 100, total_reserved_pieces: 0, total_outbound_pieces: 300, previous_outbound_pieces: 300,
   demand_order_count: 20, demand_active_days: 15, latest_demand_at: "2026-09-01", vendor_lead_time_days: 30, safety_stock_days: 5, on_order_pieces: 0, inbound_schedule: [], preferred_vendor_id: 5, vendor_product_id: 50, vendor_pack_size: 24, vendor_moq: 100 };

@@ -42,8 +42,8 @@ import { db } from "../server/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { omsOrderLines } from "@shared/schema/oms.schema";
 import { createServices } from "../server/services";
-import { deriveOmsLineAuthority } from "../server/modules/oms/oms-line-authority";
-import { recordOmsLineAuthorityEvent } from "../server/modules/oms/oms-line-authority-ledger";
+import { deriveOmsLineAuthority } from "../server/modules/oms/application/oms-line-authority";
+import { recordOmsLineAuthorityEvent } from "../server/modules/oms/application/oms-line-authority-ledger";
 
 interface CliOptions {
   apply: boolean;

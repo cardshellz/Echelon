@@ -30,7 +30,7 @@ import {
   type WmsShipmentRow,
   type WmsOrderRow,
   type WmsShipmentItemRow,
-} from "../../shipstation.service";
+} from "../../application/shipstation.service";
 
 // ─── Fixtures ────────────────────────────────────────────────────────
 
@@ -2088,7 +2088,7 @@ describe("pushShipment :: never sends a zeroed line to ShipStation", () => {
           .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
       : [];
     const src = [
-      readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf-8"),
+      readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf-8"),
       ...subFiles,
     ].join("\n");
     expect(src).toMatch(/COALESCE\(\$\{wmsOrderItems\.requiresShipping\}, 1\) = 1/);

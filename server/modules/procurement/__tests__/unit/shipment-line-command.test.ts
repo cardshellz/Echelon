@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { shipmentLineFromPoSchema, shipmentLinePatchSchema, shipmentLineDeleteSchema, shipmentPackingListImportSchema, shipmentPackingListRowSchema } from "@shared/procurement/shipment-line-command";
-import { computeShipmentLinePhysicalTotals, validateShipmentPhysicalTotals } from "../../shipment-line-physical-values";
-import { shipmentLineVersion } from "../../shipment-line-version";
-import { classifyShipmentLineCommandFailure, createShipmentLineCommands, shipmentLineCommandScope } from "../../shipment-line-commands";
-import { ShipmentSourceCapacityError } from "../../shipment-source-capacity";
+import { computeShipmentLinePhysicalTotals, validateShipmentPhysicalTotals } from "../../application/shipment-line-physical-values";
+import { shipmentLineVersion } from "../../application/shipment-line-version";
+import { classifyShipmentLineCommandFailure, createShipmentLineCommands, shipmentLineCommandScope } from "../../application/shipment-line-commands";
+import { ShipmentSourceCapacityError } from "../../application/shipment-source-capacity";
 
 const version = "a".repeat(64);
 describe("shipment line input boundary", () => {

@@ -35,47 +35,47 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../db", () => ({ db: mocks.db }));
-vi.mock("../../../modules/procurement/procurement.storage", () => ({
+vi.mock("../../../modules/procurement/infrastructure/procurement.storage", () => ({
   procurementMethods: mocks.procurement,
 }));
 vi.mock("../../../modules/inventory", () => ({
   inventoryStorage: mocks.inventory,
 }));
-vi.mock("../../../modules/procurement/purchasing-recommendation-context.service", () => ({
+vi.mock("../../../modules/procurement/application/purchasing-recommendation-context.service", () => ({
   loadPurchasingRecommendationContext: mocks.context.load,
 }));
-vi.mock("../../../modules/procurement/recommendation-po-handoff.repository", () => ({
+vi.mock("../../../modules/procurement/infrastructure/recommendation-po-handoff.repository", () => ({
   createDrizzleRecommendationPoHandoffRepository: () => ({}),
 }));
-vi.mock("../../../modules/procurement/auto-draft-run-lifecycle.repository", () => ({
+vi.mock("../../../modules/procurement/infrastructure/auto-draft-run-lifecycle.repository", () => ({
   createDrizzleAutoDraftRunLifecycleRepository: () => ({}),
 }));
-vi.mock("../../../modules/procurement/auto-draft-run-lifecycle.service", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../modules/procurement/auto-draft-run-lifecycle.service")>();
+vi.mock("../../../modules/procurement/application/auto-draft-run-lifecycle.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../modules/procurement/application/auto-draft-run-lifecycle.service")>();
   return {
     ...actual,
     createAutoDraftRunLifecycleService: () => mocks.lifecycle,
   };
 });
-vi.mock("../../../modules/procurement/recommendation-po-handoff.service", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../modules/procurement/recommendation-po-handoff.service")>();
+vi.mock("../../../modules/procurement/application/recommendation-po-handoff.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../modules/procurement/application/recommendation-po-handoff.service")>();
   return {
     ...actual,
     createRecommendationPoHandoffService: () => mocks.handoff,
   };
 });
-vi.mock("../../../modules/procurement/auto-draft-po-escalation.service", () => ({
+vi.mock("../../../modules/procurement/application/auto-draft-po-escalation.service", () => ({
   runStaleAutoDraftPoEscalationCheck: mocks.stalePoEscalation.run,
 }));
-vi.mock("../../../modules/procurement/purchase-recommendation-snapshot.service", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../modules/procurement/purchase-recommendation-snapshot.service")>();
+vi.mock("../../../modules/procurement/application/purchase-recommendation-snapshot.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../modules/procurement/application/purchase-recommendation-snapshot.service")>();
   return {
     ...actual,
     createPurchaseRecommendationSnapshotService: () => mocks.recommendationSnapshot,
   };
 });
-vi.mock("../../../modules/procurement/automatic-rfq-draft.service", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../modules/procurement/automatic-rfq-draft.service")>();
+vi.mock("../../../modules/procurement/application/automatic-rfq-draft.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../modules/procurement/application/automatic-rfq-draft.service")>();
   return {
     ...actual,
     createAutomaticRfqDraftService: () => mocks.automaticRfqDraft,

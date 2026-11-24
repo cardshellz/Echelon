@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { shipmentEditorApprovalSchema, shipmentEditorRequestSchema } from "@shared/procurement/shipment-editor";
 import { poQuantityPreviewRequestSchema } from "@shared/procurement/po-quantity-amendment";
-import { shipmentEditorBlockedReason, sumShipmentCents } from "../../shipment-editor.policy";
+import { shipmentEditorBlockedReason, sumShipmentCents } from "../../domain/shipment-editor.policy";
 import { shipmentLinePackingSchema } from "@shared/procurement/shipment-line-command";
 
 const version = "a".repeat(64), clientKey = "8e6c61fe-bd54-4a16-b547-f8d8c7ed6124";

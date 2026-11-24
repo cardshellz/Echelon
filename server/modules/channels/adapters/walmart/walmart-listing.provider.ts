@@ -1,4 +1,4 @@
-import { limitPublicationMediaPlan, resolveExplicitPublicationMediaPlan } from "../../../catalog/domain/catalog-publication-media";
+import { limitPublicationMediaPlan, resolveExplicitPublicationMediaPlan } from "../../../catalog/catalog-publication-media.api";
 import { prepareWalmartChannelIntent, assertWalmartPreparedIntent } from "./walmart-prepared-intent";
 import { z } from "zod";
 import {
@@ -13,8 +13,8 @@ import type {
   ListingPublicationProvider,
   PreparedListingItem,
   ListingSubmissionObservation,
-} from "../../../marketplace-listings/application/listing-publication-provider.port";
-import { ListingSubmissionError } from "../../../marketplace-listings/application/listing-publication-provider.port";
+} from "../../../marketplace-listings/listing-publication-provider.port.api";
+import { ListingSubmissionError } from "../../../marketplace-listings/listing-publication-provider.port.api";
 import { WalmartChannelService } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";
 import {
@@ -43,7 +43,7 @@ import {
 import {
   assertListingSetupAdmission,
   type ListingSetupIntent,
-} from "../../../inventory-planning/application/listing-setup-intent";
+} from "../../../inventory-planning/listing-setup-intent.api";
 
 type SchemaCacheEntry = WalmartListingSchema & {
   validate: ReturnType<typeof compileListingSchema>;

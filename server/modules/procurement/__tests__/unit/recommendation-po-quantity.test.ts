@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRecommendationPoQuantity } from "../../recommendation-po-quantity";
+import { resolveRecommendationPoQuantity } from "../../application/recommendation-po-quantity";
 
 describe("resolveRecommendationPoQuantity", () => {
   it("keeps PO order quantity in base pieces while preserving the receive configuration", () => {

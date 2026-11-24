@@ -48,7 +48,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", async () => {
   ebayApiRequestWithRateNotify: (method: string, path: string, _token: string, body: unknown) => runtime.provider!.request({ method, path, body }),
   };
 });
-vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn(() => {
+vi.mock("../../ebay-listing-sync.api", () => ({ readExistingEbayListingIdentityForProduct: vi.fn(() => {
   throw new Error("Unpublished preparation must not use the published-listing reader.");
 }) }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () => {
@@ -63,10 +63,10 @@ vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () =>
 });
 
 import { prepareEbayPublicationCompletion, readEbayPublicationSource } from "../../infrastructure/ebay-listing-push";
-import { assertEbayListingSourceIdentityUnchanged } from "../../ebay-existing-listing-identity";
-import { syncContentIntentHash } from "../../ebay-listing-sync-content";
-import { ebayBusinessPolicies } from "../../ebay-business-policies";
-import { assertEbayPreparedIntent } from "../../ebay-prepared-intent";
+import { assertEbayListingSourceIdentityUnchanged } from "../../application/ebay-existing-listing-identity";
+import { syncContentIntentHash } from "../../application/ebay-listing-sync-content";
+import { ebayBusinessPolicies } from "../../application/ebay-business-policies";
+import { assertEbayPreparedIntent } from "../../application/ebay-prepared-intent";
 
 function expectPreparedOwnerContract(draft: Awaited<ReturnType<typeof prepareEbayPublicationCompletion>>["draft"]): void {
   expect(draft.preparedIntent).toBeDefined();

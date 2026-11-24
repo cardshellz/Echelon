@@ -5,7 +5,7 @@ import {
   evaluateChannelFulfillmentWritebackPolicy,
   resolveChannelWritebackProvider,
   type ChannelFulfillmentWritebackPolicyInput,
-} from "../../channel-fulfillment-authority.policy";
+} from "../../domain/channel-fulfillment-authority.policy";
 
 function input(
   overrides: Partial<ChannelFulfillmentWritebackPolicyInput> = {},

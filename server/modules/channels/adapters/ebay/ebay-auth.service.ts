@@ -15,7 +15,7 @@ import { eq, and, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { ebayOauthTokens } from "@shared/schema";
 import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
-import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
+import { ChannelFulfillmentProviderError } from "../../domain/channel-fulfillment-provider.error";
 
 // ---------------------------------------------------------------------------
 // Types

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ChannelFulfillmentIngressInput } from "../../channel-fulfillment-ingress";
-import type { ChannelFulfillmentIngressRepository, IngressInventoryItem, PreparedChannelFulfillmentReceipt } from "../../channel-fulfillment-ingress.repository";
-import { createChannelFulfillmentIngressService } from "../../channel-fulfillment-ingress.service";
+import type { ChannelFulfillmentIngressInput } from "../../application/channel-fulfillment-ingress";
+import type { ChannelFulfillmentIngressRepository, IngressInventoryItem, PreparedChannelFulfillmentReceipt } from "../../infrastructure/channel-fulfillment-ingress.repository";
+import { createChannelFulfillmentIngressService } from "../../application/channel-fulfillment-ingress.service";
 
 const now = new Date("2026-09-07T20:00:00.000Z");
 const input: ChannelFulfillmentIngressInput = {

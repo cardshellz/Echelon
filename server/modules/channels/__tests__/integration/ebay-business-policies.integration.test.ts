@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { EBAY_POLICY_FIELDS, EMPTY_EBAY_POLICIES, type EbayPolicyValues } from "@shared/ebay-business-policies";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { createEbayBusinessPolicyService, type EbayPolicyTarget } from "../../ebay-business-policies.service";
+import { createEbayBusinessPolicyService, type EbayPolicyTarget } from "../../application/ebay-business-policies.service";
 import { PgEbayBusinessPolicyRepository } from "../../infrastructure/ebay-business-policies.repository";
 import { EbayBusinessPolicyProvider } from "../../infrastructure/ebay-business-policies.provider";
 import { ebayBusinessPolicyFixtureSql, ebayBusinessPolicySeedSql, ebayPolicyScope, ebayPolicyTime,

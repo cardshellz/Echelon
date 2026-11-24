@@ -2,11 +2,11 @@ import { readFileSync } from "node:fs";
 import { beforeAll, afterAll, expect, it } from "vitest";
 import { describeWithDisposableDb, getTestPool, closeTestDb } from "../../../../../test/setup-integration";
 import { WalmartConnectionRepository } from "../../adapters/walmart/walmart-connection.repository";
-import { PostgresChannelCatalogRepository } from "../../channel-catalog.repository";
+import { PostgresChannelCatalogRepository } from "../../infrastructure/channel-catalog.repository";
 import { AesGcmFulfillmentProviderCredentialCipher } from "../../../shipping-engine/infrastructure/fulfillment-provider-credential-cipher";
 import { parseWalmartOrder } from "../../adapters/walmart/walmart-us-api";
 import { mapWalmartOrder, mapWalmartOrderObservation } from "../../adapters/walmart/walmart-order.domain";
-import { PostgresChannelOrderObservationWriter } from "../../../oms/channel-order-observation.repository";
+import { PostgresChannelOrderObservationWriter } from "../../../oms/infrastructure/channel-order-observation.repository";
 import { PostgresInventoryPublicationSupplyReader } from "../../../inventory-planning/infrastructure/inventory-publication-supply-read.repository";
 import { walmartOrderFixture } from "../unit/walmart-fixture";
 

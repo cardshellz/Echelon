@@ -25,7 +25,7 @@ import {
 import { isVendorRelistAllowed } from "../domain/marketplace-push-rule";
 import { MARKETPLACE_SYNC_CODES } from "../domain/marketplace-sync-errors";
 import { MARKETPLACE_PUSH_STOP_WORDS } from "../domain/marketplace-sync-words";
-import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
+import { QuantityPublicationAdmissionError } from "../../inventory-planning/quantity-publication-admission-domain.api";
 import { hasMarketplaceListing } from "../domain/listing-live-status";
 import { decideLiveListingZeroQuantityUpdate } from "../domain/live-listing-zero-quantity";
 import {

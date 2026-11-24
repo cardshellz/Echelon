@@ -1,8 +1,8 @@
 import { sql } from "drizzle-orm";
-import { buildTrackingUrl } from "../tracking-url.util";
+import { buildTrackingUrl } from "../application/tracking-url.util";
 import type { ShipmentEvent } from "../../orders/shipment-rollup-and-context.api";
-import { resolveShipStationShipmentTimestamp } from "../shipstation-date.util";
-import { partitionCommercialRequestedQuantity } from "../shipstation-commercial-quantity.domain";
+import { resolveShipStationShipmentTimestamp } from "../domain/shipstation-date.util";
+import { partitionCommercialRequestedQuantity } from "../domain/shipstation-commercial-quantity.domain";
 import { parseProviderAmountCents } from "../../shipping/engine-and-reconcile.api";
 import {
   adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms,
@@ -18,7 +18,7 @@ import {
 import {
   recordShipStationUnmappedPhysicalException,
   shipStationShipmentRefFromExternalFulfillmentId,
-} from "../shipstation-unmapped-physical";
+} from "../application/shipstation-unmapped-physical";
 import { isPositivePostgresInteger } from "../../shipping/shipstation-provider-reconciliation.api";
 import {
   SHIPSTATION_CARRIER_COST_SOURCE,

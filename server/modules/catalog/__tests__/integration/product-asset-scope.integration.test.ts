@@ -12,7 +12,7 @@ import { type FinancialCommandDescriptor } from "../../../../platform/commands/t
 import { createProductAssetScopeService } from "../../application/product-asset-scope.service";
 import { createCatalogPublicImageUrl } from "../../domain/catalog-public-image";
 import { PgCatalogVariantPublicationPhotoReader } from "../../infrastructure/catalog-publication-images.reader";
-import { ChannelEbayListingPhotoResolver } from "../../../channels/ebay-listing-photos.service";
+import { ChannelEbayListingPhotoResolver } from "../../../channels/application/ebay-listing-photos.service";
 import { executeMigrationWithRetry } from "../../../../../migrations/migration-executor";
 
 // Never connect the application singleton to a production DATABASE_URL.

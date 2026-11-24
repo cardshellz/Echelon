@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { initializeSourceLockDefaults, initializeAllChannelDefaults } from "../../source-lock-init";
+import { initializeSourceLockDefaults, initializeAllChannelDefaults } from "../../application/source-lock-init";
 
 // ---------------------------------------------------------------------------
 // Mocks

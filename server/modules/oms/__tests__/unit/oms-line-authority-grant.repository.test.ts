@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { DROPSHIP_ACCEPTANCE_AUTHORITY_TOPIC } from "../../oms-line-authority";
+import { DROPSHIP_ACCEPTANCE_AUTHORITY_TOPIC } from "../../application/oms-line-authority";
 import {
   dropshipAcceptanceAuthorityEventId,
   grantDropshipAcceptanceLineAuthorityWithClient,
   OmsLineAuthorityGrantError,
   type OmsLineAuthorityGrantClient,
-} from "../../oms-line-authority-grant.repository";
+} from "../../infrastructure/oms-line-authority-grant.repository";
 
 const ACCEPTED_AT = new Date("2026-10-03T15:42:09.000Z");
 const SOURCE_EVENT_ID = "dropship-acceptance:intake:43";

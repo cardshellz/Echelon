@@ -8,8 +8,8 @@ import {
   translateEbayConnectorError,
 } from "../../infrastructure/dropship-ebay-connector-errors";
 import { DropshipError } from "../../domain/errors";
-import { EbayListingSyncError } from "../../../channels/ebay-listing-sync.domain";
-import { QuantityProviderRequestTimeoutError } from "../../../channels/provider-request-limits";
+import { EbayListingSyncError } from "../../../channels/domain/ebay-listing-sync.domain";
+import { QuantityProviderRequestTimeoutError } from "../../../channels/application/provider-request-limits";
 import { ChannelProviderReadError, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 
 /** Codes the shared connector and identity observer can raise on the Dropship push. */

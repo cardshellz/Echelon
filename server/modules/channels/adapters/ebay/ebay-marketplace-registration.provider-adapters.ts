@@ -1,8 +1,8 @@
 import type {
   MarketplaceListingProviderAccountClaim,
   MarketplaceListingProviderAccountClaimer,
-} from "../../../marketplace-listings/application/registration-ports";
-import type { ProviderAccountClaimResult } from "../../../marketplace-listings/application/registration-dtos";
+} from "../../../marketplace-listings/registration-ports.api";
+import type { ProviderAccountClaimResult } from "../../../marketplace-listings/registration-dtos.api";
 import {
   buildEbayProviderAccountEvidenceHash,
   ebayProviderAccountNamespace,
@@ -11,9 +11,9 @@ import {
 } from "../../../marketplace-listings/ebay-registration.api";
 import {
   MARKETPLACE_PROVIDER_IDENTITY_SCHEME,
-} from "../../../marketplace-listings/domain/listing-registration-plan";
-import { MarketplaceListingRegistrationError } from "../../../marketplace-listings/domain/registration-errors";
-import type { ListingOwnerRef } from "../../../marketplace-listings/domain/listing-replacement-plan";
+} from "../../../marketplace-listings/listing-registration-plan.api";
+import { MarketplaceListingRegistrationError } from "../../../marketplace-listings/registration-errors.api";
+import type { ListingOwnerRef } from "../../../marketplace-listings/listing-replacement-plan.api";
 import type {
   EbayAuthService,
   EbayObservedProviderAccount,

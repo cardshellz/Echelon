@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const read = (p: string) =>
   readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
 const INDEX_SRC = read("../../../../index.ts");
-const INGEST_SRC = read("../../ebay-order-ingestion.ts");
+const INGEST_SRC = read("../../application/ebay-order-ingestion.ts");
 
 describe("P0.6 — eBay real-time intake", () => {
   it("webhook routes are public — eBay cannot hold a session", () => {

@@ -58,13 +58,13 @@ import type {
   CanonicalClaimCursor,
   InventoryAvailabilityRuntimeClaimContext,
   InventoryAvailabilityRuntimeClaimExecutor,
-} from "../../inventory-planning/application/inventory-availability-runtime-claim.service";
+} from "../../inventory-planning/inventory-availability-runtime-claim.service.api";
 import {
   claimCanonicalOrderForConfirmedShipment,
   claimCanonicalOrderForPick,
   displaceClaimsForConfirmedShipment,
   refreshCanonicalClaimSupply,
-} from "../../inventory-planning/application/inventory-availability-runtime-claim.service";
+} from "../../inventory-planning/inventory-availability-runtime-claim.service.api";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../../wms/pick-corrections-and-holds.api";
 import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./confirmed-pick-shipment";

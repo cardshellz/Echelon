@@ -23,8 +23,8 @@ vi.mock("../../../../platform/observability/logger", () => ({
   logger: { debug: vi.fn(), info: harness.info, warn: harness.warn, error: vi.fn() },
 }));
 
-import { WmsSyncService } from "../../wms-sync.service";
-import type { LegacyMemberMatch } from "../../member-resolver-dry-run";
+import { WmsSyncService } from "../../application/wms-sync.service";
+import type { LegacyMemberMatch } from "../../application/member-resolver-dry-run";
 
 const DROPSHIP_OMS_CHANNEL_ID = 103;
 const SHOPIFY_CHANNEL_ID = 36;

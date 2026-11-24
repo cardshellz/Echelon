@@ -20,13 +20,13 @@ import { registerBuildRoutes } from "./modules/inventory/interfaces/http/build.r
 import { registerNotificationRoutes } from "./modules/notifications";
 import { registerFinanceAnalyticsRoutes } from "./modules/oms/channel-order-intake.api";
 import { registerWalmartChannelRoutes } from "./modules/channels/adapters/walmart/walmart.routes";
-import { registerChannelCatalogRoutes } from "./modules/channels/channel-catalog.routes";
+import { registerChannelCatalogRoutes } from "./modules/channels/interfaces/http/channel-catalog.routes";
 import { registerListingPublicationRoutes } from "./modules/marketplace-listings/interfaces/http/listing-publication.routes";
 import { registerListingUpdateRoutes } from "./modules/marketplace-listings/interfaces/http/listing-update.routes";
 import { registerListingLifecycleRoutes } from "./modules/marketplace-listings/interfaces/http/listing-lifecycle.routes";
 import { registerInventoryPublicationMembershipRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-membership.routes";
 import { registerInventoryPublicationInitialScopeRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-initial-scope.routes";
-import { registerChannelRoutes } from "./modules/channels/channels.routes";
+import { registerChannelRoutes } from "./modules/channels/interfaces/http/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/routes.api";
 import { registerPickZoneRoutes } from "./modules/warehouse/routes.api";
 import {
@@ -43,7 +43,7 @@ import { router as ebayTaxonomyRouter } from "./routes/ebay/ebay-taxonomy.routes
 import { router as ebayListingsRouter } from "./routes/ebay/ebay-listings.routes";
 import { router as ebayPricingRouter } from "./routes/ebay/ebay-pricing.routes";
 import { router as ebayPoliciesRouter } from "./routes/ebay/ebay-policies.routes";
-import { registerSyncControlRoutes } from "./modules/channels/sync-control.routes";
+import { registerSyncControlRoutes } from "./modules/channels/interfaces/http/sync-control.routes";
 import { registerOmsRoutes } from "./routes/oms.routes";
 import {
   registerSubscriptionWebhookRoutes,

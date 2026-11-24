@@ -16,7 +16,7 @@ const repository = source(
   "server",
   "modules",
   "shipping",
-  "package-allocation-ledger.repository.ts",
+  "infrastructure/package-allocation-ledger.repository.ts",
 );
 const integrationSetup = source("test", "setup-integration.ts");
 const normalizedMigration = migration.replace(/\s+/g, " ").trim();

@@ -4,9 +4,9 @@ import { CostEvidenceError } from "../../../inventory/infrastructure/cost-eviden
 import { z } from "zod";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { type FinancialCommandDescriptor, type FinancialCommandRepository, type FinancialCommandResult } from "../../../../platform/commands/transactional-command.service";
-import { ReceiptReversalError, type ReceiptReversalTransaction } from "../../receipt-reversal.service";
+import { ReceiptReversalError, type ReceiptReversalTransaction } from "../../application/receipt-reversal.service";
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
-import { createReceiptReversalCommands, hashReceiptReversalCommandIdentity, receiptReversalCommandScope, receiptReversalStorageKey, RECEIPT_REVERSAL_COMMAND_PRINCIPAL } from "../../receipt-reversal.commands";
+import { createReceiptReversalCommands, hashReceiptReversalCommandIdentity, receiptReversalCommandScope, receiptReversalStorageKey, RECEIPT_REVERSAL_COMMAND_PRINCIPAL } from "../../application/receipt-reversal.commands";
 
 const actorId = "review-operator";
 const body = { qty: 2, reason: "Correct recorded receipt" };

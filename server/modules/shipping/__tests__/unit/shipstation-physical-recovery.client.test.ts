@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createShipStationPhysicalRecoveryClient,
   parseWmsShipmentItemIdentity,
-} from "../../shipstation-physical-recovery.client";
+} from "../../infrastructure/shipstation-physical-recovery.client";
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {

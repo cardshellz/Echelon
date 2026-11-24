@@ -3,7 +3,7 @@ import type { PurchaseOrder, PurchaseOrderLine } from "@shared/schema";
 import {
   computeShipmentSourceCapacity, lockShipmentSourceCapacity, readShipmentSourceCapacities, getShippablePurchaseOrderLines, ShipmentSourceCapacityError,
   type ShipmentCapacityCommitment, type ShipmentCapacityReceipt, type ShipmentCapacityReversal,
-} from "../../shipment-source-capacity";
+} from "../../application/shipment-source-capacity";
 
 const header = { id: 10, status: "sent", physicalStatus: "sent" } as PurchaseOrder;
 const line = { id: 20, purchaseOrderId: 10, productId: 100, lineType: "product", status: "open", orderQty: 200, cancelledQty: 0, receivedQty: 0 } as PurchaseOrderLine;

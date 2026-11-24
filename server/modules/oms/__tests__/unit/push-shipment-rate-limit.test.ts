@@ -15,7 +15,7 @@ import {
   ShipStationRateLimitError,
   SS_PUSH_INVALID_SHIPMENT,
   SS_RATE_LIMITED,
-} from "../../shipstation.service";
+} from "../../application/shipstation.service";
 
 const SHIPMENT_ID = 9001;
 const WMS_ORDER_ID = 42;

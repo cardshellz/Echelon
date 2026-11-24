@@ -3,7 +3,7 @@ import type { PurchaseWorkspace } from "../../../../../shared/procurement/purcha
 import {
   createPurchaseWorkspaceService,
   type PurchaseWorkspaceSnapshot,
-} from "../../purchase-workspace.service";
+} from "../../application/purchase-workspace.service";
 
 type Shipment = PurchaseWorkspace["shipments"][number];
 type Receipt = PurchaseWorkspace["receipts"][number];

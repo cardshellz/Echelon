@@ -16,7 +16,7 @@ import { createDrizzleFinancialCommandRepository } from "../../../platform/comma
 import {
   recomputePoFinancialAggregates,
   recomputePurchaseOrderInvoiceMatchesInTransaction,
-} from "../ap-ledger.service";
+} from "../application/ap-ledger.service";
 import {
   assertPurchaseOrderCancellationAuthority,
   getPurchaseOrderCancellationPermission,
@@ -26,28 +26,28 @@ import {
   detectMatchMismatch,
   detectPastDue,
   detectQtyVariance,
-} from "../po-exceptions.service";
-import { createPurchaseApprovalCommands } from "../purchase-approval.commands";
-import { purchaseApprovalLinesFingerprint } from "../purchase-approval-review";
+} from "../application/po-exceptions.service";
+import { createPurchaseApprovalCommands } from "../application/purchase-approval.commands";
+import { purchaseApprovalLinesFingerprint } from "../application/purchase-approval-review";
 import {
   assertPurchaseApprovalPermission,
   buildPurchaseApprovalSnapshot,
   PurchaseApprovalAuthorityError,
   purchaseApprovalSnapshotCovers,
-} from "../purchase-order-approval.policy";
+} from "../domain/purchase-order-approval.policy";
 import {
   buildPoCloseChange,
   buildPoCloseShortChange,
   buildPoCloseShortLinePatch,
   normalizePoCloseShortReason,
-} from "../purchase-order-close.service";
-import { validateDeliverySchedulePatch } from "../purchase-order-delivery-schedule";
-import type { PurchaseOrderEntryTransaction } from "../purchase-order-entry.repository";
+} from "../application/purchase-order-close.service";
+import { validateDeliverySchedulePatch } from "../application/purchase-order-delivery-schedule";
+import type { PurchaseOrderEntryTransaction } from "../infrastructure/purchase-order-entry.repository";
 import {
   buildPhysicalTransitionChange,
   type PoLifecycleCommand,
-} from "../purchase-order-lifecycle.service";
-import { purchaseOrderUpdatedAtMatchesApplicationVersion } from "../purchase-order-lifecycle-version";
+} from "../application/purchase-order-lifecycle.service";
+import { purchaseOrderUpdatedAtMatchesApplicationVersion } from "../application/purchase-order-lifecycle-version";
 import type { PurchasingCatalog } from "./purchasing-catalog";
 import type { PurchasingLifecycleLocks } from "./purchasing-lifecycle-locks";
 import type { PurchasingReceiving } from "./purchasing-receiving";

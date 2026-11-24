@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   planHistoricalShipStationContentsCorrection,
   type HistoricalShipStationContentsCorrectionFacts,
-} from "../../historical-shipstation-contents-correction.domain";
+} from "../../domain/historical-shipstation-contents-correction.domain";
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);

@@ -4,7 +4,7 @@ import {
   type AutoDraftRunLifecycleRepository,
   type AutoDraftRunRecord,
   type AutoDraftRunTerminalValues,
-} from "../../auto-draft-run-lifecycle.service";
+} from "../../application/auto-draft-run-lifecycle.service";
 
 const NOW = new Date("2026-07-12T02:00:00.000Z");
 const LEASE_MS = 10 * 60 * 1_000;

@@ -9,14 +9,14 @@ import { PostgresInventoryCutoverReconstructionRepository } from "../../infrastr
 import { readInventoryCutoverReconstruction } from "../../../inventory/infrastructure/inventory-cutover-reconstruction.reader";
 import { readWmsCutoverReconstruction, readWmsCutoverShipmentReviews } from "../../../wms/infrastructure/inventory-cutover-reconstruction.reader";
 import { readCutoverOriginalCosts } from "../../../orders/infrastructure/inventory-cutover-reconstruction-cost.reader";
-import { readOmsCutoverReconstruction } from "../../../oms/inventory-cutover-reconstruction.reader";
+import { readOmsCutoverReconstruction } from "../../../oms/infrastructure/inventory-cutover-reconstruction.reader";
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 vi.mock("../../../inventory/infrastructure/inventory-cutover-reconstruction.reader", () => ({ readInventoryCutoverReconstruction: vi.fn() }));
 vi.mock("../../../wms/infrastructure/inventory-cutover-reconstruction.reader", () => ({ readWmsCutoverReconstruction: vi.fn(), readWmsCutoverShipmentReviews: vi.fn() }));
 vi.mock("../../../orders/infrastructure/inventory-cutover-reconstruction-cost.reader", () => ({ readCutoverOriginalCosts: vi.fn() }));
-vi.mock("../../../oms/inventory-cutover-reconstruction.reader", () => ({ readOmsCutoverReconstruction: vi.fn() }));
+vi.mock("../../../oms/infrastructure/inventory-cutover-reconstruction.reader", () => ({ readOmsCutoverReconstruction: vi.fn() }));
 vi.mock("../../infrastructure/inventory-cutover-admission-fence.repository", () => ({ assertInventoryCutoverFenceHeldInsideTransaction: vi.fn() }));
 
 const SECRET = "postgresql://private:credential@internal.example/db SELECT private_customer_data";

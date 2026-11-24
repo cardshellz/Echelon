@@ -22,7 +22,7 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
   let modulePool: pg.Pool | undefined;
   let ownsProcurement = false;
   let ownsAudit = false;
-  let updateInvoiceLine: typeof import("../../ap-ledger.service").updateInvoiceLine;
+  let updateInvoiceLine: typeof import("../../application/ap-ledger.service").updateInvoiceLine;
 
   let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
@@ -47,7 +47,7 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
     const priorExternal = process.env.EXTERNAL_DATABASE_URL;
     delete process.env.DATABASE_URL; delete process.env.EXTERNAL_DATABASE_URL;
     try {
-      const [apModule, dbModule] = await Promise.all([import("../../ap-ledger.service"), import("../../../../db")]);
+      const [apModule, dbModule] = await Promise.all([import("../../application/ap-ledger.service"), import("../../../../db")]);
       modulePool = dbModule.pool;
       // updateInvoiceLine owns its transaction through the legacy module-global
       // Drizzle DB. Forward its transport to this same isolated real SQL pool.

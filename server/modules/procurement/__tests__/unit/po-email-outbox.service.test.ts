@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "crypto";
-import { poEmailDocumentHash } from "../../po-email-document-contract";
+import { poEmailDocumentHash } from "../../application/po-email-document-contract";
 import {
   enqueuePurchaseOrderEmail,
   type PoEmailOutboxDbPool,
   replayDeadLetterPurchaseOrderEmail,
-} from "../../po-email-outbox.service";
+} from "../../application/po-email-outbox.service";
 
 function makePool(query: PoEmailOutboxDbPool["query"]): PoEmailOutboxDbPool {
   return { query, connect: vi.fn() };

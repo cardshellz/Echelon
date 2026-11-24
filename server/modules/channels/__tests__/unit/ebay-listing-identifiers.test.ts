@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildEbayRouteListingDraft } from "../../ebay-listing-draft";
-import { buildEbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
+import { buildEbayRouteListingDraft } from "../../application/ebay-listing-draft";
+import { buildEbayListingPhotoPlan } from "../../domain/ebay-listing-photos.domain";
 
 function draft(shape: "standalone" | "group" | "one-member-group", mpn: string | null = null,
   aspects: Record<string, string[]> = { Brand: ["Shellz"] }) {

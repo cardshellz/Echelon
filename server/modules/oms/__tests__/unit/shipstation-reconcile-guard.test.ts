@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 const RECONCILER_PATH = resolve(
   __dirname,
-  "../../../shipping/wms-shipstation-reconcile.scheduler.ts",
+  "../../../shipping/application/wms-shipstation-reconcile.scheduler.ts",
 );
 
 function sourceBetween(source: string, startMarker: string, endMarker: string): string {

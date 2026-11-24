@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   adoptProvenShipStationOrder,
   proveShipStationOrderAdoption,
-} from "../../shipstation-order-adoption";
+} from "../../application/shipstation-order-adoption";
 
 const expected = {
   shipmentId: 14866,

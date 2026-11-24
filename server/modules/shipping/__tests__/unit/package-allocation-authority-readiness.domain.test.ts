@@ -7,13 +7,13 @@ import {
   assessPackageAllocationAuthorityReadiness,
   PackageAllocationAuthorityReadinessError,
   type PackageAllocationAuthorityReadinessInput,
-} from "../../package-allocation-authority-readiness.domain";
+} from "../../domain/package-allocation-authority-readiness.domain";
 import type {
   PersistedDeclaredPackageEvidence,
   PersistedShippingProviderLabelEventRow,
-} from "../../declared-package-lifecycle-shadow.domain";
-import type { PackageAllocationSourceFacts } from "../../package-allocation-source-identity.domain";
-import { buildHistoricalShipStationContentsSystemRecoveryEvent } from "../../historical-shipstation-contents-recovery.domain";
+} from "../../domain/declared-package-lifecycle-shadow.domain";
+import type { PackageAllocationSourceFacts } from "../../domain/package-allocation-source-identity.domain";
+import { buildHistoricalShipStationContentsSystemRecoveryEvent } from "../../domain/historical-shipstation-contents-recovery.domain";
 
 const LABEL_RECEIVED_AT = "2026-08-23T14:00:00.000Z";
 

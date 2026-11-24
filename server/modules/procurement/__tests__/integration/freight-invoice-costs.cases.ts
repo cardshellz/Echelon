@@ -8,11 +8,11 @@ import type pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { freightInvoiceContextSchema, freightInvoicePreviewSchema } from "@shared/procurement/freight-invoice-costs";
-import { createFreightInvoiceCostService } from "../../freight-invoice-costs.service";
-import { registerFreightInvoiceCostRoutes } from "../../freight-invoice-costs.routes";
-import { createInvoiceFromShipmentCostsInTransaction, executeApInvoiceCommandInTransaction } from "../../ap-ledger.service";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
+import { createFreightInvoiceCostService } from "../../application/freight-invoice-costs.service";
+import { registerFreightInvoiceCostRoutes } from "../../interfaces/http/freight-invoice-costs.routes";
+import { createInvoiceFromShipmentCostsInTransaction, executeApInvoiceCommandInTransaction } from "../../application/ap-ledger.service";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
 
 export function registerFreightInvoiceCostCases(fixture: {
   pool: () => pg.Pool; database: () => AmendmentDatabase; shipments: () => ShipmentTrackingService;

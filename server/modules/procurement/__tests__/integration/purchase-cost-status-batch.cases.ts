@@ -1,10 +1,10 @@
 import type pg from "pg";
 import { it, expect } from "vitest";
 import type { PurchaseCostStatus } from "@shared/procurement/purchase-cost-status";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import { visitPurchaseCostStatusScopes } from "../../purchase-cost-status-batch.repository";
-import { readShipmentCostReviewInTransaction, readShipmentCostReviewsInTransaction } from "../../shipment-cost-review.repository";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import { visitPurchaseCostStatusScopes } from "../../infrastructure/purchase-cost-status-batch.repository";
+import { readShipmentCostReviewInTransaction, readShipmentCostReviewsInTransaction } from "../../infrastructure/shipment-cost-review.repository";
 
 export function registerPurchaseCostStatusBatchCases(fixture: { pool: () => pg.Pool; database: () => AmendmentDatabase }) {
   async function additionalScope() {

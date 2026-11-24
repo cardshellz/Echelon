@@ -1,9 +1,9 @@
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
-import { ebayListingFailureDiagnosticSchema } from "../ebay-listing-failure-diagnostic";
+import { ebayListingFailureDiagnosticSchema } from "../application/ebay-listing-failure-diagnostic";
 import type { Pool } from "pg";
 import type { EbayListingSyncJob } from "@shared/types/ebay-listing-sync";
 import { ebayListingSyncProgressSchema } from "@shared/types/ebay-listing-sync";
-import { ebayListingPhaseFromStage } from "../ebay-listing-job-progress";
+import { ebayListingPhaseFromStage } from "../application/ebay-listing-job-progress";
 
 interface ProgressRow {
   id: string;

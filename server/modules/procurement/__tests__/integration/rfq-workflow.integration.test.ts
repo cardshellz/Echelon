@@ -3,12 +3,12 @@ import { sql } from "drizzle-orm";
 import express from "express";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { SupplierSourcingService } from "../../supplier-sourcing.service";
-import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../supplier-sourcing.repository";
+import { SupplierSourcingService } from "../../application/supplier-sourcing.service";
+import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../infrastructure/supplier-sourcing.repository";
 import { DEFAULT_SUPPLIER_SOURCING_POLICY } from "@shared/procurement/supplier-sourcing";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
-import { createAutomaticRfqDraftService, normalizeAutomaticRfqDraftPolicy, type AutomaticRfqRecommendationLine } from "../../automatic-rfq-draft.service";
-import { readPurchaseRfqOrigins } from "../../purchase-rfq-origin.repository";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
+import { createAutomaticRfqDraftService, normalizeAutomaticRfqDraftPolicy, type AutomaticRfqRecommendationLine } from "../../application/automatic-rfq-draft.service";
+import { readPurchaseRfqOrigins } from "../../infrastructure/purchase-rfq-origin.repository";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -21,8 +21,8 @@ import { rfqConversionResultSchema, rfqWorkflowDetailSchema } from "@shared/proc
 import { rfqCommandReceiptSchema } from "@shared/procurement/rfq-command";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import { FinancialCommandError, type FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import type { AutomaticRecommendationPoHandoffCommand } from "../../recommendation-po-handoff.service";
-import type { RfqWorkflowCommand } from "../../rfq-workflow.service";
+import type { AutomaticRecommendationPoHandoffCommand } from "../../application/recommendation-po-handoff.service";
+import type { RfqWorkflowCommand } from "../../application/rfq-workflow.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { RFQ_AUTHORITY_TABLES, seedRfqEditActor, legacyRfqTestCommands } from "./rfq-authority.fixture";
 import { registerRfqCreationRecoveryCases } from "./rfq-create-recovery.cases";
@@ -49,12 +49,12 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   let lease: pg.PoolClient | undefined;
   let modulePool: pg.Pool | undefined;
   let database: ReturnType<typeof drizzle<typeof schema>>;
-  let service: ReturnType<typeof import("../../rfq-workflow.service").createRfqWorkflowService>;
-  let purchasingOwner: ReturnType<typeof import("../../purchasing.service").createPurchasingService>;
-  let recommendationHandoff: ReturnType<typeof import("../../recommendation-po-handoff.service").createRecommendationPoHandoffService>;
-  let commands: ReturnType<typeof import("../../rfq-workflow.commands").createRfqWorkflowCommands>;
+  let service: ReturnType<typeof import("../../application/rfq-workflow.service").createRfqWorkflowService>;
+  let purchasingOwner: ReturnType<typeof import("../../application/purchasing.service").createPurchasingService>;
+  let recommendationHandoff: ReturnType<typeof import("../../application/recommendation-po-handoff.service").createRecommendationPoHandoffService>;
+  let commands: ReturnType<typeof import("../../application/rfq-workflow.commands").createRfqWorkflowCommands>;
   let durableCommands: typeof commands;
-  let commandScope: typeof import("../../rfq-workflow.commands").rfqWorkflowCommandScope;
+  let commandScope: typeof import("../../application/rfq-workflow.commands").rfqWorkflowCommandScope;
   let commandPrincipal: string;
 
   registerRecommendationPoNumberingCases(() => ({ pool, database, purchasingOwner, actorId, now: NOW }));
@@ -91,8 +91,8 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     delete process.env.DATABASE_URL; delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [dbModule, procurement, catalog, purchasing, workflow, commandModule, repository] = await Promise.all([
-        import("../../../../db"), import("../../procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
-        import("../../purchasing.service"), import("../../rfq-workflow.service"), import("../../rfq-workflow.commands"),
+        import("../../../../db"), import("../../infrastructure/procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
+        import("../../application/purchasing.service"), import("../../application/rfq-workflow.service"), import("../../application/rfq-workflow.commands"),
         import("../../../../platform/commands/command-results.repository"),
       ]);
       modulePool = dbModule.pool;
@@ -100,8 +100,8 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
       modulePool.connect = pool.connect.bind(pool) as typeof modulePool.connect;
       const storage = { ...procurement.procurementMethods, ...catalog.productMethods };
       const owner = purchasing.createPurchasingService(database, storage as never, { now: () => NOW });
-      const handoffRepository = await import("../../recommendation-po-handoff.repository");
-      const handoffService = await import("../../recommendation-po-handoff.service");
+      const handoffRepository = await import("../../infrastructure/recommendation-po-handoff.repository");
+      const handoffService = await import("../../application/recommendation-po-handoff.service");
       recommendationHandoff = handoffService.createRecommendationPoHandoffService(handoffRepository.createDrizzleRecommendationPoHandoffRepository(database));
       purchasingOwner = owner;
       service = workflow.createRfqWorkflowService(database, owner);
@@ -211,7 +211,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const before = await service.getDetail(10);
     expect((await releaseRequest()).result.body).toMatchObject({ code: "RFQ_PURCHASE_LINK_REVIEW_REQUIRED" });
     expect((await service.getDetail(10)).version).toBe(before.version);
-    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    const { lockAndLoadActiveRfqAllocations } = await import("../../application/purchasing-rfq.service");
     expect((await database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [{ id: 2, productId: 101, productVariantId: 201, warehouseId: 1 }]))).get("101:1")).toBe(150);
   });
 
@@ -375,7 +375,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const po = rfqConversionResultSchema.parse((await commands.execute(attempt.command, actorId, attempt.identity)).body);
     await releaseRequest();
     await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=100,received_qty=20,cancelled_qty=10 WHERE id=$1", [po.lines[0].purchaseOrderLineId]);
-    const repo = (await import("../../recommendation-po-handoff.repository")).createDrizzleRecommendationPoHandoffRepository(database);
+    const repo = (await import("../../infrastructure/recommendation-po-handoff.repository")).createDrizzleRecommendationPoHandoffRepository(database);
     expect(await repo.transaction((tx) => tx.lockAndLoadPendingSourcingReservations([100]))).toEqual([{ productId: 100, pieces: 70, purchaseOrderId: po.purchaseOrderId, rfqId: null }]);
     await pool.query("UPDATE procurement.purchase_orders SET status='approved' WHERE id=$1", [po.purchaseOrderId]);
     expect(await repo.transaction((tx) => tx.lockAndLoadPendingSourcingReservations([100]))).toEqual([]);
@@ -389,7 +389,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     if (warehouseId !== null) await pool.query("INSERT INTO warehouse.warehouses(id,code,name) VALUES(2,'OVERLAP','Overlap fixture')");
     await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
     const line = await receivingChoiceRecommendation(3, 200, 150, warehouseId);
-    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    const { lockAndLoadActiveRfqAllocations } = await import("../../application/purchasing-rfq.service");
     await expect(database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [line]))).rejects.toMatchObject({ code: "RFQ_PENDING_PURCHASE_REVIEW_REQUIRED", context: { purchaseOrderIds: [po.purchaseOrderId] } });
     expect((await pendingAllocation(1)).get("100:1")).toBe(150);
   });
@@ -599,7 +599,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   });
 
   it("negotiates verified HTTP receipts and legacy raw replay over the same durable saved result", async () => {
-    const { registerRfqWorkflowRoutes } = await import("../../rfq-workflow.routes");
+    const { registerRfqWorkflowRoutes } = await import("../../interfaces/http/rfq-workflow.routes");
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => { req.session = { user: { id: actorId } } as never; next(); });
@@ -720,7 +720,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   it("holds current supplier rules stable through the same real PO owner transaction", async () => {
     await capture();
     const attempt = await conversion();
-    const { loadRfqWorkflow } = await import("../../rfq-workflow.repository");
+    const { loadRfqWorkflow } = await import("../../infrastructure/rfq-workflow.repository");
     const { lockInventoryCostGraph } = await import("../../../inventory/infrastructure/cost-evidence.repository");
     const competing = await pool.connect();
     try {
@@ -739,10 +739,10 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   it("queues a reviewed catalog import before supplier locks while the real RFQ conversion holds product custody", async () => {
     await capture();
     const attempt = await conversion();
-    const { loadRfqWorkflow } = await import("../../rfq-workflow.repository");
+    const { loadRfqWorkflow } = await import("../../infrastructure/rfq-workflow.repository");
     const { lockInventoryCostGraph } = await import("../../../inventory/infrastructure/cost-evidence.repository");
-    const { supplierEvidenceCatalogStateFingerprint } = await import("../../supplier-evidence-catalog-state");
-    const { createPurchasingService } = await import("../../purchasing.service");
+    const { supplierEvidenceCatalogStateFingerprint } = await import("../../application/supplier-evidence-catalog-state");
+    const { createPurchasingService } = await import("../../application/purchasing.service");
     const entries: Parameters<typeof purchasingOwner.applyReviewedSupplierEvidenceImport>[1] = [{
       productId: 100, productVariantId: 200, pricing: { basis: "per_piece", quantityPieces: 1, unitCostMills: 20000 },
       quotedAt: NOW, quoteReference: "LATER-CATALOG-QUOTE", packSize: 1, moq: 1, isPreferred: false,
@@ -862,7 +862,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     { name: "unresolved to unique receiving choice", priorVariantId: null, currentVariantId: 200 },
   ])("retains persisted RFQ reservations across $name", async ({ priorVariantId, currentVariantId }) => {
     const { current } = await persistedReceivingChoiceTransition(priorVariantId, currentVariantId);
-    const { lockAndLoadActiveRfqAllocations, purchasingSkuAllocationKey } = await import("../../purchasing-rfq.service");
+    const { lockAndLoadActiveRfqAllocations, purchasingSkuAllocationKey } = await import("../../application/purchasing-rfq.service");
     const pending = await database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [current]));
     expect(pending.get(purchasingSkuAllocationKey(current))).toBe(150);
     await expect(purchasingOwner.createRfqBatch({ idempotencyKey: `scope-unreviewed-${current.id}`, lines: [
@@ -926,7 +926,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     await receivingChoiceRecommendation(7, 200, 500, 2);
     await receivingChoiceRecommendation(8, null, 500, null);
     await pool.query("INSERT INTO procurement.request_for_quote_lines(rfq_id,recommendation_line_id,vendor_product_id,requested_pieces) VALUES(11,5,302,50),(11,6,302,25),(11,7,302,40),(11,8,302,60)");
-    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    const { lockAndLoadActiveRfqAllocations } = await import("../../application/purchasing-rfq.service");
     const pending = await database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [current, { id: 2, productId: 101, productVariantId: 201, warehouseId: 1 }]));
     expect(Object.fromEntries(pending)).toEqual({ "100:1": 225, "100:2": 40, "100:all": 60, "101:1": 150 });
   });
@@ -987,7 +987,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const created = rfqConversionResultSchema.parse(result.body);
     await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
     const current = await receivingChoiceRecommendation(3, null);
-    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    const { lockAndLoadActiveRfqAllocations } = await import("../../application/purchasing-rfq.service");
     expect((await database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [current]))).get("100:1")).toBe(150);
     await pool.query("UPDATE procurement.purchase_orders SET status='approved',updated_at='2026-09-06T00:00:00' WHERE id=$1", [created.purchaseOrderId]);
     await pool.query("UPDATE procurement.purchase_order_lines SET updated_at='2026-09-07T13:00:00' WHERE id=$1", [created.lines[0].purchaseOrderLineId]);
@@ -1009,7 +1009,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     expect((await pool.query<{ evidence: unknown }>("SELECT to_jsonb(q) AS evidence FROM procurement.request_for_quote_lines q ORDER BY id")).rows).toEqual(before.rows);
   });
   async function pendingAllocation(recommendationId: number) {
-    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    const { lockAndLoadActiveRfqAllocations } = await import("../../application/purchasing-rfq.service");
     return database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [{ id: recommendationId, productId: 100, productVariantId: 200, warehouseId: 1 }]));
   }
   async function freshRecommendation(id: number, runId: number, pieces: number) {

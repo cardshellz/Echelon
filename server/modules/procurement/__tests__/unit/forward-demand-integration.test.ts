@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
 
 function baseRow(overrides: Record<string, unknown> = {}) {
   return {

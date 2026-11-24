@@ -7,7 +7,7 @@ import { echelonSettings, warehouses } from "@shared/schema/warehouse.schema";
 import {
   loadSupplierPoDocumentSource,
   type SupplierPoDocumentDatabase,
-} from "../../supplier-po-document.repository";
+} from "../../infrastructure/supplier-po-document.repository";
 import { supplierDocumentSource } from "../fixtures/supplier-po-document.fixture";
 
 type StoredRow = Record<string, unknown>;

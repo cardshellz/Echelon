@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ReservationServiceContract } from "../../../channels/reservation.service";
+import type { ReservationServiceContract } from "../../../channels/application/reservation.service";
 
 import {
   admitInitialProviderShipmentAfterInventoryAuthority,
@@ -10,7 +10,7 @@ import {
   requireRoutedWarehouseId,
   WmsShipmentPrerequisiteError,
   WmsSyncService,
-} from "../../wms-sync.service";
+} from "../../application/wms-sync.service";
 
 interface ReservationPrerequisiteHarness {
   reserveBeforeShipmentProcessing(
@@ -21,7 +21,7 @@ interface ReservationPrerequisiteHarness {
 }
 
 const WMS_SYNC_SOURCE = readFileSync(
-  resolve(__dirname, "../../wms-sync.service.ts"),
+  resolve(__dirname, "../../application/wms-sync.service.ts"),
   "utf8",
 );
 

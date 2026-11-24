@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { readShipmentPurchaseOrders } from "../../shipment-purchase-orders.repository";
-import { createShipmentTrackingService } from "../../shipment-tracking.service";
-vi.mock("../../shipment-physical-read.repository", () => ({ readShipmentPhysicalLines: vi.fn(async (_tx: unknown, ids: number[]) =>
+import { readShipmentPurchaseOrders } from "../../infrastructure/shipment-purchase-orders.repository";
+import { createShipmentTrackingService } from "../../application/shipment-tracking.service";
+vi.mock("../../infrastructure/shipment-physical-read.repository", () => ({ readShipmentPhysicalLines: vi.fn(async (_tx: unknown, ids: number[]) =>
   new Map(ids.map(id => [id, []]))) }));
 
 describe("shipment purchase-order projection", () => {

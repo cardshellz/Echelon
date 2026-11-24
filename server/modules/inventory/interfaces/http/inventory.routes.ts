@@ -1,4 +1,4 @@
-import { protectEbayPolicyWriteBoundary } from "../../../channels/interfaces/ebay-policy-write-boundary";
+import { protectEbayPolicyWriteBoundary } from "../../../channels/ebay-policy-write-boundary.api";
 import { readIntegerCents, MoneyInputError } from "@shared/money-read";
 import { dollarsToMills } from "@shared/utils/money";
 import { lotCostFollowUpQuerySchema } from "@shared/inventory/lot-cost-follow-up";
@@ -29,9 +29,9 @@ import {
   INVENTORY_LEGACY_ADMIN_CONTROLS,
   sendInventoryLegacyAdminControlError,
 } from "../../../inventory-planning/legacy-admin-control.api";
-import { projectCanonicalVariantsInsideRuntimeTransaction } from "../../../inventory-planning/application/inventory-availability-runtime-atp.service";
-import type { InventoryAvailabilityRuntimeAtpContext } from "../../../inventory-planning/application/inventory-availability-runtime-atp.service";
-import { createChannelSyncService } from "../../../channels/sync.service";
+import { projectCanonicalVariantsInsideRuntimeTransaction } from "../../../inventory-planning/inventory-availability-runtime-atp.service.api";
+import type { InventoryAvailabilityRuntimeAtpContext } from "../../../inventory-planning/inventory-availability-runtime-atp.service.api";
+import { createChannelSyncService } from "../../../channels/sync.service.api";
 import { AppError } from "@shared/errors";
 import { ZodError } from "zod";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
@@ -139,7 +139,7 @@ export function registerInventoryRoutes(app: Express) {
   // ============================================
   // BIN-TO-BIN TRANSFERS
   // ============================================
-  
+
   app.post("/api/inventory/transfer", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const result = await req.app.locals.services.inventoryTransfers.transfer(req.body, req.session.user?.id || "system");
@@ -323,13 +323,13 @@ export function registerInventoryRoutes(app: Express) {
       res.status(500).json({ error: "Failed to get transfer history" });
     }
   });
-  
+
   app.post("/api/inventory/transfer/:id/undo", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
       const transactionId = parseInt(req.params.id);
       const userId = req.session.user?.id || "system";
-      
+
       const transaction = await inventoryCore.undoTransfer(transactionId, userId);
       res.json({ success: true, transaction });
     } catch (error) {
@@ -413,9 +413,9 @@ export function registerInventoryRoutes(app: Express) {
       });
 
       if (parsed.errors.length > 0) {
-        return res.status(400).json({ 
-          error: "CSV parsing errors", 
-          details: parsed.errors.slice(0, 5) 
+        return res.status(400).json({
+          error: "CSV parsing errors",
+          details: parsed.errors.slice(0, 5)
         });
       }
 
@@ -426,7 +426,7 @@ export function registerInventoryRoutes(app: Express) {
 
       // Generate a unique batch ID for this upload
       const batchId = `CSV-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      
+
       // Try to get the CSV_UPLOAD reason code (optional - table may not exist yet)
       let csvReason: any = null;
       try {
@@ -650,7 +650,7 @@ export function registerInventoryRoutes(app: Express) {
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-    
+
     try {
       const variantId = parseInt(req.params.variantId);
       if (isNaN(variantId) || variantId <= 0) {
@@ -661,7 +661,7 @@ export function registerInventoryRoutes(app: Express) {
       if (warehouseId != null && (!Number.isInteger(warehouseId) || warehouseId <= 0)) {
         return res.status(400).json({ error: "Invalid warehouse ID" });
       }
-      
+
       // Verify variant exists
       const variant = await storage.getProductVariantById(variantId);
       if (!variant) {
@@ -791,7 +791,7 @@ export function registerInventoryRoutes(app: Express) {
           message: "warehouseId must be a positive integer",
         });
       }
-      
+
       if (warehouseId) {
         const readWarehouseSummary = async (
           authority: "legacy" | "canonical",
@@ -1386,9 +1386,9 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const productLocationsData = await storage.getAllProductLocations();
-      
+
       const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
-      
+
       const baseSkuMap: Record<string, {
         baseSku: string;
         name: string;
@@ -1406,26 +1406,26 @@ export function registerInventoryRoutes(app: Express) {
       for (const pl of productLocationsData) {
         if (!pl.sku) continue;
         const match = pl.sku.match(variantPattern);
-        
+
         if (match) {
           const baseSku = match[1];
           const variantType = match[2].toUpperCase();
           const pieces = parseInt(match[3], 10);
-          
+
           if (!baseSkuMap[baseSku]) {
             let baseName = pl.name || "";
             const packMatch = baseName.match(/\s*[-–]\s*(Pack|Box|Case)\s+of\s+\d+.*/i);
             if (packMatch) {
               baseName = baseName.substring(0, packMatch.index).trim();
             }
-            
+
             baseSkuMap[baseSku] = {
               baseSku,
               name: baseName,
               variants: []
             };
           }
-          
+
           baseSkuMap[baseSku].variants.push({
             sku: pl.sku,
             type: variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case',
@@ -1456,17 +1456,17 @@ export function registerInventoryRoutes(app: Express) {
 
       for (const [baseSku, data] of Object.entries(baseSkuMap)) {
         const sortedVariants = data.variants.sort((a, b) => a.pieces - b.pieces);
-        
+
         const variantsWithHierarchy = sortedVariants.map((v, idx) => {
           let hierarchyLevel = 1;
           if (v.type === 'Box') hierarchyLevel = 2;
           if (v.type === 'Case') hierarchyLevel = 3;
-          
+
           let parentVariant: string | null = null;
           if (idx > 0) {
             parentVariant = sortedVariants[idx - 1].sku;
           }
-          
+
           return {
             sku: v.sku,
             type: v.type,
@@ -1520,9 +1520,9 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const productLocationsData = await storage.getAllProductLocations();
-      
+
       const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
-      
+
       const baseSkuMap: Record<string, {
         baseSku: string;
         name: string;
@@ -1541,22 +1541,22 @@ export function registerInventoryRoutes(app: Express) {
       for (const pl of productLocationsData) {
         if (!pl.sku) continue;
         const match = pl.sku.match(variantPattern);
-        
+
         if (match) {
           const baseSku = match[1];
           const variantType = match[2].toUpperCase();
           const pieces = parseInt(match[3], 10);
-          
+
           if (!baseSkuMap[baseSku]) {
             let baseName = pl.name || "";
             const packMatch = baseName.match(/\s*[-–]\s*(Pack|Box|Case|1 Holder|1 Pack)\s+(of\s+)?\d*.*/i);
             if (packMatch) {
               baseName = baseName.substring(0, packMatch.index).trim();
             }
-            
+
             baseSkuMap[baseSku] = { baseSku, name: baseName, variants: [] };
           }
-          
+
           baseSkuMap[baseSku].variants.push({
             sku: pl.sku,
             type: variantType === 'P' ? 'pack' : variantType === 'B' ? 'box' : 'case',
@@ -2024,23 +2024,23 @@ export function registerInventoryRoutes(app: Express) {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });
       }
-      
+
       const productLocs = await storage.getAllProductLocations();
       let created = 0;
       let updated = 0;
       let skipped = 0;
       const errors: string[] = [];
-      
+
       for (const loc of productLocs) {
         try {
           if (!loc.location || loc.location === "UNASSIGNED") {
             skipped++;
             continue;
           }
-          
+
           const code = loc.location.toUpperCase();
           const zone = (loc.zone || code.split("-")[0] || "U").toUpperCase();
-          
+
           const existing = await storage.getWarehouseLocationByCode(code);
           if (!existing) {
             await storage.createWarehouseLocation({
@@ -2059,8 +2059,8 @@ export function registerInventoryRoutes(app: Express) {
           errors.push(`${loc.sku}: ${err.message}`);
         }
       }
-      
-      res.json({ 
+
+      res.json({
         message: "Location migration completed",
         created,
         updated,
@@ -2078,7 +2078,7 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/sync/trigger-orders", requirePermission("shopify", "sync"), async (req, res) => {
     res.status(410).json({ error: "Order sync listener removed - orders now sync via OMS webhooks" });
   });
-  
+
   app.post("/api/debug/trigger-sync", requirePermission("shopify", "sync"), async (req, res) => {
     res.status(410).json({ error: "Order sync listener removed - orders now sync via OMS webhooks" });
   });
@@ -2166,21 +2166,21 @@ export function registerInventoryRoutes(app: Express) {
     try {
       // DISABLED: order-sync-listener deleted
       const health = { status: "removed", message: "Order sync listener removed in Phase 3" };
-      
+
       const row = await storage.getSyncHealthStats() as any;
       const latestShopifyOrder = row?.latest_shopify_order;
       const latestSyncedOrder = row?.latest_synced_order;
       const unsynced24h = parseInt(row?.unsynced_24h || "0");
-      
+
       let syncGapMinutes: number | null = null;
       if (latestShopifyOrder && latestSyncedOrder) {
         const shopifyTime = new Date(latestShopifyOrder).getTime();
         const syncedTime = new Date(latestSyncedOrder).getTime();
         syncGapMinutes = Math.max(0, Math.floor((shopifyTime - syncedTime) / 60000));
       }
-      
+
       const needsAlert = unsynced24h > 0 || health.status === "error";
-      
+
       res.json({
         ...health,
         latestShopifyOrder,
@@ -2188,7 +2188,7 @@ export function registerInventoryRoutes(app: Express) {
         syncGapMinutes,
         unsynced24h,
         needsAlert,
-        alertMessage: needsAlert ? 
+        alertMessage: needsAlert ?
           health.status === "error" ? `Sync error: ${(health as any).lastSyncError}` :
           unsynced24h > 0 ? `${unsynced24h} orders waiting to sync` :
           null : null,
@@ -2203,15 +2203,15 @@ export function registerInventoryRoutes(app: Express) {
     try {
       // DISABLED: order-sync-listener deleted
       const health = { status: "removed" };
-      
+
       const adminEmail = await storage.getSetting("admin_alert_email");
-      
+
       if (!adminEmail) {
         return res.status(400).json({ error: "No admin email configured. Set admin_alert_email in settings." });
       }
-      
+
       const sendgridApiKey = process.env.SENDGRID_API_KEY;
-      
+
       if (sendgridApiKey) {
         console.log("[ALERT] Would send email alert to:", adminEmail);
         res.json({ success: true, message: "Alert sent (SendGrid configured)", recipient: adminEmail });
@@ -2220,9 +2220,9 @@ export function registerInventoryRoutes(app: Express) {
         console.log("[ALERT] Would send to:", adminEmail);
         console.log("[ALERT] Status:", health.status);
         console.log("[ALERT] Error:", (health as any).lastSyncError);
-        
-        res.json({ 
-          success: true, 
+
+        res.json({
+          success: true,
           message: "Alert logged (SendGrid not configured - add SENDGRID_API_KEY to enable email)",
           recipient: adminEmail,
           health,
@@ -2281,7 +2281,7 @@ export function registerInventoryRoutes(app: Express) {
           message: "warehouseId must be a positive integer",
         });
       }
-      
+
       const inventoryRows = await storage.getInventoryLevelsSummary(warehouseId);
       const result = await projectInventoryLevels({
         rows: inventoryRows,
@@ -2437,7 +2437,7 @@ export function registerInventoryRoutes(app: Express) {
         // Backward-compatible physical alias; this is not ATP.
         available: row.variant_qty - row.reserved_qty,
       }));
-      
+
       res.json(locations);
     } catch (error) {
       console.error("Error fetching variant locations:", error);
@@ -2448,9 +2448,9 @@ export function registerInventoryRoutes(app: Express) {
   app.get("/api/inventory/export", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const { locationType, binType, zone } = req.query;
-      
+
       let rows = await storage.getInventoryExport() as any[];
-      
+
       if (locationType && typeof locationType === 'string') {
         const types = locationType.split(',');
         rows = rows.filter(r => r.location_type && types.includes(r.location_type));
@@ -2462,7 +2462,7 @@ export function registerInventoryRoutes(app: Express) {
       if (zone && typeof zone === 'string') {
         rows = rows.filter(r => r.zone === zone);
       }
-      
+
       const exportData = rows.map(row => ({
         sku: row.sku,
         variantName: row.variant_name,
@@ -2480,7 +2480,7 @@ export function registerInventoryRoutes(app: Express) {
         // Backward-compatible physical alias; this is not ATP.
         availableQty: row.available_qty,
       }));
-      
+
       res.json(exportData);
     } catch (error) {
       console.error("Error exporting inventory:", error);
@@ -2582,49 +2582,49 @@ export function registerInventoryRoutes(app: Express) {
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
       }
-      
+
       const userId = req.session.user?.id;
       const csvContent = req.file.buffer.toString("utf-8");
       const { data, errors } = Papa.parse<{ sku: string; location_code: string; quantity: string }>(csvContent, {
         header: true,
         skipEmptyLines: true,
       });
-      
+
       if (errors.length > 0) {
         return res.status(400).json({ error: "CSV parse error", details: errors });
       }
-      
+
       const csvResults = {
         processed: 0,
         created: 0,
         updated: 0,
         errors: [] as string[],
       };
-      
+
       for (const row of data) {
         try {
           const sku = row.sku?.trim();
           const locationCode = row.location_code?.trim();
           const variantQty = parseInt(row.quantity, 10);
-          
+
           if (!sku || !locationCode || isNaN(variantQty)) {
             csvResults.errors.push(`Invalid row: SKU=${sku}, Location=${locationCode}, Qty=${row.quantity}`);
             continue;
           }
-          
+
           const variant = await storage.getProductVariantBySku(sku);
 
           if (!variant) {
             csvResults.errors.push(`Variant not found: ${sku}`);
             continue;
           }
-          
+
           const location = await storage.getWarehouseLocationByCode(locationCode);
           if (!location) {
             csvResults.errors.push(`Location not found: ${locationCode}`);
             continue;
           }
-          
+
           const effects: Array<() => Promise<void>> = [];
           const rowOutcome = await db.transaction(async (tx: any) => {
             const { inventoryCore } = req.app.locals.services;
@@ -2672,13 +2672,13 @@ export function registerInventoryRoutes(app: Express) {
           if (rowOutcome === "created") csvResults.created++;
           if (rowOutcome === "updated") csvResults.updated++;
           for (const effect of effects) await effect();
-          
+
           csvResults.processed++;
         } catch (rowError) {
           csvResults.errors.push(`Error processing row: ${JSON.stringify(row)} - ${rowError}`);
         }
       }
-      
+
       res.json(csvResults);
     } catch (error) {
       console.error("Error importing inventory CSV:", error);

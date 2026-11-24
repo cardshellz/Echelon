@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   createDefaultShipStationV2WebhookVerifier,
   createShipStationV2WebhookVerifier,
-} from "../../shipstation-webhook-auth";
-import { SHIPSTATION_TRACKING_WEBHOOK_SECRET_KEY_ID } from "../../shipstation-tracking-api-config";
+} from "../../interfaces/http/shipstation-webhook-auth";
+import { SHIPSTATION_TRACKING_WEBHOOK_SECRET_KEY_ID } from "../../application/shipstation-tracking-api-config";
 
 const now = new Date("2026-07-20T12:00:00.000Z");
 const sharedSecret = "s".repeat(32);

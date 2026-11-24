@@ -6,7 +6,7 @@ import {
   ShopifyStaffOAuthError, type ShopifyStaffOAuthClaim, type ShopifyStaffOAuthClaimInput,
   type ShopifyStaffOAuthConfig, type ShopifyStaffOAuthRepository, type ShopifyStaffOAuthResult,
   type ShopifyStaffOAuthToken,
-} from "../shopify-staff-oauth.types";
+} from "../domain/shopify-staff-oauth.types";
 
 export interface ShopifyStaffOAuthTelemetry {
   timestamp: string;

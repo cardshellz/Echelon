@@ -31,7 +31,7 @@ vi.mock("../../../../storage/base", async () => ({
   db: { select: ports.select },
 }));
 vi.mock("../../../../db", () => ({ db: { select: ports.select }, pool: {} }));
-vi.mock("../../../oms/oms.service", () => ({
+vi.mock("../../../oms/application/oms.service", () => ({
   createOmsService: () => ({ ingestOrder: ports.ingest }),
 }));
 vi.mock("../../../../routes/middleware", () => ({
@@ -44,7 +44,7 @@ vi.mock(
 );
 vi.mock("../../../../websocket", () => ({ broadcastOrdersUpdated: vi.fn() }));
 
-import { registerChannelRoutes } from "../../channels.routes";
+import { registerChannelRoutes } from "../../interfaces/http/channels.routes";
 import { registerShopifyRoutes } from "../../../../routes/shopify.routes";
 
 function routes(register: (app: Express) => void) {

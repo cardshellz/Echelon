@@ -16,7 +16,7 @@ import { observeEbayQuantityRequest } from "../../application/quantity-provider-
 import { preflightEvidenceHash, type EbayRequestJournalContract } from "../../domain/ebay-publication-preflight";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
 import { EbayAdapter } from "../../../channels/adapters/ebay.adapter";
-import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/channel-inventory-publication-transport.adapter";
+import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/infrastructure/channel-inventory-publication-transport.adapter";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;

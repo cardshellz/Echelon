@@ -14,13 +14,13 @@ import {
 import type {
   ListingUpdateIntent,
   ListingUpdateProvider,
-} from "../../../marketplace-listings/application/listing-update-ports";
-import { ListingSubmissionError } from "../../../marketplace-listings/application/listing-publication-provider.port";
-import { assertUpdateSource } from "../../../marketplace-listings/domain/listing-update";
+} from "../../../marketplace-listings/listing-update-ports.api";
+import { ListingSubmissionError } from "../../../marketplace-listings/listing-publication-provider.port.api";
+import { assertUpdateSource } from "../../../marketplace-listings/listing-update.api";
 import {
   ListingPublicationError,
   listingHash,
-} from "../../../marketplace-listings/domain/listing-publication";
+} from "../../../marketplace-listings/listing-publication.api";
 import type { WalmartChannelService } from "./walmart-channel.service";
 import {
   WalmartListingProvider,

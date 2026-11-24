@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { poQuantityApprovalRequestSchema, poQuantityPreviewRequestSchema, poLineAmountCents } from "@shared/procurement/po-quantity-amendment";
-import { buildQuantityAmendmentContext, hasQuantityAmendmentAuthority, planQuantityAmendment, quantityAmendmentBlockedReason, quantityAmendmentTimestamp, type AmendmentFacts } from "../../po-quantity-amendment.policy";
+import { buildQuantityAmendmentContext, hasQuantityAmendmentAuthority, planQuantityAmendment, quantityAmendmentBlockedReason, quantityAmendmentTimestamp, type AmendmentFacts } from "../../domain/po-quantity-amendment.policy";
 import type { PurchaseApprovalActor } from "../../../identity/domain/purchase-approval-authority";
 
 function facts(): AmendmentFacts {

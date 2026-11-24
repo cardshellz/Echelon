@@ -1,0 +1,108 @@
+import express, { type Express, type NextFunction, type Request, type Response } from "express";
+import type {} from "../../../../platform/http/raw-body-request";
+
+import type { CarrierTrackingLogger, CarrierTrackingService } from "../../application/carrier-tracking.service";
+import {
+  ShipStationWebhookAuthError,
+  type ShipStationWebhookAuthenticationHeaders,
+  type ShipStationWebhookVerifier,
+} from "./shipstation-webhook-auth";
+import { SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER } from "../../application/shipstation-tracking-api-config";
+
+export const SHIPSTATION_TRACKING_WEBHOOK_PATH = "/api/shipping/webhooks/shipstation/track";
+export const SHIPSTATION_TRACKING_WEBHOOK_BODY_LIMIT = "1mb";
+
+/**
+ * Install before the application's general JSON parser. Authentication and
+ * receipt attestation require the exact bytes received from ShipStation, and
+ * an authenticated payload must still reach the evidence ledger when its JSON
+ * cannot be normalized.
+ */
+export function installShipStationTrackingRawBodyCapture(app: Express): void {
+  app.use(
+    SHIPSTATION_TRACKING_WEBHOOK_PATH,
+    express.raw({
+      type: "application/json",
+      limit: SHIPSTATION_TRACKING_WEBHOOK_BODY_LIMIT,
+      inflate: false,
+    }),
+    (request: Request, _response: Response, next: NextFunction) => {
+      if (!Buffer.isBuffer(request.body)) return next();
+
+      const rawBody = Buffer.from(request.body);
+      request.rawBody = rawBody;
+      try {
+        request.body = JSON.parse(rawBody.toString("utf8"));
+      } catch {
+        // Authentication and receipt persistence still run. The domain parser
+        // records an immutable rejection after the authenticated bytes are retained.
+        request.body = null;
+      }
+      return next();
+    },
+  );
+}
+
+export function registerShipStationTrackingWebhook(
+  app: Express,
+  dependencies: {
+    service: Pick<CarrierTrackingService, "ingestShipStationWebhook">;
+    webhookVerifier: ShipStationWebhookVerifier;
+    logger: CarrierTrackingLogger;
+  },
+): void {
+  app.post(SHIPSTATION_TRACKING_WEBHOOK_PATH, async (request, response) => {
+    try {
+      const receipt = await dependencies.webhookVerifier.verify({
+        headers: authenticationHeaders(request),
+        rawBody: request.rawBody,
+      });
+      const result = await dependencies.service.ingestShipStationWebhook(request.body, receipt);
+      if (result.ingestStatus === "rejected") {
+        return response.status(202).json({
+          status: "accepted_for_review",
+          receiptId: result.webhookReceiptId,
+          receiptDuplicate: !result.webhookReceiptInserted,
+          parseAttemptId: result.parseAttemptId,
+          parseAttemptDuplicate: !result.parseAttemptInserted,
+          reasonCode: result.reasonCode,
+        });
+      }
+      return response.status(200).json({
+        status: "accepted",
+        eventId: result.eventId,
+        duplicate: !result.eventInserted,
+        receiptDuplicate: !result.webhookReceiptInserted,
+        matchStatus: result.matchStatus,
+        dispatchEvidence: result.dispatchEvidence,
+      });
+    } catch (error) {
+      if (error instanceof ShipStationWebhookAuthError) {
+        dependencies.logger.warn({
+          code: error.code,
+          message: "ShipStation tracking webhook authentication failed.",
+          context: { httpStatus: error.httpStatus },
+        });
+        if (error.httpStatus === 404) return response.status(404).end();
+        return response.status(error.httpStatus).json({ error: error.code });
+      }
+      dependencies.logger.error({
+        code: "CARRIER_TRACKING_WEBHOOK_INGEST_FAILED",
+        message: "ShipStation tracking webhook could not be durably recorded.",
+        context: { error: error instanceof Error ? error.message : String(error) },
+      });
+      return response.status(500).json({ error: "CARRIER_TRACKING_WEBHOOK_INGEST_FAILED" });
+    }
+  });
+}
+
+function authenticationHeaders(request: Request): ShipStationWebhookAuthenticationHeaders {
+  return {
+    sharedSecret: headerValue(request, SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER),
+  };
+}
+
+function headerValue(request: Request, name: string): string | null {
+  const value = request.get(name)?.trim();
+  return value || null;
+}

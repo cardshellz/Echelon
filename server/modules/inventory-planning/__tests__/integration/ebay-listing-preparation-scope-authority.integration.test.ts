@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InventoryEbayPublicationReadinessInput } from "@shared/types/ebay-publication-readiness";
-import { readEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../../channels/ebay-listing-preparation-scope";
+import { readEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../../channels/application/ebay-listing-preparation-scope";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { cutoverCompositionBaseSql } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { WALMART_INVENTORY_NOW as now } from "../fixtures/walmart-publication-inventory.fixture";

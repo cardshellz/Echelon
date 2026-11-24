@@ -5,4 +5,4 @@ export {
   readPickPriorityChannels,
   updateChannelPickPrioritySlaDays,
   type PickPriorityChannelSummary,
-} from "./pick-priority-channel-sla.repository";
+} from "./infrastructure/pick-priority-channel-sla.repository";

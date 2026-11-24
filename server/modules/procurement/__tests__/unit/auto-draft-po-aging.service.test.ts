@@ -3,7 +3,7 @@ import { financialWorkflowFixture } from "../../../../../test/fixtures/po-financ
 import {
   buildStaleAutoDraftPoDiagnostics,
   type AutoDraftPoAgingRow,
-} from "../../auto-draft-po-aging.service";
+} from "../../application/auto-draft-po-aging.service";
 
 function row(overrides: Partial<AutoDraftPoAgingRow>): AutoDraftPoAgingRow {
   return {

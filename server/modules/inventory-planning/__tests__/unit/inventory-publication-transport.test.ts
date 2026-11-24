@@ -4,7 +4,7 @@ import {
   InventoryPublicationTransportRegistry,
   type InventoryPublicationTransportAdapter,
 } from "../../application/inventory-publication-transport";
-import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/channel-inventory-publication-transport.adapter";
+import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/infrastructure/channel-inventory-publication-transport.adapter";
 
 describe("InventoryPublicationTransportRegistry", () => {
   it("keys adapters by exact destination owner kind and provider", () => {

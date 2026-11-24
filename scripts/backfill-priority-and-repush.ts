@@ -12,9 +12,9 @@
 import { db } from "../server/db";
 import { sql } from "drizzle-orm";
 import { computeSortRank } from "../server/modules/orders/domain/sort-rank";
-import { createShipStationService } from "../server/modules/oms/shipstation.service";
-import { createOmsService } from "../server/modules/oms/oms.service";
-import { extractEbayShipByDate } from "../server/modules/oms/ebay-shipby";
+import { createShipStationService } from "../server/modules/oms/application/shipstation.service";
+import { createOmsService } from "../server/modules/oms/application/oms.service";
+import { extractEbayShipByDate } from "../server/modules/oms/application/ebay-shipby";
 
 async function main() {
   console.log("[Backfill] Starting priority + ShipStation refresh...");

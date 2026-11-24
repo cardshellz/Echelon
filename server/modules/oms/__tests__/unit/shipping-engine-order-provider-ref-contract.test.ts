@@ -4,11 +4,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const authoritySource = readFileSync(
-  resolve(process.cwd(), "server/modules/oms/channel-fulfillment-authority.repository.ts"),
+  resolve(process.cwd(), "server/modules/oms/infrastructure/channel-fulfillment-authority.repository.ts"),
   "utf8",
 );
 const trackingSource = readFileSync(
-  resolve(process.cwd(), "server/modules/shipping/carrier-tracking.repository.ts"),
+  resolve(process.cwd(), "server/modules/shipping/infrastructure/carrier-tracking.repository.ts"),
   "utf8",
 );
 const migrationSource = readFileSync(

@@ -1,6 +1,6 @@
 import { test, expect } from "vitest";
-import { extractShopifySalesFinancials } from "../../archon-sales-financials";
-import { extractShopifyDiscountEvidence } from "../../archon-discount-evidence";
+import { extractShopifySalesFinancials } from "../../application/archon-sales-financials";
+import { extractShopifyDiscountEvidence } from "../../application/archon-discount-evidence";
 const raw = {
   id: 101,
   currency: "USD",

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { prepareChannelIntent, assertPreparedChannelIntent } from "../../prepared-channel-intent.api";
-import { prepareEbayChannelIntent, ebayIntentAccount, assertEbayPreparedIntent, EBAY_PREPARED_INTENT_CAPABILITY } from "../../../channels/ebay-prepared-intent";
+import { prepareEbayChannelIntent, ebayIntentAccount, assertEbayPreparedIntent, EBAY_PREPARED_INTENT_CAPABILITY } from "../../../channels/application/ebay-prepared-intent";
 import { syncProviderFixture } from "../../../channels/__tests__/fixtures/ebay-listing-sync.fixture";
 import { resolveExplicitPublicationMediaPlan } from "../../../catalog/domain/catalog-publication-media";
-import { syncContentIntentHash } from "../../../channels/ebay-listing-sync-content";
+import { syncContentIntentHash } from "../../../channels/application/ebay-listing-sync-content";
 
 async function prepared() {
   const draft = (await syncProviderFixture().prepare()).draft;

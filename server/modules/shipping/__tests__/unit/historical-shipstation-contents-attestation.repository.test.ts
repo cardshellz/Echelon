@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   HistoricalShipStationContentsAttestationRepositoryError,
   PgHistoricalShipStationContentsAttestationRepository,
-} from "../../historical-shipstation-contents-attestation.repository";
+} from "../../infrastructure/historical-shipstation-contents-attestation.repository";
 
 function repositoryWith(input: Readonly<{
   readonly query?: (text: string) => Promise<{ rows: Record<string, unknown>[] }>;

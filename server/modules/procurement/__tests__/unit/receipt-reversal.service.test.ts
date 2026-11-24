@@ -3,7 +3,7 @@ import {
   ReceiptReversalService,
   ReceiptReversalError,
   __testing__,
-} from "../../receipt-reversal.service";
+} from "../../application/receipt-reversal.service";
 
 /**
  * Spec D, Part 1 — receipt reversal math.

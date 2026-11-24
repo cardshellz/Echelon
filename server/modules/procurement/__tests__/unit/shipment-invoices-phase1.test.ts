@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Arithmetic fixtures supply a verified source adapter. Real PostgreSQL ownership
 // regressions separately cover contradictory rows across these projections.
-vi.mock("../../shipment-billing-ownership.repository", () => ({
+vi.mock("../../infrastructure/shipment-billing-ownership.repository", () => ({
   readShipmentBillingOwnership: vi.fn(async (_client: unknown, costs: Array<{ id: number; vendorInvoiceId: number | null }>) => new Map(costs.map(cost => [cost.id, {
     state: cost.vendorInvoiceId == null ? "unbilled" : "billed", activeInvoiceId: cost.vendorInvoiceId,
     activeInvoiceLineId: cost.vendorInvoiceId == null ? null : cost.id, activeInvoiceLineIds: cost.vendorInvoiceId == null ? [] : [cost.id],
@@ -106,7 +106,7 @@ describe("getShipmentInvoicesSummary", () => {
 
   it("returns correct sums for a shipment with mixed paid/unpaid invoices", async () => {
     const { db } = await import("../../../../db");
-    const { getShipmentInvoicesSummary } = await import("../../ap-ledger.service");
+    const { getShipmentInvoicesSummary } = await import("../../application/ap-ledger.service");
 
     // Mock the query result: 2 invoices, one paid, one partially paid
     (db.select as any).mockReturnValue({
@@ -154,7 +154,7 @@ describe("getShipmentInvoicesSummary", () => {
 
   it("returns empty array and zero summary for shipment with no invoices", async () => {
     const { db } = await import("../../../../db");
-    const { getShipmentInvoicesSummary } = await import("../../ap-ledger.service");
+    const { getShipmentInvoicesSummary } = await import("../../application/ap-ledger.service");
 
     (db.select as any).mockReturnValue({
       ...mockSelectChain,
@@ -174,7 +174,7 @@ describe("getShipmentInvoicesSummary", () => {
 
   it("lists voided invoices but excludes them from financial totals", async () => {
     const { db } = await import("../../../../db");
-    const { getShipmentInvoicesSummary } = await import("../../ap-ledger.service");
+    const { getShipmentInvoicesSummary } = await import("../../application/ap-ledger.service");
 
     (db.select as any).mockReturnValue({
       ...mockSelectChain,
@@ -225,7 +225,7 @@ describe("listInvoices with inboundShipmentId filter", () => {
 
   it("passes inboundShipmentId filter to the query", async () => {
     const { db } = await import("../../../../db");
-    const { listInvoices } = await import("../../ap-ledger.service");
+    const { listInvoices } = await import("../../application/ap-ledger.service");
 
     // First call is for invoices, second is for PO links
     let callCount = 0;
@@ -271,7 +271,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
 
   it("derives 'paid' status when invoice balance is 0", async () => {
     const { db } = await import("../../../../db");
-    const { enrichCostsWithInvoiceInfo } = await import("../../ap-ledger.service");
+    const { enrichCostsWithInvoiceInfo } = await import("../../application/ap-ledger.service");
 
     (db.select as any).mockReturnValue({
       ...mockSelectChain,
@@ -307,7 +307,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
 
   it("derives 'invoiced' status when invoice has outstanding balance", async () => {
     const { db } = await import("../../../../db");
-    const { enrichCostsWithInvoiceInfo } = await import("../../ap-ledger.service");
+    const { enrichCostsWithInvoiceInfo } = await import("../../application/ap-ledger.service");
 
     (db.select as any).mockReturnValue({
       ...mockSelectChain,
@@ -334,7 +334,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
 
   it("derives 'unbilled' status when no invoice linked", async () => {
     const { db } = await import("../../../../db");
-    const { enrichCostsWithInvoiceInfo } = await import("../../ap-ledger.service");
+    const { enrichCostsWithInvoiceInfo } = await import("../../application/ap-ledger.service");
 
     (db.select as any).mockReturnValue({
       ...mockSelectChain,
@@ -361,7 +361,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
 
   it("keeps a voided invoice visible as requiring replacement", async () => {
     const { db } = await import("../../../../db");
-    const { enrichCostsWithInvoiceInfo } = await import("../../ap-ledger.service");
+    const { enrichCostsWithInvoiceInfo } = await import("../../application/ap-ledger.service");
 
     (db.select as any).mockReturnValue({
       ...mockSelectChain,
@@ -395,7 +395,7 @@ describe("shipment cost payment allocation", () => {
   });
 
   it("uses exact largest-remainder allocation without exceeding the invoice payment", async () => {
-    const { allocateProportionalPaidCents } = await import("../../ap-ledger.service");
+    const { allocateProportionalPaidCents } = await import("../../application/ap-ledger.service");
 
     const result = allocateProportionalPaidCents([
       { id: 1, amountCents: 3 },
@@ -408,7 +408,7 @@ describe("shipment cost payment allocation", () => {
   });
 
   it("allocates a partially paid invoice across charges and signed credits", async () => {
-    const { allocateProportionalPaidCents } = await import("../../ap-ledger.service");
+    const { allocateProportionalPaidCents } = await import("../../application/ap-ledger.service");
 
     const result = allocateProportionalPaidCents([
       { id: 1, amountCents: 500 },
@@ -421,7 +421,7 @@ describe("shipment cost payment allocation", () => {
 
   it("uses invoice line amounts, preserves actual zero, and returns a payment checksum", async () => {
     const { db } = await import("../../../../db");
-    const { getShipmentCostPaymentStatus } = await import("../../ap-ledger.service");
+    const { getShipmentCostPaymentStatus } = await import("../../application/ap-ledger.service");
 
     (db.select as any).mockReturnValue({
       ...mockSelectChain,
@@ -493,7 +493,7 @@ describe("shipment cost payment allocation", () => {
 
   it("preserves an unlinked signed promotion in the shipment payment summary", async () => {
     const { db } = await import("../../../../db");
-    const { getShipmentCostPaymentStatus } = await import("../../ap-ledger.service");
+    const { getShipmentCostPaymentStatus } = await import("../../application/ap-ledger.service");
 
     (db.select as any).mockReturnValue({
       ...mockSelectChain,

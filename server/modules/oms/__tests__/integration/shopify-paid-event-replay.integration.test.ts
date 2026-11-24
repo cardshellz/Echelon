@@ -6,7 +6,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { queueOmsPaidEventReplay, type PaidReplayDatabase } from "../../shopify-paid-event-replay";
+import { queueOmsPaidEventReplay, type PaidReplayDatabase } from "../../application/shopify-paid-event-replay";
 import { loadShopifyReadinessCandidates } from "../../infrastructure/shopify-readiness-candidates.repository";
 import { paidReplayFixture } from "../fixtures/shopify-paid-replay.fixture";
 

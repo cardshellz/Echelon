@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
-import { createFulfillmentPushService, type ChannelFulfillmentProviderCommandInput } from "../../../oms/fulfillment-push.service";
+import { createFulfillmentPushService, type ChannelFulfillmentProviderCommandInput } from "../../../oms/application/fulfillment-push.service";
 
 const command: ChannelFulfillmentProviderCommandInput = { commandId: 1, omsOrderId: 2, physicalShipmentId: 3, legacyWmsShipmentIds: [4],
   trackingNumber: "TRACK", carrier: "UPS", trackingUrl: null, shippedAt: new Date("2026-09-21T12:00:00Z"),

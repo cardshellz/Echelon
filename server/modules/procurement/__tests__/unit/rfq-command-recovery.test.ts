@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { reviewRfqQuantity } from "@shared/procurement/rfq-quantity-review";
 import { matchesRfqCommandReceipt, rfqCommandIntentSchema, rfqCommandReceiptSchema } from "@shared/procurement/rfq-command";
 import type { RfqWorkflowDetail } from "@shared/procurement/rfq-workflow";
-import { createRfqWorkflowCommands, RFQ_WORKFLOW_COMMAND_PRINCIPAL, rfqWorkflowCommandScope, validateRfqWorkflowReceipt } from "../../rfq-workflow.commands";
-import { createRfqWorkflowService, RfqWorkflowError, type RfqWorkflowCommand, type RfqWorkflowTransaction } from "../../rfq-workflow.service";
+import { createRfqWorkflowCommands, RFQ_WORKFLOW_COMMAND_PRINCIPAL, rfqWorkflowCommandScope, validateRfqWorkflowReceipt } from "../../application/rfq-workflow.commands";
+import { createRfqWorkflowService, RfqWorkflowError, type RfqWorkflowCommand, type RfqWorkflowTransaction } from "../../application/rfq-workflow.service";
 import type { FinancialCommandRepository, FinancialCommandResult } from "../../../../platform/commands/transactional-command.service";
 
 import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";

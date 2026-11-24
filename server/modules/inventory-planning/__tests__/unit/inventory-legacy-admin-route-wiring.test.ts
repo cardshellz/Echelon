@@ -21,7 +21,7 @@ describe("legacy inventory admin route authority wiring", () => {
     ["delete", "/api/channel-allocation-rules/:id", "channelAllocation"],
   ] as const)("gates %s %s before its legacy write", (method, path, control) => {
     const handler = routeHandler(
-      source("server/modules/channels/channels.routes.ts"),
+      source("server/modules/channels/interfaces/http/channels.routes.ts"),
       method,
       path,
     );
@@ -35,7 +35,7 @@ describe("legacy inventory admin route authority wiring", () => {
     ["put", "/api/sync/warehouses/:warehouseId/feed", "channelWarehouseAssignment"],
   ] as const)("gates %s %s before its legacy configuration write", (method, path, control) => {
     const handler = routeHandler(
-      source("server/modules/channels/sync-control.routes.ts"),
+      source("server/modules/channels/interfaces/http/sync-control.routes.ts"),
       method,
       path,
     );
@@ -117,7 +117,7 @@ describe("legacy inventory admin route authority wiring", () => {
     ["/api/channel-allocation/grid", "getBulkAtp"],
   ] as const)("retires %s before its legacy-only ATP reader runs", (path, legacyReader) => {
     const handler = routeHandler(
-      source("server/modules/channels/channels.routes.ts"),
+      source("server/modules/channels/interfaces/http/channels.routes.ts"),
       "get",
       path,
     );

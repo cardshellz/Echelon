@@ -11,8 +11,8 @@ import {
   isPermanentInventoryPushError,
   PERMANENT_FAILURE_QUARANTINE_THRESHOLD,
   type EchelonSyncOrchestrator,
-} from "../../echelon-sync-orchestrator.service";
-import { ChannelAdapterRegistry, type IChannelAdapter } from "../../channel-adapter.interface";
+} from "../../application/echelon-sync-orchestrator.service";
+import { ChannelAdapterRegistry, type IChannelAdapter } from "../../domain/channel-adapter.interface";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------

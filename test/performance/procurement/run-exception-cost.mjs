@@ -17,10 +17,10 @@ if(!output||!isAbsolute(output)||!output.endsWith('.json')
   throw new Error('Use an absolute JSON report, ascending 10/100 tiers and an isolated disposable test environment');
 }
 if(readdirSync(process.cwd()).some(name=>/^\.env(?:\.|$)/.test(name)))throw new Error('Refusing environment-loading files');
-const sourceFiles=['server/modules/procurement/shipment-cost-exception.repository.ts',
+const sourceFiles=['server/modules/procurement/infrastructure/shipment-cost-exception.repository.ts',
   'server/modules/inventory/infrastructure/cost-reconciliation.repository.ts',
-  'server/modules/procurement/shipment-cost-review.repository.ts',
-  'server/modules/procurement/shipment-tracking.service.ts',
+  'server/modules/procurement/infrastructure/shipment-cost-review.repository.ts',
+  'server/modules/procurement/application/shipment-tracking.service.ts',
   'test/performance/procurement/run-exception-cost.mjs',
   'test/performance/procurement/health-cost.fixture.ts','test/performance/procurement/query-measurement.ts'];
 const source=()=>Object.fromEntries(sourceFiles.map(file=>[file,createHash('sha256').update(readFileSync(resolve(file))).digest('hex')]));
@@ -35,7 +35,7 @@ const failure=error=>error instanceof Error?{name:error.name,message:error.messa
 save();
 const {createProcurementPerformanceFixture}=await load('test/performance/procurement/health-cost.fixture.ts');
 const {instrumentQueries}=await load('test/performance/procurement/query-measurement.ts');
-const {readShipmentCostExceptions}=await load('server/modules/procurement/shipment-cost-exception.repository.ts');
+const {readShipmentCostExceptions}=await load('server/modules/procurement/infrastructure/shipment-cost-exception.repository.ts');
 const fixture=await createProcurementPerformanceFixture(process.env.ECHELON_TEST_DATABASE_URL).catch(error=>{
   report.status='fixture_failed';report.failure=failure(error);save();throw error;
 });

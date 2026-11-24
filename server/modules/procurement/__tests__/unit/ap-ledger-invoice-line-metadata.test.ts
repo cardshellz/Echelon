@@ -23,7 +23,7 @@ vi.mock("@shared/schema", () => ({
   apPaymentAllocations: {}, apPayments: {}, inboundFreightCosts: {}, inboundShipments: {},
   poStatusHistory: {}, purchaseOrderLines: {}, purchaseOrders: {}, vendorInvoiceAttachments: {}, vendors: {},
 }));
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
 }));
 
 type RecordedLine = {
@@ -96,7 +96,7 @@ describe("invoice line metadata preserves recorded economics", () => {
   it("preserves an imported total and matching state, skips financial projection, and audits metadata", async () => {
     const record = fixture();
     const state = configure(record);
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     const updated = await updateInvoiceLine(33, { notes: " Revised packing instructions " }, "operator-9");
 
     expect(updated).toEqual({ ...record, notes: "Revised packing instructions", updatedAt: fixedTime });
@@ -121,7 +121,7 @@ describe("invoice line metadata preserves recorded economics", () => {
     { label: "recorded zero values", record: fixture({ qtyInvoiced: 0, unitCostMills: 0, unitCostCents: 0, lineTotalCents: 0 }) },
   ])("does not repair or normalize $label during a description edit", async ({ record }) => {
     const state = configure(record);
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     const updated = await updateInvoiceLine(33, { description: "Updated description" }, "operator-9");
     expect(updated).toEqual({ ...record, description: "Updated description", updatedAt: fixedTime });
     expect(Object.keys(state.writes[0].values).sort()).toEqual(["description", "updatedAt"]);
@@ -135,7 +135,7 @@ describe("invoice line metadata preserves recorded economics", () => {
   ])("does not reprice an unchanged form echo %j", async (echo) => {
     const record = fixture();
     const state = configure(record);
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     const updated = await updateInvoiceLine(33, { ...echo, notes: "Same agreed price" });
     expect(updated).toMatchObject({ ...record, notes: "Same agreed price" });
     expect(state.writes[0].values).toEqual({ updatedAt: fixedTime, notes: "Same agreed price" });
@@ -144,7 +144,7 @@ describe("invoice line metadata preserves recorded economics", () => {
   it("does not turn a rounded cents-only echo into a new sub-cent price", async () => {
     const record = fixture({ unitCostMills: 375, unitCostCents: 4 });
     const state = configure(record);
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     const updated = await updateInvoiceLine(33, { unitCostCents: 4 });
     expect(updated).toMatchObject(record);
     expect(state.writes[0].values).toEqual({ updatedAt: fixedTime });
@@ -153,7 +153,7 @@ describe("invoice line metadata preserves recorded economics", () => {
   it("preserves both stored mirrors when an unchanged legacy form resends them", async () => {
     const record = fixture({ unitCostMills: 375, unitCostCents: 3 });
     const state = configure(record);
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     const updated = await updateInvoiceLine(33, { unitCostMills: 375, unitCostCents: 3 });
     expect(updated).toMatchObject(record);
     expect(state.writes[0].values).toEqual({ updatedAt: fixedTime });
@@ -162,7 +162,7 @@ describe("invoice line metadata preserves recorded economics", () => {
   it("preserves absent legacy mills when a form resends the equivalent normalized price", async () => {
     const record = fixture({ unitCostMills: null, unitCostCents: 4 });
     const state = configure(record);
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     const updated = await updateInvoiceLine(33, { unitCostMills: 400, unitCostCents: 4 });
     expect(updated).toMatchObject(record);
     expect(state.writes[0].values).toEqual({ updatedAt: fixedTime });
@@ -175,7 +175,7 @@ describe("invoice line metadata preserves recorded economics", () => {
   it("uses the explicitly reviewed extended total for an actual quantity change", async () => {
     const record = fixture();
     const state = configure(record, "received", [[{ total: 6_667 }], [{ id: 12, paidAmountCents: 0, creditedAmountCents: 0 }], []]);
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     const updated = await updateInvoiceLine(33, { qtyInvoiced: 100, lineTotalCents: 6_667 });
     expect(state.writes[0].values).toMatchObject({ costComponentEvidence: null });
     expect(updated).toMatchObject({ qtyInvoiced: 100, unitCostMills: 6_667, unitCostCents: 67, lineTotalCents: 6_667, matchStatus: "pending" });
@@ -189,7 +189,7 @@ describe("invoice line metadata preserves recorded economics", () => {
 
   it("requires a reviewed total before repricing an unexplained extended amount", async () => {
     const state = configure(fixture());
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     await expect(updateInvoiceLine(33, { qtyInvoiced: 100 })).rejects.toMatchObject({
       statusCode: 422, details: { code: "AP_INVOICE_EXTENDED_TOTAL_REQUIRED" },
     });
@@ -198,7 +198,7 @@ describe("invoice line metadata preserves recorded economics", () => {
   });
   it("still rejects inconsistent newly supplied economic prices", async () => {
     const state = configure(fixture());
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     await expect(updateInvoiceLine(33, { unitCostMills: 9_999, unitCostCents: 67 })).rejects.toMatchObject({
       details: { code: "AP_UNIT_COST_PRECISION_MISMATCH" },
     });
@@ -214,7 +214,7 @@ describe("invoice line metadata preserves recorded economics", () => {
     ["unitCostMills", Number.MAX_SAFE_INTEGER + 1], ["unitCostCents", -1],
   ])("rejects raw JSON %s=%j before it can reprice a legacy row", async (field, value) => {
     const state = configure(fixture({ unitCostMills: null, unitCostCents: 4 }));
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     await expect(updateInvoiceLine(33, { [field as string]: value } as any)).rejects.toMatchObject({
       statusCode: 400,
       details: { field },
@@ -226,7 +226,7 @@ describe("invoice line metadata preserves recorded economics", () => {
 
   it("does not bypass the existing invoice edit lock for metadata", async () => {
     const state = configure(fixture(), "approved");
-    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    const { updateInvoiceLine } = await import("../../application/ap-ledger.service");
     await expect(updateInvoiceLine(33, { notes: "Cannot edit" })).rejects.toMatchObject({
       statusCode: 409, details: { code: "AP_INVOICE_IMMUTABLE" },
     });

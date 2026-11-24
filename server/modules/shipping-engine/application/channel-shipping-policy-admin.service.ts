@@ -19,7 +19,7 @@ import {
 import type { AuditLogPayload } from "../../../infrastructure/auditLogger";
 import type {
   ChannelShippingCapabilityResolver,
-} from "../../channels/channel-shipping-capability.registry";
+} from "../../channels/channel-shipping-capability.registry.api";
 import { buildLegacyChannelShippingFallback } from "./legacy-channel-shipping-fallback";
 import {
   resolveChannelShippingPolicyCandidate,

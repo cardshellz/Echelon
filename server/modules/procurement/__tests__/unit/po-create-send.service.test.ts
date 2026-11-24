@@ -1,7 +1,7 @@
 import { costGraphLockExecute } from "./cost-graph.fixture";
 import { costGraphAndProcurementSettingsExecute } from "./procurement-settings.fixture";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+import { createPurchasingService, PurchasingError } from "../../application/purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests for Spec A service methods.

@@ -6,9 +6,9 @@ import { shipmentCreateResultSchema } from "@shared/procurement/shipment-create-
 import { verifiedCustodyResultSchema } from "@shared/procurement/receiving-quarantine-command";
 import type { ReceivingQuarantineCommandResult } from "@shared/procurement/receiving-quarantine";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import type { PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
-import type { ReceivingCustodyCommand } from "../../receiving-quarantine.service";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
+import type { PurchasingRecommendationRawRow } from "../../application/purchasing-recommendation.engine";
+import type { ReceivingCustodyCommand } from "../../application/receiving-quarantine.service";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
 import { createFlowCostHarness, FLOW_ACTOR, FLOW_AT, FLOW_IDS, seedFlowMasterData, type FlowCostHarness } from "./procurement-flow-cost.fixture";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -33,12 +33,12 @@ function demandRow(): PurchasingRecommendationRawRow {
 suite.sequential("RFQ-origin shipment quarantine lifecycle preserves physical custody", () => {
   let harness: FlowCostHarness;
   let disposeHarness: (() => Promise<void>) | undefined;
-  let custodyModule: typeof import("../../receiving-quarantine.commands");
-  let custodyCommands: ReturnType<typeof import("../../receiving-quarantine.commands").createReceivingCustodyCommands>;
-  let readCustody: typeof import("../../receiving-quarantine.service").readReceivingQuarantineView;
-  let acceptanceOptions: typeof import("../../receiving-quarantine-options.repository").readQuarantineAcceptanceOptions;
-  let shipmentCommands: ReturnType<typeof import("../../shipment-create.commands").createShipmentCreateCommands>;
-  let shipmentModule: typeof import("../../shipment-create.commands");
+  let custodyModule: typeof import("../../application/receiving-quarantine.commands");
+  let custodyCommands: ReturnType<typeof import("../../application/receiving-quarantine.commands").createReceivingCustodyCommands>;
+  let readCustody: typeof import("../../application/receiving-quarantine.service").readReceivingQuarantineView;
+  let acceptanceOptions: typeof import("../../infrastructure/receiving-quarantine-options.repository").readQuarantineAcceptanceOptions;
+  let shipmentCommands: ReturnType<typeof import("../../application/shipment-create.commands").createShipmentCreateCommands>;
+  let shipmentModule: typeof import("../../application/shipment-create.commands");
   let hashCommand: typeof import("../../../../platform/commands/http-command").hashHttpFinancialCommand;
 
   beforeEach(async () => {
@@ -53,14 +53,14 @@ suite.sequential("RFQ-origin shipment quarantine lifecycle preserves physical cu
         VALUES(10,'inventory','adjust','inventory'),(11,'purchasing','approve','purchasing');
       INSERT INTO identity.auth_role_permissions(role_id,permission_id,constraints)
         VALUES(1,10,NULL),(1,11,NULL)`);
-    custodyModule = await import("../../receiving-quarantine.commands");
-    shipmentModule = await import("../../shipment-create.commands");
+    custodyModule = await import("../../application/receiving-quarantine.commands");
+    shipmentModule = await import("../../application/shipment-create.commands");
     const repositoryModule = await import("../../../../platform/commands/command-results.repository");
     const repository = repositoryModule.createDrizzleFinancialCommandRepository(harness.database);
     custodyCommands = custodyModule.createReceivingCustodyCommands(harness.receiving, repository, () => FLOW_AT);
     shipmentCommands = shipmentModule.createShipmentCreateCommands(harness.shipment, repository, () => FLOW_AT);
-    readCustody = (await import("../../receiving-quarantine.service")).readReceivingQuarantineView;
-    acceptanceOptions = (await import("../../receiving-quarantine-options.repository")).readQuarantineAcceptanceOptions;
+    readCustody = (await import("../../application/receiving-quarantine.service")).readReceivingQuarantineView;
+    acceptanceOptions = (await import("../../infrastructure/receiving-quarantine-options.repository")).readQuarantineAcceptanceOptions;
     hashCommand = (await import("../../../../platform/commands/http-command")).hashHttpFinancialCommand;
   });
 
@@ -494,7 +494,7 @@ suite.sequential("RFQ-origin shipment quarantine lifecycle preserves physical cu
   it("preserves exact accepted-receipt reversal coverage without releasing held custody", async () => {
     const source = await sourceWithHeldGoods(800);
     const before = await harness.database.transaction(tx => readCustody(tx, source.receipt.id, FLOW_ACTOR));
-    const { ReceiptReversalService } = await import("../../receipt-reversal.service");
+    const { ReceiptReversalService } = await import("../../application/receipt-reversal.service");
     const reversal = new ReceiptReversalService(harness.database, harness.inventory);
     const body = { receivingLineId: source.line.id, qty: 1, reason: "Correct one accepted case count",
       idempotencyKey: "controlled-custody-reversal", userId: FLOW_ACTOR };

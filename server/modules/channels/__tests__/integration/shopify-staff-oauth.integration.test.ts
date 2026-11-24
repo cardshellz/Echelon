@@ -10,7 +10,7 @@ import { PostgresShopifyStaffOAuthRepository } from "../../infrastructure/shopif
 import { createShopifyStaffOAuthService, type ShopifyStaffOAuthDependencies } from "../../application/shopify-staff-oauth.service";
 import { parseShopifyStaffOAuthConfig } from "../../domain/shopify-staff-oauth";
 import { ShopifyStaffOAuthError, type ShopifyStaffOAuthBinding, type ShopifyStaffOAuthClaim,
-  type ShopifyStaffOAuthClaimInput, type ShopifyStaffOAuthCreate } from "../../shopify-staff-oauth.types";
+  type ShopifyStaffOAuthClaimInput, type ShopifyStaffOAuthCreate } from "../../domain/shopify-staff-oauth.types";
 
 // No application .env loader, application Pool or provider is imported. Even a
 // direct local invocation must meet the same loopback/disposable gate as CI.

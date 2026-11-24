@@ -13,7 +13,7 @@ vi.mock("../../../orders", () => ({ ordersStorage: {}, orderPageQuerySchema: {} 
 vi.mock("../../../catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../inventory", () => ({ inventoryStorage: {} }));
-vi.mock("../../../oms/oms.service", () => ({ createOmsService: () => ({}) }));
+vi.mock("../../../oms/application/oms.service", () => ({ createOmsService: () => ({}) }));
 vi.mock("../../../inventory-planning/infrastructure/inventory-legacy-admin-control.repository",
   () => ({ createInventoryLegacyAdminControlService: () => ({}) }));
 vi.mock("../../../../websocket", () => ({ broadcastOrdersUpdated: vi.fn() }));
@@ -31,9 +31,9 @@ vi.mock("../../../../routes/middleware", () => ({
     next();
   },
 }));
-import { registerChannelPricingRoutes } from "../../channels.routes";
+import { registerChannelPricingRoutes } from "../../interfaces/http/channels.routes";
 import { registerEbayPricingRuleRoutes } from "../../../../routes/ebay/ebay-pricing.routes";
-import { createChannelPricingService, type ChannelPricingService } from "../../channel-pricing.service";
+import { createChannelPricingService, type ChannelPricingService } from "../../application/channel-pricing.service";
 import { createChannelPricingTestDatabase, pricingSnapshot } from "../fixtures/channel-pricing-owner.fixture";
 import type { InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 

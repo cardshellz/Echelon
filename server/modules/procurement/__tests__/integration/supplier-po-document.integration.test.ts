@@ -16,12 +16,12 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target, property) {
   const value = Reflect.get(connection.database, property);
   return typeof value === "function" ? value.bind(connection.database) : value;
 } }) }));
-import { procurementMethods } from "../../procurement.storage";
+import { procurementMethods } from "../../infrastructure/procurement.storage";
 import { productMethods } from "../../../catalog/infrastructure/catalog.storage";
-import { createPurchasingService, type CreatePurchaseOrderWithLinesInput } from "../../purchasing.service";
-import { buildSupplierPoDocument } from "../../supplier-po-document";
-import { renderPoHtml } from "../../po-document";
-import { loadSupplierPoDocumentSource } from "../../supplier-po-document.repository";
+import { createPurchasingService, type CreatePurchaseOrderWithLinesInput } from "../../application/purchasing.service";
+import { buildSupplierPoDocument } from "../../application/supplier-po-document";
+import { renderPoHtml } from "../../application/po-document";
+import { loadSupplierPoDocumentSource } from "../../infrastructure/supplier-po-document.repository";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

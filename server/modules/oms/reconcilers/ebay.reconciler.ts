@@ -3,13 +3,13 @@ import { sql } from "drizzle-orm";
 import type { FulfillmentReconciler, ReconciliationStatus } from "./reconciler.interface";
 import { createEbayApiClient } from "../../channels/ebay-connector.api";
 import { EbayAuthService } from "../../channels/ebay-connector.api";
-import type { ChannelFulfillmentIngressService } from "../channel-fulfillment-ingress.service";
-import { processEbayFulfillmentIngress } from "../ebay-fulfillment-ingress.adapter";
+import type { ChannelFulfillmentIngressService } from "../application/channel-fulfillment-ingress.service";
+import { processEbayFulfillmentIngress } from "../infrastructure/ebay-fulfillment-ingress.adapter";
 import {
   handoffLegacyShipmentToChannelFulfillment,
   isChannelFulfillmentHandoffComplete,
-} from "../channel-fulfillment-authority.handoff";
-import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
+} from "../application/channel-fulfillment-authority.handoff";
+import type { ChannelFulfillmentAuthorityService } from "../application/channel-fulfillment-authority.service";
 
 export class EbayFulfillmentReconciler implements FulfillmentReconciler {
   constructor(
@@ -22,7 +22,7 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
     try {
       const ebayClient = this.createEbayClient(order);
       const ebayOrder = await ebayClient.getOrder((order as any).external_order_id || order.externalOrderId);
-      
+
       if (!ebayOrder || !ebayOrder.orderFulfillmentStatus) {
         return "unknown";
       }

@@ -25,7 +25,7 @@ export function parseCustomerReturnShopDomains(raw: string | undefined): readonl
 export async function createCustomerReturnLiveService(): Promise<CustomerReturnLiveService> {
   const approvedShopDomains = parseCustomerReturnShopDomains(process.env.CUSTOMER_RETURN_SHOPIFY_DOMAINS);
   const [{ pool, db }, { ChannelIdentityService }] = await Promise.all([
-    import("../../../db"), import("../../channels/channel-identity.service"),
+    import("../../../db"), import("../../channels/channel-identity.service.api"),
   ]);
   const identity = new ChannelIdentityService(db);
   const storedDimensions = new ShippingPackageDimensionsReader(pool);

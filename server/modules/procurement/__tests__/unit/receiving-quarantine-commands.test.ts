@@ -1,20 +1,20 @@
 import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";
 import { custodyTestResult } from "@shared/procurement/__tests__/receiving-quarantine.fixture";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createReceivingCustodyCommands, custodyCommandScope, hashCustodyCommandIdentity, CUSTODY_COMMAND_PRINCIPAL } from "../../receiving-quarantine.commands";
+import { createReceivingCustodyCommands, custodyCommandScope, hashCustodyCommandIdentity, CUSTODY_COMMAND_PRINCIPAL } from "../../application/receiving-quarantine.commands";
 import { ReceivingQuarantineError } from "../../domain/receiving-quarantine";
-import type { CustodyTransaction } from "../../receiving-quarantine.repository";
-import type { ReceivingQuarantineReceivingPort } from "../../receiving-quarantine-receiving.port";
+import type { CustodyTransaction } from "../../infrastructure/receiving-quarantine.repository";
+import type { ReceivingQuarantineReceivingPort } from "../../application/receiving-quarantine-receiving.port";
 import type {
   FinancialCommandDescriptor, FinancialCommandRepository, FinancialCommandResult,
 } from "../../../../platform/commands/transactional-command.service";
 
 const mocks = vi.hoisted(() => ({ legacy: vi.fn(), execute: vi.fn(), logError: vi.fn() }));
-vi.mock("../../receiving-quarantine-command-evidence.repository", () => ({ assertNoLegacyCustodyCommand: mocks.legacy }));
+vi.mock("../../infrastructure/receiving-quarantine-command-evidence.repository", () => ({ assertNoLegacyCustodyCommand: mocks.legacy }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.logError } }));
-vi.mock("../../receiving-quarantine.service", async importOriginal => ({
-  ...await importOriginal<typeof import("../../receiving-quarantine.service")>(),
+vi.mock("../../application/receiving-quarantine.service", async importOriginal => ({
+  ...await importOriginal<typeof import("../../application/receiving-quarantine.service")>(),
   executeReceivingCustodyCommand: mocks.execute,
 }));
 

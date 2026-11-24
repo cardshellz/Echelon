@@ -6,12 +6,12 @@ export {
   synchronizeProcurementSkuReferences,
   type ProcurementSkuReferenceRename,
   type ProcurementSkuReferenceRenameResult,
-} from "./procurement-sku-reference.service";
+} from "./application/procurement-sku-reference.service";
 export {
   correctProduct102PurchasingIdentity,
   recordProduct102PurchasingCleanupAudit,
-} from "./product-102-identity-cleanup.repository";
+} from "./infrastructure/product-102-identity-cleanup.repository";
 export {
   mergePurchasingProductIdentity,
   readPurchasingMergeEvidence,
-} from "./purchasing-product-merge";
+} from "./application/purchasing-product-merge";

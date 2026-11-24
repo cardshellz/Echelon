@@ -21,7 +21,7 @@ import { describe, expect, it } from "vitest";
 const omsDir = resolve(__dirname, "../..");
 const subDir = resolve(omsDir, "shipstation");
 const SHIPSTATION_SRC = [
-  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf-8"),
+  readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf-8"),
   ...(existsSync(subDir)
     ? readdirSync(subDir)
         .filter((f) => f.endsWith(".ts"))

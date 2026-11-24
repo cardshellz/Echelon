@@ -6,7 +6,7 @@
  * future refactor can't drop them.
  */
 import { describe, it, expect } from "vitest";
-import { FLOW_ISSUES, CONSISTENCY_INVARIANTS } from "../../flow-waterfall.service";
+import { FLOW_ISSUES, CONSISTENCY_INVARIANTS } from "../../application/flow-waterfall.service";
 
 const VALID_STAGES = new Set(["intake", "oms_to_wms", "wms_fulfill", "engine_push", "shipped", "writeback", "other"]);
 const VALID_KINDS = new Set(["stuck", "contradiction", "duplicate", "queue_failure", "sla"]);

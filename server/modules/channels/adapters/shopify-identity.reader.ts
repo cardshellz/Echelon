@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ChannelIdentityError, externalIdentitySchema, providerRestIdentitySchema } from "../channel-identity.domain";
+import { ChannelIdentityError, externalIdentitySchema, providerRestIdentitySchema } from "../domain/channel-identity.domain";
 
 export interface ShopifyIdentityConnection {
   id: number;

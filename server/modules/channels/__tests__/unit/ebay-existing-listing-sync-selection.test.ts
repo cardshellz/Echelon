@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isExistingEbayListingSyncCandidate, type ExistingEbayListingSyncCandidate } from "../../ebay-listing-eligibility";
+import { isExistingEbayListingSyncCandidate, type ExistingEbayListingSyncCandidate } from "../../application/ebay-listing-eligibility";
 
 const candidate: ExistingEbayListingSyncCandidate = {
   productActive: true, variantActive: true, salesEligibility: "sellable",

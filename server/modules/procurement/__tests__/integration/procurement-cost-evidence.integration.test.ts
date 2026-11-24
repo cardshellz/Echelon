@@ -5,7 +5,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { fixtureTable } from "./shipment-line-fixture";
-import { recordCostRevision } from "../../cost-source-revision.repository";
+import { recordCostRevision } from "../../infrastructure/cost-source-revision.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const enabled = Boolean(url) && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

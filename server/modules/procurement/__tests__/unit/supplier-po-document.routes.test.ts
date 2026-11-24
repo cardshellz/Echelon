@@ -5,17 +5,17 @@ import type { ServiceRegistry } from "../../../../services";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { supplierDocumentSource } from "../fixtures/supplier-po-document.fixture";
-import { SupplierPoDocumentError } from "../../supplier-po-document";
+import { SupplierPoDocumentError } from "../../application/supplier-po-document";
 const sourceReader = vi.hoisted(() => vi.fn());
-vi.mock("../../supplier-po-document.repository", () => ({ loadSupplierPoDocumentSource: sourceReader }));
+vi.mock("../../infrastructure/supplier-po-document.repository", () => ({ loadSupplierPoDocumentSource: sourceReader }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../orders", () => ({ ordersStorage: {} }));
-vi.mock("../../procurement", () => ({ procurementStorage: {} }));
-vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../po-email-outbox.service", () => ({
+vi.mock("../../infrastructure/procurement", () => ({ procurementStorage: {} }));
+vi.mock("../../application/ap-ledger.service", () => ({}));
+vi.mock("../../application/po-email-outbox.service", () => ({
   enqueuePurchaseOrderEmail: vi.fn(), listPurchaseOrderEmailDeliveries: vi.fn(), replayDeadLetterPurchaseOrderEmail: vi.fn(),
   PoEmailOutboxError: class extends Error { constructor(message: string, readonly statusCode: number, readonly code: string) { super(message); } },
 }));
@@ -29,7 +29,7 @@ vi.mock("../../../../routes/middleware", () => ({
   },
 }));
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
-import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
+import { registerPurchaseOrderRoutes } from "../../interfaces/http/purchase-order.routes";
 
 function unusedService(name: string): object {
   return new Proxy({}, {

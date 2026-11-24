@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { ebayPublicationStockResultSchema } from "@shared/types/ebay-publication-stock";
 import { findEbayPublicationReadinessReceipt } from "../../inventory-planning/quantity-publication.api";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
 import { PostgresEbayListingSyncRepository } from "./ebay-listing-sync.repository";
 /** Read-only compatibility for immutable commands saved by the retired manual
  * stock setup flow. It cannot create mappings, selection or listing requests. */

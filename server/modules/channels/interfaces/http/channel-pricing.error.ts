@@ -1,6 +1,6 @@
 import type { Response } from "express";
 import { ZodError } from "zod";
-import { ChannelPricingError } from "../../channel-pricing.domain";
+import { ChannelPricingError } from "../../domain/channel-pricing.domain";
 
 function postgresSqlState(error: unknown): string | undefined {
   if (error === null || typeof error !== "object") return undefined;

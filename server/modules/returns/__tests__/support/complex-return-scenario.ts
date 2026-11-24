@@ -11,7 +11,7 @@ import {
   buildPackageHistory,
   packageHistoryNativeFromShopify,
   type PackageHistoryScope,
-} from "../../../shipping/package-history.domain";
+} from "../../../shipping/domain/package-history.domain";
 import { customerReturnPublicLineId } from "../../application/customer-return-live-packaging";
 
 export const COMPLEX_SCOPE = {

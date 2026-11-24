@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planPackageReconciliation, type PackageReconciliationInput } from "../../package-reconciliation.domain";
+import { planPackageReconciliation, type PackageReconciliationInput } from "../../domain/package-reconciliation.domain";
 
 const pkg = (labelId: number, providerOrderId: string, quantity: number, status: "active" | "voided" = "active") => ({
   labelId, providerOrderId, trackingNumber: `tracking-${labelId}`, status, outbound: true,

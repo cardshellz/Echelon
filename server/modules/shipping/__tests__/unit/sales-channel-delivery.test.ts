@@ -7,7 +7,7 @@ import {
   deriveSalesChannelDeliveryEvidence,
   latestSalesChannelDeliveryEvidence,
   mergeDeliveryStatus,
-} from "../../sales-channel-delivery.domain";
+} from "../../domain/sales-channel-delivery.domain";
 
 function fixture() {
   const snapshot = complexProvider();

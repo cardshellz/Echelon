@@ -1,20 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { HistoricalShipStationContentsClient } from "../../historical-shipstation-contents-audit.client";
+import type { HistoricalShipStationContentsClient } from "../../infrastructure/historical-shipstation-contents-audit.client";
 import {
   historicalShipStationRecoverableCaseEvidenceHash,
   type HistoricalShipStationContentsAutomaticRecoveryEvidence,
   type HistoricalShipStationContentsSystemRecoveryEvent,
-} from "../../historical-shipstation-contents-recovery.domain";
+} from "../../domain/historical-shipstation-contents-recovery.domain";
 import type {
   HistoricalShipStationContentsSystemRecoveryCandidate,
   HistoricalShipStationContentsSystemRecoveryRepository,
   HistoricalShipStationContentsSystemRecoveryTransaction,
-} from "../../historical-shipstation-contents-system-recovery.repository";
+} from "../../infrastructure/historical-shipstation-contents-system-recovery.repository";
 import {
   HistoricalShipStationContentsSystemRecoveryService,
   HistoricalShipStationContentsSystemRecoveryServiceError,
-} from "../../historical-shipstation-contents-system-recovery.service";
+} from "../../application/historical-shipstation-contents-system-recovery.service";
 
 const candidate: HistoricalShipStationContentsSystemRecoveryCandidate = Object.freeze({
   shippingProviderLabelId: "41",

@@ -1,22 +1,22 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ReceivingService } from "../../receiving.service";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
+import { ReceivingService } from "../../application/receiving.service";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
 import { ReceivingQuarantineError } from "../../domain/receiving-quarantine";
-import type { PrepareReceivingQuarantineAcceptanceInput } from "../../receiving-quarantine-receiving.port";
-import { receivingQuarantineSourceVersion } from "../../receiving-quarantine-receiving.port";
+import type { PrepareReceivingQuarantineAcceptanceInput } from "../../application/receiving-quarantine-receiving.port";
+import { receivingQuarantineSourceVersion } from "../../application/receiving-quarantine-receiving.port";
 
 const guards = vi.hoisted(() => ({
   history: vi.fn(), editable: vi.fn(), presence: vi.fn(), complete: vi.fn(),
 }));
-vi.mock("../../receiving-quarantine.repository", () => ({
+vi.mock("../../infrastructure/receiving-quarantine.repository", () => ({
   assertNoReceivingCustodyHistory: guards.history,
   assertReceivingQuarantineLineEditable: guards.editable,
   readReceiptCustodyPresence: guards.presence,
   completeReceivingQuarantineAcceptances: guards.complete,
 }));
-vi.mock("../../receiving-custody-public", () => ({ lockReceivingCustodyFence: vi.fn(async () => undefined) }));
-vi.mock("../../receipt-cost-queue.service", () => ({
+vi.mock("../../application/receiving-custody-public", () => ({ lockReceivingCustodyFence: vi.fn(async () => undefined) }));
+vi.mock("../../application/receipt-cost-queue.service", () => ({
   enqueueReceiptCostRequests: vi.fn(async () => undefined),
   processReceiptCostRequests: vi.fn(async () => ({ status: "complete" })),
 }));

@@ -29,7 +29,7 @@ import {
   calculateRecipeCapacity,
   type RecipeDefinition,
   type WarehouseRecipeSnapshot,
-} from "../../inventory/domain/recipe-capacity.domain";
+} from "../../inventory/recipe-capacity.domain.api";
 import { resolvePromiseWarehouseIds } from "./inventory-warehouse-scope";
 
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");

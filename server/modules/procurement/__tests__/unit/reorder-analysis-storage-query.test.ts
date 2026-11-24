@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const STORAGE_SRC = readFileSync(
-  resolve(__dirname, "../../procurement.storage.ts"),
+  resolve(__dirname, "../../infrastructure/procurement.storage.ts"),
   "utf8",
 );
 
@@ -28,7 +28,7 @@ describe("coherent receipt-aware supply source in reorder analysis", () => {
     expect(STORAGE_SRC).toContain('return readPurchasePlanningSnapshot(db, async (tx) => {');
     expect(STORAGE_SRC).toContain('await tx.execute(sql`');
     expect(STORAGE_SRC).not.toContain('on_order.earliest_expected');
-    const source = readFileSync(resolve(__dirname, "../../purchase-planning-snapshot.repository.ts"), "utf8");
+    const source = readFileSync(resolve(__dirname, "../../infrastructure/purchase-planning-snapshot.repository.ts"), "utf8");
     expect(source).toContain('const supply = await readPurchasePlanningSupply(tx)');
     expect(source).toContain('isolationLevel: "repeatable read", accessMode: "read only"');
   });

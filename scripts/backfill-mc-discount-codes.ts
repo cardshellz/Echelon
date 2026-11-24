@@ -27,8 +27,8 @@ import { and, gte, isNotNull } from "drizzle-orm";
 
 import { db } from "../server/db";
 import { omsOrders } from "@shared/schema";
-import { extractDiscountCodes, pushToMissionControl } from "../server/modules/oms/mc-push";
-import { extractMarketingConsent } from "../server/modules/oms/marketing-consent";
+import { extractDiscountCodes, pushToMissionControl } from "../server/modules/oms/application/mc-push";
+import { extractMarketingConsent } from "../server/modules/oms/application/marketing-consent";
 
 const LOG_PREFIX = "[backfill-mc-orders]";
 

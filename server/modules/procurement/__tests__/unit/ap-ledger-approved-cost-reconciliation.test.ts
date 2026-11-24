@@ -70,12 +70,12 @@ vi.mock("drizzle-orm", () => ({
   asc: vi.fn((value: unknown) => value),
   like: vi.fn(),
 }));
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
   detectFinancialExceptions: vi.fn(),
 }));
 vi.mock("../../../inventory/application/cogs.service", () => ({ COGSService: class {} }));
-vi.mock("../../purchase-cost-application.service", () => ({
+vi.mock("../../application/purchase-cost-application.service", () => ({
   reconcilePurchaseCostEvidence: mocks.reconcilePurchaseCostEvidence,
 }));
 
@@ -158,7 +158,7 @@ describe("approved invoice PO-line cost reconciliation", () => {
       [{ id: 12, invoiceNumber: "INV-001", status: "approved" }],
     ]);
     const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } =
-      await import("../../ap-ledger.service");
+      await import("../../application/ap-ledger.service");
 
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(
       50,
@@ -185,7 +185,7 @@ describe("approved invoice PO-line cost reconciliation", () => {
       [{ id: 12, invoiceNumber: "INV-001", status: "approved" }],
     ]);
     const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } =
-      await import("../../ap-ledger.service");
+      await import("../../application/ap-ledger.service");
 
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
 
@@ -211,7 +211,7 @@ describe("approved invoice PO-line cost reconciliation", () => {
       ],
     ]);
     const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } =
-      await import("../../ap-ledger.service");
+      await import("../../application/ap-ledger.service");
 
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
 
@@ -232,7 +232,7 @@ describe("approved invoice PO-line cost reconciliation", () => {
       [{ id: 12, invoiceNumber: "INV-SHORT", status: "approved" }],
     ]);
     const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } =
-      await import("../../ap-ledger.service");
+      await import("../../application/ap-ledger.service");
 
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
 
@@ -251,7 +251,7 @@ describe("approved invoice PO-line cost reconciliation", () => {
       [{ id: 12, invoiceNumber: "INV-001", status: "voided" }],
     ]);
     const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } =
-      await import("../../ap-ledger.service");
+      await import("../../application/ap-ledger.service");
 
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
 
@@ -265,7 +265,7 @@ describe("approved invoice PO-line cost reconciliation", () => {
   it("does not claim an authoritative scalar while exact components need lineage review", async () => {
     mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult({ review: true }));
     const client = clientFor([[poLine], [invoiceLine()], [{ id: 12, status: "approved" }]]);
-    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../ap-ledger.service");
+    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../application/ap-ledger.service");
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client, "operator");
     expect(result).toMatchObject({ state: "review_required", authoritativeUnitCostMills: null,
       costSourceState: "confirmed", costApplicationState: "review_required", quantityCoverage: { complete: true } });
@@ -275,7 +275,7 @@ describe("approved invoice PO-line cost reconciliation", () => {
   it("preserves exact source totals without claiming a rounded per-piece scalar", async () => {
     mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult({ product: 56501 }));
     const client = clientFor([[poLine], [invoiceLine()], [{ id: 12, status: "approved" }]]);
-    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../ap-ledger.service");
+    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../application/ap-ledger.service");
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
     expect(result).toMatchObject({ state: "confirmed_invoice_cost", authoritativeUnitCostMills: null,
       costSources: [{ contract: { totalMills: 56501, basePieces: 100 } }, { contract: { totalMills: 5000 } }] });
@@ -284,7 +284,7 @@ describe("approved invoice PO-line cost reconciliation", () => {
   it("cannot treat missing component applications as completed cost authority", async () => {
     mocks.reconcilePurchaseCostEvidence.mockResolvedValue({ ...componentResult(), costApplications: [] });
     const client = clientFor([[poLine], [invoiceLine()], [{ id: 12, status: "approved" }]]);
-    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../ap-ledger.service");
+    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../application/ap-ledger.service");
     expect(await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client)).toMatchObject({ state: "review_required", authoritativeUnitCostMills: null });
   });
 });

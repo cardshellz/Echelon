@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   computePurchaseOrderInvoiceMatchSourceFingerprint,
   evaluatePurchaseOrderInvoiceMatches,
-} from "../../purchase-order-invoice-match";
+} from "../../application/purchase-order-invoice-match";
 
 const poLine = {
   id: 10,

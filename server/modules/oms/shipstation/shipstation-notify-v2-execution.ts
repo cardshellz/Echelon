@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { omsOrderEvents } from "@shared/schema";
-import { verifyRefundedChannelMerchandise } from "../channel-merchandise-dispatch.service";
+import { verifyRefundedChannelMerchandise } from "../application/channel-merchandise-dispatch.service";
 import {
   dispatchShipmentEvent,
   recomputeOrderStatusFromShipments,
@@ -19,8 +19,8 @@ import {
   resolveShipStationUnmappedPhysicalExceptionForExactReplay,
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
-} from "../shipstation-unmapped-physical";
-import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
+} from "../application/shipstation-unmapped-physical";
+import type { ChannelFulfillmentAuthorityService } from "../application/channel-fulfillment-authority.service";
 import {
   ReplacementInventoryUnavailableError,
   ShipmentInventoryUnavailableError,

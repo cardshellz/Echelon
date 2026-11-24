@@ -11,7 +11,7 @@ const schema = readFileSync(
   "utf8",
 );
 const repository = readFileSync(
-  resolve(process.cwd(), "server/modules/oms/channel-fulfillment-authority.repository.ts"),
+  resolve(process.cwd(), "server/modules/oms/infrastructure/channel-fulfillment-authority.repository.ts"),
   "utf8",
 );
 const integrationSchema = readFileSync(

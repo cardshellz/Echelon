@@ -2,16 +2,16 @@ export {
   startShopifyBridgeListener,
   bridgeShopifyOrderToOms,
   backfillShopifyOrders,
-} from "./shopify-bridge";
+} from "./application/shopify-bridge";
 export { loadShopifyReadinessCandidates } from "./infrastructure/shopify-readiness-candidates.repository";
-export { queueOmsPaidEventReplay } from "./shopify-paid-event-replay";
+export { queueOmsPaidEventReplay } from "./application/shopify-paid-event-replay";
 export { automaticPaidReplayEvidenceSchema } from "./domain/shopify-paid-replay-policy";
-export { normalizeShopifyCustomerId } from "./shopify-customer-identity";
-export { reconcileShopifyLineReadiness } from "./shopify-line-readiness.service";
+export { normalizeShopifyCustomerId } from "./application/shopify-customer-identity";
+export { reconcileShopifyLineReadiness } from "./application/shopify-line-readiness.service";
 export { recordChannelAuthorityGap } from "./infrastructure/channel-authority-gap.repository";
 export { deriveShopifyChannelPaymentSettled } from "./domain/channel-payment-settlement";
-export { readShopifyLineCurrentQuantity } from "./shopify-line-item-normalizer";
-export { processShopifyFulfillmentIngress } from "./shopify-fulfillment-ingress.adapter";
+export { readShopifyLineCurrentQuantity } from "./application/shopify-line-item-normalizer";
+export { processShopifyFulfillmentIngress } from "./infrastructure/shopify-fulfillment-ingress.adapter";
 export {
   buildShopifyFulfillmentRetryEnvelope,
   enqueueShopifyFulfillmentWebhookRetry,
@@ -19,13 +19,13 @@ export {
   sourceChannelIdFromRetryPayload,
   sourceEventIdFromRetryPayload,
   type ShopifyFulfillmentWebhookTopic,
-} from "./shopify-fulfillment-webhook-retry";
+} from "./application/shopify-fulfillment-webhook-retry";
 export {
   repairShopifyOmsOrderCustomer,
   countOmsOrdersMissingCustomerName,
   type RepairShopifyOmsOrderCustomerScope,
   type RepairShopifyOmsOrderCustomerData,
-} from "./shopify-customer-repair.command";
+} from "./application/shopify-customer-repair.command";
 export {
   buildShopifyWebhookInboxInput,
   enqueueWebhookInboxRetry,
@@ -34,4 +34,4 @@ export {
   markWebhookSucceeded,
   recordWebhookReceived,
   type WebhookInboxReceipt,
-} from "./webhook-inbox.service";
+} from "./application/webhook-inbox.service";

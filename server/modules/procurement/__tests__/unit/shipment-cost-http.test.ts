@@ -23,10 +23,10 @@ vi.mock("../../../../platform/commands/command-results.repository", () => ({
   financialCommandRepository: mocks.repository,
   createDrizzleFinancialCommandRepository: () => mocks.repository,
 }));
-vi.mock("../../ap-ledger.service", () => ({}));
+vi.mock("../../application/ap-ledger.service", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
-import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
+import { registerInboundShipmentRoutes } from "../../interfaces/http/inbound-shipment.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 
 let server: Server | undefined;

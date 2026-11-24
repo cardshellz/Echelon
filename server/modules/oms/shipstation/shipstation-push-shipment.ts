@@ -1,7 +1,7 @@
 import { readIntegerCents } from "@shared/money-read";
 import { and, eq, sql } from "drizzle-orm";
 import { OrderEditError } from "../../order-edits/oms-coordination.api";
-import { verifyRefundedChannelMerchandise } from "../channel-merchandise-dispatch.service";
+import { verifyRefundedChannelMerchandise } from "../application/channel-merchandise-dispatch.service";
 import { outboundShipmentItems, outboundShipments, wmsOrderItems, wmsOrders } from "@shared/schema";
 import { recomputeOrderStatusFromShipments } from "../../orders/shipment-rollup-and-context.api";
 import {
@@ -24,7 +24,7 @@ import {
   adoptProvenShipStationOrder,
   proveShipStationOrderAdoption,
   resolveShipStationHandoffCommands,
-} from "../shipstation-order-adoption";
+} from "../application/shipstation-order-adoption";
 import {
   PUSHABLE_SHIPMENT_STATUSES,
   shipStationOrderKeyForShipment,

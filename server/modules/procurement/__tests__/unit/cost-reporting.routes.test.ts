@@ -3,7 +3,7 @@ import {createServer,request as httpRequest,type Server} from "node:http";
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
 const permission=vi.hoisted(() => vi.fn());
 vi.mock("../../../../modules/identity",() => ({hasPermission:permission}));
-import {registerCostReportingRoutes} from "../../cost-reporting.routes";
+import {registerCostReportingRoutes} from "../../interfaces/http/cost-reporting.routes";
 
 describe("purchase reporting HTTP authority",() => {
   let server:Server,origin:string;

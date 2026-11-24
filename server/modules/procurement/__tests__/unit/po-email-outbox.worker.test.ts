@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { poEmailDocumentHash } from "../../po-email-document-contract";
-import type { PoEmailOutboxDbPool } from "../../po-email-outbox.service";
+import { poEmailDocumentHash } from "../../application/po-email-document-contract";
+import type { PoEmailOutboxDbPool } from "../../application/po-email-outbox.service";
 import {
   claimDeliveries,
   classifyDeliveryError,
   computeNextAttemptAt,
   processPoEmailOutboxBatch,
-} from "../../po-email-outbox.worker";
+} from "../../application/po-email-outbox.worker";
 
 function makePool(query: PoEmailOutboxDbPool["query"]): PoEmailOutboxDbPool {
   return { query, connect: vi.fn() };

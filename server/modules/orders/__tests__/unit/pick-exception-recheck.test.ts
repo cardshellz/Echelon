@@ -12,7 +12,7 @@ vi.mock("../../../wms/infrastructure/picking-progress.repository", async (origin
 
 import { readWmsPickingBlockers } from "../../../wms/infrastructure/picking-progress.repository";
 import { PickingUseCases } from "../../application/picking.use-cases";
-import { releaseClearedPickExceptions } from "../../../oms/oms-flow-reconciliation.service";
+import { releaseClearedPickExceptions } from "../../../oms/application/oms-flow-reconciliation.service";
 
 // 2026-10-03, #63721: every line was picked, but the unmapped graded card
 // (SKU "UNKNOWN", no bin) kept the order in exception. Only another pick
@@ -166,7 +166,7 @@ describe("scheduled exception re-check", () => {
   });
 
   it("runs before detection, so a released order gets its missing shipment in the same run, and is wired at boot", () => {
-    const flow = readFileSync(resolve(process.cwd(), "server/modules/oms/oms-flow-reconciliation.service.ts"), "utf8");
+    const flow = readFileSync(resolve(process.cwd(), "server/modules/oms/application/oms-flow-reconciliation.service.ts"), "utf8");
     const release = flow.indexOf('step("releaseClearedPickExceptions"');
     expect(release).toBeGreaterThan(0);
     expect(release).toBeLessThan(flow.indexOf('step("collect"'));

@@ -2,7 +2,7 @@ import type {
   PackageHistoryNative,
   PackageHistoryScope,
   RetainedPackageHistoryShipment,
-} from "../../package-history.domain";
+} from "../../domain/package-history.domain";
 const instant = new Date("2026-09-23T12:00:00Z");
 export function historyFixture() {
   const scope: PackageHistoryScope = {

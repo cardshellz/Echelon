@@ -25,7 +25,7 @@ describe("channel variant override lock", () => {
   });
 
   it("is taken by the only SKU-override writer inside its transaction, and by the stock-link SKU confirmation", () => {
-    const storage = readFileSync(join(process.cwd(), "server/modules/channels/channel-catalog.storage.ts"), "utf8");
+    const storage = readFileSync(join(process.cwd(), "server/modules/channels/infrastructure/channel-catalog.storage.ts"), "utf8");
     const upsert = storage.slice(storage.indexOf("async upsertChannelVariantOverride"), storage.indexOf("async deleteChannelVariantOverride"));
     expect(upsert).toContain("return db.transaction(async (tx) => {");
     expect(upsert).toContain("await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${channelVariantOverrideLockKey(");

@@ -5,7 +5,7 @@ import {
   getOmsLineMaterializableQuantity,
   getOmsLineRemainingMaterializableQuantity,
   type OmsLineAuthorityInput,
-} from "../../oms-line-authority";
+} from "../../application/oms-line-authority";
 
 const NOW = new Date("2026-06-25T12:00:00.000Z");
 

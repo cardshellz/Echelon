@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import pg from "pg";
-import { claimDeliveries, processPoEmailOutboxBatch } from "../../po-email-outbox.worker";
-import { enqueuePurchaseOrderEmail, replayDeadLetterPurchaseOrderEmail } from "../../po-email-outbox.service";
-import { poEmailDocumentHash } from "../../po-email-document-contract";
+import { claimDeliveries, processPoEmailOutboxBatch } from "../../application/po-email-outbox.worker";
+import { enqueuePurchaseOrderEmail, replayDeadLetterPurchaseOrderEmail } from "../../application/po-email-outbox.service";
+import { poEmailDocumentHash } from "../../application/po-email-document-contract";
 
 // Never load .env here. The caller must provision a dedicated local database.
 const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;

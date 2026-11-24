@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { PgHistoricalShipStationContentsReviewRepository } from "../../historical-shipstation-contents-review.repository";
+import { PgHistoricalShipStationContentsReviewRepository } from "../../infrastructure/historical-shipstation-contents-review.repository";
 
 describe("historical contents review assigned-role authority", () => {
   it.each([

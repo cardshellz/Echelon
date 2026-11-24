@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EbayListingPushService, EbayListingPushSkipped, ebayListingPushFailure, ebayListingPushRequestSchema } from "../../ebay-listing-push.service";
+import { EbayListingPushService, EbayListingPushSkipped, ebayListingPushFailure, ebayListingPushRequestSchema } from "../../application/ebay-listing-push.service";
 import { ebayListingPushResponseSchema } from "@shared/types/ebay-listing-push";
 
 describe("shared eBay publication batch", () => {

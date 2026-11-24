@@ -10,7 +10,7 @@ import {
   isDropshipOmsOrder,
   WmsDropshipWarehouseError,
   type DropshipOrderWarehouseFacts,
-} from "../../dropship-order-warehouse";
+} from "../../application/dropship-order-warehouse";
 
 const LEON = { id: 1, isActive: 1, warehouseType: "operations" };
 

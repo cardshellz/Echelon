@@ -9,7 +9,7 @@ import {
 import { requirePermission } from "../../../../routes/middleware";
 import type {
   ChannelShippingCapabilityResolver,
-} from "../../../channels/channel-shipping-capability.registry";
+} from "../../../channels/channel-shipping-capability.registry.api";
 import {
   ChannelShippingPolicyAdminError,
   ChannelShippingPolicyAdminService,

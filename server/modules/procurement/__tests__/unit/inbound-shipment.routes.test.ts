@@ -42,7 +42,7 @@ vi.mock("../../../../middleware/idempotency", () => ({
   requireIdempotency: mocks.requireIdempotency,
 }));
 
-vi.mock("../../shipment-tracking.service", () => ({
+vi.mock("../../application/shipment-tracking.service", () => ({
   ShipmentTrackingError: class ShipmentTrackingError extends Error {
     statusCode: number;
 
@@ -53,7 +53,7 @@ vi.mock("../../shipment-tracking.service", () => ({
   },
 }));
 
-vi.mock("../../ap-ledger.service", () => ({
+vi.mock("../../application/ap-ledger.service", () => ({
   ...mocks.apLedger,
   ApLedgerError: class ApLedgerError extends Error {
     statusCode: number;
@@ -67,8 +67,8 @@ vi.mock("../../ap-ledger.service", () => ({
 
 vi.mock("../../../notifications/in-app-notifications.api", () => mocks.notifications);
 
-import { ApLedgerError } from "../../ap-ledger.service";
-import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
+import { ApLedgerError } from "../../application/ap-ledger.service";
+import { registerInboundShipmentRoutes } from "../../interfaces/http/inbound-shipment.routes";
 
 function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
   return {

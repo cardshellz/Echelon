@@ -15,17 +15,17 @@ import { insertAuditEventDrizzle } from "../../../infrastructure/transactional-a
 import {
   createPurchaseRecommendationSnapshotService,
   type CreatePurchaseRecommendationRunInput,
-} from "../purchase-recommendation-snapshot.service";
+} from "../application/purchase-recommendation-snapshot.service";
 import {
   lockAndLoadActiveRfqAllocations,
   purchasingSkuAllocationKey,
-} from "../purchasing-rfq.service";
+} from "../application/purchasing-rfq.service";
 import {
   buildRfqCreationRequestHash,
   evaluateRfqAllocationOverride,
-} from "../purchasing-rfq-allocation";
-import type { RfqWorkflowTransaction } from "../rfq-workflow.service";
-import { loadSupplierSourcingRecords } from "../supplier-sourcing.repository";
+} from "../application/purchasing-rfq-allocation";
+import type { RfqWorkflowTransaction } from "../application/rfq-workflow.service";
+import { loadSupplierSourcingRecords } from "../infrastructure/supplier-sourcing.repository";
 import type { PurchasingCatalog } from "./purchasing-catalog";
 import {
   assertOptionalCatalogText,

@@ -7,10 +7,10 @@ vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) => {
   if (req.headers["x-test-permission"] !== `${resource}:${action}`) return res.status(403).json({ error: "Permission denied" }); next();
 } }));
-import { registerInvoiceCostReviewPreviewRoute } from "../../invoice-cost-review-preview.routes";
-import { ApLedgerError } from "../../ap-ledger.service";
+import { registerInvoiceCostReviewPreviewRoute } from "../../interfaces/http/invoice-cost-review-preview.routes";
+import { ApLedgerError } from "../../application/ap-ledger.service";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
-import { PoQuantityAmendmentError } from "../../po-quantity-amendment.policy";
+import { PoQuantityAmendmentError } from "../../domain/po-quantity-amendment.policy";
 import { MoneyInputError } from "@shared/money-read";
 
 describe("invoice cost preview HTTP boundary", () => {

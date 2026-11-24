@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { readCatalogStockVariantOwners } from "../../catalog/infrastructure/catalog-stock-selection.reader";
+import { readCatalogStockVariantOwners } from "../../catalog/catalog-stock-selection.reader.api";
 import type { VerifiedStockListing, VerifiedListingStockResult, VerifiedListingStockStore } from "../application/verified-listing-stock.service";
 import { InventoryPublicationMembershipError } from "../application/inventory-publication-membership.service";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";

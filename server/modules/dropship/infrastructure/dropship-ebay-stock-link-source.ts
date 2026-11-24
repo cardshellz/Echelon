@@ -3,8 +3,8 @@ import { stockLinkDestinationSchema, type StockLinkDestination } from "@shared/t
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import type {
   StockLinkCandidatePage, StockLinkCarriedSkuRow, StockLinkEnrollmentListing, StockLinkEnrollmentSource, StockLinkRecentChange,
-} from "../../inventory-planning/application/stock-link.ports";
-import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/domain/stock-link-errors";
+} from "../../inventory-planning/stock-link.ports.api";
+import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/stock-link-errors.api";
 
 /**
  * Dropship's read-only SQL for the stock-link engine's listing enrollment (channels PR3, PLAN-CH-v3 §9 PR3;

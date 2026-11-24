@@ -3,8 +3,8 @@ import {
   buildShipStationRecoveredLabelObservation,
   createShipStationPhysicalRecoveryService,
   findShipStationPhysicalRecoveryCandidates,
-} from "../../shipstation-physical-recovery.service";
-import type { ShipStationCompletedPhysicalPackage } from "../../../shipping/shipstation-physical-recovery.client";
+} from "../../application/shipstation-physical-recovery.service";
+import type { ShipStationCompletedPhysicalPackage } from "../../../shipping/infrastructure/shipstation-physical-recovery.client";
 
 function queryText(query: any): string {
   return (query?.queryChunks ?? [])

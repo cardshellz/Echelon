@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { reviewRfqQuantity } from "@shared/procurement/rfq-quantity-review";
 import { describe, expect, it } from "vitest";
 import { releasableRfqLines, rfqReleaseSchema, rfqConvertSchema, rfqQuoteCaptureSchema, rfqQuoteRevisionSchema, type RfqQuoteRevision, type RfqWorkflowDetail } from "@shared/procurement/rfq-workflow";
-import { assertRfqQuoteCanConvert, rfqWorkflowVersion } from "../../rfq-workflow.service";
-import { mapRfqQuoteRevision, RfqEvidenceIntegrityError } from "../../rfq-workflow.repository";
-import { classifyRfqWorkflowFailure } from "../../rfq-workflow.commands";
+import { assertRfqQuoteCanConvert, rfqWorkflowVersion } from "../../application/rfq-workflow.service";
+import { mapRfqQuoteRevision, RfqEvidenceIntegrityError } from "../../infrastructure/rfq-workflow.repository";
+import { classifyRfqWorkflowFailure } from "../../application/rfq-workflow.commands";
 import { parseRfqMoney, rfqQuoteFromForm, rfqQuoteFormFromEvidence } from "../../../../../client/src/lib/rfq-quote-form";
 
 const at = new Date("2026-09-07T12:00:00Z");
@@ -139,7 +139,7 @@ describe("RFQ quote form exact amounts", () => {
 
 describe("RFQ conversion receive-configuration contract", () => {
   const conversionSource = readFileSync(
-    join(process.cwd(), "server", "modules", "procurement", "rfq-workflow.service.ts"),
+    join(process.cwd(), "server", "modules", "procurement", "application/rfq-workflow.service.ts"),
     "utf8",
   );
 

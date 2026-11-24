@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { EbayApiClient } from "../../channels/ebay-connector.api";
 import { EbayQuantityResponseUncertainError } from "../../channels/ebay-connector.api";
-import type { EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
-import type { EbayListingInspection } from "../../marketplace-listings/domain/ebay-listing-inspection";
+import type { EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request.api";
+import type { EbayListingInspection } from "../../marketplace-listings/ebay-listing-inspection.api";
 import type { EbayMarketplaceRegistrationObserver } from "../../marketplace-listings/ebay-registration.api";
 import type {
   DropshipListingEndProvider,

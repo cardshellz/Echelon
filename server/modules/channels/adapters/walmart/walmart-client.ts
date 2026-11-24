@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { ChannelProviderError } from "../../channel-provider.error";
-import { observeQuantityProviderRequest, recordQuantityProviderResponse } from "../../../inventory-planning/application/quantity-provider-request-evidence";
+import { ChannelProviderError } from "../../domain/channel-provider.error";
+import { observeQuantityProviderRequest, recordQuantityProviderResponse } from "../../../inventory-planning/quantity-provider-request-evidence.api";
 
 export const walmartCredentialsSchema = z.object({
   clientId: z.string().trim().min(1).max(500).refine((value) => !value.includes(":")),

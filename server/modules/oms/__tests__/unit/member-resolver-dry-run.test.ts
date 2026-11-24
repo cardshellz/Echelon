@@ -5,7 +5,7 @@ import {
   MEMBER_RESOLVER_DRY_RUN_VERSION,
   type DryRunResolverResult,
   type LegacyMemberMatch,
-} from "../../member-resolver-dry-run";
+} from "../../application/member-resolver-dry-run";
 import type { MemberKey, MemberResolution } from "../../../membership";
 
 const CLUB_PLAN_ID = "5f966934-9ff2-4966-9e8f-d4292ca3290e";

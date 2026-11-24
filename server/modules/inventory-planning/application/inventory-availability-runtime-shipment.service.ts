@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { RecordInventoryShipmentInput, RecordReplacementInventoryShipmentInput } from "../../inventory/application/inventory.use-cases";
-import type { OperationalShipmentRequest, OperationalShipmentResult } from "../../inventory/domain/operational-shipment-dispatch";
+import type { RecordInventoryShipmentInput, RecordReplacementInventoryShipmentInput } from "../../inventory/inventory.use-cases.api";
+import type { OperationalShipmentRequest, OperationalShipmentResult } from "../../inventory/operational-shipment-dispatch.api";
 import type { CanonicalClaimDispatchSourceRequest } from "./inventory-availability-dispatch-source-command.port";
 
 const id = z.number().int().positive().max(2_147_483_647);

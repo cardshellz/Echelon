@@ -3,7 +3,7 @@ import {
   ShopifyStaffOAuthError,
   type ShopifyStaffOAuthConfig,
   type ShopifyStaffOAuthToken,
-} from "../../shopify-staff-oauth.types";
+} from "../../domain/shopify-staff-oauth.types";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 60_000;

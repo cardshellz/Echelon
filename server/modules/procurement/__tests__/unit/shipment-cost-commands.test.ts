@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { InboundFreightCost } from "@shared/schema";
 import { shipmentCostCreateSchema } from "@shared/procurement/shipment-cost-command";
-import { shipmentCostVersion, versionShipmentCost } from "../../shipment-cost-version";
-import { ShipmentTrackingError } from "../../shipment-tracking.service";
+import { shipmentCostVersion, versionShipmentCost } from "../../application/shipment-cost-version";
+import { ShipmentTrackingError } from "../../application/shipment-tracking.service";
 import {
   classifyShipmentCostCommandFailure, createShipmentCostCommands,
   shipmentCostCommandScope, SHIPMENT_COST_COMMAND_PRINCIPAL, type ShipmentCostCommand,
-} from "../../shipment-cost-commands";
+} from "../../application/shipment-cost-commands";
 import type { FinancialCommandDescriptor, FinancialCommandRepository } from "../../../../platform/commands/transactional-command.service";
 
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));

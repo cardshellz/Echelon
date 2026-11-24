@@ -7,10 +7,10 @@ import * as schema from "@shared/schema";
 import { describe, expect, it } from "vitest";
 import { rfqCreateReceiptSchema, type RfqCreatePayload } from "@shared/procurement/rfq-create-command";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
-import { createRfqCreateCommands, hashRfqCreateIdentity, rfqCreateCommandScope, RFQ_CREATE_COMMAND_PRINCIPAL } from "../../rfq-create.commands";
-import { createRfqWorkflowService } from "../../rfq-workflow.service";
-import { lockAndLoadActiveRfqAllocations } from "../../purchasing-rfq.service";
-import type { createPurchasingService } from "../../purchasing.service";
+import { createRfqCreateCommands, hashRfqCreateIdentity, rfqCreateCommandScope, RFQ_CREATE_COMMAND_PRINCIPAL } from "../../application/rfq-create.commands";
+import { createRfqWorkflowService } from "../../application/rfq-workflow.service";
+import { lockAndLoadActiveRfqAllocations } from "../../application/purchasing-rfq.service";
+import type { createPurchasingService } from "../../application/purchasing.service";
 
 export function registerRfqCreationRecoveryCases(harness: {
   pool(): pg.Pool; database(): ReturnType<typeof drizzle<typeof schema>>;
@@ -188,7 +188,7 @@ export function registerRfqCreationRecoveryCases(harness: {
       expect(await counts("legacy-changed")).toEqual({ rfqs: 1, lines: 1, audits: 1 });
     });
     it("drops a committed HTTP response then recovers through the real creation endpoint", async () => {
-      await seedSelection(); const { registerPurchasingRecommendationRoutes } = await import("../../purchasing-recommendation.routes");
+      await seedSelection(); const { registerPurchasingRecommendationRoutes } = await import("../../interfaces/http/purchasing-recommendation.routes");
       const app = express(); app.use(express.json()); let drop = true;
       app.use((req, res, next) => { req.session = { user: { id: harness.actorId } } as never;
         const json = res.json.bind(res); res.json = ((body: unknown) => { if (drop && res.statusCode < 300) { drop = false; res.destroy(); return res; } return json(body); }) as typeof res.json; next(); });

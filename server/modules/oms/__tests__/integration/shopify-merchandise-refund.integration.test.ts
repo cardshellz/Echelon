@@ -16,7 +16,7 @@ import {
 import {
   applyShopifyRefundCascade,
   type ShopifyRefundCascadeHelpers,
-} from "../../shopify-refund-cascade.service";
+} from "../../application/shopify-refund-cascade.service";
 import type { ShopifyMerchandiseSnapshot } from "../../infrastructure/shopify-merchandise-snapshot";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

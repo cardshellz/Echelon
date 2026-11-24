@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createAllocationEngine } from "../../allocation-engine.service";
+import { createAllocationEngine } from "../../application/allocation-engine.service";
 
 // ---------------------------------------------------------------------------
 // Mock factories

@@ -4,12 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import { createShipStationEngine } from "../../adapters/shipstation.adapter";
 import { serializeShipmentPushPayloadToShipStationOrder } from "../../adapters/shipstation/shipstation-push-serializer";
 import { mapShipStationShipmentToCanonicalEvent } from "../../adapters/shipstation/shipstation-webhook-normalizer";
-import { createShipStationService } from "../../../oms/shipstation.service";
+import { createShipStationService } from "../../../oms/application/shipstation.service";
 import {
   assembleShipmentPushPayload,
   canonicalShipmentEventToRollupEvent,
 } from "../../../orders/shipment-rollup-and-context.api";
-import type { ShipmentPushPayload } from "../../types";
+import type { ShipmentPushPayload } from "../../domain/types";
 
 const REPO_ROOT = path.resolve(__dirname, "../../../../..");
 
@@ -341,7 +341,7 @@ describe("Batch R-3: Real Shipping Engine Port Completion (P3.3)", () => {
       "pushShipmentThroughEngine(db, engine, shipmentId, { overrideReview })",
     );
 
-    const retryWorkerSrc = readRepoFile("server/modules/oms/webhook-retry.worker.ts");
+    const retryWorkerSrc = readRepoFile("server/modules/oms/application/webhook-retry.worker.ts");
     expect(retryWorkerSrc).toContain("shipping_engine_shipment_push");
     expect(retryWorkerSrc).toContain("shipping_engine_hold_sync");
     expect(retryWorkerSrc).toContain("shipping_engine_sort_rank_sync");

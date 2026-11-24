@@ -4,7 +4,7 @@ import {
   DEFAULT_PURCHASING_FORECAST_POLICY,
   normalizePurchasingForecastPolicy,
   PURCHASING_FORECAST_POLICY_CAPTURE_VERSION,
-} from "../../purchasing-forecast-policy";
+} from "../../application/purchasing-forecast-policy";
 
 describe("purchasing forecast policy", () => {
   it("provides an automation-safe multi-window default", () => {

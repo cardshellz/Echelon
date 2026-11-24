@@ -8,7 +8,7 @@ import { parseFlags } from "../../../../../scripts/repair-historical-carrier-dis
 // fulfillment was already correct. Both code paths are fixed; a reviewed rerun
 // (a7899a26) replays the allocation record or admits the split sibling box.
 describe("parked carrier dispatches from the split-box bugs", () => {
-  const repository = readFileSync(resolve(process.cwd(), "server/modules/shipping/carrier-tracking.repository.ts"), "utf8");
+  const repository = readFileSync(resolve(process.cwd(), "server/modules/shipping/infrastructure/carrier-tracking.repository.ts"), "utf8");
   const eligibility = repository.slice(repository.indexOf("function historicalCarrierDispatchRepairEligibilitySql"));
   const requeueable = eligibility.slice(0, eligibility.indexOf("OR ("));
 

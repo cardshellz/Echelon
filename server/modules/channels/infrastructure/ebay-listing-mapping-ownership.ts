@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { ebayListingSyncIdentitySchema, EbayListingSyncError, type EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
+import { ebayListingSyncIdentitySchema, EbayListingSyncError, type EbayListingSyncIdentity } from "../domain/ebay-listing-sync.domain";
 
 /** Shared local identity check. Mutation callers hold the short listing-table
  * lock so another mapping cannot appear between this read and their commit. */

@@ -6,12 +6,12 @@ import {
   STOCK_LINK_SKU_MAX_LENGTH, stockLinkDestinationSchema, stockLinkItemObservationSchema, stockLinkSkuLookupSchema,
   type StockLinkDestination, type StockLinkItemObservation, type StockLinkSkuLookup, type StockLinkStoreItem,
 } from "@shared/types/stock-link";
-import type { StockLinkAdapter, StockLinkProviderCallOptions } from "../../inventory-planning/application/stock-link.ports";
-import { normalizeStockLinkSku } from "../../inventory-planning/domain/stock-link";
-import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/domain/stock-link-errors";
-import { ChannelIdentityError } from "../channel-identity.domain";
-import type { ChannelIdentityService } from "../channel-identity.service";
-import { PROVIDER_RETRY_AFTER_MAX_SECONDS, boundedProviderRetryAfterSeconds } from "../provider-request-limits";
+import type { StockLinkAdapter, StockLinkProviderCallOptions } from "../../inventory-planning/stock-link.ports.api";
+import { normalizeStockLinkSku } from "../../inventory-planning/stock-link.api";
+import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/stock-link-errors.api";
+import { ChannelIdentityError } from "../domain/channel-identity.domain";
+import type { ChannelIdentityService } from "../application/channel-identity.service";
+import { PROVIDER_RETRY_AFTER_MAX_SECONDS, boundedProviderRetryAfterSeconds } from "../application/provider-request-limits";
 import {
   isShopifyAdminGraphQLConnectionValid, requestShopifyAdminGraphQL, type ShopifyAdminGraphQLConnection,
   type ShopifyAdminGraphQLFailure, type ShopifyAdminGraphQLOperation, type ShopifyAdminGraphQLResponseMeta,

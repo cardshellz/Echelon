@@ -1,11 +1,11 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Transaction } from "../../purchase-workspace-read";
-import { readPurchaseCostApplications } from "../../purchase-cost-application-read.repository";
+import type { Transaction } from "../../application/purchase-workspace-read";
+import { readPurchaseCostApplications } from "../../infrastructure/purchase-cost-application-read.repository";
 
 const readers = vi.hoisted(() => ({ exceptions: vi.fn(), ledger: vi.fn() }));
-vi.mock("../../shipment-cost-exception.repository", () => ({ readShipmentCostExceptions: readers.exceptions }));
+vi.mock("../../infrastructure/shipment-cost-exception.repository", () => ({ readShipmentCostExceptions: readers.exceptions }));
 vi.mock("../../../inventory/infrastructure/cost-reconciliation.repository", () => ({ readReconciliationLedger: readers.ledger }));
 const dialect = new PgDialect();
 const at = "2026-10-16T12:00:00.000Z";

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import type { MaterializePhysicalPackageInput } from "../../server/modules/oms/channel-fulfillment-authority.repository";
+import type { MaterializePhysicalPackageInput } from "../../server/modules/oms/infrastructure/channel-fulfillment-authority.repository";
 
 import {
   buildCandidateQuery,

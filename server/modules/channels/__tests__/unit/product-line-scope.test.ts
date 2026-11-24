@@ -23,7 +23,7 @@ import {
   normalizeProductScope,
   buildProductScopeCondition,
   DEFAULT_PRODUCT_SCOPE,
-} from "../../product-line-scope";
+} from "../../application/product-line-scope";
 
 const dialect = new PgDialect();
 

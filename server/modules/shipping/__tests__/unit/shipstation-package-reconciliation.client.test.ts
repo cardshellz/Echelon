@@ -1,6 +1,6 @@
 import { describe,expect,it,vi } from 'vitest';
-import { createShipStationPackageReconciliationClient } from '../../shipstation-package-reconciliation.client';
-import type { PackageReconciliationSnapshot } from '../../../oms/package-reconciliation.repository';
+import { createShipStationPackageReconciliationClient } from '../../infrastructure/shipstation-package-reconciliation.client';
+import type { PackageReconciliationSnapshot } from '../../../oms/infrastructure/package-reconciliation.repository';
 const at='2026-09-17T14:00:00.000Z';
 const snapshot={sources:[{id:1,shipment_id:1,qty:3,provider:'shopify',purpose:'customer_fulfillment',sku:'SKU-A'}],evidence:[1,2].map(id=>({label:{id:String(id),provider_label_id:String(10+id),provider_order_id:'20',provider_order_key:'root',tracking_number:`TRACK${id}`,label_status:id===1?'voided':'active'}}))} as unknown as PackageReconciliationSnapshot;
 function fixture(options:{unknownPackage?:boolean;badSku?:boolean;badTotal?:boolean;missingOrder?:boolean;throttle?:boolean}={}){

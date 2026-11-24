@@ -1,14 +1,14 @@
 import type { Pool } from "pg";
-import { ChannelPricingResolutionError } from "../channel-pricing-resolver";
-import type { readEbayListingPhotoReadiness } from "../ebay-listing-photo-readiness";
-import { isProductEffectivelyListed, isVariantEffectivelyListed, isExistingEbayListingSyncCandidate } from "../ebay-listing-eligibility";
+import { ChannelPricingResolutionError } from "../application/channel-pricing-resolver";
+import type { readEbayListingPhotoReadiness } from "../application/ebay-listing-photo-readiness";
+import { isProductEffectivelyListed, isVariantEffectivelyListed, isExistingEbayListingSyncCandidate } from "../application/ebay-listing-eligibility";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import type { EbayListingFeedInventoryService } from "../application/ebay-listing-feed-inventory.service";
-import { resolveEbayFeedListingState, type EbayFeedVariantListingState } from "../ebay-listing-feed-status";
-import { isValidEbayFixedPriceCents, normalizeCents } from "../ebay-listing-draft";
+import { resolveEbayFeedListingState, type EbayFeedVariantListingState } from "../application/ebay-listing-feed-status";
+import { isValidEbayFixedPriceCents, normalizeCents } from "../application/ebay-listing-draft";
 import { EbaySyncSelectionReader } from "./ebay-sync-selection.reader";
-import { mapChannelReads } from "../../marketplace-listings/application/channel-read-work";
+import { mapChannelReads } from "../../marketplace-listings/channel-read-work.api";
 import { z } from "zod";
 
 // Four independent projections leave the default 20-slot pool capacity for

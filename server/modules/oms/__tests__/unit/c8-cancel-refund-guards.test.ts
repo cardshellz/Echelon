@@ -14,20 +14,20 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const WMS_SYNC_SRC = readFileSync(
-  fileURLToPath(new URL("../../wms-sync.service.ts", import.meta.url)),
+  fileURLToPath(new URL("../../application/wms-sync.service.ts", import.meta.url)),
   "utf8",
 );
 
 const OMS_WEBHOOKS_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../oms-webhooks.ts", import.meta.url),
+    new URL("../../application/oms-webhooks.ts", import.meta.url),
   ),
   "utf8",
 );
 
 const REFUND_CASCADE_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../shopify-refund-cascade.service.ts", import.meta.url),
+    new URL("../../application/shopify-refund-cascade.service.ts", import.meta.url),
   ),
   "utf8",
 );

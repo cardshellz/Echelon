@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolvePurchasingForwardDemandContributionCapture } from "../../purchasing-forward-demand-contribution";
+import { resolvePurchasingForwardDemandContributionCapture } from "../../application/purchasing-forward-demand-contribution";
 
 const confidenceWeights = { high: 100, medium: 70, low: 40 };
 

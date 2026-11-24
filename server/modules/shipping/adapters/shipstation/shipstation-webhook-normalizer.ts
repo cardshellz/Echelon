@@ -6,8 +6,8 @@
  */
 
 import { normalizeShipStationV1Date } from "@shared/utils/shipstation-date";
-import type { CanonicalShipmentEvent, EngineRef } from "../../types";
-import { normalizeCarrier, parseProviderAmountCents } from "../../types";
+import type { CanonicalShipmentEvent, EngineRef } from "../../domain/types";
+import { normalizeCarrier, parseProviderAmountCents } from "../../domain/types";
 
 const ENGINE_NAME = "shipstation";
 export const SHIPSTATION_SHIPMENTS_API_COST_SOURCE = "shipstation_shipments_api";

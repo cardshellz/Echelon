@@ -2,8 +2,8 @@ import { it, expect } from "vitest";
 import type pg from "pg";
 import type { drizzle } from "drizzle-orm/node-postgres";
 import type * as schema from "@shared/schema";
-import type { NewRecommendationPurchaseOrder } from "../../recommendation-po-handoff.service";
-import type { createPurchasingService } from "../../purchasing.service";
+import type { NewRecommendationPurchaseOrder } from "../../application/recommendation-po-handoff.service";
+import type { createPurchasingService } from "../../application/purchasing.service";
 
 interface NumberingFixture {
   pool: pg.Pool;
@@ -30,7 +30,7 @@ export function registerRecommendationPoNumberingCases(context: () => NumberingF
   }
 
   async function repository(fixture: NumberingFixture) {
-    const { createDrizzleRecommendationPoHandoffRepository } = await import("../../recommendation-po-handoff.repository");
+    const { createDrizzleRecommendationPoHandoffRepository } = await import("../../infrastructure/recommendation-po-handoff.repository");
     return createDrizzleRecommendationPoHandoffRepository(fixture.database);
   }
 

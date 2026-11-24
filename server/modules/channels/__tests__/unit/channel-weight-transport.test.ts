@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ChannelListingPayload } from "../../channel-adapter.interface";
+import type { ChannelListingPayload } from "../../domain/channel-adapter.interface";
 import { ShopifyMarketplaceListingConnector } from "../../listing-connectors/shopify-listing.connector";
 import { walmartShippingWeightAttributes } from "../../adapters/walmart/walmart-listing-schema";
 

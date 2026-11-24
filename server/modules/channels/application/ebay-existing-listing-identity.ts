@@ -1,0 +1,278 @@
+import { z } from "zod";
+import { isArchivedCatalogMember } from "../../marketplace-listings/listing-member-lifecycle-domain.api";
+import { isVariantSellable, type VariantSellabilityInput } from "./ebay-listing-eligibility";
+import {
+  marketplaceObservedListingPublicationSchema,
+  type MarketplaceListingRegistrationObserver,
+  type ListingRegistrationVariantCandidate,
+  type MarketplaceObservedListingPublication,
+} from "../../marketplace-listings";
+import {
+  EbayListingSyncError,
+  ebayListingSyncIdentitySchema,
+  type EbayListingSyncIdentity,
+} from "../domain/ebay-listing-sync.domain";
+
+const id = z.number().int().positive().max(2_147_483_647);
+const sku = z.string().trim().min(1).max(100);
+const existingListingRowSchema = z.object({
+  product_id: id,
+  variant_id: id,
+  variant_sku: sku,
+  external_sku: sku.nullable(),
+  external_variant_id: z.string().trim().min(1).max(255).nullable(),
+  external_product_id: z.string().trim().min(1).max(255).nullable(),
+  content_sync_enabled: z.boolean().optional(),
+  catalog_archived: z.boolean().optional(),
+  mapping_exists: z.boolean().optional(),
+});
+export type ExistingEbayListingIdentityRow = z.infer<typeof existingListingRowSchema>;
+export interface ExistingEbayListingIdentityContext {
+  readonly channelId: number;
+  readonly connectionId: number;
+  readonly accountId: string;
+  readonly marketplaceId: string;
+}
+
+/** One source snapshot definition for ordinary maintenance and transaction
+ * fencing. Stock selection adds other rules and cannot replace this predicate. */
+export function captureEbayListingSourceIdentity(rows: readonly (Omit<ExistingEbayListingIdentityRow, "variant_sku"> & {
+  variant_sku: string | null;
+  product_is_active: boolean | null; variant_is_active: boolean | null;
+  product_status?: string | null;
+  variant_sales_eligibility?: VariantSellabilityInput["salesEligibility"];
+  product_excluded?: boolean | null; variant_excluded?: boolean | null;
+  product_override_is_listed?: number | boolean | null; variant_override_is_listed?: number | boolean | null;
+  type_listing_enabled?: boolean | null;
+})[], context: ExistingEbayListingIdentityContext): EbayListingSyncIdentity {
+  return captureExistingEbayListingIdentity(rows.map(row => ({ ...row, mapping_exists: true,
+    catalog_archived: isArchivedCatalogMember({ productActive: row.product_is_active, variantActive: row.variant_is_active, productStatus: row.product_status }),
+    content_sync_enabled: row.product_status !== "archived" && isVariantSellable({ productActive: row.product_is_active, variantActive: row.variant_is_active,
+      salesEligibility: row.variant_sales_eligibility, productExcluded: row.product_excluded === true,
+      productOverrideIsListed: row.product_override_is_listed, typeListingEnabled: row.type_listing_enabled,
+      variantExcluded: row.variant_excluded === true, variantOverrideIsListed: row.variant_override_is_listed }) })), context);
+}
+
+/** Captures the mapping we actually saved. Catalog renames do not rename eBay resources. */
+export function captureExistingEbayListingIdentity(
+  input: readonly unknown[],
+  context: ExistingEbayListingIdentityContext,
+): EbayListingSyncIdentity {
+  const parsed = z.array(existingListingRowSchema).min(1).max(250).safeParse(input);
+  if (!parsed.success) {
+    throw identityError("EBAY_SYNC_MAPPING_INVALID", "The saved eBay listing has an incomplete variant mapping. Review its catalog variant and saved eBay identifiers.");
+  }
+  const rows = parsed.data;
+  const productId = rows[0].product_id;
+  if (rows.some(row => row.product_id !== productId)) {
+    throw identityError("EBAY_SYNC_MAPPING_INVALID", "The saved eBay listing contains variants from different products.");
+  }
+  const identity = ebayListingSyncIdentitySchema.safeParse({
+    ...context,
+    productId,
+    // Only the provider observation can establish the existing group's key.
+    groupKey: null,
+    variants: rows.map(row => ({
+      variantId: row.variant_id,
+      catalogSku: row.variant_sku,
+      contentSyncEnabled: row.content_sync_enabled ?? true,
+      ...(row.catalog_archived === undefined ? {} : { catalogArchived: row.catalog_archived }),
+      ...(row.mapping_exists === undefined ? {} : { mappingExists: row.mapping_exists }),
+      sku: row.external_sku ?? row.variant_sku,
+      externalSku: row.external_sku,
+      offerId: row.external_variant_id,
+      listingId: row.external_product_id,
+    })),
+  });
+  if (!identity.success) {
+    throw identityError("EBAY_SYNC_MAPPING_INVALID", `Product ${productId} has duplicate or invalid saved eBay identities. Review its variant mappings.`);
+  }
+  return identity.data;
+}
+
+/** An old job's catalog-derived group hint is not provider identity evidence. */
+export function assertEbayListingSourceIdentityUnchanged(
+  expected: EbayListingSyncIdentity,
+  current: EbayListingSyncIdentity,
+): void {
+  const memberById = new Map(current.variants.map(member => [member.variantId, member]));
+  if (expected.channelId !== current.channelId
+    || expected.connectionId !== current.connectionId
+    || expected.accountId !== current.accountId
+    || expected.marketplaceId !== current.marketplaceId
+    || expected.productId !== current.productId
+    || expected.variants.length !== current.variants.length
+    || expected.variants.some(member => {
+      const observed = memberById.get(member.variantId);
+      return !observed || member.sku !== observed.sku
+        || member.externalSku !== observed.externalSku
+        || member.offerId !== observed.offerId
+        || member.listingId !== observed.listingId
+        || (member.catalogSku !== undefined && member.catalogSku !== observed.catalogSku)
+        || (member.contentSyncEnabled !== undefined && member.contentSyncEnabled !== observed.contentSyncEnabled)
+        || (member.catalogArchived !== undefined && member.catalogArchived !== observed.catalogArchived)
+        || (member.mappingExists !== undefined && member.mappingExists !== observed.mappingExists);
+    })) {
+    throw identityError("EBAY_SYNC_IDENTITY_CHANGED", `Product ${expected.productId}'s saved eBay mapping changed after this sync was requested. Review the mapping and request a new sync.`);
+  }
+}
+
+/**
+ * Reuses marketplace-listings' provider-owned observation algorithm. This binds
+ * existing saved local variant mappings to a complete, published eBay listing;
+ * it neither registers a listing nor guesses that a catalog SKU is its group.
+ */
+export async function resolveExistingEbayListingIdentity(
+  source: EbayListingSyncIdentity,
+  observer: MarketplaceListingRegistrationObserver,
+  candidates: readonly ListingRegistrationVariantCandidate[],
+  pendingAdditionSkus: readonly string[] = [],
+): Promise<{ identity: EbayListingSyncIdentity; observation: MarketplaceObservedListingPublication }> {
+  // Active saved members choose the maintenance target. Archived nonmembers
+  // belong to the independent listing lifecycle and are not queried here.
+  const includedListingIds = source.variants.filter(member => member.contentSyncEnabled !== false)
+    .map(member => member.listingId).filter((value): value is string => value !== null);
+  const listingIds = [...new Set(includedListingIds.length ? includedListingIds
+    : source.variants.map(member => member.listingId).filter((value): value is string => value !== null))];
+  if (listingIds.length !== 1) {
+    throw identityError("EBAY_SYNC_LISTING_IDENTITY_REQUIRED", `Product ${source.productId} must map to one existing eBay listing; ${listingIds.length} saved listing IDs were found.`);
+  }
+  const candidateById = new Map(candidates.map(candidate => [candidate.productVariantId, candidate]));
+  if (candidateById.size !== source.variants.length || candidates.length !== source.variants.length
+    || source.variants.some(member => candidateById.get(member.variantId)?.sku !== member.sku)) {
+    throw identityError("EBAY_SYNC_MAPPING_INVALID", "The provider observation does not cover the exact saved eBay variant mappings.");
+  }
+  const observation = await observeExistingEbayPublication({
+    owner: { kind: "channel", channelId: source.channelId, productId: source.productId, provider: "ebay", marketplaceId: source.marketplaceId },
+    locator: { providerPublicationKey: null, externalListingId: listingIds[0] },
+    // Catalog archival transfers this member to the shared removal owner. Do not
+    // make active maintenance depend on reads of an archived SKU or missing offer.
+    memberCandidates: candidates.filter(candidate => !source.variants.find(member => member.variantId === candidate.productVariantId)?.catalogArchived),
+    topologyOnlySkus: source.variants.filter(member => member.catalogArchived).map(member => member.sku),
+  }, observer, source.accountId);
+  return { identity: bindObservedEbayListingMembers(source, observation, pendingAdditionSkus), observation };
+}
+
+const nonMemberEvidenceSchema = z.array(z.object({
+  sku,
+  inventoryItemExists: z.boolean(),
+  groupIds: z.array(z.string().trim().min(1).max(255)).max(1_000),
+  offers: z.array(z.object({
+    sku: sku.nullable(), marketplaceId: z.string().trim().min(1).max(100).nullable(),
+    offerId: z.string().trim().min(1).max(255), status: z.enum(["PUBLISHED", "UNPUBLISHED"]),
+    listingId: z.string().trim().min(1).max(255).nullable(), listingStatus: z.string().trim().min(1).max(100).nullable(),
+  }).strict()).max(10_000),
+}).strict()).max(250);
+
+/** One rule for preparation and durable binding: preserve every live member,
+ * but a disabled, exact unpublished offer outside all groups is not a member
+ * of this listing. Saved source mappings remain intact for replay and audit. */
+export function bindObservedEbayListingMembers(
+  source: EbayListingSyncIdentity,
+  rawObservation: MarketplaceObservedListingPublication,
+  // SKUs a reviewed listing change of this product and listing is adding (its open change-intent rows). eBay can
+  // keep such a size in the group, or even publish it, when the change stops part-way. That is Echelon's own
+  // unfinished work, so it must not lock the review that finishes it. It is never bound as a saved member here.
+  pendingAdditionSkus: readonly string[] = [],
+): EbayListingSyncIdentity {
+  const pending = new Set(pendingAdditionSkus);
+  const observation = pending.size === 0 ? rawObservation
+    : { ...rawObservation, members: rawObservation.members.filter(member => !pending.has(member.sku)) };
+  const observedBySku = new Map(observation.members.map(member => [member.sku, member]));
+  const missing = source.variants.filter(member => !member.catalogArchived && !observedBySku.has(member.sku));
+  if (observedBySku.size !== observation.members.length
+    || observation.members.some(member => !source.variants.some(saved => saved.sku === member.sku))) {
+    throw identityError("EBAY_SYNC_MEMBERSHIP_CHANGED", `Product ${source.productId}'s eBay listing membership differs from its saved variant mappings. Review the complete listing before syncing.`);
+  }
+  if (missing.length) {
+    const evidence = nonMemberEvidenceSchema.safeParse(observation.evidence.nonMemberCandidates);
+    const groupSkus = z.array(sku).max(10_000).safeParse(observation.evidence.groupVariantSkus);
+    if (!evidence.success || !groupSkus.success || new Set(evidence.data.map(member => member.sku)).size !== evidence.data.length
+      || (observation.publicationKeyIdentity !== null
+        ? groupSkus.data.filter(sku => !source.variants.some(member => member.sku === sku && member.catalogArchived)).length !== observation.members.length
+          || groupSkus.data.some(sku => !observedBySku.has(sku) && !source.variants.some(member => member.sku === sku && member.catalogArchived))
+          || new Set(groupSkus.data).size !== groupSkus.data.length
+        : groupSkus.data.length !== 0)
+      || evidence.data.length !== missing.length || missing.some(member => {
+        const read = evidence.data.find(candidate => candidate.sku === member.sku);
+        const offer = read?.offers[0];
+        return member.contentSyncEnabled !== false || member.offerId === null || !read?.inventoryItemExists
+          || read.groupIds.length !== 0 || groupSkus.data.includes(member.sku) || read.offers.length !== 1
+          || offer?.offerId !== member.offerId || offer.sku !== member.sku || offer.marketplaceId !== source.marketplaceId
+          || offer.status !== "UNPUBLISHED" || offer.listingId !== null || offer.listingStatus !== null;
+      })) {
+      throw identityError("EBAY_SYNC_MEMBERSHIP_CHANGED", `Product ${source.productId} has saved variants outside its live eBay listing whose unpublished status is not verified. Sync cannot change the listing membership.`);
+    }
+  }
+  const groupKey = observation.publicationKeyIdentity?.externalId ?? null;
+  const groupSkus = z.array(sku).max(250).parse(observation.evidence.groupVariantSkus ?? []);
+  const retainedGroupSkus = groupSkus.filter(sku => !observedBySku.has(sku));
+  if (new Set(groupSkus).size !== groupSkus.length
+    || retainedGroupSkus.some(sku => !pending.has(sku) && !source.variants.some(member => member.sku === sku && member.catalogArchived))) {
+    throw identityError("EBAY_SYNC_MEMBERSHIP_CHANGED", "The eBay group contains an unverified member outside this product's saved archived variants.");
+  }
+  // Keep remotely present archived members in the topology snapshot. Content
+  // sync must preserve that topology until the lifecycle removes them; this is
+  // not permission to prepare their inventory or rewrite their item content.
+  const retainedArchivedSkus = retainedGroupSkus.filter(sku => !pending.has(sku));
+  const published = source.variants.filter(member => observedBySku.has(member.sku));
+  if (published.length > 1 && groupKey === null) {
+    throw identityError("EBAY_SYNC_GROUP_IDENTITY_REQUIRED", `Product ${source.productId}'s multi-variant eBay listing has no verified inventory group.`);
+  }
+  const variants = published.map(member => {
+    const observed = observedBySku.get(member.sku)!;
+    if (observed.inventoryItemIdentity?.externalId !== member.sku
+      || observed.offerIdentity === null
+      || (member.listingId !== null && member.listingId !== observation.listingIdentity.externalId)
+      || (member.offerId !== null && member.offerId !== observed.offerIdentity.externalId)) {
+      throw identityError("EBAY_SYNC_IDENTITY_CHANGED", `Saved eBay SKU ${member.sku} no longer matches its exact inventory item and offer. Review variant ${member.variantId}.`);
+    }
+    return { ...member, offerId: observed.offerIdentity.externalId, listingId: observation.listingIdentity.externalId };
+  });
+  return ebayListingSyncIdentitySchema.parse({ ...source, groupKey, variants,
+    ...(retainedArchivedSkus.length ? { retainedGroupSkus: [...retainedArchivedSkus].sort() } : {}) });
+}
+
+/** Shared read boundary for maintenance and interrupted first-publication replay.
+ * The provider-owned observer supplies group membership, never a catalog hint. */
+export async function observeExistingEbayPublication(
+  input: Parameters<MarketplaceListingRegistrationObserver["observeExistingPublication"]>[0],
+  observer: MarketplaceListingRegistrationObserver,
+  expectedAccountId: string,
+) {
+  const raw = await observer.observeExistingPublication(input).catch(rethrowObservationFailure);
+  const parsed = marketplaceObservedListingPublicationSchema.safeParse(raw);
+  if (!parsed.success) throw identityError("EBAY_SYNC_PROVIDER_IDENTITY_INVALID", "eBay did not return a complete, valid listing identity observation.");
+  const observation = parsed.data;
+  if (observation.providerAccount.provider !== "ebay"
+    || observation.providerAccount.externalAccountId !== expectedAccountId
+    || observation.marketplaceId !== input.owner.marketplaceId
+    || !observation.isPublished
+    || observation.listingIdentity.externalId !== input.locator.externalListingId) {
+    throw identityError("EBAY_SYNC_IDENTITY_CHANGED", "The observed eBay account or published listing does not match the authorized listing identity.");
+  }
+  return observation;
+}
+
+function identityError(code: string, message: string): EbayListingSyncError {
+  return new EbayListingSyncError(code, message);
+}
+
+/** Translate the shared observation port's read failures into listing recovery
+ * policy. Provider identity validation remains owned by the shared observer. */
+function rethrowObservationFailure(error: unknown): never {
+  if (!(error instanceof Error) || !("code" in error)) throw error;
+  if (error.code === "EBAY_REGISTRATION_PROVIDER_READ_TIMEOUT")
+    throw new EbayListingSyncError("EBAY_REGISTRATION_READ_TIMEOUT", "The eBay listing identity check timed out before a complete response arrived.", { cause: error });
+  if (error.code === "EBAY_REGISTRATION_PROVIDER_READ_UNAVAILABLE")
+    throw new EbayListingSyncError("EBAY_REGISTRATION_READ_FAILED", "The eBay listing identity check could not reach eBay.", { cause: error });
+  if (error.code !== "EBAY_REGISTRATION_PROVIDER_READ_FAILED") throw error;
+  const status = "context" in error && error.context && typeof error.context === "object" && "status" in error.context
+    ? error.context.status : undefined;
+  if (status === 401) throw new EbayListingSyncError("EBAY_AUTH_REQUIRED", "eBay rejected the authorization used to verify this listing. Review the connection settings.", { cause: error });
+  if (status === 403) throw new EbayListingSyncError("EBAY_PROVIDER_ACCESS_DENIED", "eBay denied access while verifying this listing. Review the account's permission to access the listing.", { cause: error });
+  if (status === 429) throw new EbayListingSyncError("EBAY_PROVIDER_RATE_LIMITED", "eBay is limiting listing identity checks. Wait before checking again.", { cause: error });
+  if (status === 408 || (typeof status === "number" && status >= 500))
+    throw new EbayListingSyncError("EBAY_REGISTRATION_READ_FAILED", "eBay could not finish the listing identity check.", { cause: error });
+  throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_IDENTITY_INVALID", "eBay refused a required listing identity lookup. Review the saved account, SKU, offer and listing mappings.", { cause: error });
+}

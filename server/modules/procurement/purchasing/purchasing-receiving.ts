@@ -14,30 +14,30 @@ import {
   summarizeShipmentReceiptCustodyCoverage,
   type ShipmentReceiptCustodyCoverage,
 } from "../domain/shipment-receipt-custody";
-import { readPoDirectCustodySources } from "../po-direct-receipt-custody.repository";
-import { detectQtyVariance } from "../po-exceptions.service";
+import { readPoDirectCustodySources } from "../infrastructure/po-direct-receipt-custody.repository";
+import { detectQtyVariance } from "../application/po-exceptions.service";
 import {
   findOpenPoLineByProduct as findOpenPoLineByProductWithStorage,
   reconcilePurchaseOrderReceipt,
   type ReceiptReconciliationResult,
   type ReceivingReconciliationLine,
-} from "../purchase-order-receipt-reconciliation.service";
-import { RECEIVABLE_SHIPMENT_STATUSES } from "../receiving-close-integrity.domain";
+} from "../application/purchase-order-receipt-reconciliation.service";
+import { RECEIVABLE_SHIPMENT_STATUSES } from "../domain/receiving-close-integrity.domain";
 import {
   readPrimaryReceivingLocations,
   type ReceivingIntegrityTransaction,
-} from "../receiving-close-integrity.repository";
-import { readReceiptCustodyPresence } from "../receiving-quarantine.repository";
-import { ShipmentReceiptCoverageError } from "../receiving-shipment-coverage";
+} from "../infrastructure/receiving-close-integrity.repository";
+import { readReceiptCustodyPresence } from "../infrastructure/receiving-quarantine.repository";
+import { ShipmentReceiptCoverageError } from "../application/receiving-shipment-coverage";
 import {
   planReceiptUnits,
   ReceivingUnitError,
   type ReceiptUnitPlan,
   type ReceiptVariant,
-} from "../receiving-unit-contract";
-import { ReceivingUnitSnapshotError } from "../receiving-unit-snapshot";
-import { readShipmentReceiptCustodyCoverage } from "../shipment-receipt-custody.repository";
-import { shipmentReceiptSourceVersion } from "../shipment-receipt-source-version";
+} from "../application/receiving-unit-contract";
+import { ReceivingUnitSnapshotError } from "../application/receiving-unit-snapshot";
+import { readShipmentReceiptCustodyCoverage } from "../infrastructure/shipment-receipt-custody.repository";
+import { shipmentReceiptSourceVersion } from "../application/shipment-receipt-source-version";
 import type { PurchasingCosting } from "./purchasing-costing";
 import {
   ACTIVE_RECEIPT_STATUSES,

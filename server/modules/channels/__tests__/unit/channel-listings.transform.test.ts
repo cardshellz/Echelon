@@ -15,7 +15,7 @@ import {
   extractNumericId,
   rowToListingDto,
   type ChannelListingRowInput,
-} from "../../channel-listings.transform";
+} from "../../domain/channel-listings.transform";
 
 describe("extractNumericId", () => {
   it("extracts the trailing id from a Shopify ProductVariant GID", () => {

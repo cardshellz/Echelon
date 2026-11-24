@@ -2,7 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 
 import { channelConnections, channels, products, productVariants } from "@shared/schema";
 import { db as defaultDb, pool as defaultPool } from "../../../../db";
-import { MarketplaceListingRegistrationError } from "../../../marketplace-listings/domain/registration-errors";
+import { MarketplaceListingRegistrationError } from "../../../marketplace-listings/registration-errors.api";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { createEbayChannelQuantityReader } from "./ebay-channel-quantity.reader";
 import type {

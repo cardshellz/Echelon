@@ -1,4 +1,4 @@
-import { SupplierCreditEvidenceError } from "../../supplier-credit-settlement.repository";
+import { SupplierCreditEvidenceError } from "../../infrastructure/supplier-credit-settlement.repository";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
   postCommit: vi.fn(),
 }));
 
-vi.mock("../../ap-ledger.service", () => {
+vi.mock("../../application/ap-ledger.service", () => {
   class ApLedgerError extends Error {
     constructor(
       message: string,
@@ -24,17 +24,17 @@ vi.mock("../../ap-ledger.service", () => {
   };
 });
 
-vi.mock("../../ap-invoice-transition.service", () => ({
+vi.mock("../../application/ap-invoice-transition.service", () => ({
   reviewInvoiceTransitionInTransaction: async (tx: unknown, invoiceId: number, action: string, input: unknown, actorId: string, at: Date, key: string) => ({
     result: await mocks.executeInTransaction(`${action}_invoice`, { invoiceId, userId: actorId, transitionReview: input, now: at, key }, tx),
   }),
 }));
 
-import { ApLedgerError } from "../../ap-ledger.service";
+import { ApLedgerError } from "../../application/ap-ledger.service";
 import {
   classifyApInvoiceCommandFailure,
   createApInvoiceCommands,
-} from "../../ap-invoice-commands";
+} from "../../application/ap-invoice-commands";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 
 const descriptor: FinancialCommandDescriptor = {

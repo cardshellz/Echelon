@@ -1,6 +1,6 @@
 import { supplierCreditDispositionSchema } from "@shared/procurement/supplier-credit";
 import type { CostIssue, CostSourceReference } from "@shared/procurement/cost-source-contracts";
-import { costFingerprint, costInteger } from "../../inventory/infrastructure/cost-evidence-values";
+import { costFingerprint, costInteger } from "../../inventory/cost-evidence-values.api";
 import { allocateCentsFromNumericBasis } from "./shipment-allocation-basis";
 import { supplierCreditDispositionMatches, supplierCreditInvoiceSourceFingerprint, supplierCreditIssue, supplierCreditSourceEvidenceSchema, type SupplierCreditCostRow } from "./supplier-credit-source";
 import { supplierInvoiceTaxSource } from "./supplier-invoice-amounts";

@@ -3,11 +3,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const EBAY_INGESTION_SRC = readFileSync(
-  resolve(__dirname, "../../ebay-order-ingestion.ts"),
+  resolve(__dirname, "../../application/ebay-order-ingestion.ts"),
   "utf-8",
 );
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
-  resolve(__dirname, "../../webhook-retry.worker.ts"),
+  resolve(__dirname, "../../application/webhook-retry.worker.ts"),
   "utf-8",
 );
 const SERVER_INDEX_SRC = readFileSync(

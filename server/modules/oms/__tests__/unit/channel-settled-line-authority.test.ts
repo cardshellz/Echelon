@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveOmsLineAuthority, type OmsLineAuthorityInput } from "../../oms-line-authority";
+import { deriveOmsLineAuthority, type OmsLineAuthorityInput } from "../../application/oms-line-authority";
 import {
   OMS_LINE_AWAITING_CHANNEL_PAYMENT,
   OMS_PAID_QUANTITY_BELOW_CHANNEL,

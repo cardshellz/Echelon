@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
-import { readShipmentPhysicalLines } from "../../shipment-physical-read.repository";
+import { readShipmentPhysicalLines } from "../../infrastructure/shipment-physical-read.repository";
 
 function reader(rows: unknown[] = []) {
   const orderBy = vi.fn().mockResolvedValue(rows);

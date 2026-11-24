@@ -4,10 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   backfillShopifyOrders,
   bridgeShopifyOrderToOms,
-} from "../../shopify-bridge";
+} from "../../application/shopify-bridge";
 
 const SHOPIFY_BRIDGE_SRC = readFileSync(
-  resolve(__dirname, "../../shopify-bridge.ts"),
+  resolve(__dirname, "../../application/shopify-bridge.ts"),
   "utf8",
 );
 const SHOPIFY_RECONCILIATION_SRC = readFileSync(

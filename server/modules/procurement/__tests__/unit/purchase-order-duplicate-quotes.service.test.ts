@@ -9,7 +9,7 @@ import {
   vendorProducts,
   vendors,
 } from "@shared/schema";
-import { createPurchasingService } from "../../purchasing.service";
+import { createPurchasingService } from "../../application/purchasing.service";
 
 const NOW = new Date("2026-07-13T16:00:00.000Z");
 

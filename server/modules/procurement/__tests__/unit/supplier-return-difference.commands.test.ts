@@ -1,13 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-vi.mock("../../supplier-return.service", () => ({ recordSupplierReturn: vi.fn() }));
-vi.mock("../../supplier-return-difference.service", () => ({ recordSupplierReturnDifferenceReview: vi.fn() }));
+vi.mock("../../application/supplier-return.service", () => ({ recordSupplierReturn: vi.fn() }));
+vi.mock("../../application/supplier-return-difference.service", () => ({ recordSupplierReturnDifferenceReview: vi.fn() }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
-import { recordSupplierReturnDifferenceReview } from "../../supplier-return-difference.service";
-import { createSupplierReturnReviewCommands, SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE, validateSupplierReturnReviewReceipt } from "../../supplier-return-difference.commands";
-import { SupplierReturnError } from "../../supplier-return.errors";
+import { recordSupplierReturnDifferenceReview } from "../../application/supplier-return-difference.service";
+import { createSupplierReturnReviewCommands, SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE, validateSupplierReturnReviewReceipt } from "../../application/supplier-return-difference.commands";
+import { SupplierReturnError } from "../../domain/supplier-return.errors";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor, FinancialCommandRepository } from "../../../../platform/commands/transactional-command.service";
-import type { SupplierReturnTransaction } from "../../supplier-return.repository";
+import type { SupplierReturnTransaction } from "../../infrastructure/supplier-return.repository";
 import { returnCreditReviewRequest, returnCreditReviewResult, returnCreditReview } from "../../../../../test/fixtures/supplier-return";
 
 const actorId = "review-operator", key = "supplier-review-1234", entitlementId = 111;

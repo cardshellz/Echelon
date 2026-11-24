@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
-import type { ChannelFulfillmentAuthorityService } from "../../channel-fulfillment-authority.service";
+import type { ChannelFulfillmentAuthorityService } from "../../application/channel-fulfillment-authority.service";
 import { getChannelFulfillmentCommandWorkerHeartbeat, resetChannelFulfillmentCommandWorkerForTest,
-  startChannelFulfillmentCommandWorker } from "../../channel-fulfillment-command.worker";
+  startChannelFulfillmentCommandWorker } from "../../application/channel-fulfillment-command.worker";
 
 afterEach(() => { resetChannelFulfillmentCommandWorkerForTest(); vi.useRealTimers(); });
 

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildStaleAutoDraftPoDiagnostics, type AutoDraftPoAgingRow } from "../../auto-draft-po-aging.service";
+import { buildStaleAutoDraftPoDiagnostics, type AutoDraftPoAgingRow } from "../../application/auto-draft-po-aging.service";
 import {
   CRITICAL_STALE_AUTO_DRAFT_PO_NOTIFICATION_KEY,
   buildCriticalStaleAutoDraftPoNotification,
   sendCriticalStaleAutoDraftPoEscalation,
-} from "../../auto-draft-po-escalation.service";
+} from "../../application/auto-draft-po-escalation.service";
 
 function row(overrides: Partial<AutoDraftPoAgingRow>): AutoDraftPoAgingRow {
   return {

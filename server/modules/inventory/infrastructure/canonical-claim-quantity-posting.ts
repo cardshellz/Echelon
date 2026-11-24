@@ -1,4 +1,4 @@
-import type { CanonicalClaimTransactionClient } from "../../inventory-planning/application/canonical-claim-inventory.port";
+import type { CanonicalClaimTransactionClient } from "../../inventory-planning/canonical-claim-inventory.port.api";
 import { InventoryQuantityError, quantityMovementSchema, type QuantityCommand, type QuantityMovement } from "../domain/quantity-ledger";
 import { PostgresInventoryQuantityLedger } from "./quantity-ledger.repository";
 

@@ -1,5 +1,5 @@
 import type { AllowedInventoryConversion } from "@shared/types/inventory-conversions";
-import type { InventoryConversionReader } from "../../inventory-planning/application/inventory-conversion-read.port";
+import type { InventoryConversionReader } from "../../inventory-planning/inventory-conversion-read.port.api";
 
 export interface InventoryLevelAtpRow {
   productVariantId: number;

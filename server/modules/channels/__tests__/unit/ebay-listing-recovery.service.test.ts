@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { EbayListingRecoveryService, type EbayListingRecoveryContinuation } from "../../ebay-listing-recovery.service";
-import { EbayListingSyncError, storedEbayListingSyncJobSchema, publicationRetryReviewHash } from "../../ebay-listing-sync.domain";
+import { EbayListingRecoveryService, type EbayListingRecoveryContinuation } from "../../application/ebay-listing-recovery.service";
+import { EbayListingSyncError, storedEbayListingSyncJobSchema, publicationRetryReviewHash } from "../../domain/ebay-listing-sync.domain";
 import { syncIdentity } from "../fixtures/ebay-listing-sync.fixture";
 
 const id = "655ca747-20b9-4940-9c61-019baf1c11c1";

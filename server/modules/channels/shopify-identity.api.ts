@@ -11,8 +11,8 @@ export {
   type ShopifyIdentityConnection,
   type ShopifyVariantIdentity,
 } from "./adapters/shopify-identity.reader";
-export { ChannelIdentityService } from "./channel-identity.service";
+export { ChannelIdentityService } from "./application/channel-identity.service";
 export {
   ChannelIdentityError,
   type ChannelItemIdentity,
-} from "./channel-identity.domain";
+} from "./domain/channel-identity.domain";

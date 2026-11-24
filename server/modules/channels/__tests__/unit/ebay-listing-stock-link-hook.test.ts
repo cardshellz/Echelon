@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { linkEbayListingStockBeforeChange, type EbayListingStockLinkHookInput } from "../../infrastructure/ebay-listing-stock-link-hook";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
 
 // Channels PR4 (PLAN-CH-v3 §5 "Edit / rebuild / relist"): the Card Shellz eBay update and rebuild hooks link the
 // sizes that would get a positive quantity before the first eBay mutation; a refusal stops the change before eBay.

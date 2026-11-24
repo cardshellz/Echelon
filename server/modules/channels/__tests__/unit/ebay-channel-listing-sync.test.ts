@@ -19,7 +19,7 @@ vi.mock("../../infrastructure/ebay-active-listing-sync", async () => {
   };
 });
 vi.mock("../../infrastructure/ebay-listing-push", () => ({ readEbayPublicationSource: f.source }));
-vi.mock("../../ebay-publication-admission.service", () => ({ admitEbayPublication: f.publish }));
+vi.mock("../../application/ebay-publication-admission.service", () => ({ admitEbayPublication: f.publish }));
 import { syncChannelListings } from "../../infrastructure/ebay-channel-listing-sync";
 
 const destination = { channelId: 67, provider: "ebay", connectionId: 34, accountId: "seller-1", environment: "production" as const, marketplaceId: "EBAY_US" };

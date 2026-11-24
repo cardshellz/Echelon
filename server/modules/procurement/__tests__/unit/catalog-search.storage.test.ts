@@ -54,7 +54,7 @@ vi.mock("../../../../storage/base", async () => {
 });
 
 // Import after mock so storage.ts picks up the mocked base.
-import { procurementMethods } from "../../procurement.storage";
+import { procurementMethods } from "../../infrastructure/procurement.storage";
 
 describe("Spec A follow-up \u2014 searchVendorCatalog", () => {
   beforeEach(() => {

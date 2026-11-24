@@ -44,7 +44,7 @@ describe("reconcileCancellations is wired into the 15-min reconciliation interva
 });
 
 const READINESS_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../../oms/shopify-line-readiness.service.ts"),
+  resolve(__dirname, "../../../oms/application/shopify-line-readiness.service.ts"),
   "utf8",
 );
 

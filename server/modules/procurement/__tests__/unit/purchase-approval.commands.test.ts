@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPurchaseApprovalCommands, purchaseApprovalCommandScope } from "../../purchase-approval.commands";
+import { createPurchaseApprovalCommands, purchaseApprovalCommandScope } from "../../application/purchase-approval.commands";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor, FinancialCommandRepository } from "../../../../platform/commands/transactional-command.service";
 

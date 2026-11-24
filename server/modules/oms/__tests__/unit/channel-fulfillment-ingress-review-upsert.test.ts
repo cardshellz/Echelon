@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createChannelFulfillmentIngressRepository } from "../../channel-fulfillment-ingress.repository";
+import { createChannelFulfillmentIngressRepository } from "../../infrastructure/channel-fulfillment-ingress.repository";
 
 function sqlText(query: any): string {
   const chunks = query?.queryChunks ?? query?.chunks ?? [];

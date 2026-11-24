@@ -45,13 +45,13 @@ vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
 vi.mock("../../../notifications/in-app-notifications.api", () => mocks.notifications);
 
-vi.mock("../../receiving-entry.commands", async original => ({
-  ...await original<typeof import("../../receiving-entry.commands")>(),
+vi.mock("../../application/receiving-entry.commands", async original => ({
+  ...await original<typeof import("../../application/receiving-entry.commands")>(),
   createReceivingEntryCommands: mocks.entry.create,
 }));
 
-import { registerReceivingRoutes, RECEIVING_READ_GRANTS, MAX_RECEIVING_LIST_LIMIT } from "../../receiving.routes";
-import { hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../receiving-entry.commands";
+import { registerReceivingRoutes, RECEIVING_READ_GRANTS, MAX_RECEIVING_LIST_LIMIT } from "../../interfaces/http/receiving.routes";
+import { hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../application/receiving-entry.commands";
 
 function buildApp(services: Record<string, any> = {}): Express {
   const app = express();

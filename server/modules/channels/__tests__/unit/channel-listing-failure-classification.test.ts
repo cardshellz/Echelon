@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ChannelListingValidationError, channelListingValidationFromError } from "@shared/channel-listing-validation";
 import { providerWriteDiagnosticFromError, providerWriteShouldRetry } from "@shared/channel-provider-write";
-import { syncFailure } from "../../ebay-listing-sync.domain";
-import { ebayListingFailureDiagnostic } from "../../ebay-listing-failure-diagnostic";
+import { syncFailure } from "../../domain/ebay-listing-sync.domain";
+import { ebayListingFailureDiagnostic } from "../../application/ebay-listing-failure-diagnostic";
 import { channelOperationFailure } from "../../../../infrastructure/channel-operation-failure";
 
 const now = new Date("2026-10-24T12:00:00Z");

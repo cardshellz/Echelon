@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildForecastTrustHealth } from "../../forecast-trust-health.service";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import { buildForecastTrustHealth } from "../../application/forecast-trust-health.service";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
 
 describe("buildForecastTrustHealth", () => {
   it("summarizes forecast trust review and watch signals from recommendation output", () => {

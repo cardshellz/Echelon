@@ -102,13 +102,13 @@ vi.mock("../../../../db", () => ({
   },
 }));
 
-vi.mock("../../shipment-cost-exclusions.repository", () => ({
+vi.mock("../../infrastructure/shipment-cost-exclusions.repository", () => ({
   readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })),
 }));
-vi.mock("../../purchase-tax-costs.repository", () => ({
+vi.mock("../../infrastructure/purchase-tax-costs.repository", () => ({
   readTaxedShipmentSupplierCosts: vi.fn(async () => new Map()),
 }));
-vi.mock("../../shipment-unit-options.repository", () => ({
+vi.mock("../../infrastructure/shipment-unit-options.repository", () => ({
   readShipmentUnitOptions: vi.fn(async () => new Map()),
   shipmentReceivingUnitSource: vi.fn(() => ({})),
 }));
@@ -117,11 +117,11 @@ import {
   computeIdempotencyRequestHash,
   requireIdempotency,
 } from "../../../../middleware/idempotency";
-import { RECEIVING_READ_GRANTS } from "../../receiving.routes";
+import { RECEIVING_READ_GRANTS } from "../../interfaces/http/receiving.routes";
 import { RECEIVING_READ_PERMISSIONS } from "../../../../../client/src/lib/procurement-access";
-import { createShipmentTrackingService } from "../../shipment-tracking.service";
+import { createShipmentTrackingService } from "../../application/shipment-tracking.service";
 import { registerOperationsDashboardRoutes } from "../../../orders/interfaces/http/operations-dashboard.routes";
-import { registerPurchasingRoutes } from "../../procurement.routes";
+import { registerPurchasingRoutes } from "../../interfaces/http/procurement.routes";
 
 function startServer(app: Express): Promise<{ url: string; close: () => Promise<void> }> {
   return new Promise((resolve) => {

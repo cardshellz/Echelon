@@ -1,6 +1,6 @@
 import { supplierReturnCreditReviewSchema, supplierReturnCreditReviewEntrySchema, supplierReturnCreditAssignmentSchema, type SupplierReturnCreditReview } from "@shared/procurement/supplier-return-credit";
 import type { SupplierReturnCostTotals } from "@shared/procurement/supplier-return";
-import { costFingerprint, costInteger } from "../../inventory/infrastructure/cost-evidence-values";
+import { costFingerprint, costInteger } from "../../inventory/cost-evidence-values.api";
 export class SupplierReturnCreditReviewError extends Error {
     constructor(readonly code: string, message: string) { super(message); this.name = "SupplierReturnCreditReviewError"; }
 }

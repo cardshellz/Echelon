@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   readBoundedResponseText,
   ShipStationTrackingResponseReadError,
-} from "../../shipstation-tracking-http";
+} from "../../application/shipstation-tracking-http";
 
 describe("ShipStation tracking HTTP response reader", () => {
   it("returns a bounded UTF-8 response body", async () => {

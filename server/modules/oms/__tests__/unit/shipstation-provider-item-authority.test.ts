@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   parsePositiveWmsShipmentItemsFromShipStation,
   type ShipStationShipment,
-} from "../../shipstation.service";
+} from "../../application/shipstation.service";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 

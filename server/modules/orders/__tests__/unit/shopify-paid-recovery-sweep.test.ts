@@ -4,9 +4,9 @@ import { paidReplayFixture } from "../../../oms/__tests__/fixtures/shopify-paid-
 
 const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), readiness: vi.fn(), replay: vi.fn(), sync: vi.fn(), gap: vi.fn(), wmsRetry: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: ports }));
-vi.mock("../../../oms/shopify-bridge", () => ({ bridgeShopifyOrderToOms: vi.fn() }));
-vi.mock("../../../oms/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
-vi.mock("../../../oms/shopify-paid-event-replay", () => ({ queueOmsPaidEventReplay: ports.replay }));
+vi.mock("../../../oms/application/shopify-bridge", () => ({ bridgeShopifyOrderToOms: vi.fn() }));
+vi.mock("../../../oms/application/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
+vi.mock("../../../oms/application/shopify-paid-event-replay", () => ({ queueOmsPaidEventReplay: ports.replay }));
 vi.mock("../../../oms/infrastructure/channel-authority-gap.repository", () => ({ recordChannelAuthorityGap: ports.gap }));
 vi.mock("../../../oms/webhook-retry.api", () => ({ enqueueOmsWmsSyncRetry: ports.wmsRetry }));
 import { initReconciliation, runReconciliationNow } from "../../application/shopify-order-reconciliation";

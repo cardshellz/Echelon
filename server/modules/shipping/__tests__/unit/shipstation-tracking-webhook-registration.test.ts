@@ -3,13 +3,13 @@ import { parseFlags } from "../../../../../scripts/configure-shipstation-trackin
 import {
   configureShipStationTrackingWebhook,
   normalizeTrackingWebhookTargetUrl,
-} from "../../shipstation-tracking-webhook-registration";
+} from "../../application/shipstation-tracking-webhook-registration";
 import {
   createShipStationTrackingWebhooksClient,
   ShipStationTrackingWebhooksClientError,
   type ShipStationTrackingWebhook,
   type ShipStationTrackingWebhooksClient,
-} from "../../shipstation-tracking-webhooks.client";
+} from "../../infrastructure/shipstation-tracking-webhooks.client";
 
 const TARGET = "https://echelon.example.com/api/shipping/webhooks/shipstation/track";
 const WEBHOOK_SECRET = "w".repeat(32);

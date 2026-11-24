@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyHistoricalPoSupplierEvidence,
   previewHistoricalPoSupplierEvidence,
-} from "../../historical-po-supplier-evidence-backfill.service";
+} from "../../application/historical-po-supplier-evidence-backfill.service";
 
 const evidenceRow = {
   vendor_id: 2,

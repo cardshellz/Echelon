@@ -285,20 +285,20 @@ describe("P1.2: OMS order status state-machine chokepoint", () => {
     });
 
     it("ensures every OMS cancellation and shipment writer enforces state-machine guards", () => {
-      const webhooksSrc = fs.readFileSync(path.join(OMS_ROOT, "oms-webhooks.ts"), "utf8");
+      const webhooksSrc = fs.readFileSync(path.join(OMS_ROOT, "application/oms-webhooks.ts"), "utf8");
       expect(webhooksSrc).toContain("transitionOmsOrderStatus(db, existing.id");
       expect(webhooksSrc).toContain(
         "NOT IN ('shipped', 'partially_shipped', 'delivered', 'refunded')",
       );
 
-      const ebaySrc = fs.readFileSync(path.join(OMS_ROOT, "ebay-order-ingestion.ts"), "utf8");
+      const ebaySrc = fs.readFileSync(path.join(OMS_ROOT, "application/ebay-order-ingestion.ts"), "utf8");
       expect(ebaySrc).toContain("transitionOmsOrderStatus(database, result.id");
 
-      const wmsSyncSrc = fs.readFileSync(path.join(OMS_ROOT, "wms-sync.service.ts"), "utf8");
+      const wmsSyncSrc = fs.readFileSync(path.join(OMS_ROOT, "application/wms-sync.service.ts"), "utf8");
       expect(wmsSyncSrc).toContain("transitionOmsOrderStatus(db, row.oms_id");
 
       const observationSrc = fs.readFileSync(
-        path.join(OMS_ROOT, "channel-order-observation.repository.ts"),
+        path.join(OMS_ROOT, "infrastructure/channel-order-observation.repository.ts"),
         "utf8",
       );
       expect(observationSrc).toContain(
@@ -306,7 +306,7 @@ describe("P1.2: OMS order status state-machine chokepoint", () => {
       );
 
       const dropshipCancelSrc = fs.readFileSync(
-        path.join(OMS_ROOT, "dropship-marketplace-cancel.ts"),
+        path.join(OMS_ROOT, "application/dropship-marketplace-cancel.ts"),
         "utf8",
       );
       expect(dropshipCancelSrc).toContain(
@@ -314,7 +314,7 @@ describe("P1.2: OMS order status state-machine chokepoint", () => {
       );
 
       const flowRecSrc = fs.readFileSync(
-        path.join(OMS_ROOT, "oms-flow-reconciliation.service.ts"),
+        path.join(OMS_ROOT, "application/oms-flow-reconciliation.service.ts"),
         "utf8",
       );
       expect(flowRecSrc).toContain(
@@ -322,7 +322,7 @@ describe("P1.2: OMS order status state-machine chokepoint", () => {
       );
       expect(flowRecSrc).toContain("oo.shipped_at IS NULL");
 
-      const omsServiceSrc = fs.readFileSync(path.join(OMS_ROOT, "oms.service.ts"), "utf8");
+      const omsServiceSrc = fs.readFileSync(path.join(OMS_ROOT, "application/oms.service.ts"), "utf8");
       expect(omsServiceSrc).toContain("recordShipmentOutcome(");
       expect(omsServiceSrc).toContain('allowedOmsOrderFromStatuses("shipped", "engine")');
     });

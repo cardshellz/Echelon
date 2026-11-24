@@ -7,7 +7,7 @@ import {
   prepareOrderEditHeldPartitions,
   providerCarriesManualHold,
   verifyDeferredHeldPartition,
-} from "../order-edit-held-partitions";
+} from "../application/order-edit-held-partitions";
 import { clearOutboundShipmentReviewFlagByReasonInWms } from "../../wms/outbound-shipment-mutations.api";
 import {
   ORDER_EDIT_PROVIDER_HOLD_UNTIL,

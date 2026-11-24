@@ -5,7 +5,7 @@ import {
   readCatalogStockSelectionFactsForProducts,
   readCatalogStockSelectionFactsForVariants,
   type CatalogStockVariantFacts,
-} from "../../catalog/infrastructure/catalog-stock-selection.reader";
+} from "../../catalog/catalog-stock-selection.reader.api";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
 import type { DropshipStockSelectionCandidate } from "../domain/stock-publication-selection";

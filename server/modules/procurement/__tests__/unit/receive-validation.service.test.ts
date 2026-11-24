@@ -5,7 +5,7 @@ import {
   ReceiveValidationService,
   DEFAULT_COST_VARIANCE_WARN_PCT,
   __testing__,
-} from "../../receive-validation.service";
+} from "../../application/receive-validation.service";
 
 /** Receipt commands validate and freeze the count configuration. Warnings
  * compare per-piece costs only; PO preferences cannot override that receipt. */

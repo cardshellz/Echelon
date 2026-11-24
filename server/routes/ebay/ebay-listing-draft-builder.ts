@@ -1,1 +1,1 @@
-export * from "../../modules/channels/ebay-listing-draft";
+export * from "../../modules/channels/application/ebay-listing-draft";

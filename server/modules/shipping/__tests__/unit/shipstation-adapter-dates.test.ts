@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createShipStationEngine, type ShipStationServiceHandle } from "../../adapters/shipstation.adapter";
-import { deriveReconcileEvent } from "../../reconcile-derive";
+import { deriveReconcileEvent } from "../../domain/reconcile-derive";
 
 function fixture(shipDate: string, holdUntilDate: string) {
   const shipment = { shipmentId: 23, orderId: 42, orderKey: "echelon-wms-shp-42", shipDate,

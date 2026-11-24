@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   partitionCommercialRequestedQuantity,
   ShipStationCommercialQuantityError,
-} from "../../shipstation-commercial-quantity.domain";
+} from "../../domain/shipstation-commercial-quantity.domain";
 
 describe("ShipStation split commercial quantity", () => {
   it("preserves nullable historical authority for an unchanged physical split", () => {

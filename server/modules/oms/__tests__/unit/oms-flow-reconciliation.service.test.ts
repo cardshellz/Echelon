@@ -10,10 +10,10 @@ import {
   remediateOmsFlowIssue,
   resetOmsFlowReconciliationSchedulerHeartbeatForTests,
   runOmsFlowReconciliation,
-} from "../../oms-flow-reconciliation.service";
+} from "../../application/oms-flow-reconciliation.service";
 
 const OMS_FLOW_RECONCILIATION_SRC = readFileSync(
-  resolve(__dirname, "../../oms-flow-reconciliation.service.ts"),
+  resolve(__dirname, "../../application/oms-flow-reconciliation.service.ts"),
   "utf-8",
 );
 

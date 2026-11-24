@@ -1,5 +1,5 @@
 export {
   ShipmentAccessError,
   queryShipmentOrderContext,
-} from "./outbound-shipment-access.query";
-export { queryOutboundShipments } from "./outbound-shipment-list.query";
+} from "./infrastructure/outbound-shipment-access.query";
+export { queryOutboundShipments } from "./infrastructure/outbound-shipment-list.query";

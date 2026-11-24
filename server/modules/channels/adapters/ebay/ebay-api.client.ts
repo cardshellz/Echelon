@@ -12,13 +12,13 @@
 import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "./ebay-api-error";
 import { readEbayNativePackage, type EbayNativePackageSnapshot } from "./ebay-native-package.reader";
 import { readEbayPublishedContent } from "./ebay-published-content.reader";
-import type { ChannelPublishedContent } from "../../../marketplace-listings/domain/channel-publication-content";
+import type { ChannelPublishedContent } from "../../../marketplace-listings/channel-publication-content.api";
 import { normalizeEbayObservedOffers } from "./ebay-offer-observation";
 import type { EbayAuthService } from "./ebay-auth.service";
-import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
+import { ChannelFulfillmentProviderError } from "../../domain/channel-fulfillment-provider.error";
 import { replaceEbayPackageTracking, type EbayTrackingReplacementBatch } from "./ebay-package-tracking-replacement";
-import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../quantity-publication-request";
-import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../provider-request-limits";
+import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
+import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../application/provider-request-limits";
 import { executeEbayQuantityHttp } from "./ebay-quantity-http";
 import { ebayInventoryOffersPath } from "./ebay-inventory-quantity";
 import type {

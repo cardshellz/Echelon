@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classifyAdditionalLabelPackage, planLabelReplacement, type AdditionalLabelPackageInput } from "../../label-replacement-plan.domain";
-import { MAX_LABEL_REPLACEMENT_ITEMS, scopeLabelReplacementPredecessors, type LabelReplacementScopeInput } from "../../label-replacement-scope.domain";
+import { classifyAdditionalLabelPackage, planLabelReplacement, type AdditionalLabelPackageInput } from "../../domain/label-replacement-plan.domain";
+import { MAX_LABEL_REPLACEMENT_ITEMS, scopeLabelReplacementPredecessors, type LabelReplacementScopeInput } from "../../domain/label-replacement-scope.domain";
 
 describe("channel-independent label replacement package scope", () => {
   const previous = [1, 2, 3, 4].map(id => ({

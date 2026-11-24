@@ -6,7 +6,7 @@ import { orderItems, type OrderItem } from "@shared/schema";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { IntegrityError, ValidationError } from "@shared/errors";
 import type { db } from "../../../db";
-import type { CanonicalClaimTransactionClient } from "../../inventory-planning/application/canonical-claim-inventory.port";
+import type { CanonicalClaimTransactionClient } from "../../inventory-planning/canonical-claim-inventory.port.api";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import {
   canonicalAvailabilityClaimPickCommandSchema,

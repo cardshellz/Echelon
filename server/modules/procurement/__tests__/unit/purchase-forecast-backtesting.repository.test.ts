@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { createPurchaseForecastBacktestingRepository } from "../../purchase-forecast-backtesting.repository";
-import { buildPurchasingForecastPolicyCohort } from "../../purchasing-forecast-policy";
+import { createPurchaseForecastBacktestingRepository } from "../../infrastructure/purchase-forecast-backtesting.repository";
+import { buildPurchasingForecastPolicyCohort } from "../../application/purchasing-forecast-policy";
 
 const policyCohort = buildPurchasingForecastPolicyCohort();
 

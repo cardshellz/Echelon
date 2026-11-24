@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { refreshShortClaims, retryConfirmedPickCorrections } from "../../oms-flow-reconciliation.service";
+import { refreshShortClaims, retryConfirmedPickCorrections } from "../../application/oms-flow-reconciliation.service";
 
 function deps(refreshShortClaimSupply?: ReturnType<typeof vi.fn>) {
   return {

@@ -1,4 +1,4 @@
-import type { ChannelSyncBatchAdapter } from "../../../marketplace-listings/application/channel-sync-batch.service";
+import type { ChannelSyncBatchAdapter } from "../../../marketplace-listings/channel-sync-batch.service.api";
 import {
   ChannelSyncAdmissionRefused,
   ChannelSyncBatchError,
@@ -6,7 +6,7 @@ import {
   type SyncBatchMember,
   type SyncCommandStatus,
   type SyncAdmissionRefusal,
-} from "../../../marketplace-listings/domain/channel-sync-batch";
+} from "../../../marketplace-listings/domain-channel-sync-batch.api";
 import type {
   selectIncludedEbaySyncProducts,
   syncChannelListings,

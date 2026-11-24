@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createCatalogBackfillService, type CatalogBackfillService } from "../../catalog-backfill.service";
+import { createCatalogBackfillService, type CatalogBackfillService } from "../../application/catalog-backfill.service";
 
 const photoMocks = vi.hoisted(() => ({ append: vi.fn(), createImporter: vi.fn() }));
 vi.mock("../../../catalog", () => ({

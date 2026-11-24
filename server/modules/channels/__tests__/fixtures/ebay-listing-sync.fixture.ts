@@ -1,6 +1,6 @@
 import { vi } from "vitest";
-import type { PreparedEbayListingSync } from "../../ebay-listing-sync.service";
-import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
+import type { PreparedEbayListingSync } from "../../application/ebay-listing-sync.service";
+import type { EbayListingSyncIdentity } from "../../domain/ebay-listing-sync.domain";
 import type {
   EbayInventoryItem,
   EbayInventoryItemGroup,

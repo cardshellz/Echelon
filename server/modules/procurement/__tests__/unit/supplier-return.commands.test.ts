@@ -1,10 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { z } from "zod";
-vi.mock("../../supplier-return.service", () => ({ recordSupplierReturn: vi.fn() }));
+vi.mock("../../application/supplier-return.service", () => ({ recordSupplierReturn: vi.fn() }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
-import { recordSupplierReturn, type SupplierReturnTransaction } from "../../supplier-return.service";
-import { bindSupplierReturnCommand, classifySupplierReturnFailure, createSupplierReturnCommands, SUPPLIER_RETURN_COMMAND_SCOPE, validateSupplierReturnReceipt } from "../../supplier-return.commands";
-import { SupplierReturnError } from "../../supplier-return.errors";
+import { recordSupplierReturn, type SupplierReturnTransaction } from "../../application/supplier-return.service";
+import { bindSupplierReturnCommand, classifySupplierReturnFailure, createSupplierReturnCommands, SUPPLIER_RETURN_COMMAND_SCOPE, validateSupplierReturnReceipt } from "../../application/supplier-return.commands";
+import { SupplierReturnError } from "../../domain/supplier-return.errors";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
 import { SupplierReturnStockError } from "../../../inventory/domain/supplier-return-stock";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";

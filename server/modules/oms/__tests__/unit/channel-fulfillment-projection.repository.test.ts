@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 
-import { createChannelFulfillmentProjector } from "../../channel-fulfillment-projection.repository";
+import { createChannelFulfillmentProjector } from "../../infrastructure/channel-fulfillment-projection.repository";
 
 function sqlText(query: any): string {
   return new PgDialect().sqlToQuery(query).sql;

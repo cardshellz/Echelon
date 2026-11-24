@@ -41,7 +41,7 @@ import {
   SHOPIFY_CANCEL_USER_ERRORS,
   SHOPIFY_CANCEL_NETWORK_ERROR,
   SHOPIFY_PUSH_CLIENT_NOT_SET,
-} from "../../fulfillment-push.service";
+} from "../../application/fulfillment-push.service";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
 
 // ─── Fixtures ────────────────────────────────────────────────────────

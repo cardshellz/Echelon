@@ -1,25 +1,25 @@
 export {
   resolveShipStationTrackingApiKey,
   resolveShipStationTrackingWebhookSecret,
-} from "./shipstation-tracking-api-config";
+} from "./application/shipstation-tracking-api-config";
 
 export {
   ShipStationTrackingEventsError,
   createShipStationTrackingEventsClient,
   createShipStationTrackingHydrationRequest,
   isRetryableTrackingEventsError,
-} from "./shipstation-tracking-events.client";
+} from "./infrastructure/shipstation-tracking-events.client";
 
 export {
   ShipStationTrackingResponseReadError,
   readBoundedResponseText,
-} from "./shipstation-tracking-http";
+} from "./application/shipstation-tracking-http";
 
-export { createShipStationTrackingSubscriptionsClient } from "./shipstation-tracking-subscriptions.client";
-export { configureShipStationTrackingWebhook } from "./shipstation-tracking-webhook-registration";
+export { createShipStationTrackingSubscriptionsClient } from "./infrastructure/shipstation-tracking-subscriptions.client";
+export { configureShipStationTrackingWebhook } from "./application/shipstation-tracking-webhook-registration";
 export {
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,
-} from "./shipstation-tracking-webhook.routes";
-export { createShipStationTrackingWebhooksClient } from "./shipstation-tracking-webhooks.client";
-export { createDefaultShipStationV2WebhookVerifier } from "./shipstation-webhook-auth";
+} from "./interfaces/http/shipstation-tracking-webhook.routes";
+export { createShipStationTrackingWebhooksClient } from "./infrastructure/shipstation-tracking-webhooks.client";
+export { createDefaultShipStationV2WebhookVerifier } from "./interfaces/http/shipstation-webhook-auth";

@@ -7,7 +7,7 @@ import { resolvePurchaseCostSource } from "../../domain/purchase-cost-source";
 import {
   projectReceiptCostQueue,
   type ReceiptCostQueueRead,
-} from "../../receipt-cost-queue-read.service";
+} from "../../application/receipt-cost-queue-read.service";
 import {
   purchaseCostNextAction,
   type PurchaseLineCostStatus,

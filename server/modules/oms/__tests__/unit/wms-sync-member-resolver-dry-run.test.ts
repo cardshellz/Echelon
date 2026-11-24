@@ -37,7 +37,7 @@ vi.mock("../../../../platform/observability/logger", () => ({
   logger: { debug: harness.debug, info: harness.info, warn: harness.warn, error: vi.fn() },
 }));
 
-import { WmsSyncService } from "../../wms-sync.service";
+import { WmsSyncService } from "../../application/wms-sync.service";
 import {
   MemberResolver,
   MembershipResolverError,
@@ -45,7 +45,7 @@ import {
   type MemberResolution,
 } from "../../../membership";
 import type { MemberDirectory } from "../../../membership/application/member-resolver";
-import type { LegacyMemberMatch, MemberResolverDryRunRecord } from "../../member-resolver-dry-run";
+import type { LegacyMemberMatch, MemberResolverDryRunRecord } from "../../application/member-resolver-dry-run";
 
 const SHOPIFY_CHANNEL_ID = 36;
 const EBAY_CHANNEL_ID = 5;

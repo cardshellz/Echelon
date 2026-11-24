@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Express, Request, Response } from "express";
-import type { OrderData } from "../../oms.service";
+import type { OrderData } from "../../application/oms.service";
 
 const harness = vi.hoisted(() => ({
   database: {
@@ -24,7 +24,7 @@ vi.mock("../../../orders/domain/sort-rank", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../orders/domain/sort-rank")>()),
   resolveSlaDueAt: async () => null,
 }));
-vi.mock("../../webhook-inbox.service", () => ({
+vi.mock("../../application/webhook-inbox.service", () => ({
   buildShopifyWebhookInboxInput: () => ({}),
   recordWebhookReceived: async () => ({
     id: 15,
@@ -37,9 +37,9 @@ vi.mock("../../webhook-inbox.service", () => ({
   enqueueWebhookInboxRetry: vi.fn(),
 }));
 
-import { createOmsService } from "../../oms.service";
-import { __test__ as webhook, registerOmsWebhooks } from "../../oms-webhooks";
-import { WmsSyncService } from "../../wms-sync.service";
+import { createOmsService } from "../../application/oms.service";
+import { __test__ as webhook, registerOmsWebhooks } from "../../application/oms-webhooks";
+import { WmsSyncService } from "../../application/wms-sync.service";
 
 beforeEach(() => {
   vi.clearAllMocks();

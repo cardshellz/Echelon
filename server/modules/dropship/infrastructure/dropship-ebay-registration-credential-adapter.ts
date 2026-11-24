@@ -2,8 +2,8 @@ import type {
   EbayRegistrationCredentialProvider,
   EbayRegistrationReadCredential,
 } from "../../marketplace-listings/ebay-registration.api";
-import { MarketplaceListingRegistrationError } from "../../marketplace-listings/domain/registration-errors";
-import type { ListingOwnerRef } from "../../marketplace-listings/domain/listing-replacement-plan";
+import { MarketplaceListingRegistrationError } from "../../marketplace-listings/registration-errors.api";
+import type { ListingOwnerRef } from "../../marketplace-listings/listing-replacement-plan.api";
 import type { DropshipMarketplaceRegistrationOwnerRepository } from "../application/dropship-marketplace-registration-owner-reader";
 import {
   resolveDropshipEbayProviderEnvironment,

@@ -5,9 +5,9 @@ import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import pg from "pg";
 import * as schema from "@shared/schema";
 import { fixtureForeignKeys, fixtureTable } from "./shipment-line-fixture";
-import { createPurchasingService, type PurchasingService } from "../../purchasing.service";
+import { createPurchasingService, type PurchasingService } from "../../application/purchasing.service";
 import { buildSupplierEvidenceImportPreview, type SupplierEvidenceImportPreview,
-  type SupplierEvidenceImportRow } from "../../supplier-evidence-import.service";
+  type SupplierEvidenceImportRow } from "../../application/supplier-evidence-import.service";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

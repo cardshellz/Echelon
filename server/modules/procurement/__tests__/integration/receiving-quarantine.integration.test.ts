@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type ReceivingQuarantineCommandResult } from "@shared/procurement/receiving-quarantine";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_AT, type FlowCostHarness } from "./procurement-flow-cost.fixture";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
-import type { ReceivingCustodyCommand } from "../../receiving-quarantine.service";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
+import type { ReceivingCustodyCommand } from "../../application/receiving-quarantine.service";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const run = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
@@ -13,11 +13,11 @@ const ACTOR = "custody-approver";
 const REFERENCE = "Inspected physical goods, photo evidence 42";
 run.sequential("real receiving custody commands and normal inventory recognition", () => {
   let harness: FlowCostHarness;
-  let commands: ReturnType<typeof import("../../receiving-quarantine.commands").createReceivingCustodyCommands>;
-  let identityHash: typeof import("../../receiving-quarantine.commands").hashCustodyCommandIdentity;
-  let scope: typeof import("../../receiving-quarantine.commands").custodyCommandScope;
-  let options: typeof import("../../receiving-quarantine-options.repository").readQuarantineAcceptanceOptions;
-  let readView: typeof import("../../receiving-quarantine.service").readReceivingQuarantineView;
+  let commands: ReturnType<typeof import("../../application/receiving-quarantine.commands").createReceivingCustodyCommands>;
+  let identityHash: typeof import("../../application/receiving-quarantine.commands").hashCustodyCommandIdentity;
+  let scope: typeof import("../../application/receiving-quarantine.commands").custodyCommandScope;
+  let options: typeof import("../../infrastructure/receiving-quarantine-options.repository").readQuarantineAcceptanceOptions;
+  let readView: typeof import("../../application/receiving-quarantine.service").readReceivingQuarantineView;
   beforeAll(async () => {
     harness = await createFlowCostHarness(url!);
     await seedFlowMasterData(harness);
@@ -30,13 +30,13 @@ run.sequential("real receiving custody commands and normal inventory recognition
       INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(10,'inventory','adjust','inventory'),(11,'purchasing','approve','purchasing');
       INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES('custody-approver',10),('custody-inventory',11),('custody-inactive',10),('custody-scoped',12);
       INSERT INTO identity.auth_role_permissions(role_id,permission_id,constraints) VALUES(10,10,NULL),(10,11,NULL),(11,10,NULL),(12,10,'{"warehouseId":1}'),(12,11,'{"warehouseId":1}')`);
-    const commandModule = await import("../../receiving-quarantine.commands");
+    const commandModule = await import("../../application/receiving-quarantine.commands");
     const repository = await import("../../../../platform/commands/command-results.repository");
     commands = commandModule.createReceivingCustodyCommands(harness.receiving, repository.createDrizzleFinancialCommandRepository(harness.database), () => FLOW_AT);
     scope = commandModule.custodyCommandScope;
     identityHash = commandModule.hashCustodyCommandIdentity;
-    options = (await import("../../receiving-quarantine-options.repository")).readQuarantineAcceptanceOptions;
-    readView = (await import("../../receiving-quarantine.service")).readReceivingQuarantineView;
+    options = (await import("../../infrastructure/receiving-quarantine-options.repository")).readQuarantineAcceptanceOptions;
+    readView = (await import("../../application/receiving-quarantine.service")).readReceivingQuarantineView;
   });
   afterAll(async () => { await harness?.dispose(); });
   function descriptor(command: ReceivingCustodyCommand, id: number, body: unknown, key: string, actorId: string): FinancialCommandDescriptor {
@@ -121,7 +121,7 @@ run.sequential("real receiving custody commands and normal inventory recognition
   });
   it("rejects legacy observation evidence under a reused key without another intake", async () => {
     const source = await receipt(); const key = randomUUID(); const body = unknownBody();
-    const { executeReceivingCustodyCommand } = await import("../../receiving-quarantine.service");
+    const { executeReceivingCustodyCommand } = await import("../../application/receiving-quarantine.service");
     await harness.database.transaction(tx => executeReceivingCustodyCommand(tx, harness.receiving, { command: "intake", resourceId: source.order.id, body,
       actorId: ACTOR, at: FLOW_AT, commandKey: key }));
     await expect(execute("intake", source.order.id, body, key, "custody-inventory")).rejects.toMatchObject({ code: "RECEIVING_CUSTODY_LEGACY_RECOVERY_REQUIRED" });
@@ -271,7 +271,7 @@ run.sequential("real receiving custody commands and normal inventory recognition
     const prepared = await success("prepare-acceptance", source.result.observation.id, await acceptanceBody(source.order.id));
     await harness.receiving.close(source.order.id, ACTOR);
     const before = await harness.database.transaction(tx => readView(tx, source.order.id, ACTOR));
-    const { ReceiptReversalService } = await import("../../receipt-reversal.service");
+    const { ReceiptReversalService } = await import("../../application/receipt-reversal.service");
     const reversal = new ReceiptReversalService(harness.database, harness.inventory);
     const input = { receivingLineId: prepared.acceptance!.receivingLineId, qty: 1,
       reason: "Correct one previously accepted unit", idempotencyKey: `custody-reversal-${randomUUID()}`, userId: ACTOR };

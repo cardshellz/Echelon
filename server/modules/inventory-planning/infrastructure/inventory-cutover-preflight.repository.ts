@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import { pool } from "../../../db";
 import { readWmsCutoverDemand } from "../../wms/cutover-and-dispatch.api";
-import { captureInventoryCutoverEncumbranceInsideTransaction } from "../../inventory/infrastructure/inventory-cutover-encumbrance.repository";
+import { captureInventoryCutoverEncumbranceInsideTransaction } from "../../inventory/inventory-cutover-encumbrance.repository.api";
 import { inventoryCutoverVariantSchema } from "@shared/types/inventory-cutover-preflight";
 import { plannerPositiveQuantitySchema } from "@shared/types/inventory-availability-planner";
 import type { InventoryCutoverPreflightStore } from "../application/inventory-cutover-preflight.service";

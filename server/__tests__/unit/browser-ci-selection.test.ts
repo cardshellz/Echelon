@@ -94,7 +94,7 @@ describe("browser CI impact selection", () => {
   it.each([
     "test/connected/procurement/server.ts",
     "test/connected/procurement/authority.spec.ts",
-    "server/modules/procurement/receiving.service.ts",
+    "server/modules/procurement/application/receiving.service.ts",
     "migrations/900000027000019030001_receiving_entry_audit_guard.sql",
     "tsconfig.tests.connected.json",
   ])("runs connected acceptance for its owned path: %s", file => {
@@ -412,7 +412,7 @@ describe("browser CI impact selection", () => {
 
   it.each([
     "docs/migration-allocation.md",
-    "server/modules/procurement/purchase-order-receipt-reconciliation.service.ts",
+    "server/modules/procurement/application/purchase-order-receipt-reconciliation.service.ts",
     "migrations/261_po_email_document_gate.sql",
   ])("skips Dropship for unrelated modifications after resolving the real dependency graph: %s", (file) => {
     expect(selectBrowserSuite({ suite: "dropship", changes: [{ status: "M", paths: [file] }], ...repositorySources() })).toEqual({

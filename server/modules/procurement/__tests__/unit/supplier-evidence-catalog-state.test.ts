@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { supplierEvidenceCatalogStateFingerprint as fingerprint } from "../../supplier-evidence-catalog-state";
+import { supplierEvidenceCatalogStateFingerprint as fingerprint } from "../../application/supplier-evidence-catalog-state";
 
 const targets = [{ productId: 10, productVariantId: null, isPreferred: true }];
 const stored = { id: 1, vendorId: 7, productId: 10, productVariantId: null, isPreferred: 1, isActive: 1,

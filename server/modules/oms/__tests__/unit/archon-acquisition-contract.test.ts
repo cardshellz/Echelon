@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readStorefrontAcquisition } from "../../archon-acquisition-contract";
+import { readStorefrontAcquisition } from "../../application/archon-acquisition-contract";
 
 const touch = {
   occurredAt: "2026-09-13T10:00:00Z",

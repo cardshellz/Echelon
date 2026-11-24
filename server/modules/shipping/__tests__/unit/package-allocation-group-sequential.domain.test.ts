@@ -6,8 +6,8 @@ import {
   type PackageAllocationGroupAction,
   type PackageAllocationGroupPackageInput,
   type PackageAllocationGroupPlannerInput,
-} from "../../package-allocation-group.domain";
-import type { DeclaredPackageLifecycleEvent } from "../../declared-package-lifecycle.domain";
+} from "../../domain/package-allocation-group.domain";
+import type { DeclaredPackageLifecycleEvent } from "../../domain/declared-package-lifecycle.domain";
 
 const groupKey = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const labelObservedAt = "2026-08-21T14:00:00.000Z";

@@ -8,7 +8,7 @@ import {
   vendorInvoicePoLinks,
   vendorInvoices,
 } from "@shared/schema";
-import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+import { createPurchasingService, PurchasingError } from "../../application/purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests for PR 2 — 3-way match gate at PO close.
@@ -27,10 +27,10 @@ import { createPurchasingService, PurchasingError } from "../../purchasing.servi
 // Mock detectMatchMismatch from po-exceptions.service
 const mockDetectMatchMismatch = vi.fn().mockResolvedValue(undefined);
 const mockRecomputePurchaseOrderInvoiceMatches = vi.fn();
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectMatchMismatch: (...args: any[]) => mockDetectMatchMismatch(...args),
 }));
-vi.mock("../../ap-ledger.service", () => ({
+vi.mock("../../application/ap-ledger.service", () => ({
   recomputePoFinancialAggregates: vi.fn(),
   recomputePurchaseOrderInvoiceMatchesInTransaction: (...args: any[]) =>
     mockRecomputePurchaseOrderInvoiceMatches(...args),

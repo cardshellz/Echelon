@@ -1,5 +1,5 @@
 import { parseDecimalCents } from "@shared/money-read";
-import { ebayBusinessPolicies } from "../ebay-business-policies";
+import { ebayBusinessPolicies } from "../application/ebay-business-policies";
 import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 /**
  * eBay Channel Adapter
@@ -40,9 +40,9 @@ import type {
   FulfillmentPushResult,
   CancellationPayload,
   CancellationPushResult,
-} from "../channel-adapter.interface";
-import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
-import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
+} from "../domain/channel-adapter.interface";
+import { InventoryPublicationConfigurationError } from "../domain/channel-adapter.interface";
+import { QuantityPublicationAdmissionError } from "../../inventory-planning/quantity-publication-admission-domain.api";
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
@@ -62,10 +62,10 @@ import type {
 
 import crypto from "crypto";
 import { readExistingEbayListingPhotos } from "./ebay/ebay-listing-photos.reader";
-import type { EbayListingPhotoResolver } from "../ebay-listing-photos.service";
+import type { EbayListingPhotoResolver } from "../application/ebay-listing-photos.service";
 import { createEbayMarketplaceRegistrationAdapters } from "./ebay/ebay-marketplace-registration.factory";
-import { observeExistingEbayPublication } from "../ebay-existing-listing-identity";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
+import { observeExistingEbayPublication } from "../application/ebay-existing-listing-identity";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
 
 // ---------------------------------------------------------------------------
 // Types

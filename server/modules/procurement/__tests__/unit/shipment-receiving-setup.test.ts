@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { reviewReceivingConfiguration } from "@shared/procurement/receiving-configuration";
 import { shipmentReceivingSetupSchema } from "@shared/procurement/shipment-receiving-setup";
-import { createShipmentTrackingService } from "../../shipment-tracking.service";
-import { readShipmentReceivingSources } from "../../shipment-receiving-setup.repository";
+import { createShipmentTrackingService } from "../../application/shipment-tracking.service";
+import { readShipmentReceivingSources } from "../../infrastructure/shipment-receiving-setup.repository";
 
 const at = new Date("2026-10-20T12:00:00.000Z");
 const configuration = { id: 30, productId: 10, sku: "CASE-100", name: "Case of 100", unitsPerVariant: 100, isActive: true };

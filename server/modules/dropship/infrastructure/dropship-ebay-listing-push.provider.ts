@@ -11,11 +11,11 @@ import {
 } from "../domain/marketplace-sync-decision";
 import { describeEbayErrors, parseEbayErrorBody } from "./ebay-error-body";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";
-import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
+import { createProviderRequestDeadline } from "../../channels/provider-request-limits.api";
 import { executeEbayQuantityHttp } from "../../channels/ebay-connector.api";
 import { discoverEbayInventoryOffers, ebayInventoryMarketplace, ebayInventoryOffersPath } from "../../channels/ebay-connector.api";
 import { sendEbayQuantityUpdates } from "../../channels/ebay-connector.api";
-import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
+import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request.api";
 import type {
   DropshipMarketplaceListingPushProvider,
   DropshipMarketplaceListingPushRequest,
@@ -33,7 +33,7 @@ import {
   type EbayListingLifecycleClient,
   type EbayListingRebuildPreview,
   type EbayListingRebuildResult,
-} from "../../channels/listing-connectors/ebay-listing.connector";
+} from "../../channels/ebay-listing.connector.api";
 import {
   EbayListingBuilder,
   type EbayListingConfig as SharedEbayListingConfig,
@@ -48,11 +48,11 @@ import type {
 } from "../../channels/ebay-connector.api";
 import { readEbayNativePackage } from "../../channels/ebay-connector.api";
 import { readEbayPublishedContent } from "../../channels/ebay-connector.api";
-import type { CatalogImageInspector } from "../../catalog/domain/catalog-image-inspection";
+import type { CatalogImageInspector } from "../../catalog/catalog-image-inspection.api";
 import { EbayApiRequestError, isMissingEbayOfferCollection } from "../../channels/ebay-connector.api";
 import { normalizeEbayObservedOffers } from "../../channels/ebay-connector.api";
-import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";
-import type { ChannelListingPayload } from "../../channels/channel-adapter.interface";
+import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain.api";
+import type { ChannelListingPayload } from "../../channels/channel-adapter.interface.api";
 import {
   isEbayResourceAuthFailureStatus,
   recordEbayAccessTokenRejection,

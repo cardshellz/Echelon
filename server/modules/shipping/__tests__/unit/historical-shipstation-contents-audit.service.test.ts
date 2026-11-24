@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { auditHistoricalShipStationContents } from "../../historical-shipstation-contents-audit.service";
-import type { HistoricalShipStationContentsRecoveryStatus } from "../../historical-shipstation-contents-recovery.domain";
+import { auditHistoricalShipStationContents } from "../../application/historical-shipstation-contents-audit.service";
+import type { HistoricalShipStationContentsRecoveryStatus } from "../../domain/historical-shipstation-contents-recovery.domain";
 
 const expectedContents = {
   kind: "available" as const,

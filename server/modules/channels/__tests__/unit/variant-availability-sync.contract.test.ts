@@ -57,7 +57,7 @@ describe("inactive variant availability contracts", () => {
 
   it("uses a lease and row locking so multiple app instances cannot own the same transition", () => {
     const repository = repoFile(
-      "server/modules/channels/variant-availability-sync.repository.ts",
+      "server/modules/channels/infrastructure/variant-availability-sync.repository.ts",
     );
 
     expect(repository).toContain("FOR UPDATE SKIP LOCKED");

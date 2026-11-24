@@ -1,8 +1,8 @@
 import { z } from "zod";
-import type { LegacyMaintenanceEvidenceReader, LegacyMaintenanceProof } from "../../inventory-planning/application/legacy-maintenance-evidence.port";
-import type { InventoryAvailabilityTransactionQueryClient } from "../../inventory-planning/application/inventory-availability-transaction-query.port";
-import { quantityPublicationScopeLockKey, quantityPublicationScopeSchema } from "../../inventory-planning/domain/quantity-publication-admission";
-import { ebayListingSyncIdentitySchema, syncStageHash, type EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
+import type { LegacyMaintenanceEvidenceReader, LegacyMaintenanceProof } from "../../inventory-planning/legacy-maintenance-evidence.port.api";
+import type { InventoryAvailabilityTransactionQueryClient } from "../../inventory-planning/inventory-availability-transaction-query.port.api";
+import { quantityPublicationScopeLockKey, quantityPublicationScopeSchema } from "../../inventory-planning/quantity-publication-admission-domain.api";
+import { ebayListingSyncIdentitySchema, syncStageHash, type EbayListingSyncIdentity } from "../domain/ebay-listing-sync.domain";
 
 const eventSchema = z.object({ id: z.string(), revision: z.string(), ownerToken: z.string().uuid(), event: z.string(),
   createdAt: z.string(), evidence: z.record(z.unknown()) });

@@ -2,7 +2,7 @@ import type {
   MarketplaceListingProviderAccountClaimer,
   MarketplaceListingRegistrationObserver,
   MarketplaceListingRegistrationOwnerReader,
-} from "../../../marketplace-listings/application/registration-ports";
+} from "../../../marketplace-listings/registration-ports.api";
 import {
   EbayMarketplaceRegistrationObserver,
 } from "../../../marketplace-listings/ebay-registration.api";

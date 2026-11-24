@@ -1,6 +1,6 @@
 import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
-import { generatePurchasingRecommendations } from "../../server/modules/procurement/purchasing-recommendation.engine";
+import { generatePurchasingRecommendations } from "../../server/modules/procurement/application/purchasing-recommendation.engine";
 import { installFixtures } from "./procurement-fixtures";
 
 const SAVED = "echelon:order-supplier-handoff:v1:test-user";

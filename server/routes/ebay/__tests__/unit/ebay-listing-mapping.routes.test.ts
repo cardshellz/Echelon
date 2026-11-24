@@ -2,8 +2,8 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EbayListingMappingReview, EbayListingMappingResult } from "@shared/types/ebay-listing-mapping";
-import type { EbayListingMappingService } from "../../../../modules/channels/ebay-listing-mapping.service";
-import { EbayListingSyncError } from "../../../../modules/channels/ebay-listing-sync.domain";
+import type { EbayListingMappingService } from "../../../../modules/channels/application/ebay-listing-mapping.service";
+import { EbayListingSyncError } from "../../../../modules/channels/domain/ebay-listing-sync.domain";
 import { registerEbayListingMappingRoutes } from "../../ebay-listing-mapping.routes";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async (_user: string, _resource: string, _action: string) => true) }));

@@ -1,6 +1,6 @@
 import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
-import { buildPoLifecycleSummary } from "../../server/modules/procurement/purchase-order-lifecycle.service";
+import { buildPoLifecycleSummary } from "../../server/modules/procurement/application/purchase-order-lifecycle.service";
 import { installFixtures, po } from "./procurement-fixtures";
 
 async function cancellationFixture(

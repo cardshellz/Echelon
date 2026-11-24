@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveReceivingUnitSnapshot, type ReceivingUnitSnapshotInput } from "../../receiving-unit-snapshot";
+import { resolveReceivingUnitSnapshot, type ReceivingUnitSnapshotInput } from "../../application/receiving-unit-snapshot";
 
 const input = (patch: Partial<ReceivingUnitSnapshotInput> = {}): ReceivingUnitSnapshotInput => ({
   receivingLineId: 11, receivingOrderId: 10, purchaseOrderLineId: 21, purchaseOrderId: 20,

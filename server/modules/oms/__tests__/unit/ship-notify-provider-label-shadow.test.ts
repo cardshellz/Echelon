@@ -7,7 +7,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const omsDir = join(here, "..", "..");
 const subDir = join(omsDir, "shipstation");
 const source = [
-  readFileSync(join(omsDir, "shipstation.service.ts"), "utf8"),
+  readFileSync(join(omsDir, "application/shipstation.service.ts"), "utf8"),
   ...(existsSync(subDir)
     ? readdirSync(subDir)
         .filter((f) => f.endsWith(".ts"))

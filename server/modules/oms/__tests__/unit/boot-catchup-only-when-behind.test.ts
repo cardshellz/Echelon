@@ -8,7 +8,7 @@ import {
 } from "../../../../infrastructure/scheduler-run-registry";
 
 const SWEEPER_SRC = readFileSync(
-  resolve(__dirname, "../../fulfillment-sweeper.scheduler.ts"),
+  resolve(__dirname, "../../application/fulfillment-sweeper.scheduler.ts"),
   "utf8",
 );
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildOrderEditPaidPricing,
   type OrderEditPaidPricingInput,
-} from "../../order-edit-paid-pricing";
+} from "../../application/order-edit-paid-pricing";
 import { paidRewardFixture } from "../../../order-edits/__tests__/fixtures/order-edit-paid-reward.fixture";
 
 function incident(): OrderEditPaidPricingInput {

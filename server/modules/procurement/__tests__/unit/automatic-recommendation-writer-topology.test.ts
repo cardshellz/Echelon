@@ -14,13 +14,13 @@ function purchasingServiceSource(): string {
         .sort()
         .map((name) => readFileSync(join(subDir, name), "utf8"))
     : [];
-  return [source("server/modules/procurement/purchasing.service.ts"), ...subFiles].join("\n");
+  return [source("server/modules/procurement/application/purchasing.service.ts"), ...subFiles].join("\n");
 }
 
 describe("automatic recommendation writer topology", () => {
   it("routes scheduled and direct runs through the atomic handoff service", () => {
     const job = source("server/jobs/auto-draft.job.ts");
-    const routes = source("server/modules/procurement/purchasing-recommendation.routes.ts");
+    const routes = source("server/modules/procurement/interfaces/http/purchasing-recommendation.routes.ts");
 
     expect(job).toContain("handoffService.createAutomaticHandoff");
     expect(job).not.toContain("bulkCreatePurchaseOrderLines");

@@ -5,7 +5,7 @@ import {
   createShipStationTrackingEventsClient,
   isRetryableTrackingEventsError,
   ShipStationTrackingEventsError,
-} from "../../shipstation-tracking-events.client";
+} from "../../infrastructure/shipstation-tracking-events.client";
 
 describe("ShipStation exact-label tracking client", () => {
   it("constructs the exact allowlisted provider-label endpoint", () => {

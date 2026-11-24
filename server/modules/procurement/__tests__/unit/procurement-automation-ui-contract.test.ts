@@ -19,7 +19,7 @@ const readSource = (relativePath: string): string =>
 
 const page = readSource("client/src/pages/ProcurementAutomation.tsx");
 const app = readSource("client/src/App.tsx");
-const routes = readSource("server/modules/procurement/purchasing-recommendation.routes.ts");
+const routes = readSource("server/modules/procurement/interfaces/http/purchasing-recommendation.routes.ts");
 
 describe("procurement automation UI contract", () => {
   it("protects /procurement/automation with the server's inventory read permission", () => {

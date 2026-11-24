@@ -1,12 +1,12 @@
 import {
   stockLinkDestinationSchema, stockLinkOfferLookupSchema, type StockLinkDestination, type StockLinkOfferLookup,
 } from "@shared/types/stock-link";
-import type { StockLinkOfferAdapter, StockLinkProviderCallOptions } from "../../inventory-planning/application/stock-link.ports";
-import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/domain/stock-link-errors";
+import type { StockLinkOfferAdapter, StockLinkProviderCallOptions } from "../../inventory-planning/stock-link.ports.api";
+import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/stock-link-errors.api";
 import {
   EbayInventoryQuantityError, discoverEbayInventoryOffers, ebayInventoryMarketplace, ebayInventoryOffersPath,
 } from "../../channels/ebay-connector.api";
-import { boundedProviderRetryAfterSeconds } from "../../channels/provider-request-limits";
+import { boundedProviderRetryAfterSeconds } from "../../channels/provider-request-limits.api";
 import { DropshipError } from "../domain/errors";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import type { DropshipInventoryPublicationDestinationReader } from "./dropship-ebay-inventory-publication.adapter";

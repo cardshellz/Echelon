@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ebayPublicationRequestJournalContract, validateEbayPublicationStageContract,
-  proveLegacyEbayPublicationPreflight, type EbayPublicationStageEvent } from "../../ebay-publication-preflight-evidence";
+  proveLegacyEbayPublicationPreflight, type EbayPublicationStageEvent } from "../../application/ebay-publication-preflight-evidence";
 import { syncIdentity } from "../fixtures/ebay-listing-sync.fixture";
 
 function fixture() {

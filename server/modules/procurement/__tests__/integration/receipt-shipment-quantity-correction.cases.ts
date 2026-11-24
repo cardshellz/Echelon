@@ -1,17 +1,17 @@
 import {
   createShipmentCostReconciliationService,
   shipmentReconciliationScope,
-} from "../../shipment-cost-reconciliation.service";
+} from "../../application/shipment-cost-reconciliation.service";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { expect, it } from "vitest";
 import type pg from "pg";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
 import {
   createReceiptShipmentQuantityCorrectionService,
   quantityCorrectionScope,
-} from "../../receipt-shipment-quantity-correction.service";
+} from "../../application/receipt-shipment-quantity-correction.service";
 import {
   costFingerprint,
   recordReceiptCostOrigin,

@@ -239,7 +239,7 @@ describe("P1.4 & P1.6: Typed Module Interfaces and Single Webhook Durability Con
         'receiveShopifyRouteWebhook(inboxDb, req, res, "fulfillments/update", payload)',
       );
 
-      const workerSrc = readRepoFile("server/modules/oms/webhook-retry.worker.ts");
+      const workerSrc = readRepoFile("server/modules/oms/application/webhook-retry.worker.ts");
       expect(workerSrc).toContain('"products/update"');
       expect(workerSrc).toContain("SHOPIFY_ROUTE_TOPICS");
     });

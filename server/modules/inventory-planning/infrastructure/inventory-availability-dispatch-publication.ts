@@ -1,7 +1,7 @@
 import type { CanonicalClaimDispatchBeforeCommit } from "../application/inventory-availability-dispatch.port";
 import { InventoryShipmentRuntimeError } from "../application/inventory-availability-runtime-shipment.service";
 import { createTransactionScopedInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
-import type { OperationalShipmentBeforeCommit } from "../../inventory/application/operational-shipment-dispatch.port";
+import type { OperationalShipmentBeforeCommit } from "../../inventory/operational-shipment-dispatch.port.api";
 import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
 import { markPublicationProductChanged } from "./publication-product-change";
 

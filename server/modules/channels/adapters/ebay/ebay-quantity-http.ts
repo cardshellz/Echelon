@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { channelProviderWriteDiagnosticSchema } from "@shared/channel-provider-write";
 import { isEbayProviderRefusalCategory } from "@shared/ebay-provider-rejection";
-import { createProviderRequestDeadline } from "../../provider-request-limits";
+import { createProviderRequestDeadline } from "../../application/provider-request-limits";
 import { readEbayBulkQuantityResponse } from "./ebay-quantity-update";
 import { QuantityProviderRejectionError, recordQuantityProviderResponse,
-  type QuantityProviderResponseEvidence } from "../../../inventory-planning/application/quantity-provider-request-evidence";
+  type QuantityProviderResponseEvidence } from "../../../inventory-planning/quantity-provider-request-evidence.api";
 
 // eBay's observed per-item error says "Try back after 1 day". A full 24 hours is
 // conservative without inventing a calendar-reset timezone. Longer Retry-After wins.

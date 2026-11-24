@@ -14,13 +14,13 @@ import { cutoverCompositionBaseSql } from "../../../inventory-planning/__tests__
 import { installEbayPublicationInventoryFixture } from "../../../inventory-planning/__tests__/fixtures/ebay-publication-inventory.fixture";
 import { PgCatalogVariantPublicationPhotoReader } from "../../../catalog/infrastructure/catalog-publication-images.reader";
 import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
-import { prepareEbayChannelIntent, ebayIntentAccount } from "../../../channels/ebay-prepared-intent";
+import { prepareEbayChannelIntent, ebayIntentAccount } from "../../../channels/application/ebay-prepared-intent";
 import { PostgresEbayListingSyncRepository } from "../../../channels/infrastructure/ebay-listing-sync.repository";
 import { syncProviderFixture, syncIdentity } from "../../../channels/__tests__/fixtures/ebay-listing-sync.fixture";
 import { prepareChannelIntent } from "../../prepared-channel-intent.api";
 import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
-import type { EbayListingSyncClaim } from "../../../channels/ebay-listing-sync.service";
-import type { EbayListingSyncIdentity } from "../../../channels/ebay-listing-sync.domain";
+import type { EbayListingSyncClaim } from "../../../channels/application/ebay-listing-sync.service";
+import type { EbayListingSyncIdentity } from "../../../channels/domain/ebay-listing-sync.domain";
 vi.mock("../../../../db", () => ({ pool: {} }));
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

@@ -20,20 +20,20 @@ import {
 import { readCommandAuthorityActor } from "../../identity";
 import { captureDocumentNumberTime } from "../../../platform/document-numbering/document-number";
 import { assertPurchaseOrderEntryAuthority } from "../domain/purchase-order-entry";
-import { hasPoInvoiceHistory, readPoInvoiceHistory } from "../po-invoice-history.repository";
+import { hasPoInvoiceHistory, readPoInvoiceHistory } from "../infrastructure/po-invoice-history.repository";
 import {
   assertNoLegacyPurchaseOrderEntry,
   type PurchaseOrderEntryTransaction,
-} from "../purchase-order-entry.repository";
-import { executePurchaseOrderEntry } from "../purchase-order-entry.service";
+} from "../infrastructure/purchase-order-entry.repository";
+import { executePurchaseOrderEntry } from "../application/purchase-order-entry.service";
 import {
   millisecondTransactionTimestamp,
   purchaseOrderUpdatedAtMatchesApplicationVersion,
-} from "../purchase-order-lifecycle-version";
+} from "../application/purchase-order-lifecycle-version";
 import {
   vendorCatalogPricingMatches,
   vendorCatalogQuoteUsability,
-} from "../purchase-order-line-commands";
+} from "../application/purchase-order-line-commands";
 import type { PurchasingCatalog } from "./purchasing-catalog";
 import type { PurchasingEntryValidation } from "./purchasing-entry-validation";
 import type { PurchasingLifecycleActions } from "./purchasing-lifecycle-actions";

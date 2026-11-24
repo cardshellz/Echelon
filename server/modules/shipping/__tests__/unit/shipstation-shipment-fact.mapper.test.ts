@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { mapShipStationShipment } from "../../shipstation-shipment-fact.mapper";
+import { mapShipStationShipment } from "../../application/shipstation-shipment-fact.mapper";
 import {
   parseShipmentFact, ShipmentFactError, shipmentFactContentHash, type ShipmentFact,
-} from "../../shipment-fact.domain";
+} from "../../domain/shipment-fact.domain";
 
 const shipment = (overrides: Record<string, unknown> = {}) => ({
   shipmentId: 123456789,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildSupplierSetupGaps } from "../../supplier-setup-gaps.service";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import { buildSupplierSetupGaps } from "../../application/supplier-setup-gaps.service";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
 
 describe("buildSupplierSetupGaps", () => {
   it("only counts missing vendor as blocked when it blocks the current recommendation", () => {

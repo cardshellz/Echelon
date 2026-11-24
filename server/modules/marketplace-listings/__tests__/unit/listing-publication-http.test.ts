@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { z } from "zod";
 import { registerListingPublicationRoutes } from "../../interfaces/http/listing-publication.routes";
 import { saveListingDraftSchema } from "@shared/types/channel-listing-publication";
-import { ChannelIdentityError } from "../../../channels/channel-identity.domain";
+import { ChannelIdentityError } from "../../../channels/domain/channel-identity.domain";
 
 vi.mock("../../../../routes/middleware", () => ({
   requirePermission:

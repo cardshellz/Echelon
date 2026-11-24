@@ -3,7 +3,7 @@ import type { PoFinancialEvidenceInput } from "../../domain/po-financial-evidenc
 
 // These orchestration fixtures contain ordinary goods invoices. PostgreSQL
 // shipment-billing-ownership tests exercise the real capability read and rejection.
-vi.mock("../../shipment-billing-ownership.repository", () => ({
+vi.mock("../../infrastructure/shipment-billing-ownership.repository", () => ({
   readInvoiceSourceCapabilities: vi.fn(async () => {
     const verified = { allowed: true, code: "AP_INVOICE_SOURCE_VERIFIED", reason: "Fixture has ordinary invoice source ownership." };
     return { purchaseOrderLinks: verified, approval: verified, payment: verified, freightSourceLineIds: [] };
@@ -115,16 +115,16 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../../../db", () => ({ db: mocks.db }));
 // Supply source evidence while retaining the actual financial workflow and
 // milestone evaluators. The adapter is exercised against PostgreSQL separately.
-vi.mock("../../po-financial-evidence.repository", () => ({
+vi.mock("../../infrastructure/po-financial-evidence.repository", () => ({
   readPoFinancialEvidenceSourcesWithClient: mocks.readPoFinancialEvidenceSourcesWithClient,
 }));
 vi.mock("@shared/schema", () => tables);
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
   detectFinancialExceptions: mocks.detectFinancialExceptions,
 }));
 vi.mock("../../../inventory/application/cogs.service", () => ({ COGSService: class {} }));
-vi.mock("../../purchase-cost-application.service", () => ({
+vi.mock("../../application/purchase-cost-application.service", () => ({
   reconcilePurchaseCostEvidence: mocks.reconcilePurchaseCostEvidence,
 }));
 
@@ -217,7 +217,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it.each(["record_payment", "apply_payment", "void_payment"] as const)("rejects a missing/invalid %s clock before any database operation", async (command) => {
-    const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
+    const { executeApPaymentCommandInTransaction } = await import("../../application/ap-ledger.service");
     const { lockInventoryCostGraph } = await import("../../../inventory/infrastructure/cost-evidence.repository");
     const tx = buildTx([]);
     for (const now of [undefined, null, new Date("invalid"), "2026-10-25"]) {
@@ -233,7 +233,7 @@ describe("AP ledger atomic side effects", () => {
 
   it("records payment, allocations, invoice balance, and PO aggregate inside one transaction", async () => {
     useFinancialSource(financialSource(2500));
-    const { recordPayment } = await import("../../ap-ledger.service");
+    const { recordPayment } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
       [{ invoicedAmountCents: 2500, status: "approved" }],
@@ -272,7 +272,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("locks the PO and writes financial transition history in the aggregate transaction", async () => {
-    const { recomputePoFinancialAggregates } = await import("../../ap-ledger.service");
+    const { recomputePoFinancialAggregates } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{
         status: "received",
@@ -309,7 +309,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("does not write duplicate history when aggregate recomputation leaves status unchanged", async () => {
-    const { recomputePoFinancialAggregates } = await import("../../ap-ledger.service");
+    const { recomputePoFinancialAggregates } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{
         status: "received",
@@ -329,7 +329,7 @@ describe("AP ledger atomic side effects", () => {
 
   it("derives disputed PO state from an active disputed invoice", async () => {
     useFinancialSource(financialSource(0, "disputed"));
-    const { recomputePoFinancialAggregates } = await import("../../ap-ledger.service");
+    const { recomputePoFinancialAggregates } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{
         status: "received",
@@ -358,7 +358,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("resolves disputed PO state when the invoice resolution command removes the dispute", async () => {
-    const { recomputePoFinancialAggregates } = await import("../../ap-ledger.service");
+    const { recomputePoFinancialAggregates } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{
         status: "received",
@@ -388,7 +388,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("fails the aggregate command when required financial transition history cannot persist", async () => {
-    const { recomputePoFinancialAggregates } = await import("../../ap-ledger.service");
+    const { recomputePoFinancialAggregates } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{
         status: "received",
@@ -417,7 +417,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("locks allocated invoices and rejects cross-vendor payments before inserting cash movement", async () => {
-    const { recordPayment } = await import("../../ap-ledger.service");
+    const { recordPayment } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 99, status: "approved", balanceCents: 2500 }],
     ]);
@@ -440,7 +440,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("rejects unsafe invoice balance values before inserting cash movement", async () => {
-    const { recordPayment } = await import("../../ap-ledger.service");
+    const { recordPayment } = await import("../../application/ap-ledger.service");
     const tx = buildTx([[
       {
         id: 12,
@@ -471,7 +471,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("rejects unsafe paid totals before updating an invoice total", async () => {
-    const { updateInvoice } = await import("../../ap-ledger.service");
+    const { updateInvoice } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{
         id: 12,
@@ -498,7 +498,7 @@ describe("AP ledger atomic side effects", () => {
 
   it("requires AP command audit persistence inside the caller-owned payment transaction", async () => {
     useFinancialSource(financialSource(2500));
-    const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
+    const { executeApPaymentCommandInTransaction } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
       [{ invoicedAmountCents: 2500, status: "approved" }],
@@ -533,7 +533,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("keeps invoice transition, PO aggregates, and required audit in the caller-owned transaction", async () => {
-    const { executeApInvoiceCommandInTransaction } = await import("../../ap-ledger.service");
+    const { executeApInvoiceCommandInTransaction } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, status: "received", paidAmountCents: 0 }],
       [{ purchaseOrderId: 7 }],
@@ -571,7 +571,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("rejects invoice approval before success audit when COGS reconciliation fails", async () => {
-    const { executeApInvoiceCommandInTransaction } = await import("../../ap-ledger.service");
+    const { executeApInvoiceCommandInTransaction } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, status: "received", paidAmountCents: 0 }],
       [{ purchaseOrderId: 7 }],
@@ -637,7 +637,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("persists invoice attachment metadata and audit in one transaction", async () => {
-    const { addAttachment } = await import("../../ap-ledger.service");
+    const { addAttachment } = await import("../../application/ap-ledger.service");
     const tx = buildTx([[{ id: 12 }]]);
     const originalInsert = tx.insert;
     tx.insert = vi.fn((table) => {
@@ -672,7 +672,7 @@ describe("AP ledger atomic side effects", () => {
 
   it("returns operator-visible AP command outcome metadata", async () => {
     useFinancialSource(financialSource(2500));
-    const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
+    const { executeApPaymentCommandInTransaction } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
       [{ invoicedAmountCents: 2500, status: "approved" }],
@@ -709,7 +709,7 @@ describe("AP ledger atomic side effects", () => {
 
   it("voids payment, reverses invoice balance, and recomputes PO aggregate inside one transaction", async () => {
     useFinancialSource(financialSource(0, "approved", "voided"));
-    const { voidPayment } = await import("../../ap-ledger.service");
+    const { voidPayment } = await import("../../application/ap-ledger.service");
     const tx = buildTx([
       [{ id: 21, status: "completed" }],
       [{ vendorInvoiceId: 12 }],

@@ -6,7 +6,7 @@ import { WalmartApiError } from "../../adapters/walmart/walmart-client";
 import { createChannelEbayStockLinkAdapter } from "../../adapters/ebay/ebay-stock-link.adapter";
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 import { EbayInventoryQuantityError } from "../../adapters/ebay/ebay-inventory-quantity";
-import { InventoryPublicationConfigurationError } from "../../channel-adapter.interface";
+import { InventoryPublicationConfigurationError } from "../../domain/channel-adapter.interface";
 
 // Channels PR4: the Walmart and Card Shellz eBay stock-link adapters, provider I/O mocked.
 

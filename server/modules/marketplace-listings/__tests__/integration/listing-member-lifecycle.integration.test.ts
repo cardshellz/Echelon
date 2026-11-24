@@ -3,7 +3,7 @@ import { ListingMemberRecoveryService } from "../../application/listing-member-r
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { readChannelStockSelection } from "../../../channels/channel-stock-selection";
+import { readChannelStockSelection } from "../../../channels/channel-stock-selection.api";
 import { PostgresListingMemberLifecycleRepository, readListingMemberRetirements, assertArchivedMemberPublicationAllowed } from "../../infrastructure/pg-listing-member-lifecycle.repository";
 import { PostgresListingLifecycleRepository } from "../../infrastructure/pg-listing-lifecycle.repository";
 import { listingAccountKey } from "../../domain/listing-publication";

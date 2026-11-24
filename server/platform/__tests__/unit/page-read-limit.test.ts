@@ -171,7 +171,7 @@ describe("page protection wiring", () => {
     expect(hasProtectedPageReadWiring(statement.expression.arguments)).toBe(expected);
   });
   it.each([
-    ["server/modules/channels/channels.routes.ts", ["/api/wms/orders", "/api/channel-allocation/grid"]],
+    ["server/modules/channels/interfaces/http/channels.routes.ts", ["/api/wms/orders", "/api/channel-allocation/grid"]],
     ["server/modules/orders/interfaces/http/picking.routes.ts", ["/api/picking/queue", "/api/orders", "/api/orders/history"]],
     ["server/modules/orders/interfaces/http/picking-history.routes.ts", ["/api/picking/history"]],
     ["server/modules/inventory/interfaces/http/inventory.routes.ts", ["/api/inventory/transactions"]],

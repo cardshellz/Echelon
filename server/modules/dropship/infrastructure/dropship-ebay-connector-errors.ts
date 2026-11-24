@@ -1,5 +1,5 @@
 import { DropshipError } from "../domain/errors";
-import { EbayListingSyncError } from "../../channels/ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../../channels/ebay-listing-sync.domain.api";
 import { providerReadDiagnosticFromError, providerReadShouldRetry } from "@shared/channel-provider-read";
 
 /**

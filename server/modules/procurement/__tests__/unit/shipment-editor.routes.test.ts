@@ -2,15 +2,15 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { createShipmentEditorService } from "../../shipment-editor.service";
-import { ShipmentTrackingError } from "../../shipment-tracking.service";
+import type { createShipmentEditorService } from "../../application/shipment-editor.service";
+import { ShipmentTrackingError } from "../../application/shipment-tracking.service";
 
 vi.mock("../../../../routes/middleware", () => ({
   requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) =>
     req.headers["x-permission"] === `${resource}:${action}` ? next() : res.status(403).json({ error: "Permission denied" }),
 }));
 vi.mock("../../../../platform/observability/logger", () => ({ logger: { error: vi.fn() } }));
-import { registerShipmentEditorRoutes } from "../../shipment-editor.routes";
+import { registerShipmentEditorRoutes } from "../../interfaces/http/shipment-editor.routes";
 
 type Service = ReturnType<typeof createShipmentEditorService>;
 describe("shipment line editor HTTP boundary", () => {

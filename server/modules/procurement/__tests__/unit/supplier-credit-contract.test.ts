@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertInvoiceSettlementEvidence, readVerifiedInvoiceSettlementProjections } from "../../supplier-credit-settlement.repository";
-import type { ApLedgerDbClient } from "../../ap-ledger.service";
+import { assertInvoiceSettlementEvidence, readVerifiedInvoiceSettlementProjections } from "../../infrastructure/supplier-credit-settlement.repository";
+import type { ApLedgerDbClient } from "../../application/ap-ledger.service";
 import { supplierCreditCreateInputSchema, supplierCreditApplyInputSchema, supplierCreditDetailSchema } from "@shared/procurement/supplier-credit";
 import { sumInvoiceCredits, type InvoiceCreditEvidence } from "../../domain/invoice-credit-evidence";
 import { deriveInvoiceFinancialState } from "../../domain/invoice-financial-state";

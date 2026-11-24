@@ -4,8 +4,8 @@ import express, { type NextFunction, type Request, type Response } from "express
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { relationshipFixture } from "../../../../../test/fixtures/document-relationships";
-import { registerDocumentRelationshipRoutes } from "../../document-relationships.routes";
-import { createDocumentRelationshipService } from "../../document-relationships.service";
+import { registerDocumentRelationshipRoutes } from "../../interfaces/http/document-relationships.routes";
+import { createDocumentRelationshipService } from "../../application/document-relationships.service";
 
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) =>
   (req: Request, res: Response, next: NextFunction) => req.headers["x-permission"] === `${resource}:${action}` ? next() : res.sendStatus(403) }));

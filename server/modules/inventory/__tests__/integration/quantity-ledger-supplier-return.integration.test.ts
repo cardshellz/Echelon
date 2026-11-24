@@ -8,7 +8,7 @@ import * as schema from "@shared/schema";
 import { createQuantityLedgerTestContext, QUANTITY_TEST_TIME, type QuantityLedgerTestContext } from "../fixtures/quantity-ledger-database";
 import { fixtureTable, fixtureColumnDefinitions, qualifiedTable } from "../../../procurement/__tests__/integration/shipment-line-fixture";
 import { installSupplierReturnCompletionFixture } from "../../../procurement/__tests__/integration/supplier-return-fixture";
-import { recordSupplierReturn } from "../../../procurement/supplier-return.service";
+import { recordSupplierReturn } from "../../../procurement/application/supplier-return.service";
 import { previewSupplierReturnStock, readSupplierReturnInventoryEvidence } from "../../application/supplier-return-stock";
 import { ensureLotCostQuantityBasis, allocateLotQuantityCost, readUnallocatedLotCosts } from "../../infrastructure/cost-quantity.repository";
 import { recordReceiptCostOrigin } from "../../infrastructure/cost-evidence.repository";

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CostSourceRevision } from "@shared/procurement/cost-source-contracts";
 import type { ReconciliationRecordEvidence } from "../../../inventory/domain/cost-reconciliation";
-import { summarizeQuantityCorrectionCostReview } from "../../quantity-correction-cost-review";
+import { summarizeQuantityCorrectionCostReview } from "../../application/quantity-correction-cost-review";
 
 const source: CostSourceRevision = {
   contractVersion: 1,

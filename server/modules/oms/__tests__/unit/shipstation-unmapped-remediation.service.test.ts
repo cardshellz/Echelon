@@ -6,7 +6,7 @@ import {
   resolveShipStationUnmappedPhysicalAsProviderEcho,
   resolveShipStationUnmappedPhysicalAsReturnLabel,
   resolveShipStationUnmappedPhysicalAsVoidedLabel,
-} from "../../shipstation-unmapped-remediation.service";
+} from "../../application/shipstation-unmapped-remediation.service";
 
 function queryText(query: any): string {
   return (query?.queryChunks ?? [])

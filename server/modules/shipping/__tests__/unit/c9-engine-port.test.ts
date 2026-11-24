@@ -29,7 +29,7 @@ function readShipStationSrc(): string {
         .sort()
         .map((f) => readFileSync(resolve(subDir, f), "utf8"))
     : [];
-  return [readSrc("server/modules/oms/shipstation.service.ts"), ...subFiles].join("\n");
+  return [readSrc("server/modules/oms/application/shipstation.service.ts"), ...subFiles].join("\n");
 }
 
 function sourceBetween(source: string, startMarker: string, endMarker: string): string {
@@ -148,12 +148,12 @@ describe("D-NOENGINE: reconciler cancel/markShipped uses engine", () => {
   const indexSrc = readSrc("server/index.ts");
   const omsWmsReconcileSrc = readSrc("server/modules/orders/application/oms-wms-cancel-reconcile.scheduler.ts");
   const oneShotRepairsSrc = readSrc("server/modules/orders/application/one-shot-repairs.ts");
-  const wmsShipStationReconcileSrc = readSrc("server/modules/shipping/wms-shipstation-reconcile.scheduler.ts");
+  const wmsShipStationReconcileSrc = readSrc("server/modules/shipping/application/wms-shipstation-reconcile.scheduler.ts");
 
   it("imports engineRefFromRow from shipping module in extracted reconcilers", () => {
     expect(omsWmsReconcileSrc).toContain("engineRefFromRow");
     expect(omsWmsReconcileSrc).toContain('from "../../shipping/engine-and-reconcile.api"');
-    expect(wmsShipStationReconcileSrc).toContain('import { engineRefFromRow } from "./adapters/shipstation.adapter"');
+    expect(wmsShipStationReconcileSrc).toContain('import { engineRefFromRow } from "../adapters/shipstation.adapter"');
   });
 
   it("reconciler #4 cancel uses engine.cancel, not ss.cancelOrder", () => {
@@ -267,7 +267,7 @@ describe("D-NOENGINE: engineRefFromRow helper", () => {
 
 describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
   const indexSrc = readSrc("server/index.ts");
-  const wmsReconcileSrc = readSrc("server/modules/shipping/wms-shipstation-reconcile.scheduler.ts");
+  const wmsReconcileSrc = readSrc("server/modules/shipping/application/wms-shipstation-reconcile.scheduler.ts");
   const v2Block = sourceBetween(
     wmsReconcileSrc,
     "const runShipStationReconcileV2 = async () => {",
@@ -332,7 +332,7 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
   });
 
   it("imports deriveReconcileEvent inside shipping module reconciler", () => {
-    expect(wmsReconcileSrc).toContain('import { deriveReconcileEvent } from "./reconcile-derive"');
+    expect(wmsReconcileSrc).toContain('import { deriveReconcileEvent } from "../domain/reconcile-derive"');
     expect(indexSrc).toContain('from "./modules/shipping/engine-and-reconcile.api"');
   });
 });
@@ -360,7 +360,7 @@ describe("D-NOENGINE Phase 4: eBay reconciler uses engine interface", () => {
 
 describe("D-NOENGINE Phase 4: legacy V1 reconciler is retired", () => {
   const indexSrc = readSrc("server/index.ts");
-  const wmsReconcileSrc = readSrc("server/modules/shipping/wms-shipstation-reconcile.scheduler.ts");
+  const wmsReconcileSrc = readSrc("server/modules/shipping/application/wms-shipstation-reconcile.scheduler.ts");
 
   it("always invokes the canonical V2 reconciler without a feature flag fallback", () => {
     const schedulerBlock = wmsReconcileSrc.slice(

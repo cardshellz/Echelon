@@ -25,12 +25,12 @@ async function main(): Promise<void> {
   if (!tiers.length || tiers.some((value, index) => ![10,100,500].includes(value) || (index > 0 && value <= tiers[index - 1]))) throw new Error("Use ascending bounded tiers 10,100,500");
   const mode = process.argv[4] ?? "unresolved";
   if (!["unresolved", "posted"].includes(mode) || (mode === "posted" && tiers.some(tier => tier > 100))) throw new Error("Posted verification is bounded to 10/100 shipments");
-  const files = ["server/modules/procurement/shipment-tracking.service.ts", "server/modules/procurement/po-shipment-cost-summary.repository.ts",
-    "server/modules/procurement/procurement-health-summary.service.ts", "server/modules/procurement/purchase-cost-status.repository.ts",
-    "server/modules/procurement/purchase-cost-status-snapshot.repository.ts", "server/modules/procurement/purchase-cost-status-batch.repository.ts", "server/modules/procurement/shipment-cost-review.repository.ts",
-    "server/modules/procurement/shipment-cost-posting-read.repository.ts", "server/modules/procurement/procurement.storage.ts",
-    "server/modules/procurement/shipment-cost-exception.repository.ts", "server/modules/inventory/infrastructure/cost-reconciliation.repository.ts",
-    "server/modules/procurement/domain/current-shipment-cost-source.ts", "server/modules/procurement/shipment-health-evidence.repository.ts",
+  const files = ["server/modules/procurement/application/shipment-tracking.service.ts", "server/modules/procurement/infrastructure/po-shipment-cost-summary.repository.ts",
+    "server/modules/procurement/application/procurement-health-summary.service.ts", "server/modules/procurement/infrastructure/purchase-cost-status.repository.ts",
+    "server/modules/procurement/infrastructure/purchase-cost-status-snapshot.repository.ts", "server/modules/procurement/infrastructure/purchase-cost-status-batch.repository.ts", "server/modules/procurement/infrastructure/shipment-cost-review.repository.ts",
+    "server/modules/procurement/infrastructure/shipment-cost-posting-read.repository.ts", "server/modules/procurement/infrastructure/procurement.storage.ts",
+    "server/modules/procurement/infrastructure/shipment-cost-exception.repository.ts", "server/modules/inventory/infrastructure/cost-reconciliation.repository.ts",
+    "server/modules/procurement/domain/current-shipment-cost-source.ts", "server/modules/procurement/infrastructure/shipment-health-evidence.repository.ts",
     "shared/money-read.ts", "shared/utils/money.ts",
     "test/performance/procurement/query-measurement.ts", "test/performance/procurement/health-cost.fixture.ts",
     "test/performance/procurement/run-health-cost.ts"];
@@ -63,8 +63,8 @@ async function main(): Promise<void> {
     report.identity = fixture.identity;
     report.schema = await fixture.metadata();
     const [{ loadProcurementHealthSummary }, { readPoShipmentCosts }, { inventoryStorage }] = await Promise.all([
-      import("../../../server/modules/procurement/procurement-health-summary.service"),
-      import("../../../server/modules/procurement/po-shipment-cost-summary.repository"),
+      import("../../../server/modules/procurement/application/procurement-health-summary.service"),
+      import("../../../server/modules/procurement/infrastructure/po-shipment-cost-summary.repository"),
       import("../../../server/modules/inventory"),
     ]);
     const healthStorage = { ...fixture.harness.storage, getVelocityLookbackDays: () => inventoryStorage.getVelocityLookbackDays() };

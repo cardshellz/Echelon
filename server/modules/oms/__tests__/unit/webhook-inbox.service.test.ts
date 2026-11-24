@@ -12,18 +12,18 @@ import {
   markWebhookSucceeded,
   enqueueWebhookInboxReplay,
   recordWebhookReceived,
-} from "../../webhook-inbox.service";
+} from "../../application/webhook-inbox.service";
 
 const WEBHOOK_INBOX_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../webhook-inbox.service.ts"),
+  resolve(__dirname, "../../application/webhook-inbox.service.ts"),
   "utf-8",
 );
 const OMS_WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
+  resolve(__dirname, "../../application/oms-webhooks.ts"),
   "utf-8",
 );
 const OMS_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../oms.service.ts"),
+  resolve(__dirname, "../../application/oms.service.ts"),
   "utf-8",
 );
 

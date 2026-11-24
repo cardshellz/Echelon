@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   deriveChannelFulfillmentQuantityAuthority,
   type ChannelFulfillmentQuantityEvidence,
-} from "../../channel-fulfillment-quantity-authority";
-import { evaluateChannelFulfillmentWritebackPolicy } from "../../channel-fulfillment-authority.policy";
+} from "../../application/channel-fulfillment-quantity-authority";
+import { evaluateChannelFulfillmentWritebackPolicy } from "../../domain/channel-fulfillment-authority.policy";
 
 const evidence = (overrides: Partial<ChannelFulfillmentQuantityEvidence> = {}): ChannelFulfillmentQuantityEvidence => ({
   lifetimePaidQuantity: 2,

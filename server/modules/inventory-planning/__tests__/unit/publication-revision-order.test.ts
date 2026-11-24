@@ -35,7 +35,7 @@ describe("latest publication revision read", () => {
 });
 
 describe("parked carrier dispatches from the revision bug", () => {
-  const repository = readFileSync(resolve(process.cwd(), "server/modules/shipping/carrier-tracking.repository.ts"), "utf8");
+  const repository = readFileSync(resolve(process.cwd(), "server/modules/shipping/infrastructure/carrier-tracking.repository.ts"), "utf8");
 
   it("are a reviewed repair cohort that the requeue may select", () => {
     expect(repository).toContain("THEN 'publication_revision_order'");

@@ -4,10 +4,10 @@ import type {
   PackageAllocationEffectIntentV1,
   PackageAllocationEntryV1,
   PackageAllocationGroupPackageEvidenceV1,
-} from "../../package-allocation-group.domain";
+} from "../../domain/package-allocation-group.domain";
 import {
   PackageAllocationLedgerRepositoryError,
-} from "../../package-allocation-ledger.repository";
+} from "../../infrastructure/package-allocation-ledger.repository";
 import type {
   AppendPackageAllocationPlanInput,
   LockedPackageAllocationGroup,
@@ -19,19 +19,19 @@ import type {
   PersistedPackageAllocationPlan,
   RegisteredPackageAllocationBinding,
   RegisteredPackageAllocationSource,
-} from "../../package-allocation-ledger.repository";
+} from "../../infrastructure/package-allocation-ledger.repository";
 import {
   PACKAGE_ALLOCATION_PLANNER_VERSION,
   PackageAllocationPersistenceError,
   PackageAllocationPlanningService,
   type PersistPackageAllocationPlanCommand,
-} from "../../package-allocation-planning.service";
-import { buildPackageAllocationAuthorityRelationshipSelectionEvidence } from "../../package-allocation-authority-resolution.service";
+} from "../../application/package-allocation-planning.service";
+import { buildPackageAllocationAuthorityRelationshipSelectionEvidence } from "../../application/package-allocation-authority-resolution.service";
 import {
   derivePackageAllocationSourceRegistration,
   type PackageAllocationSourceFacts,
   type PackageAllocationSourceRegistrationV1,
-} from "../../package-allocation-source-identity.domain";
+} from "../../domain/package-allocation-source-identity.domain";
 
 const groupKey = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 

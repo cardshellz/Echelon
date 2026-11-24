@@ -5,12 +5,12 @@ import {
   costSourceRevisionSchema,
   costInventoryEffectProofSchema,
 } from "@shared/procurement/cost-source-contracts";
-import { proveNoInventoryEffect } from "../../inventory/domain/no-inventory-effect";
+import { proveNoInventoryEffect } from "../../inventory/no-inventory-effect.api";
 import {
   purchaseComponentPostingStatus,
   purchaseCostComponentStatusSchema,
 } from "@shared/procurement/purchase-cost-status";
-import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
+import type { CostRevisionInput } from "../../inventory/cost-evidence.repository.api";
 
 const resultSchema = z.object({
   status: z.enum(["applied", "review_required"]),

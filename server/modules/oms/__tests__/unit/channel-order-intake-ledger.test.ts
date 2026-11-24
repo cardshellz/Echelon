@@ -5,7 +5,7 @@ import {
   ebayOrderIsShippable,
   recordChannelOrderFailure,
   recordChannelOrderObservation,
-} from "../../channel-order-intake.service";
+} from "../../application/channel-order-intake.service";
 
 const migration = readFileSync(
   resolve(process.cwd(), "migrations/152_channel_order_intake_ledger.sql"),

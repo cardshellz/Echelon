@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ProcurementSkuReferenceError,
   synchronizeProcurementSkuReferences,
-} from "../../procurement-sku-reference.service";
+} from "../../application/procurement-sku-reference.service";
 
 function createExecutor(rowCounts: number[] = [2, 1, 3, 4]) {
   const updates: Array<Record<string, unknown>> = [];

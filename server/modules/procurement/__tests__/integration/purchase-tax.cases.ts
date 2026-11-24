@@ -7,15 +7,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { purchaseTaxContextSchema, purchaseTaxPreviewSchema, purchaseTaxResultSchema,
   type PurchaseTaxChange, type PurchaseTaxTarget } from "@shared/procurement/purchase-tax";
-import { createPurchaseTaxChangeService } from "../../purchase-tax-change.service";
-import { registerPurchaseTaxRoutes } from "../../purchase-tax.routes";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
-import type { AmendmentDatabase, AmendmentTransaction } from "../../po-quantity-amendment.repository";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
-import { createShipmentCostReconciliationService, shipmentReconciliationScope } from "../../shipment-cost-reconciliation.service";
+import { createPurchaseTaxChangeService } from "../../application/purchase-tax-change.service";
+import { registerPurchaseTaxRoutes } from "../../interfaces/http/purchase-tax.routes";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import { readPoShipmentCosts } from "../../infrastructure/po-shipment-cost-summary.repository";
+import type { AmendmentDatabase, AmendmentTransaction } from "../../infrastructure/po-quantity-amendment.repository";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
+import { createShipmentCostReconciliationService, shipmentReconciliationScope } from "../../application/shipment-cost-reconciliation.service";
 import { costFingerprint, lockInventoryCostGraph } from "../../../inventory/infrastructure/cost-evidence.repository";
-import { readPoTaxEvidence } from "../../purchase-tax-evidence.repository";
+import { readPoTaxEvidence } from "../../infrastructure/purchase-tax-evidence.repository";
 import { purchaseTaxAmounts } from "../../domain/purchase-tax";
 
 /** Registered inside the existing real receipt/AP/freight fixture. HTTP, IAM,

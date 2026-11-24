@@ -19,7 +19,7 @@ import {
 } from "../../domain/stock-link";
 import type { StockLinkDestination, StockLinkStoreItem } from "@shared/types/stock-link";
 import { readPublicationStockSelection } from "../../infrastructure/inventory-publication-selection.reader";
-import { createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source";
+import { createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source.api";
 import { CHANNEL_VARIANT_OVERRIDE_LOCK_SQL, channelVariantOverrideLockKey } from "../../../channels/infrastructure/channel-variant-override-lock";
 import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";

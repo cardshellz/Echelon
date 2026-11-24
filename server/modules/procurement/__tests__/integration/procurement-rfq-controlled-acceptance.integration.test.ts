@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { defaultPurchasePlanningPolicy } from "@shared/procurement/purchase-planning-policy";
 import { rfqConversionResultSchema, type RfqConvert, type RfqQuoteEvidence } from "@shared/procurement/rfq-workflow";
-import type { PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
-import { PurchasePlanningPolicyRepository } from "../../purchase-planning-policy.repository";
-import { PurchasePlanningPolicyService } from "../../purchase-planning-policy.service";
-import { readPurchaseRfqOrigins } from "../../purchase-rfq-origin.repository";
-import { lockAndLoadActiveRfqAllocations } from "../../purchasing-rfq.service";
+import type { PurchasingRecommendationRawRow } from "../../application/purchasing-recommendation.engine";
+import { PurchasePlanningPolicyRepository } from "../../infrastructure/purchase-planning-policy.repository";
+import { PurchasePlanningPolicyService } from "../../application/purchase-planning-policy.service";
+import { readPurchaseRfqOrigins } from "../../infrastructure/purchase-rfq-origin.repository";
+import { lockAndLoadActiveRfqAllocations } from "../../application/purchasing-rfq.service";
 import { createControlledRfqDatabase } from "./rfq-controlled-acceptance-database";
 import { captureControlledRfqQuote, createControlledRfqProposal, prepareControlledRfqConversion } from "./rfq-controlled-acceptance-helper";
 

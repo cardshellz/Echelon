@@ -5,8 +5,8 @@ import {
 } from "@shared/schema";
 import type { db } from "../../../db";
 import { persistAuditEvent, type AuditLogPayload } from "../../../infrastructure/auditLogger";
-import { ChannelPricingError, type PricingRuleTarget, type SaveChannelPrice, type SaveChannelPricingRule } from "../channel-pricing.domain";
-import type { ChannelPricingStore, ChannelPricingTransaction, ListedChannelPricingRule, StoredChannelPrice } from "../channel-pricing.store";
+import { ChannelPricingError, type PricingRuleTarget, type SaveChannelPrice, type SaveChannelPricingRule } from "../domain/channel-pricing.domain";
+import type { ChannelPricingStore, ChannelPricingTransaction, ListedChannelPricingRule, StoredChannelPrice } from "../application/channel-pricing.store";
 
 export type ChannelPricingDatabase = Pick<typeof db, "select" | "transaction">;
 type Transaction = Parameters<Parameters<ChannelPricingDatabase["transaction"]>[0]>[0];

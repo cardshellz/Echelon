@@ -167,7 +167,7 @@ vi.mock("drizzle-orm", () => ({
 import {
   createInvoiceFromShipmentCosts,
   ApLedgerError,
-} from "../../ap-ledger.service";
+} from "../../application/ap-ledger.service";
 
 // ── Reset helper ──
 function resetMocks() {

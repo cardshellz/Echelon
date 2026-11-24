@@ -1,8 +1,8 @@
-import { prepareChannelPublicationWeight } from "../../marketplace-listings/domain/channel-package-weight";
+import { prepareChannelPublicationWeight } from "../../marketplace-listings/channel-package-weight.api";
 import type {
   ChannelListingPayload,
   ListingPushResult,
-} from "../channel-adapter.interface";
+} from "../domain/channel-adapter.interface";
 
 export interface ShopifyListingCredentials {
   shopDomain: string;

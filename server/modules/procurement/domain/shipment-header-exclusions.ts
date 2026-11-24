@@ -1,7 +1,7 @@
 import { supplierHeaderAmounts } from "./supplier-header-costs";
 import { allocateCentsFromNumericBasis } from "./shipment-allocation-basis";
 import { readIntegerCents } from "@shared/money-read";
-import { CostEvidenceError, costInteger } from "../../inventory/infrastructure/cost-evidence-values";
+import { CostEvidenceError, costInteger } from "../../inventory/cost-evidence-values.api";
 
 /** A gross freight allocation can include recoverable header tax or another
  * explicitly excluded amount. Distribute those exact cents over that charge's

@@ -11,7 +11,7 @@ import {
   type PoLinePricingInput,
 } from "@shared/utils/po-line-pricing";
 import { insertAuditEventDrizzle } from "../../../infrastructure/transactional-audit";
-import { supplierEvidenceCatalogStateFingerprint } from "../supplier-evidence-catalog-state";
+import { supplierEvidenceCatalogStateFingerprint } from "../application/supplier-evidence-catalog-state";
 import {
   assertNonnegativeSafeInteger,
   assertOptionalCatalogText,

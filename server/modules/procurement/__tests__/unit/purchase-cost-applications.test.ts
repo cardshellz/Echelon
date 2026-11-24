@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { purchaseCostApplicationHistorySchema } from "@shared/procurement/purchase-cost-applications";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { projectPurchaseCostApplications, type PurchaseCostApplicationRead } from "../../purchase-cost-application-read.service";
-import { projectReceiptCostQueue, type ReceiptCostQueueRead } from "../../receipt-cost-queue-read.service";
+import { projectPurchaseCostApplications, type PurchaseCostApplicationRead } from "../../application/purchase-cost-application-read.service";
+import { projectReceiptCostQueue, type ReceiptCostQueueRead } from "../../application/receipt-cost-queue-read.service";
 
 const recordedAt = "2026-09-07T12:00:00.000Z";
 function withFingerprint(input: Record<string, unknown>) {

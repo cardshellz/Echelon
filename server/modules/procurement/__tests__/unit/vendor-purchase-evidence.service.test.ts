@@ -10,7 +10,7 @@ import {
   vendorInvoicePoLinks,
   vendorProducts,
 } from "@shared/schema";
-import { createPurchasingService } from "../../purchasing.service";
+import { createPurchasingService } from "../../application/purchasing.service";
 
 describe("completed supplier purchase evidence", () => {
   it("records last purchase cost/date atomically without replacing the reusable quote", async () => {

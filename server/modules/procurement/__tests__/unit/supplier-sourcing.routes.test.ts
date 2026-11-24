@@ -7,12 +7,12 @@ import type { AddressInfo } from "node:net";
 const mocks = vi.hoisted(() => ({ permission: vi.fn(), read: vi.fn(), history: vi.fn(), update: vi.fn() }));
 vi.mock("../../../../modules/identity", () => ({ hasPermission: mocks.permission }));
 vi.mock("../../../../db", () => ({ db: {} }));
-vi.mock("../../supplier-sourcing.service", async (original) => ({
-  ...await original<typeof import("../../supplier-sourcing.service")>(),
+vi.mock("../../application/supplier-sourcing.service", async (original) => ({
+  ...await original<typeof import("../../application/supplier-sourcing.service")>(),
   SupplierSourcingService: class { read = mocks.read; history = mocks.history; update = mocks.update; },
 }));
-import { registerSupplierSourcingRoutes } from "../../supplier-sourcing.routes";
-import { SupplierSourcingError } from "../../supplier-sourcing.service";
+import { registerSupplierSourcingRoutes } from "../../interfaces/http/supplier-sourcing.routes";
+import { SupplierSourcingError } from "../../application/supplier-sourcing.service";
 
 describe("supplier sourcing HTTP authority", () => {
   let server: http.Server;

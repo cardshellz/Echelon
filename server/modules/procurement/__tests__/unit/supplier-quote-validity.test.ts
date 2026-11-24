@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assessSupplierQuoteValidity } from "../../supplier-quote-validity";
+import { assessSupplierQuoteValidity } from "../../application/supplier-quote-validity";
 
 describe("supplier quote validity", () => {
   it("allows at most five minutes of timestamp clock skew", () => {

@@ -2,7 +2,7 @@ import type { ListingIntentPropagationService } from "../application/listing-int
 import type { Express, Response } from "express";
 import { z } from "zod";
 import { requirePermission } from "../../../routes/middleware";
-import { requireDropshipAuth } from "../../dropship/interfaces/http/dropship-auth.routes";
+import { requireDropshipAuth } from "../../dropship/dropship-auth.routes.api";
 import { listingIntentPropagationRepository as repository } from "../../../listing-intent-propagation.composition";
 
 const id = z.coerce.number().int().positive().max(2_147_483_647);

@@ -83,9 +83,9 @@ async function main(): Promise<void> {
     const context = await fixture.createConnectedReceivingDatabase(ownedDatabase);
     const identity = await pool.query("SELECT current_database() AS name");
     if (identity.rows[0]?.name !== dedicatedUrl.pathname.slice(1)) throw new Error("Application connection escaped its owned fixture database");
-    const { ReceivingService } = await import("../../../server/modules/procurement/receiving.service");
-    const { createPurchasingService } = await import("../../../server/modules/procurement/purchasing.service");
-    const { createShipmentTrackingService } = await import("../../../server/modules/procurement/shipment-tracking.service");
+    const { ReceivingService } = await import("../../../server/modules/procurement/application/receiving.service");
+    const { createPurchasingService } = await import("../../../server/modules/procurement/application/purchasing.service");
+    const { createShipmentTrackingService } = await import("../../../server/modules/procurement/application/shipment-tracking.service");
     const navigation = await import("./navigation-fixture");
     const workflow = await import("./workflow-fixture");
     const { procurementStorage } = await import("../../../server/modules/procurement");
@@ -94,9 +94,9 @@ async function main(): Promise<void> {
     const { InventoryUseCases } = await import("../../../server/modules/inventory/application/inventory.use-cases");
     const { createInventoryMethods } = await import("../../../server/modules/inventory/infrastructure/inventory.repository");
     const { InventoryLotService } = await import("../../../server/modules/inventory/application/lots.service");
-    const { ReceiptReversalService } = await import("../../../server/modules/procurement/receipt-reversal.service");
-    const { ReceiveValidationService } = await import("../../../server/modules/procurement/receive-validation.service");
-    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../../server/modules/procurement/ap-ledger.service");
+    const { ReceiptReversalService } = await import("../../../server/modules/procurement/application/receipt-reversal.service");
+    const { ReceiveValidationService } = await import("../../../server/modules/procurement/application/receive-validation.service");
+    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../../server/modules/procurement/application/ap-ledger.service");
     const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage };
     const inventory = new InventoryUseCases(db as unknown as ConstructorParameters<typeof InventoryUseCases>[0],
       createInventoryMethods(db), new InventoryLotService(db));
@@ -214,7 +214,7 @@ async function main(): Promise<void> {
       res.once("finish", () => { void stop().then(() => process.exit(0), error => { console.error(error); process.exit(1); }); });
     });
     const { registerAuthRoutes } = await import("../../../server/modules/identity/routes.api");
-    const { registerPurchasingRoutes } = await import("../../../server/modules/procurement/procurement.routes");
+    const { registerPurchasingRoutes } = await import("../../../server/modules/procurement/interfaces/http/procurement.routes");
     const { registerWarehouseRoutes } = await import("../../../server/modules/warehouse/warehouse-settings-routes.api");
     const { registerSettingsRoutes } = await import("../../../server/modules/warehouse/warehouse-settings-routes.api");
     const { registerProductRoutes } = await import("../../../server/modules/catalog/interfaces/http/catalog.routes");
