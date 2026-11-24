@@ -4,9 +4,9 @@ import type { MigrationRetryNotice } from "../../../../../migrations/migration-e
 import {
   readCatalogStockSelectionFactsForProducts,
   readCatalogStockSelectionFactsForVariants,
-} from "../../../catalog/catalog-stock-selection.reader";
+} from "../../../catalog/infrastructure/catalog-stock-selection.reader";
 import type { EbayListingInspection } from "../../../marketplace-listings/domain/ebay-listing-inspection";
-import { tryLockListingMemberRemote } from "../../../marketplace-listings/listing-member-lifecycle";
+import { tryLockListingMemberRemote } from "../../../marketplace-listings/listing-member-lifecycle.api";
 import { quantityPublicationScopeLockKey } from "../../../inventory-planning/infrastructure/quantity-publication-admission.repository";
 import { PostgresQuantityProviderResponseRecovery } from "../../../inventory-planning/infrastructure/quantity-provider-response-recovery.repository";
 import type { ListingMemberIdentity } from "../../../../../shared/types/listing-member-lifecycle";
@@ -45,7 +45,7 @@ import { writeProcessHeartbeat } from "../../infrastructure/dropship-process-hea
 import { PgDropshipSelectionAtpRepository } from "../../infrastructure/dropship-selection-atp.repository";
 import { PgDropshipSelectionChangeRepository } from "../../infrastructure/dropship-selection-change.repository";
 import { readDropshipSelectionEffectsFacts } from "../../infrastructure/dropship-selection-effects.reader";
-import { readDropshipListingStockSelection } from "../../stock-publication-selection";
+import { readDropshipListingStockSelection } from "../../stock-publication-selection.api";
 import type { SelectionChangeAnswer, SelectionChangePreviewAnswer } from "../../../../../shared/dropship/vendor-selection-changes";
 import { B_STORED_ANSWER } from "../fixtures/vendor-selection-changes-b.fixture";
 import {

@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../orders/bin-location-backfill", () => ({
+vi.mock("../../../orders/application/bin-location-backfill", () => ({
   backfillOpenOrderItemBinAssignment: vi.fn(async () => 0),
 }));
 
@@ -23,7 +23,7 @@ import {
   deleteProductLocation,
   promoteBestRemainingSlot,
 } from "../../infrastructure/warehouse.repository";
-import { backfillOpenOrderItemBinAssignment } from "../../../orders/bin-location-backfill";
+import { backfillOpenOrderItemBinAssignment } from "../../../orders/application/bin-location-backfill";
 
 const REPOSITORY_SRC = readFileSync(
   resolve(__dirname, "../../infrastructure/warehouse.repository.ts"),

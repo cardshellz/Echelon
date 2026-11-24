@@ -6,7 +6,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { loadShopifyReadinessCandidates } from "../../../oms/infrastructure/shopify-readiness-candidates.repository";
 
 const RECONCILE_SRC = readFileSync(
-  resolve(__dirname, "../../shopify-order-reconciliation.ts"),
+  resolve(__dirname, "../../application/shopify-order-reconciliation.ts"),
   "utf8",
 );
 

@@ -48,7 +48,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let service: ShipmentTrackingService;
   let createService: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
-  let storage: typeof import("../../procurement.storage").procurementMethods & Pick<typeof import("../../../catalog/catalog.storage").productMethods, "getProductVariantById">;
+  let storage: typeof import("../../procurement.storage").procurementMethods & Pick<typeof import("../../../catalog/infrastructure/catalog.storage").productMethods, "getProductVariantById">;
   let commandModule: typeof import("../../shipment-line-commands");
   let repositoryFactory: typeof import("../../../../platform/commands/command-results.repository").createDrizzleFinancialCommandRepository;
   let defaultModulePool: pg.Pool | undefined;
@@ -193,7 +193,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     try {
       const [serviceModule, storageModule, commands, repositoryModule, databaseModule, catalogModule] = await Promise.all([
         import("../../shipment-tracking.service"), import("../../procurement.storage"), import("../../shipment-line-commands"),
-        import("../../../../platform/commands/command-results.repository"), import("../../../../db"), import("../../../catalog/catalog.storage"),
+        import("../../../../platform/commands/command-results.repository"), import("../../../../db"), import("../../../catalog/infrastructure/catalog.storage"),
       ]);
       createService = serviceModule.createShipmentTrackingService;
       storage = { ...storageModule.procurementMethods, getProductVariantById: catalogModule.productMethods.getProductVariantById };

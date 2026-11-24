@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { QUANTITY_CATCHUP_HEALTH_CHECKS, quantityCatchupHealthChecks } from "../../../inventory-planning/quantity-catchup-health";
+import { QUANTITY_CATCHUP_HEALTH_CHECKS, quantityCatchupHealthChecks } from "../../../inventory-planning/quantity-catchup-health.api";
 import { getOmsOpsHealth } from "../../ops-health.service";
 import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
 

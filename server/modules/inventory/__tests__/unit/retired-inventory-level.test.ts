@@ -44,7 +44,7 @@ describe("isLevelDeleteForbiddenError", () => {
 });
 
 describe("inventory level routes", () => {
-  const routes = readFileSync(resolve(process.cwd(), "server/modules/inventory/inventory.routes.ts"), "utf8");
+  const routes = readFileSync(resolve(process.cwd(), "server/modules/inventory/interfaces/http/inventory.routes.ts"), "utf8");
 
   it("hides history-only rows from the per-variant location list", () => {
     expect(routes).toContain("!isRetiredEmptyLevel(level, assignedLocationIds.has(level.warehouseLocationId))");

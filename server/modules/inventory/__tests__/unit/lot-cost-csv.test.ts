@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseLotCostCsvRow } from "../../cogs.service";
+import { parseLotCostCsvRow } from "../../application/cogs.service";
 
 describe("parseLotCostCsvRow (sku + per-piece)", () => {
   it("parses sku + cost_per_piece (dollars) to per-piece mills", () => {

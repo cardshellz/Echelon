@@ -13,7 +13,7 @@ import { previewSupplierReturnStock, readSupplierReturnInventoryEvidence } from 
 import { ensureLotCostQuantityBasis, allocateLotQuantityCost, readUnallocatedLotCosts } from "../../infrastructure/cost-quantity.repository";
 import { recordReceiptCostOrigin } from "../../infrastructure/cost-evidence.repository";
 import { openOperationalQuantityPosting } from "../../infrastructure/operational-quantity-posting";
-import { COGSService } from "../../cogs.service";
+import { COGSService } from "../../application/cogs.service";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

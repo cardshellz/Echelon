@@ -4,7 +4,7 @@ import { outboundShipments } from "@shared/schema";
 import { readCommandAuthorityActor } from "../identity";
 import { hasStaffCapability, SHIPMENT_CAPABILITIES, type StaffCapability } from "@shared/staff-capabilities";
 import { shipmentOrderContextSchema } from "@shared/shipment-access";
-import { readShipmentLinkedOrderSummary } from "../orders/shipment-order-context.query";
+import { readShipmentLinkedOrderSummary } from "../orders/infrastructure/shipment-order-context.query";
 import { randomUUID } from "node:crypto";
 import { logger } from "../../platform/observability/logger";
 export class ShipmentAccessError extends Error {

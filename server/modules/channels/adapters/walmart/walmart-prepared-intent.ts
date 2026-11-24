@@ -2,7 +2,7 @@ import type { CatalogPublicationMediaPlan } from "@shared/types/catalog-publicat
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
 import type { ListingPublicationInput, PreparedListingItem } from "../../../marketplace-listings/application/listing-publication-provider.port";
 import { prepareChannelIntent, assertPreparedChannelIntent, preparedChannelIntentHash,
-  type ChannelIntentAccount } from "../../../marketplace-listings/prepared-channel-intent";
+  type ChannelIntentAccount } from "../../../marketplace-listings/prepared-channel-intent.api";
 import { jsonObject } from "./walmart-listing-schema";
 
 export const WALMART_PREPARED_INTENT_CAPABILITY = "walmart-item-feed-v1";

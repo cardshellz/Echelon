@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CanonicalClaimDispatchCommand } from "@shared/types/inventory-availability-dispatch";
-import { WmsCanonicalClaimDispatchSourceOwner } from "../../canonical-claim-dispatch-source";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../../infrastructure/canonical-claim-dispatch-source";
 
 function fixture(physical = false) {
   const command: CanonicalClaimDispatchCommand = { claimId: "10", orderId: 70, orderItemId: 71, warehouseId: 1,

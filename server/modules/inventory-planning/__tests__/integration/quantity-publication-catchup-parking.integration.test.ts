@@ -13,7 +13,7 @@ import { QuantityPublicationCatchupService } from "../../application/quantity-pu
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "../../infrastructure/inventory-cutover-definitions.repository";
 import { retireStockLinkMappingsInsideTransaction } from "../../infrastructure/stock-link-retire";
-import { quantityCatchupHealthChecks } from "../../quantity-catchup-health";
+import { quantityCatchupHealthChecks } from "../../quantity-catchup-health.api";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
 
 // Channels PR5 (PLAN-CH-v3 section 6 "Catch-up", "Wake matching"; section 9 PR5 tests). Only the process

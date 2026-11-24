@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import type { StockSelectionQueryClient, StockPublicationSelection } from "@shared/types/stock-publication-selection";
-import { readCatalogStockSelectionFacts } from "../../catalog/catalog-stock-selection.reader";
+import { readCatalogStockSelectionFacts } from "../../catalog/infrastructure/catalog-stock-selection.reader";
 import { resolveChannelStockSelection, type ChannelStockSelectionFacts } from "../channel-stock-selection.domain";
 
 export type { StockSelectionQueryClient, StockPublicationSelection } from "@shared/types/stock-publication-selection";

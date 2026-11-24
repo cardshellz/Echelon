@@ -22,7 +22,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target, property) {
   return typeof value === "function" ? value.bind(connection.database) : value;
 } }) }));
 import { procurementMethods } from "../../procurement.storage";
-import { productMethods } from "../../../catalog/catalog.storage";
+import { productMethods } from "../../../catalog/infrastructure/catalog.storage";
 import { createPurchasingService } from "../../purchasing.service";
 import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
 import { PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL } from "../../purchase-order-entry.commands";

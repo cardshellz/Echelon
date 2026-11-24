@@ -14,8 +14,8 @@ import {
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { operationOwnerTableFixture } from "../fixtures/operation-owner-database";
-import { reconcileWmsPickingProgress } from "../../../wms/picking-progress.repository";
-import { PickingUseCases } from "../../picking.use-cases";
+import { reconcileWmsPickingProgress } from "../../../wms/infrastructure/picking-progress.repository";
+import { PickingUseCases } from "../../application/picking.use-cases";
 import { eq } from "drizzle-orm";
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;

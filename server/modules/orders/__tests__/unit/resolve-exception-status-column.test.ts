@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const STORAGE_SRC = readFileSync(
-  resolve(__dirname, "../../orders.storage.ts"),
+  resolve(__dirname, "../../infrastructure/orders.storage.ts"),
   "utf-8",
 );
 

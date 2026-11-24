@@ -134,7 +134,7 @@ function createEbayRouteRequest(input: EbayRouteClientInput) {
           )
             throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The verified eBay account changed before the listing write.");
           const { createChannelEbayQuantityRequestAdmission } = await import(
-        "../../inventory-planning/quantity-publication"
+        "../../inventory-planning/quantity-publication.api"
           );
           return createChannelEbayQuantityRequestAdmission({
             channelId: EBAY_CHANNEL_ID,

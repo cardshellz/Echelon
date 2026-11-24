@@ -27,7 +27,7 @@ function readShipStationSource(): string {
 
 const SHIPSTATION_SRC = readShipStationSource();
 const PROJECTION_SRC = readFileSync(
-  fileURLToPath(new URL("../../../wms/channel-fulfillment-projection.repository.ts", import.meta.url)),
+  fileURLToPath(new URL("../../../wms/infrastructure/channel-fulfillment-projection.repository.ts", import.meta.url)),
   "utf8",
 );
 const quantityProjectionSql: string[] = [];

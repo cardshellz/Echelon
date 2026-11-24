@@ -8,7 +8,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PostgresCanonicalClaimInventoryRepository } from "../../infrastructure/canonical-claim-inventory.repository";
-import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../../../orders/canonical-claim-picker-observation-review.repository";
+import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../../../orders/infrastructure/canonical-claim-picker-observation-review.repository";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 

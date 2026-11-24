@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Keep the COGS dependency without importing unrelated inventory repository owners.
 vi.mock("../../../inventory", async () => ({
-  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+  COGSService: (await import("../../../inventory/application/cogs.service")).COGSService,
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ import type { InventoryUseCases } from "../../../inventory/application/inventory
 import type { ReceivingService } from "../../receiving.service";
 import { previewSupplierReturnStock, readSupplierReturnInventoryEvidence } from "../../../inventory/application/supplier-return-stock";
 import { readUnallocatedLotCosts } from "../../../inventory/infrastructure/cost-quantity.repository";
-import { InventoryLotService } from "../../../inventory/lots.service";
+import { InventoryLotService } from "../../../inventory/application/lots.service";
 import { recordSupplierReturn, createSupplierReturnReader } from "../../supplier-return.service";
 import { SupplierReturnFollowupService } from "../../../inventory/application/supplier-return-followup.service";
 import type { ShipmentTrackingService } from "../../shipment-tracking.service";

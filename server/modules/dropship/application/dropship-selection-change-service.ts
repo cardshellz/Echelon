@@ -15,7 +15,7 @@ import {
   OLDER_PROCESS_GRACE_MS,
   isCatalogPageOutdated,
 } from "../domain/catalog-code-version";
-import { isArchivedCatalogMember } from "../../marketplace-listings/listing-member-lifecycle";
+import { isArchivedCatalogMember } from "../../marketplace-listings/listing-member-lifecycle.api";
 import { DropshipError } from "../domain/errors";
 import { isReservedSelectionIdempotencyKey } from "../domain/selection-release";
 import {

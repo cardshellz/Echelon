@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { InventoryAvailabilityRuntimeClaimContext } from "../../../inventory-planning/application/inventory-availability-runtime-claim.service";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 
 // #63712 / #63696 (2026-10-02): the order's case was reserved in a reserve bin
 // (K-09, G-04-B) while the correction card pointed at the pick face (RACK-14,
@@ -84,7 +84,7 @@ describe("every canonical pick command the gun sends passes the claim schema", (
   // key that failed every observation pick in production (limit 120).
   it.each(["scan", "missed_pick_confirmation"])("strict, recorded-stock and observation commands are valid (%s)", async (pickMethod) => {
     const { canonicalAvailabilityClaimPickCommandSchema } = await import("@shared/types/inventory-availability-claims");
-    const { CANONICAL_CLAIM_IDEMPOTENCY_KEY_MAX } = await import("../../picking.use-cases");
+    const { CANONICAL_CLAIM_IDEMPOTENCY_KEY_MAX } = await import("../../application/picking.use-cases");
     const sent: unknown[] = [];
     const pickClaimLine = vi.fn(async (command: unknown) => {
       sent.push(command);

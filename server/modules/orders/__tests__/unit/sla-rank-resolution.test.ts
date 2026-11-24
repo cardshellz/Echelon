@@ -5,7 +5,7 @@ import {
   invalidatePickPrioritySettingsCache,
   resolveSlaDueAt,
   type PickPrioritySettingsDb,
-} from "../../sort-rank";
+} from "../../domain/sort-rank";
 
 function mockDb(responses: Array<{ rows: any[] }>): PickPrioritySettingsDb {
   const execute = vi.fn(async () => {

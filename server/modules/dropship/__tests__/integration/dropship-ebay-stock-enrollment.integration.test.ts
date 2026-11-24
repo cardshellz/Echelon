@@ -9,7 +9,7 @@ import {
 import { stockLinksMigrationSql } from "../../../inventory-planning/__tests__/fixtures/stock-link.fixture";
 import type { StockLinkOfferAdapter } from "../../../inventory-planning/application/stock-link.ports";
 import { createStockLinkService } from "../../../inventory-planning/infrastructure/stock-link.factory";
-import { dropshipEbayStockCommandKey } from "../../../inventory-planning/quantity-publication";
+import { dropshipEbayStockCommandKey } from "../../../inventory-planning/application/quantity-publication";
 import { enrollmentEvidenceHash } from "../../../inventory-planning/domain/stock-link-enrollment";
 import { DropshipEbayStockLinkSource } from "../../infrastructure/dropship-ebay-stock-link-source";
 

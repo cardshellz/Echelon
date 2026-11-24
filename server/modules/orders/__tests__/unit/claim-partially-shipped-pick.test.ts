@@ -3,11 +3,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ORDERS_STORAGE_SRC = readFileSync(
-  resolve(__dirname, "../../orders.storage.ts"),
+  resolve(__dirname, "../../infrastructure/orders.storage.ts"),
   "utf-8",
 );
 const WMS_ORDER_MUTATIONS_SRC = readFileSync(
-  resolve(__dirname, "../../../wms/wms-order-mutations.repository.ts"),
+  resolve(__dirname, "../../../wms/infrastructure/wms-order-mutations.repository.ts"),
   "utf-8",
 );
 

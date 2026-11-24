@@ -5,13 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { pickingReadinessBlockers, type WmsPickingProgressLine } from "@shared/wms-picking-progress";
 
 const reconcileWmsPickingProgress = vi.hoisted(() => vi.fn());
-vi.mock("../../../wms/picking-progress.repository", async (original) => ({
-  ...(await original<typeof import("../../../wms/picking-progress.repository")>()),
+vi.mock("../../../wms/infrastructure/picking-progress.repository", async (original) => ({
+  ...(await original<typeof import("../../../wms/infrastructure/picking-progress.repository")>()),
   reconcileWmsPickingProgress,
 }));
 
-import { readWmsPickingBlockers } from "../../../wms/picking-progress.repository";
-import { PickingUseCases } from "../../picking.use-cases";
+import { readWmsPickingBlockers } from "../../../wms/infrastructure/picking-progress.repository";
+import { PickingUseCases } from "../../application/picking.use-cases";
 import { releaseClearedPickExceptions } from "../../../oms/oms-flow-reconciliation.service";
 
 // 2026-10-03, #63721: every line was picked, but the unmapped graded card

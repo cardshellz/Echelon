@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { CycleCountUseCases } from "../../../inventory/application/cycle-count.use-cases";
-import { runCycleCountFreezeGuard } from "../../../inventory/cycle-count-freeze-guard.scheduler";
+import { runCycleCountFreezeGuard } from "../../../inventory/application/cycle-count-freeze-guard.scheduler";
 import * as binAssignmentApi from "../../bin-assignment.api";
 import * as cutoverWorkApi from "../../cutover-work.api";
 import * as warehouseIndex from "../../index";

@@ -48,7 +48,7 @@ import type {
 } from "../../channels/ebay-connector.api";
 import { readEbayNativePackage } from "../../channels/ebay-connector.api";
 import { readEbayPublishedContent } from "../../channels/ebay-connector.api";
-import type { CatalogImageInspector } from "../../catalog/catalog-image-inspection";
+import type { CatalogImageInspector } from "../../catalog/domain/catalog-image-inspection";
 import { EbayApiRequestError, isMissingEbayOfferCollection } from "../../channels/ebay-connector.api";
 import { normalizeEbayObservedOffers } from "../../channels/ebay-connector.api";
 import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";

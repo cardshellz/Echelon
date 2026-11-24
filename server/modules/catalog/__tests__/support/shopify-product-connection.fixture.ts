@@ -1,5 +1,5 @@
-import { buildShopifyProductMappingSummary } from "../../shopify-product-mapping.domain";
-import type { ShopifyConnectionRemoteProduct, ShopifyConnectionSource } from "../../shopify-product-connection.domain";
+import { buildShopifyProductMappingSummary } from "../../domain/shopify-product-mapping.domain";
+import type { ShopifyConnectionRemoteProduct, ShopifyConnectionSource } from "../../domain/shopify-product-connection.domain";
 
 export const CONNECTION_COMMAND_KEY = "00000000-0000-4000-8000-000000000041";
 export const CONNECTION_ACTOR = "user:operator-1";

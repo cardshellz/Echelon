@@ -34,7 +34,7 @@
 import "dotenv/config";
 import { sql } from "drizzle-orm";
 import { db } from "../server/db";
-import { recomputeOrderStatusFromShipments } from "../server/modules/orders/shipment-rollup";
+import { recomputeOrderStatusFromShipments } from "../server/modules/orders/application/shipment-rollup";
 import { deriveOmsFromWms } from "../shared/enums/order-status";
 
 interface Args { execute: boolean; limit?: number }

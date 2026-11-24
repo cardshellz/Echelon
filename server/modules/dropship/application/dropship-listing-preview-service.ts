@@ -8,11 +8,11 @@ import type { ResolvedListingContent } from "../../../../shared/dropship/listing
 import type { EbayCategorySource } from "../../../../shared/dropship/ebay-category-rules";
 import { z } from "zod";
 import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
-import type { CatalogImageFile } from "../../catalog/catalog-media.reader";
+import type { CatalogImageFile } from "../../catalog/infrastructure/catalog-media.reader";
 import type {
   CatalogVariantPublicationPhotoReader,
   CatalogVariantPublicationPhotos,
-} from "../../catalog/catalog-publication-images.reader";
+} from "../../catalog/infrastructure/catalog-publication-images.reader";
 import { enrichDropshipListingRows, type DropshipListingPresentationDependencies } from "./dropship-listing-presentation";
 import type {
   DropshipSourcePlatform,

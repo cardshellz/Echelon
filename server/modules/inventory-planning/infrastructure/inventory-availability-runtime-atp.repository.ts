@@ -5,7 +5,7 @@ import type { InventoryAvailabilityTransactionQueryClient } from "../application
 import * as schema from "@shared/schema";
 
 import { pool as defaultPool } from "../../../db";
-import { createLegacyInventoryAtpService } from "../../inventory/atp.service";
+import { createLegacyInventoryAtpService } from "../../inventory/application/atp.service";
 import {
   AuthorityAwareInventoryAtpService,
   InventoryAvailabilityRuntimeAtpError,

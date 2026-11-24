@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { legacyTransformationExecutionAuthority } from "../../application/transformation-execution-authority.port";
 import { ManualInventoryTransferService } from "../../application/manual-inventory-transfer.service";
-import { COGSService } from "../../cogs.service";
+import { COGSService } from "../../application/cogs.service";
 import { InventoryUseCases } from "../../application/inventory.use-cases";
 
 vi.mock("../../infrastructure/operational-quantity-posting", () => ({
@@ -268,7 +268,7 @@ describe("Priority 4 (INV-1): Inventory Control and Costing Safeguards", () => {
   describe("IW-F03: Inventory mutation route permission gates", () => {
     it("gates POST /api/inventory/receive, /api/inventory/locations, and /api/inventory/items with explicit permissions", () => {
       const source = readFileSync(
-        resolve(process.cwd(), "server/modules/inventory/inventory.routes.ts"),
+        resolve(process.cwd(), "server/modules/inventory/interfaces/http/inventory.routes.ts"),
         "utf8",
       );
       expect(source).toContain(

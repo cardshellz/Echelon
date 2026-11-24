@@ -30,10 +30,10 @@ import {
 import {
   channelStockUpdateDeadLetterDestinationCountSql,
   channelStockUpdateDeadLetterDestinationSampleSql,
-} from "../inventory-planning/channel-stock-update-dead-letters";
-import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../dropship/marketplace-sync-health";
-import { stockLinkHealthChecksForProcess } from "../inventory-planning/stock-link-health";
-import { QUANTITY_CATCHUP_HEALTH_CHECKS } from "../inventory-planning/quantity-catchup-health";
+} from "../inventory-planning/channel-stock-update-dead-letters.api";
+import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../dropship/marketplace-sync-health.api";
+import { stockLinkHealthChecksForProcess } from "../inventory-planning/stock-link-health.api";
+import { QUANTITY_CATCHUP_HEALTH_CHECKS } from "../inventory-planning/quantity-catchup-health.api";
 import {
   HELD_LINE_AGING_DAYS,
   allLinesHeldCountQuery,

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createExpectedWmsReturn } from "../../expected-return-commands";
+import { createExpectedWmsReturn } from "../../application/expected-return-commands";
 
 const NOW = new Date("2026-08-11T16:00:00.000Z");
 

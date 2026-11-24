@@ -236,7 +236,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       const [receivingModule, reversalModule, procurementModule, inventoryModule, repositoryModule, lotsModule, dbModule] = await Promise.all([
         import("../../receiving.service"), import("../../receipt-reversal.service"), import("../../procurement.storage"),
         import("../../../inventory/application/inventory.use-cases"), import("../../../inventory/infrastructure/inventory.repository"),
-        import("../../../inventory/lots.service"), import("../../../../db"),
+        import("../../../inventory/application/lots.service"), import("../../../../db"),
       ]);
       Receiving = receivingModule.ReceivingService;
       Reversal = reversalModule.ReceiptReversalService;

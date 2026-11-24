@@ -8,4 +8,4 @@ export { CanonicalClaimInventoryMutationError } from "./infrastructure/canonical
 export type { BuildUseCases } from "./application/build.use-cases";
 export type { BuildOrderCompletedContext } from "./infrastructure/build-execution.repository";
 export { RecipeCapacityError, type RecipeDemandPlan } from "./domain/recipe-capacity.domain";
-export type { RecipeCapacityService } from "./recipe-capacity.service";
+export type { RecipeCapacityService } from "./application/recipe-capacity.service";

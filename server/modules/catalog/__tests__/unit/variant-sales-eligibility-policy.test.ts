@@ -5,7 +5,7 @@ import {
   assertVariantSalesIdentityCompatible,
   coerceVariantSalesEligibilityOnPayload,
   VariantSalesEligibilityError,
-} from "../../variant-sales-eligibility-policy";
+} from "../../domain/variant-sales-eligibility-policy";
 
 const existing = {
   id: 511,

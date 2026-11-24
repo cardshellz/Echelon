@@ -17,7 +17,7 @@ import { InventoryPublicationNotSentError } from "../application/inventory-publi
 import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provider-request-evidence.repository";
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
   type QuantityPublicationScope, type QuantityPublicationDrainProof, type QuantityPublicationRecovery } from "../domain/quantity-publication-admission";
-import { readArchivedListingMember, lockArchivedListingMember, type ArchivedListingMemberSource } from "../../marketplace-listings/listing-member-lifecycle";
+import { readArchivedListingMember, lockArchivedListingMember, type ArchivedListingMemberSource } from "../../marketplace-listings/listing-member-lifecycle.api";
 
 // Separate namespace from authority, inventory-admission, and target/variant locks.
 export const QUANTITY_PUBLICATION_LOCK_NAMESPACE = 918419;

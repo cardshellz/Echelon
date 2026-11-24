@@ -23,7 +23,7 @@ import * as schema from "@shared/schema";
 import { EbayAuthService, createEbayAuthConfig } from "../adapters/ebay/ebay-auth.service";
 import { ensureEbayListingInventoryReady } from "./ebay-listing-inventory-readiness";
 import { linkEbayListingStockBeforeChange } from "./ebay-listing-stock-link-hook";
-import { linkChannelEbayStock, readEbayStockLinkGaps } from "../../inventory-planning/quantity-publication";
+import { linkChannelEbayStock, readEbayStockLinkGaps } from "../../inventory-planning/quantity-publication.api";
 import { EbayListingChangeIntentRepository } from "./ebay-listing-change-intent.repository";
 
 /** The actor of a stock link made by a reviewed listing update or rebuild (its receipt and audit row). */

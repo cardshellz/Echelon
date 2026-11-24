@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
 vi.mock("../../../warehouse/settings.api", () => ({ getSettingsForWarehouse: vi.fn() }));
-import { OperationsDashboardService } from "../../operations-dashboard.service";
+import { OperationsDashboardService } from "../../application/operations-dashboard.service";
 
 const canonicalEvidence = () => ({ transactionId: 1, transactionType: "ship", variantQtyDelta: 0,
   reservedQtyDelta: 0, referenceType: "availability_claim_dispatch", sourceState: "picked", targetState: "shipped",

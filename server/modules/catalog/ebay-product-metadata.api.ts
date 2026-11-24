@@ -6,4 +6,4 @@ export {
   setCatalogVariantEbayListingExcludedInTx,
   updateCatalogProductEbayBrowseCategory,
   updateCatalogProductType,
-} from "./ebay-product-metadata.command";
+} from "./application/ebay-product-metadata.command";

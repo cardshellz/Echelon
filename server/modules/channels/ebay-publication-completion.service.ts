@@ -1,6 +1,6 @@
 import type { EbayProductSyncResult } from "@shared/types/ebay-listing-sync";
 import type { EbayListingInspection } from "../marketplace-listings/domain/ebay-listing-inspection";
-import type { EbayAutomaticPublicationRecoveryService } from "../inventory-planning/quantity-publication";
+import type { EbayAutomaticPublicationRecoveryService } from "../inventory-planning/quantity-publication.api";
 import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listing-identity";
 import { EbayListingSyncError, syncStageHash, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
 import { completedEbayListingSyncResult, EbayExistingListingSyncExecution, type EbayListingSyncExecution, type PreparedEbayListingSync } from "./ebay-listing-sync.service";

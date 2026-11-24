@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planProductAssetScopeChange } from "../../product-asset-scope.domain";
+import { planProductAssetScopeChange } from "../../domain/product-asset-scope.domain";
 
 describe("catalog photo assignment decisions", () => {
   it.each([[10, null], [null, 10], [10, 11]] as const)("changes scope %s to %s", (before, after) => {

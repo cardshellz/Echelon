@@ -40,7 +40,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {
   hasUnfinishedRecoveryWork = fixture.unfinished;
 } }));
-vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { hasOutstanding: fixture.outstanding },
+vi.mock("../../../inventory-planning/application/quantity-publication", () => ({ quantityProviderResponseRecovery: { hasOutstanding: fixture.outstanding },
   automaticEbayPublicationRecovery: {}, ebayPublicationReconciliationRepository: {},
   ebayPublicationRejectionReader: { read: vi.fn() },
   EbayPublicationContentRefreshRejectedError: class extends Error {

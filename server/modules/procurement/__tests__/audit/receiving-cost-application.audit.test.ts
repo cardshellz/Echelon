@@ -42,7 +42,7 @@ audit.sequential("AUDIT ONLY: current receipt/AP/freight cost defects with real 
   let purchasing: ReturnType<typeof import("../../purchasing.service").createPurchasingService>;
   let shipment: ReturnType<typeof import("../../shipment-tracking.service").createShipmentTrackingService>;
   let createShipment: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
-  let cogs: import("../../../inventory/cogs.service").COGSService;
+  let cogs: import("../../../inventory/application/cogs.service").COGSService;
   let reconcile: typeof import("../../ap-ledger.service").reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
 
   beforeAll(async () => {
@@ -85,9 +85,9 @@ audit.sequential("AUDIT ONLY: current receipt/AP/freight cost defects with real 
       const [receivingModule, purchasingModule, shipmentModule, procurementModule, catalogModule,
         inventoryModule, repositoryModule, lotModule, cogsModule, apModule, dbModule] = await Promise.all([
         import("../../receiving.service"), import("../../purchasing.service"), import("../../shipment-tracking.service"),
-        import("../../procurement.storage"), import("../../../catalog/catalog.storage"),
+        import("../../procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
         import("../../../inventory/application/inventory.use-cases"), import("../../../inventory/infrastructure/inventory.repository"),
-        import("../../../inventory/lots.service"), import("../../../inventory/cogs.service"),
+        import("../../../inventory/application/lots.service"), import("../../../inventory/application/cogs.service"),
         import("../../ap-ledger.service"), import("../../../../db"),
       ]);
       defaultModulePool = dbModule.pool;

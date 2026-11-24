@@ -89,7 +89,7 @@ describe("D-NOENGINE: migration adds engine columns", () => {
 
 describe("D-NOENGINE: pushShipment writes engine columns", () => {
   const ssSrc = readShipStationSrc();
-  const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
+  const wmsShipmentsRepoSrc = readSrc("server/modules/wms/infrastructure/outbound-shipments-mutations.repository.ts");
 
   it("writes shipping_engine in the same UPDATE as shipstation_order_id", () => {
     const start = ssSrc.indexOf("Mark shipment queued + persist engine refs");
@@ -112,7 +112,7 @@ describe("D-NOENGINE: pushShipment writes engine columns", () => {
 
 describe("D-NOENGINE: split/combined shipment creation includes engine columns", () => {
   const ssSrc = readShipStationSrc();
-  const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
+  const wmsShipmentsRepoSrc = readSrc("server/modules/wms/infrastructure/outbound-shipments-mutations.repository.ts");
 
   it("split shipment INSERT includes engine triple", () => {
     const insertStart = ssSrc.indexOf("ensureSplitShipmentFromShipStation");
@@ -146,13 +146,13 @@ describe("D-NOENGINE: split/combined shipment creation includes engine columns",
 
 describe("D-NOENGINE: reconciler cancel/markShipped uses engine", () => {
   const indexSrc = readSrc("server/index.ts");
-  const omsWmsReconcileSrc = readSrc("server/modules/orders/oms-wms-cancel-reconcile.scheduler.ts");
-  const oneShotRepairsSrc = readSrc("server/modules/orders/one-shot-repairs.ts");
+  const omsWmsReconcileSrc = readSrc("server/modules/orders/application/oms-wms-cancel-reconcile.scheduler.ts");
+  const oneShotRepairsSrc = readSrc("server/modules/orders/application/one-shot-repairs.ts");
   const wmsShipStationReconcileSrc = readSrc("server/modules/shipping/wms-shipstation-reconcile.scheduler.ts");
 
   it("imports engineRefFromRow from shipping module in extracted reconcilers", () => {
     expect(omsWmsReconcileSrc).toContain("engineRefFromRow");
-    expect(omsWmsReconcileSrc).toContain('from "../shipping/engine-and-reconcile.api"');
+    expect(omsWmsReconcileSrc).toContain('from "../../shipping/engine-and-reconcile.api"');
     expect(wmsShipStationReconcileSrc).toContain('import { engineRefFromRow } from "./adapters/shipstation.adapter"');
   });
 
@@ -321,7 +321,7 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
     // An engine-side cancel of a LIVE order is flagged for review, never applied.
     expect(v2Block).toContain('event.kind === "review"');
     expect(v2Block).toContain("flagOutboundShipmentReconcileReviewIfUnsetInWms(");
-    const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
+    const wmsShipmentsRepoSrc = readSrc("server/modules/wms/infrastructure/outbound-shipments-mutations.repository.ts");
     expect(wmsShipmentsRepoSrc).toContain("requires_review = true");
     expect(v2Block).toContain("engine_cancel_flagged_for_review");
   });

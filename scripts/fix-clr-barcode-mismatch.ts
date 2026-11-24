@@ -1,6 +1,6 @@
 import { Pool, type PoolClient } from "pg";
 
-import { repairOpenWmsOrderItemBarcode } from "../server/modules/wms/order-item-maintenance-commands";
+import { repairOpenWmsOrderItemBarcode } from "../server/modules/wms/application/order-item-maintenance-commands";
 
 const PACK_SKU = "SHLZ-TOP-55PT-CLR-P25";
 const PACK_BARCODE = "13359263";

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CanonicalClaimPickerObservationReviewError,
   PostgresCanonicalClaimPickerObservationReviewRepository,
-} from "../../canonical-claim-picker-observation-review.repository";
+} from "../../infrastructure/canonical-claim-picker-observation-review.repository";
 
 const OCCURRED_AT = new Date("2026-09-03T11:00:00.000Z");
 

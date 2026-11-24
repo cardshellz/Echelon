@@ -26,7 +26,7 @@ function buildDb(capture: { inserted: any }) {
 describe("InventoryLotService.createLot — cost-layer population", () => {
   it("writes total_unit_cost_cents = unitCostCents, plus po_line_id and cost_source for a PO receipt", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const capture: { inserted: any } = { inserted: null };
     const svc = new InventoryLotService(buildDb(capture));
 
@@ -54,7 +54,7 @@ describe("InventoryLotService.createLot — cost-layer population", () => {
 
   it("defaults cost_source to 'manual' and po_line_id to null for a non-PO lot, but still sets total", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const capture: { inserted: any } = { inserted: null };
     const svc = new InventoryLotService(buildDb(capture));
 
@@ -73,7 +73,7 @@ describe("InventoryLotService.createLot — cost-layer population", () => {
 
   it("stores mills as the cost source of truth; po is the remainder (no double-count)", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const capture: { inserted: any } = { inserted: null };
     const svc = new InventoryLotService(buildDb(capture));
 

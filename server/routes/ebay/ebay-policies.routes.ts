@@ -26,7 +26,7 @@ import {
 } from "./ebay-listing-connector-client";
 import { ebayListingExclusionService } from "../../modules/channels/ebay-listing-exclusion";
 import { registerEbayListingExclusionRoutes } from "./ebay-listing-exclusion.routes";
-import { createSharedProductPhotoImporter } from "../../modules/catalog/shared-product-photos.service";
+import { createSharedProductPhotoImporter } from "../../modules/catalog/application/shared-product-photos.service";
 import { ebayOriginalPhotoUrl } from "../../modules/channels/adapters/ebay/ebay-photo-requirements";
 
 export const router = express.Router();

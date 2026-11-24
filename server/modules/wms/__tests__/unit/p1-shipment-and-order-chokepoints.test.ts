@@ -7,13 +7,13 @@ import {
   isShipmentTransitionAllowed,
   isTerminalShipmentStatus,
   transitionShipmentStatus,
-} from "../../shipment-status-core";
+} from "../../domain/shipment-status-core";
 import {
   WMS_WAREHOUSE_STATUS_TRANSITION_MATRIX,
   allowedWmsOrderFromStatuses,
   isTerminalWmsOrderStatus,
   isWmsOrderTransitionAllowed,
-} from "../../wms-order-status-core";
+} from "../../domain/wms-order-status-core";
 import {
   assignWmsOrderToWarehouseInWms,
   releaseLockedPickingAssignmentInWms,
@@ -21,7 +21,7 @@ import {
   updateActiveWmsOrderFieldsReturningInWms,
   updateWmsOrderByIdInWms,
   updateWmsOrderByIdReturningInWms,
-} from "../../wms-order-mutations.repository";
+} from "../../infrastructure/wms-order-mutations.repository";
 
 const WMS_ROOT = path.resolve(__dirname, "../..");
 
@@ -257,7 +257,7 @@ describe("P1.1 & P1.3: WMS Shipment & Order Status State-Machine Chokepoints", (
 
     it("eliminates the phantom wms.orders.status column write in wms-order-mutations.repository.ts", () => {
       const src = fs.readFileSync(
-        path.join(WMS_ROOT, "wms-order-mutations.repository.ts"),
+        path.join(WMS_ROOT, "infrastructure/wms-order-mutations.repository.ts"),
         "utf8",
       );
       expect(src).not.toMatch(/UPDATE\s+wms\.orders\b[\s\S]{0,120}?\bSET\s+status\s*=/);

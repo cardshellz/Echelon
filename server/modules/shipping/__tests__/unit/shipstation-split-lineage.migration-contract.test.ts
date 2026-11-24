@@ -26,7 +26,7 @@ const shipStationService = [
     : []),
 ].join("\n");
 const wmsShipmentItemsRepo = readFileSync(
-  resolve(process.cwd(), "server/modules/wms/outbound-shipment-items-mutations.repository.ts"),
+  resolve(process.cwd(), "server/modules/wms/infrastructure/outbound-shipment-items-mutations.repository.ts"),
   "utf8",
 );
 const integrationSetup = readFileSync(

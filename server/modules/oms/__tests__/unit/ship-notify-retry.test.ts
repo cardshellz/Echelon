@@ -53,11 +53,11 @@ vi.mock("../../../../db", () => ({
   },
 }));
 
-vi.mock("../../../wms/create-shipment", () => ({
+vi.mock("../../../wms/application/create-shipment", () => ({
   createShipmentForOrder: createShipmentForOrderMock,
 }));
 
-vi.mock("../../../wms/late-order-shipment-coverage", () => ({
+vi.mock("../../../wms/domain/late-order-shipment-coverage", () => ({
   movePendingShipmentItemsToLateEditResidual:
     movePendingShipmentItemsMock,
   createLateEditResidualShipment: createLateEditResidualShipmentMock,

@@ -51,8 +51,8 @@ async function reconcileOneShipment(
     oms_order_status?: string;
   },
   ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string },
-  dispatchShipmentEvent: typeof import("../../../orders/shipment-rollup").dispatchShipmentEvent,
-  recomputeOrderStatusFromShipments: typeof import("../../../orders/shipment-rollup").recomputeOrderStatusFromShipments,
+  dispatchShipmentEvent: typeof import("../../../orders/application/shipment-rollup").dispatchShipmentEvent,
+  recomputeOrderStatusFromShipments: typeof import("../../../orders/application/shipment-rollup").recomputeOrderStatusFromShipments,
 ) {
   const shipmentId = row.shipment_id;
 

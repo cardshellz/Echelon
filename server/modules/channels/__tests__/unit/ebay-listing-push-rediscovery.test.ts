@@ -22,7 +22,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
 }));
 // This suite exercises provider identity rediscovery. Real inventory admission
 // and enrollment are covered in the disposable PostgreSQL composition suite.
-vi.mock("../../../inventory-planning/quantity-publication", async () => ({ ensureEbayPublicationReady: state.ensureStock,
+vi.mock("../../../inventory-planning/application/quantity-publication", async () => ({ ensureEbayPublicationReady: state.ensureStock,
   InventoryPublicationMembershipError: (await import("../../../inventory-planning/application/inventory-publication-membership.service")).InventoryPublicationMembershipError,
   InventoryPublicationSelectionError: (await import("../../../inventory-planning/infrastructure/inventory-publication-selection.reader")).InventoryPublicationSelectionError,
 }));

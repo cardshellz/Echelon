@@ -6,7 +6,7 @@ import {
   readDropshipEbayStockAuthority,
   type DropshipEbayStockReadinessInput,
   type DropshipEbayStockReadinessResult,
-} from "../../inventory-planning/quantity-publication";
+} from "../../inventory-planning/quantity-publication.api";
 import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/domain/listing-registration-plan";
 import { DropshipError } from "../domain/errors";
 import {

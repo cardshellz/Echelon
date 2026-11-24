@@ -14,8 +14,8 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../../db", () => ({ db: { execute: harness.execute } }));
-vi.mock("../../../orders/sort-rank", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../orders/sort-rank")>()),
+vi.mock("../../../orders/domain/sort-rank", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../orders/domain/sort-rank")>()),
   // priority.shipping_base.standard in production.
   getShippingBase: async () => 100,
 }));

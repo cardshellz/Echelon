@@ -6,7 +6,7 @@ import type { InventoryCutoverPreflight } from "@shared/types/inventory-cutover-
 import { registerInventoryCutoverPreflightRoutes } from "../../interfaces/http/inventory-cutover-preflight.routes";
 import { InventoryCutoverPreflightError, InventoryCutoverPreflightService } from "../../application/inventory-cutover-preflight.service";
 import type { InventoryCutoverPreflightFacts } from "../../domain/inventory-cutover-preflight";
-import { WmsCutoverDemandCaptureError } from "../../../wms/inventory-cutover-demand-reader";
+import { WmsCutoverDemandCaptureError } from "../../../wms/infrastructure/inventory-cutover-demand-reader";
 import { InventoryCutoverEncumbranceCaptureError } from "../../../inventory/infrastructure/inventory-cutover-encumbrance.repository";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));

@@ -2,7 +2,7 @@ import { EbayBusinessPolicyError, ebayPolicySourceSchema } from "@shared/ebay-bu
 import { z } from 'zod';
 import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
 import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
-import { publicationSelectionBusyIssue } from '../../modules/inventory-planning/publication-selection-work';
+import { publicationSelectionBusyIssue } from '../../modules/inventory-planning/publication-selection-work.api';
 
 export function listingFailure(error: unknown, productId?: number, jobId?: string) {
   const busy = publicationSelectionBusyIssue(error);

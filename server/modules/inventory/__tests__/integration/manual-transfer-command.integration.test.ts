@@ -17,7 +17,7 @@ import { installWarehouseOperationMigration } from "../../../orders/__tests__/fi
 import { InventoryUseCases } from "../../application/inventory.use-cases";
 import { ManualInventoryTransferService } from "../../application/manual-inventory-transfer.service";
 import { createInventoryMethods } from "../../infrastructure/inventory.repository";
-import { createInventoryLotService } from "../../lots.service";
+import { createInventoryLotService } from "../../application/lots.service";
 import { creditTransferToReplenishment } from "../../infrastructure/replenishment-transfer-credit.repository";
 import { InventoryQuantityError } from "../../domain/quantity-ledger";
 import { AppError } from "@shared/errors";

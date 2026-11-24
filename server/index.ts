@@ -14,7 +14,7 @@ import { registerListingIntentPropagationRoutes } from "./modules/marketplace-li
 import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
-import { startShopifyProductConnectionWorker } from "./modules/catalog/shopify-product-connection.worker";
+import { startShopifyProductConnectionWorker } from "./modules/catalog/application/shopify-product-connection.worker";
 import { createDefaultShopifyProductConnectionService } from "./services/shopify-product-connection";
 import {
   createOrderEditService,
@@ -87,7 +87,7 @@ import {
   startDropshipUsdcWatcherWorker,
 } from "./modules/dropship/runtime-workers.api";
 import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-order-authority.api";
-import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
+import { startCycleCountFreezeGuard } from "./modules/inventory/application/cycle-count-freeze-guard.scheduler";
 import {
   startOmsFlowReconciliationScheduler,
   startOmsOpsAlertScheduler,

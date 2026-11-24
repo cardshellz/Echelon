@@ -6,7 +6,7 @@ vi.mock("../../../../db", () => ({ db: ports }));
 vi.mock("../../../oms/shopify-bridge", () => ({ bridgeShopifyOrderToOms: ports.bridge }));
 vi.mock("../../../oms/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
 vi.mock("../../../oms/infrastructure/channel-authority-gap.repository", () => ({ recordChannelAuthorityGap: ports.gap }));
-import { initReconciliation, runReconciliationNow } from "../../shopify-order-reconciliation";
+import { initReconciliation, runReconciliationNow } from "../../application/shopify-order-reconciliation";
 
 const dialect = new PgDialect();
 const queries = () => ports.execute.mock.calls.map(([query]) => dialect.sqlToQuery(query));

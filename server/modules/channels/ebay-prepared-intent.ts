@@ -6,7 +6,7 @@ import { EbayListingSyncError } from "./ebay-listing-sync.domain";
 import { EBAY_LISTING_MAX_PHOTOS } from "./ebay-listing-photos.domain";
 import { ebayPreparedContentHash } from "./ebay-listing-sync-content";
 import { prepareChannelIntent, assertPreparedChannelIntent, preparedChannelIntentHash,
-  type ChannelIntentAccount, type ChannelPreparedIntent } from "../marketplace-listings/prepared-channel-intent";
+  type ChannelIntentAccount, type ChannelPreparedIntent } from "../marketplace-listings/prepared-channel-intent.api";
 
 export const EBAY_PREPARED_INTENT_CAPABILITY = "ebay-inventory-resource-steps-v1";
 type Draft = Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup">;

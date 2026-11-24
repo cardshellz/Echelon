@@ -23,7 +23,7 @@ vi.mock("../../../../routes/middleware", () => {
   const pass = (_req: Request, _res: Response, next: NextFunction) => next();
   return { requirePermission: () => pass, requireAuth: pass, requireAssignedSystemRole: () => pass, upload: { single: () => pass } };
 });
-import { registerInventoryRoutes } from "../../inventory.routes";
+import { registerInventoryRoutes } from "../../interfaces/http/inventory.routes";
 
 describe("CSV counts cannot recognize pending receiving custody", () => {
   let server: Server;

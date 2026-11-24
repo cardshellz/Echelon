@@ -62,7 +62,7 @@ vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () =>
   ) }) };
 });
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {} }));
-vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { reconcile: fixture.recovery },
+vi.mock("../../../inventory-planning/application/quantity-publication", () => ({ quantityProviderResponseRecovery: { reconcile: fixture.recovery },
   automaticEbayPublicationRecovery: { recover: fixture.automaticRecovery }, ebayPublicationReconciliationRepository: {},
   ebayPublicationRejectionReader: { read: vi.fn() },
   EbayPublicationContentRefreshRejectedError: class extends Error {

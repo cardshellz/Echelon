@@ -21,8 +21,8 @@ import { quantityPublicationScopeLockKey, PostgresQuantityPublicationAdmission }
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../../inventory-planning/infrastructure/inventory-publication-target-stop.repository";
 import { PostgresInventoryPublicationOutboxRepository } from "../../../inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { InventoryPublicationOutboxService } from "../../../inventory-planning/application/inventory-publication-outbox.service";
-import { createDropshipEbayQuantityRequestAdmission, readDropshipEbayStockDestination } from "../../../inventory-planning/quantity-publication";
-import { dropshipEbayStockCommandKey } from "../../../inventory-planning/quantity-publication";
+import { createDropshipEbayQuantityRequestAdmission, readDropshipEbayStockDestination } from "../../../inventory-planning/application/quantity-publication";
+import { dropshipEbayStockCommandKey } from "../../../inventory-planning/application/quantity-publication";
 import { EbayDropshipListingPushProvider } from "../../infrastructure/dropship-ebay-listing-push.provider";
 import { createDropshipEbayStockReadinessGate, type DropshipStockLinkLogger } from "../../infrastructure/dropship-ebay-stock-readiness.gate";
 import { PgDropshipListingPushWorkerRepository } from "../../infrastructure/dropship-listing-push-worker.repository";

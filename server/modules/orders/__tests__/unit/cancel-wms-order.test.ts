@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { cancelWmsOrderAndRelease } from "../../cancel-wms-order";
+import { cancelWmsOrderAndRelease } from "../../application/cancel-wms-order";
 
 /**
  * P0.1c — the single WMS-order cancel entrypoint.

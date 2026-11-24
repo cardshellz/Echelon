@@ -2,7 +2,7 @@ import { EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies"
 import { eq } from "drizzle-orm";
 import { EbayApiRequestError } from "../adapters/ebay/ebay-api-error";
 import { ChannelEbayListingPhotoResolver } from "../ebay-listing-photos.service";
-import { createCatalogPublicImageUrl } from "../../catalog/catalog-public-image";
+import { createCatalogPublicImageUrl } from "../../catalog/domain/catalog-public-image";
 import https from "https";
 import {
   createProviderRequestDeadline,

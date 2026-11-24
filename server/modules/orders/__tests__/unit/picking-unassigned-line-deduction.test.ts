@@ -11,7 +11,7 @@
  *   3. Zero stock anywhere keeps the original wording.
  */
 import { describe, expect, it, vi } from "vitest";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 
 type Level = { warehouseLocationId: number; variantQty: number };
 

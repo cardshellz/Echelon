@@ -8,7 +8,7 @@ import { PostgresCustomerReturnIntakeStore } from "../../infrastructure/customer
 import { PostgresCustomerReturnAuthorizationStore } from "../../infrastructure/customer-return-authorization.repository";
 import { PostgresCustomerReturnLocalInspectionReader } from "../../infrastructure/customer-return-local-inspection.reader";
 import { __test__ as refundCascadeTest } from "../../../oms/shopify-refund-cascade.service";
-import { createReturnsService } from "../../../orders/returns.service";
+import { createReturnsService } from "../../../orders/application/returns.service";
 import { resolveReturnsTestDatabase } from "../support/disposable-database";
 import {
   createIntakeTestSchema,

@@ -19,7 +19,7 @@ const WMS_SYNC_SRC = readFileSync(
 );
 const CREATE_SHIPMENT_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../../wms/create-shipment.ts", import.meta.url),
+    new URL("../../../wms/application/create-shipment.ts", import.meta.url),
   ),
   "utf8",
 );
@@ -40,7 +40,7 @@ const INVENTORY_SRC = readFileSync(
 );
 const ORDERS_STORAGE_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../../orders/orders.storage.ts", import.meta.url),
+    new URL("../../../orders/infrastructure/orders.storage.ts", import.meta.url),
   ),
   "utf8",
 );
@@ -144,7 +144,7 @@ describe("C2 Phase 2: tx-aware pipeline structural checks", () => {
 
 // ─── Behavioral: createShipmentForOrder useXactLock ─────────────────
 
-import { createShipmentForOrder } from "../../../wms/create-shipment";
+import { createShipmentForOrder } from "../../../wms/application/create-shipment";
 
 function isAdvisoryLockQuery(query: any): boolean {
   try {

@@ -1,5 +1,5 @@
 import type { Response } from "express";
-import { publicationSelectionBusyIssue } from "../modules/inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../modules/inventory-planning/publication-selection-work.api";
 
 export function sendShopifyProductSyncFailure(response: Response, error: unknown): void {
   const busy = publicationSelectionBusyIssue(error);

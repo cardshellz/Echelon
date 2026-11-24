@@ -134,7 +134,7 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
     delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [tracking, storageModule, catalogModule, commandModule, repository, dbModule] = await Promise.all([
-        import("../../shipment-tracking.service"), import("../../procurement.storage"), import("../../../catalog/catalog.storage"),
+        import("../../shipment-tracking.service"), import("../../procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
         import("../../shipment-create.commands"), import("../../../../platform/commands/command-results.repository"), import("../../../../db"),
       ]);
       commands = commandModule;

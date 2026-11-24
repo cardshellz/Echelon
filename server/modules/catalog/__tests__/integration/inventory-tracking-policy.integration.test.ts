@@ -7,15 +7,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import * as schema from "@shared/schema";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { inventoryTrackingPolicyBaseFixture } from "../fixtures/inventory-tracking-policy.fixture";
-import { PickingUseCases } from "../../../orders/picking.use-cases";
-import { createShopifyProductMappingService } from "../../shopify-product-mapping.service";
+import { PickingUseCases } from "../../../orders/application/picking.use-cases";
+import { createShopifyProductMappingService } from "../../application/shopify-product-mapping.service";
 import { createReservationService } from "../../../channels/reservation.service";
 import { createCatalogBackfillService, type BackfillResult } from "../../../channels/catalog-backfill.service";
 import { removeChannelProductIdentities, upsertChannelProductIdentity } from "../../../channels/channel-product-identity.repository";
 import { PostgresInventoryAvailabilityClaimRepository } from "../../../inventory-planning/infrastructure/inventory-availability-claim.repository";
-import { productMethods } from "../../catalog.storage";
-import { updateProductInventoryTracking } from "../../inventory-tracking-policy.repository";
-import { createBulkInventoryTrackingService } from "../../bulk-inventory-tracking.service";
+import { productMethods } from "../../infrastructure/catalog.storage";
+import { updateProductInventoryTracking } from "../../infrastructure/inventory-tracking-policy.repository";
+import { createBulkInventoryTrackingService } from "../../application/bulk-inventory-tracking.service";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { resolveOrderLineCatalogIdentity } from "../../../oms/order-line-catalog-identity.service";
 import { createOmsService } from "../../../oms/oms.service";
@@ -25,7 +25,7 @@ import { decideChannelFulfillmentInventoryPosting } from "../../../oms/domain/ch
 
 import { listTrackingStopHistory, exportTrackingStopHistory } from "../../../inventory/infrastructure/tracking-stop.repository";
 
-import { COGSService } from "../../../inventory/cogs.service";
+import { COGSService } from "../../../inventory/application/cogs.service";
 import { installWarehouseOperationMigration } from "../../../orders/__tests__/fixtures/install-warehouse-operation-migration";
 import { orderEditProjectionQueryFixtureSql } from "../../../order-edits/__tests__/fixtures/order-edit-projection.fixture";
 

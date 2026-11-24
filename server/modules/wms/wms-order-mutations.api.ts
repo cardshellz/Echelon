@@ -5,7 +5,7 @@ export {
   insertWmsAllocationExceptionReturningInWms,
   supersedePriorBlockingAllocationExceptionsInWms,
   updateDuplicateBlockingAllocationExceptionInWms,
-} from "./allocation-exceptions-mutations.repository";
+} from "./infrastructure/allocation-exceptions-mutations.repository";
 export {
   applyWmsOrderShippingRollupStatusInWms,
   assignWmsOrderToWarehouseInWms,
@@ -31,11 +31,11 @@ export {
   updateWmsOrderSlaAndPromotionInWms,
   updateWmsOrdersWarehouseStatusByCombinedGroupInWms,
   type NonStatusWmsOrderUpdates,
-} from "./wms-order-mutations.repository";
+} from "./infrastructure/wms-order-mutations.repository";
 export {
   TERMINAL_WMS_WAREHOUSE_STATUSES,
   WMS_WAREHOUSE_STATUS_TRANSITION_MATRIX,
   allowedWmsOrderFromStatuses,
   isTerminalWmsOrderStatus,
   isWmsOrderTransitionAllowed,
-} from "./wms-order-status-core";
+} from "./domain/wms-order-status-core";

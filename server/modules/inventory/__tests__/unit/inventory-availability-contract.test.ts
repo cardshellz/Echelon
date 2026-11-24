@@ -3,12 +3,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const RUNTIME_SOURCES = [
-  "../../lots.service.ts",
-  "../../cogs.service.ts",
-  "../../atp.service.ts",
+  "../../application/lots.service.ts",
+  "../../application/cogs.service.ts",
+  "../../application/atp.service.ts",
   "../../domain/inventory.domain.ts",
   "../../infrastructure/inventory.repository.ts",
-  "../../inventory.routes.ts",
+  "../../interfaces/http/inventory.routes.ts",
   "../../../dropship/infrastructure/dropship-order-acceptance.repository.ts",
 ];
 

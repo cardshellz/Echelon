@@ -51,7 +51,7 @@ import {
   INVENTORY_LEGACY_ADMIN_CONTROLS,
   sendInventoryLegacyAdminControlError,
 } from "../inventory-planning/legacy-admin-control.api";
-import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work.api";
 import {
   deleteChannelAllocationRuleInTx,
   deleteChannelWarehouseAssignmentInTx,
@@ -1277,7 +1277,7 @@ export function registerChannelRoutes(app: Express) {
       if (!res.headersSent) res.status(500).json({ error: error?.message || "Failed to push images" });
     }
   });
-  
+
 
   // Get channel sync status for a product
   app.get("/api/products/:productId/channel-status", requirePermission("channels", "view"), async (req, res) => {

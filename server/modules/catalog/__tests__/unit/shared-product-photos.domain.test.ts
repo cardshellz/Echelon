@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planSharedPhotoAdditions } from "../../shared-product-photos.domain";
+import { planSharedPhotoAdditions } from "../../domain/shared-product-photos.domain";
 describe("shared imported photo planning", () => {
   it("retains existing photos, deduplicates source URLs and does not mutate input", () => {
     const existing = Object.freeze([Object.freeze({ id: 1, url: "https://cdn.example.com/current.jpg", position: 9 })]);

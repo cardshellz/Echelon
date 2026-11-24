@@ -6,8 +6,8 @@ import { orders, orderItems, combinedOrderGroups, warehouseSettings } from "@sha
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { validatePostgresTestEnvironment } from "../../../../../scripts/ci/postgres-tests";
 
-vi.mock("../../shipment-rollup", () => ({ recomputeOrderStatusFromShipments: vi.fn() }));
-import { createOrderCombiningService } from "../../combining.service";
+vi.mock("../../application/shipment-rollup", () => ({ recomputeOrderStatusFromShipments: vi.fn() }));
+import { createOrderCombiningService } from "../../application/combining.service";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

@@ -39,7 +39,7 @@ import { ebayInventoryOffersPath, publishEbayInventoryQuantity, readEbayInventor
 import { AutomaticSyncEbayProvider, automaticSyncOldPhotos, automaticSyncPhotos } from "../fixtures/ebay-automatic-sync-provider.fixture";
 import { PostgresEbayLegacyMaintenanceEvidenceReader } from "../../infrastructure/ebay-legacy-maintenance-evidence";
 import { ChannelRecoverySyncService } from "../../../marketplace-listings/application/channel-recovery-sync.service";
-import { releaseListingWorkPermit, tryAcquireListingWorkPermit, withListingWorkPermit } from "../../../marketplace-listings/listing-work-permits";
+import { releaseListingWorkPermit, tryAcquireListingWorkPermit, withListingWorkPermit } from "../../../marketplace-listings/listing-work-permits.api";
 import { proveEbayStockOnlyEffects } from "../../adapters/ebay/ebay-recovery-effects";
 import { ebayListingPublicationScopes } from "../../ebay-listing-request-recovery";
 import type { RetainedPublicationEffectEvidence } from "../../../inventory-planning/application/ebay-publication-reconciliation.service";

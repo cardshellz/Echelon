@@ -14,7 +14,7 @@ import { interpretInventoryShipmentQuantity, type InventoryShipmentQuantityEvide
 import { shipmentQuantityEvidenceProjection } from "./shipment-quantity-evidence.sql";
 import { openOperationalQuantityPosting } from "./operational-quantity-posting";
 import { lockInventoryCostGraph } from "./cost-evidence.repository";
-import { InventoryLotService } from "../lots.service";
+import { InventoryLotService } from "../application/lots.service";
 import {
   updateChannelFeedByIdInChannels,
   insertChannelFeedInChannels,
@@ -142,14 +142,14 @@ export function createInventoryMethods(
   async lockInventoryLevel(warehouseLocationId: number, productVariantId: number, tx: any): Promise<InventoryLevel | undefined> {
     if (!tx) throw new Error("Transaction is required for lockInventoryLevel");
     const result = await tx.execute(sql`
-      SELECT * FROM inventory.inventory_levels 
-      WHERE warehouse_location_id = ${warehouseLocationId} 
-        AND product_variant_id = ${productVariantId} 
+      SELECT * FROM inventory.inventory_levels
+      WHERE warehouse_location_id = ${warehouseLocationId}
+        AND product_variant_id = ${productVariantId}
       FOR UPDATE LIMIT 1
     `);
-    
+
     if (!result.rows || result.rows.length === 0) return undefined;
-    
+
     const row = result.rows[0];
     return {
       id: row.id,
@@ -176,9 +176,9 @@ export function createInventoryMethods(
 
     // Atomic FOR UPDATE inside transaction if tx is passed
     const existingResult = await tx.execute(sql`
-      SELECT id FROM inventory.inventory_levels 
-      WHERE warehouse_location_id = ${level.warehouseLocationId} 
-        AND product_variant_id = ${level.productVariantId} 
+      SELECT id FROM inventory.inventory_levels
+      WHERE warehouse_location_id = ${level.warehouseLocationId}
+        AND product_variant_id = ${level.productVariantId}
       FOR UPDATE LIMIT 1
     `);
 
@@ -526,7 +526,7 @@ export function createInventoryMethods(
     canUndo: boolean;
   }[]> {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    
+
     const results = await db
       .select({
         id: inventoryTransactions.id,
@@ -553,7 +553,7 @@ export function createInventoryMethods(
       const variant = row.productVariantId
         ? await db.select().from(productVariants).where(eq(productVariants.id, row.productVariantId)).limit(1)
         : [];
-      
+
       const reverseExists = await db
         .select()
         .from(inventoryTransactions)
@@ -562,7 +562,7 @@ export function createInventoryMethods(
           eq(inventoryTransactions.notes, `Undo of transfer ${row.id}`)
         ))
         .limit(1);
-      
+
       return {
         id: row.id,
         fromLocation: fromLoc[0]?.code || "Unknown",
@@ -575,7 +575,7 @@ export function createInventoryMethods(
         canUndo: row.createdAt > fiveMinutesAgo && reverseExists.length === 0
       };
     }));
-    
+
     return enriched;
   },
 
@@ -589,16 +589,16 @@ export function createInventoryMethods(
       .from(inventoryTransactions)
       .where(eq(inventoryTransactions.id, transactionId))
       .limit(1);
-    
+
     if (!original.length) {
       throw new Error("Transaction not found");
     }
-    
+
     const txn = original[0];
     if (txn.transactionType !== "transfer") {
       throw new Error("Can only undo transfer transactions");
     }
-    
+
     const alreadyUndone = await tx
       .select()
       .from(inventoryTransactions)
@@ -607,11 +607,11 @@ export function createInventoryMethods(
         eq(inventoryTransactions.notes, `Undo of transfer ${transactionId}`)
       ))
       .limit(1);
-    
+
     if (alreadyUndone.length) {
       throw new Error("This transfer has already been undone");
     }
-    
+
     return await this.executeTransfer({
       commandKey: `undo_transfer:${transactionId}`,
       fromLocationId: txn.toLocationId!,

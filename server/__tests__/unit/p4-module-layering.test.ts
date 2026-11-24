@@ -20,20 +20,27 @@ const MODULES_ROOT = resolve(ROOT, "server/modules");
  */
 const STRICT_LAYERED_MODULES = [
   "cartonization",
+  "catalog",
   "catalog-export",
   "customer-account",
+  "dropship",
   "identity",
   "integrations",
+  "inventory",
+  "inventory-planning",
+  "marketplace-listings",
   "membership",
   "notifications",
   "operations",
   "order-edits",
+  "orders",
   "returns",
   "shipping-engine",
   "shopify",
   "subscriptions",
   "sync",
   "warehouse",
+  "wms",
 ] as const;
 
 const ALLOWED_SUBDIRECTORIES = new Set([
@@ -42,6 +49,8 @@ const ALLOWED_SUBDIRECTORIES = new Set([
   "infrastructure",
   "interfaces",
   "work",
+  "integrity",
+  "reconcile",
   "__tests__",
 ]);
 
@@ -63,7 +72,7 @@ function walkTsFiles(dir: string, acc: string[] = []): string[] {
 }
 
 describe("P4.3 — Module Layering Normalization Ratchet", () => {
-  it("keeps all 15 normalized modules strictly free of loose implementation files at module root", () => {
+  it("keeps all 22 normalized modules strictly free of loose implementation files at module root", () => {
     const rootFileViolations: string[] = [];
     const subDirViolations: string[] = [];
     const missingEntrypoints: string[] = [];

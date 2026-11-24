@@ -1,5 +1,5 @@
-import { PgCatalogVariantPublicationPhotoReader, readPublicCatalogImage } from "../../../catalog/catalog-publication-images.reader";
-import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
+import { PgCatalogVariantPublicationPhotoReader, readPublicCatalogImage } from "../../../catalog/infrastructure/catalog-publication-images.reader";
+import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
 import { prepareWalmartChannelIntent } from "../../../channels/adapters/walmart/walmart-prepared-intent";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

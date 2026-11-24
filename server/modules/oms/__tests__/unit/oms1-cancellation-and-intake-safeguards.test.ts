@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleCustomerCancelOnShipment,
   markShipmentCancelled,
-} from "../../../orders/shipment-rollup";
+} from "../../../orders/application/shipment-rollup";
 import { createChannelFulfillmentIngressService } from "../../channel-fulfillment-ingress.service";
 import { cancelOrderCascade } from "../../oms-webhooks";
 import { createOmsService, recordOmsReconcileReviewEvent } from "../../oms.service";

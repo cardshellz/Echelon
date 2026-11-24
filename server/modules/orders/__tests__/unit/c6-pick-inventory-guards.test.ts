@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const PICKING_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../picking.use-cases.ts", import.meta.url),
+    new URL("../../application/picking.use-cases.ts", import.meta.url),
   ),
   "utf8",
 );

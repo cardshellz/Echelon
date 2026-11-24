@@ -93,7 +93,7 @@ async function main(): Promise<void> {
     const { warehouseStorage } = await import("../../../server/modules/warehouse");
     const { InventoryUseCases } = await import("../../../server/modules/inventory/application/inventory.use-cases");
     const { createInventoryMethods } = await import("../../../server/modules/inventory/infrastructure/inventory.repository");
-    const { InventoryLotService } = await import("../../../server/modules/inventory/lots.service");
+    const { InventoryLotService } = await import("../../../server/modules/inventory/application/lots.service");
     const { ReceiptReversalService } = await import("../../../server/modules/procurement/receipt-reversal.service");
     const { ReceiveValidationService } = await import("../../../server/modules/procurement/receive-validation.service");
     const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../../server/modules/procurement/ap-ledger.service");
@@ -217,8 +217,8 @@ async function main(): Promise<void> {
     const { registerPurchasingRoutes } = await import("../../../server/modules/procurement/procurement.routes");
     const { registerWarehouseRoutes } = await import("../../../server/modules/warehouse/warehouse-settings-routes.api");
     const { registerSettingsRoutes } = await import("../../../server/modules/warehouse/warehouse-settings-routes.api");
-    const { registerProductRoutes } = await import("../../../server/modules/catalog/catalog.routes");
-    const { registerInventoryRoutes } = await import("../../../server/modules/inventory/inventory.routes");
+    const { registerProductRoutes } = await import("../../../server/modules/catalog/interfaces/http/catalog.routes");
+    const { registerInventoryRoutes } = await import("../../../server/modules/inventory/interfaces/http/inventory.routes");
     const { registerNotificationRoutes } = await import("../../../server/modules/notifications/routes.api");
     registerAuthRoutes(app);
     registerPurchasingRoutes(app);

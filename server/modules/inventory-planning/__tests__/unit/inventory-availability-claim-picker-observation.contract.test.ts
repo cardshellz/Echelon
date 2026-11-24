@@ -39,14 +39,14 @@ const inventoryRepository = readFileSync(
 const reviewRepository = readFileSync(
   resolve(
     process.cwd(),
-    "server/modules/orders/canonical-claim-picker-observation-review.repository.ts",
+    "server/modules/orders/infrastructure/canonical-claim-picker-observation-review.repository.ts",
   ),
   "utf8",
 );
 const wmsAllocationExceptionsRepository = readFileSync(
   resolve(
     process.cwd(),
-    "server/modules/wms/allocation-exceptions-mutations.repository.ts",
+    "server/modules/wms/infrastructure/allocation-exceptions-mutations.repository.ts",
   ),
   "utf8",
 );

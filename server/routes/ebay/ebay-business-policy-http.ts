@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import { ZodError } from "zod";
 import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
-import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work.api";
 
 export function ebayPolicyActor(req: Request): string {
   const request = req as Request & {

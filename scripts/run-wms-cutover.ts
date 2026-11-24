@@ -3,11 +3,11 @@ import { sql } from "drizzle-orm";
 import {
   prepareLegacyWmsOrderItemSchema,
   replicateLegacyWmsOrderItems,
-} from "../server/modules/wms/order-item-maintenance-commands";
+} from "../server/modules/wms/application/order-item-maintenance-commands";
 
 async function run() {
   console.log("Starting WMS Full Cutover...");
-  
+
   try {
     console.log("1. Injecting matching legacy columns into wms.orders to prevent mapping faults...");
     await db.execute(sql`
@@ -37,21 +37,21 @@ async function run() {
     console.log("3. Replicating wms.orders data...");
     await db.execute(sql`
       INSERT INTO wms.orders (
-        id, channel_id, source, external_order_id, order_number, customer_name, customer_email, 
-        shipping_name, shipping_address, shipping_city, shipping_state, shipping_postal_code, shipping_country, 
-        warehouse_id, priority, warehouse_status, on_hold, held_at, assigned_picker_id, batch_id, 
-        combined_group_id, combined_role, item_count, unit_count, picked_count, order_placed_at, created_at, 
-        started_at, completed_at, source_table_id, shopify_order_id, financial_status, shopify_fulfillment_status, 
-        cancelled_at, notes, short_reason, metadata, legacy_order_id, shopify_created_at, sla_due_at, sla_status, 
+        id, channel_id, source, external_order_id, order_number, customer_name, customer_email,
+        shipping_name, shipping_address, shipping_city, shipping_state, shipping_postal_code, shipping_country,
+        warehouse_id, priority, warehouse_status, on_hold, held_at, assigned_picker_id, batch_id,
+        combined_group_id, combined_role, item_count, unit_count, picked_count, order_placed_at, created_at,
+        started_at, completed_at, source_table_id, shopify_order_id, financial_status, shopify_fulfillment_status,
+        cancelled_at, notes, short_reason, metadata, legacy_order_id, shopify_created_at, sla_due_at, sla_status,
         exception_at, exception_resolution, exception_resolved_at, exception_resolved_by, exception_notes
       )
-      SELECT 
-        id, channel_id, source, external_order_id, order_number, customer_name, customer_email, 
-        shipping_name, shipping_address, shipping_city, shipping_state, shipping_postal_code, shipping_country, 
-        warehouse_id, priority, warehouse_status, on_hold, held_at, assigned_picker_id, batch_id, 
-        combined_group_id, combined_role, item_count, unit_count, picked_count, order_placed_at, created_at, 
-        started_at, completed_at, source_table_id, shopify_order_id, financial_status, shopify_fulfillment_status, 
-        cancelled_at, notes, short_reason, metadata, legacy_order_id, shopify_created_at, sla_due_at, sla_status, 
+      SELECT
+        id, channel_id, source, external_order_id, order_number, customer_name, customer_email,
+        shipping_name, shipping_address, shipping_city, shipping_state, shipping_postal_code, shipping_country,
+        warehouse_id, priority, warehouse_status, on_hold, held_at, assigned_picker_id, batch_id,
+        combined_group_id, combined_role, item_count, unit_count, picked_count, order_placed_at, created_at,
+        started_at, completed_at, source_table_id, shopify_order_id, financial_status, shopify_fulfillment_status,
+        cancelled_at, notes, short_reason, metadata, legacy_order_id, shopify_created_at, sla_due_at, sla_status,
         exception_at, exception_resolution, exception_resolved_at, exception_resolved_by, exception_notes
       FROM public.orders
       ON CONFLICT (id) DO NOTHING;

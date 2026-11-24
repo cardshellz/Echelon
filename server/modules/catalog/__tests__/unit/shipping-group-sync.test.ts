@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   enqueueShippingGroupMetafields,
   type ShippingGroupSyncClient,
-} from "../../shipping-group-sync";
+} from "../../application/shipping-group-sync";
 
 const dialect = new PgDialect();
 

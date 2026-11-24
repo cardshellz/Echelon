@@ -34,7 +34,7 @@ const REFUND_CASCADE_SRC = readFileSync(
 
 const EXPECTED_RETURN_COMMAND_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../../wms/expected-return-commands.ts", import.meta.url),
+    new URL("../../../wms/application/expected-return-commands.ts", import.meta.url),
   ),
   "utf8",
 );
@@ -55,7 +55,7 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
   // (its reservations were consumed by picks), and the release is
   // idempotent so a failure can be retried by the reconciler.
   const CANCEL_HELPER_SRC = readFileSync(
-    fileURLToPath(new URL("../../../orders/cancel-wms-order.ts", import.meta.url)),
+    fileURLToPath(new URL("../../../orders/application/cancel-wms-order.ts", import.meta.url)),
     "utf8",
   );
 

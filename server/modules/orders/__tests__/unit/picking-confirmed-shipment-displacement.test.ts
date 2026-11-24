@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { InventoryAvailabilityRuntimeClaimContext } from "../../../inventory-planning/application/inventory-availability-runtime-claim.service";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 
 // #63688 shipped 10 packs from C-11 with nothing reserved, while every C-11 pack
 // was promised to newer orders not yet picked. A confirmed shipment takes those

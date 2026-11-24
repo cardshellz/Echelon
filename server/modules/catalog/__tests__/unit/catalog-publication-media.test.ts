@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   limitPublicationMediaPlan,
   resolveExplicitPublicationMediaPlan,
-} from "../../catalog-publication-media";
+} from "../../domain/catalog-publication-media";
 
 describe("Catalog reviewed URL media selection", () => {
   it("retains exact input provenance, deduplicates before capacity and does not invent Catalog assets", () => {

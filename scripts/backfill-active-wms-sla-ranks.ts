@@ -12,7 +12,7 @@
 import { fileURLToPath } from "node:url";
 import { db } from "../server/db";
 import { sql } from "drizzle-orm";
-import { computeSortRank, resolveSlaDueAt } from "../server/modules/orders/sort-rank";
+import { computeSortRank, resolveSlaDueAt } from "../server/modules/orders/domain/sort-rank";
 import { createShipStationService } from "../server/modules/oms/shipstation.service";
 import { extractEbayShipByDate } from "../server/modules/oms/ebay-shipby";
 

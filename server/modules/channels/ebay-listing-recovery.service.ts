@@ -3,7 +3,7 @@ import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayPublicationRecoveryConfirmationSchema } from "@shared/types/ebay-publication-recovery";
 import { ebayListingRecoveryConfirmationSchema } from "@shared/types/ebay-listing-recovery";
 import type { EbayPublicationRecoveryResult } from "@shared/types/ebay-publication-recovery";
-import type { EbayPublicationRecoveryService } from "../inventory-planning/quantity-publication";
+import type { EbayPublicationRecoveryService } from "../inventory-planning/quantity-publication.api";
 import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
 import { EbayListingSyncError, publicationRetryReviewHash, type StoredEbayListingSyncJob } from "./ebay-listing-sync.domain";
 import { ebayListingSyncIdentitySchema, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";

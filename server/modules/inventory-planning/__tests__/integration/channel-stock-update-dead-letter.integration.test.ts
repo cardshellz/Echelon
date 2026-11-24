@@ -18,7 +18,7 @@ import { QuantityPublicationRecoveryService } from "../../application/quantity-p
 import {
   channelStockUpdateDeadLetterDestinationCountSql,
   channelStockUpdateDeadLetterDestinationSampleSql,
-} from "../../channel-stock-update-dead-letters";
+} from "../../channel-stock-update-dead-letters.api";
 import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/channel-inventory-publication-transport.adapter";
 import { ShopifyAdapter } from "../../../channels/adapters/shopify.adapter";
 

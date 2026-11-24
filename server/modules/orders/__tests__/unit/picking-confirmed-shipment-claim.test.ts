@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { canonicalAvailabilityClaimCommandSchema } from "@shared/types/inventory-availability-claims";
 import type { InventoryAvailabilityRuntimeClaimContext } from "../../../inventory-planning/application/inventory-availability-runtime-claim.service";
-import { PickingUseCases, shortClaimMessage } from "../../picking.use-cases";
+import { PickingUseCases, shortClaimMessage } from "../../application/picking.use-cases";
 
 // 2026-10-02: 12 of 19 stuck corrections belonged to orders already marked
 // shipped. Shipped orders could not be claimed or re-planned, and a post-ship

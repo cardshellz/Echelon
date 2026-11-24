@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { shopifyProductConnectionRequestSchema } from "@shared/catalog/shopify-product-connection";
-import { buildShopifyConnectionCreateSpec } from "../../shopify-product-connection.domain";
-import { buildShopifyProductSearchQuery, connectionOwnership, createShopifyProductConnectionProvider } from "../../shopify-product-connection.provider";
+import { buildShopifyConnectionCreateSpec } from "../../domain/shopify-product-connection.domain";
+import { buildShopifyProductSearchQuery, connectionOwnership, createShopifyProductConnectionProvider } from "../../infrastructure/shopify-product-connection.provider";
 import { createProductConnectionApi } from "../support/shopify-product-connection.api";
 import { CONNECTION_COMMAND_KEY, connectionSource } from "../support/shopify-product-connection.fixture";
 

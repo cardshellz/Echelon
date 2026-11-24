@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PostgresOperationalShipmentDispatchRepository } from "../../infrastructure/operational-shipment-dispatch.repository";
-import { WmsOperationalShipmentSourceOwner } from "../../../wms/operational-shipment-source";
+import { WmsOperationalShipmentSourceOwner } from "../../../wms/infrastructure/operational-shipment-source";
 import { createChannelFulfillmentAuthorityRepository } from "../../../oms/channel-fulfillment-authority.repository";
 import { shipmentQuantityEvidenceProjection } from "../../infrastructure/shipment-quantity-evidence.sql";
 import { interpretInventoryShipmentQuantity } from "@shared/inventory/shipment-quantity";

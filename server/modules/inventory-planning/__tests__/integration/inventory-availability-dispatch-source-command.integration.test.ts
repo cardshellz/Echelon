@@ -6,7 +6,7 @@ import type { CanonicalClaimDispatchBeforeCommit } from "../../application/inven
 import { PostgresCanonicalClaimDispatchRepository } from "../../infrastructure/inventory-availability-dispatch.repository";
 import { PostgresCanonicalClaimDispatchSourceCommandResolver } from "../../infrastructure/inventory-availability-dispatch-source-command.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
-import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/canonical-claim-dispatch-source";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/infrastructure/canonical-claim-dispatch-source";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { DISPATCH_TIME, dispatchPlan } from "../../../inventory/__tests__/fixtures/canonical-claim-dispatch";
 import { dispatchRuntimeFixtureSql, dispatchRuntimeSeedSql } from "../fixtures/inventory-availability-dispatch-runtime-fixture";

@@ -4,7 +4,7 @@ import {
   extractPackageAttributeUpdates,
   parsePackageAttributeBulkRows,
   PackageAttributeValidationError,
-} from "../../package-attributes";
+} from "../../domain/package-attributes";
 
 describe("catalog package attributes", () => {
   it("coerces valid package fields from a single variant payload", () => {

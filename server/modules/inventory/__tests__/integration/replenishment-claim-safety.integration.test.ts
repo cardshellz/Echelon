@@ -24,8 +24,8 @@ import { createQuantityLedgerTestContext, prepareQuantityLotCreationMetadata, ty
 import { InventoryUseCases } from "../../application/inventory.use-cases";
 import { createReplenishmentService } from "../../application/replenishment.use-cases";
 import { createInventoryMethods } from "../../infrastructure/inventory.repository";
-import { createInventoryLotService } from "../../lots.service";
-import { PickingUseCases } from "../../../orders/picking.use-cases";
+import { createInventoryLotService } from "../../application/lots.service";
+import { PickingUseCases } from "../../../orders/application/picking.use-cases";
 import { installWarehouseOperationMigration } from "../../../orders/__tests__/fixtures/install-warehouse-operation-migration";
 
 vi.mock("../../../../db", () => ({ pool: {}, db:{} }));

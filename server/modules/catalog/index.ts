@@ -6,16 +6,16 @@
  */
 
 // Storage
-export { type IProductStorage, productMethods } from "./catalog.storage";
-import { type IProductStorage, productMethods } from "./catalog.storage";
+export { type IProductStorage, productMethods } from "./infrastructure/catalog.storage";
+import { type IProductStorage, productMethods } from "./infrastructure/catalog.storage";
 export const catalogStorage: IProductStorage = productMethods;
 
-export { readInventoryCostDisplay, type InventoryCostDisplay } from "./inventory-cost-display.reader";
+export { readInventoryCostDisplay, type InventoryCostDisplay } from "./infrastructure/inventory-cost-display.reader";
 
-export { createSharedProductPhotoImporter, type SharedImportedPhoto } from "./shared-product-photos.service";
+export { createSharedProductPhotoImporter, type SharedImportedPhoto } from "./application/shared-product-photos.service";
 
 // Service types
-export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import.service";
+export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./application/product-import.service";
 
 export {
   confirmProductVariantShipsInOwnContainer,

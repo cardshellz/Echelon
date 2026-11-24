@@ -1,6 +1,6 @@
 import { projectPoAmendmentReturnedCosts } from "./po-amendment-return-impact";
 import type { PoAmendmentImpact } from "@shared/procurement/po-amendment-impact";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory/application/cogs.service";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { buildPoAmendmentImpact } from "./po-amendment-impact.policy";

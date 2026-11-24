@@ -2,8 +2,8 @@ import http, { type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ShopifyProductConnectionError } from "../../shopify-product-connection.domain";
-import { registerShopifyProductConnectionRoutes } from "../../shopify-product-connection.routes";
+import { ShopifyProductConnectionError } from "../../domain/shopify-product-connection.domain";
+import { registerShopifyProductConnectionRoutes } from "../../interfaces/http/shopify-product-connection.routes";
 import { CONNECTION_COMMAND_KEY } from "../support/shopify-product-connection.fixture";
 
 const mocks = vi.hoisted(() => ({ context: vi.fn(), search: vi.fn(), preview: vi.fn(), submit: vi.fn(), status: vi.fn(),

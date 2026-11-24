@@ -1,6 +1,6 @@
 import type { StockPublicationSelection } from "@shared/types/stock-publication-selection";
 import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
-import { archivedListingMemberSelection, isArchivedCatalogMember } from "../../marketplace-listings/listing-member-lifecycle";
+import { archivedListingMemberSelection, isArchivedCatalogMember } from "../../marketplace-listings/listing-member-lifecycle.api";
 import { isCustomerSellableVariant, type VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
 import {
   evaluateDropshipCatalogExposure,

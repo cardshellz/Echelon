@@ -3,8 +3,8 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { combinedOrderGroups } from "@shared/schema";
 
-vi.mock("../../shipment-rollup", () => ({ recomputeOrderStatusFromShipments: vi.fn() }));
-import { createOrderCombiningService } from "../../combining.service";
+vi.mock("../../application/shipment-rollup", () => ({ recomputeOrderStatusFromShipments: vi.fn() }));
+import { createOrderCombiningService } from "../../application/combining.service";
 
 function selectable(rows: unknown[], locks: string[]) {
   const query = Object.assign(Promise.resolve(rows), {

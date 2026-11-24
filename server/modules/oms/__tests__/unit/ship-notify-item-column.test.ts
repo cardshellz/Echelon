@@ -23,7 +23,7 @@ const SS_SRC = [
     : []),
 ].join("\n");
 const PROJECTION_SRC = readFileSync(
-  resolve(__dirname, "../../../wms/channel-fulfillment-projection.repository.ts"),
+  resolve(__dirname, "../../../wms/infrastructure/channel-fulfillment-projection.repository.ts"),
   "utf-8",
 );
 

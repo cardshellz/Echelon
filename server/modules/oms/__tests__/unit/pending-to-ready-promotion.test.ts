@@ -13,7 +13,7 @@ const WEBHOOKS_SRC = readFileSync(
 );
 
 const WMS_ORDER_MUTATIONS_SRC = readFileSync(
-  resolve(__dirname, "../../../wms/wms-order-mutations.repository.ts"),
+  resolve(__dirname, "../../../wms/infrastructure/wms-order-mutations.repository.ts"),
   "utf-8",
 );
 

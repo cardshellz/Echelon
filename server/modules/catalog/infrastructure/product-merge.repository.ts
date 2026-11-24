@@ -23,7 +23,7 @@ import {
 import { reassignWmsOrderItemVariant } from "../../wms/order-intake-and-items.api";
 import { mergePurchasingProductIdentity, readPurchasingMergeEvidence } from "../../procurement/catalog-identity-coordination.api";
 import { mergeVariantProductLocationsInTx } from "../../warehouse/cross-module-warehouse-mutations.api";
-import { productMethods as catalogStorage } from "../catalog.storage";
+import { productMethods as catalogStorage } from "./catalog.storage";
 import { renameDerivedVariantSkus } from "../application/product-sku-rename";
 import {
   ProductMergeError,

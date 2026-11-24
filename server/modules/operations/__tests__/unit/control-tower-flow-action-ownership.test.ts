@@ -23,7 +23,7 @@ const OMISSION_CORRECTION_MIGRATION_SOURCE = readFileSync(
   "utf8",
 );
 const SHIPPING_PROGRESS_SOURCE = readFileSync(
-  resolve(__dirname, "../../../wms/shipping-progress.query.ts"),
+  resolve(__dirname, "../../../wms/infrastructure/shipping-progress.query.ts"),
   "utf8",
 );
 

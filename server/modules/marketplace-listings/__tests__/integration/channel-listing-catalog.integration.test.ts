@@ -14,9 +14,9 @@ import {
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { ChannelListingCatalogRepository } from "../../../channels/channel-listing-catalog.repository";
 import { createHash } from "node:crypto";
-import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
-import { readPublicCatalogImage } from "../../../catalog/catalog-publication-images.reader";
-import { MAX_PRODUCT_IMAGE_BYTES } from "../../../catalog/product-image-download.service";
+import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
+import { readPublicCatalogImage } from "../../../catalog/infrastructure/catalog-publication-images.reader";
+import { MAX_PRODUCT_IMAGE_BYTES } from "../../../catalog/application/product-image-download.service";
 
 vi.mock("../../../../db", () => ({ db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;

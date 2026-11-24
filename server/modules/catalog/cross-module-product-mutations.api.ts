@@ -13,4 +13,4 @@ export {
   insertProductFromShopifyBackfillInCatalog,
   updateProductPulledContentFieldsInCatalog,
   setProductReorderExcludedInCatalog,
-} from "./cross-module-product-mutations.command";
+} from "./application/cross-module-product-mutations.command";

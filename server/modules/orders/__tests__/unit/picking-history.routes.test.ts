@@ -18,8 +18,8 @@ vi.mock("../../../../routes/middleware", () => ({
     next();
   },
 }));
-import { registerPickingHistoryRoutes } from "../../picking-history.routes";
-import { PickingHistoryRepository } from "../../picking-history.repository";
+import { registerPickingHistoryRoutes } from "../../interfaces/http/picking-history.routes";
+import { PickingHistoryRepository } from "../../infrastructure/picking-history.repository";
 import { db } from "../../../../db";
 
 describe("bounded all-date picking history HTTP contract", () => {
@@ -80,10 +80,10 @@ describe("bounded all-date picking history HTTP contract", () => {
     await expect(repository.page({ channelId: -1 })).rejects.toThrow();
   });
   it("does not repurpose the active queue or its self-healing reads for history", () => {
-    const source = readFileSync(resolve(__dirname, "../../picking-history.repository.ts"), "utf8");
+    const source = readFileSync(resolve(__dirname, "../../infrastructure/picking-history.repository.ts"), "utf8");
     expect(source).toContain('accessMode: "read only"');
     expect(source).not.toMatch(/getPickQueue|\.insert\(|\.update\(|\.delete\(|NOW\(\)|INTERVAL/i);
-    const active = readFileSync(resolve(__dirname, "../../orders.storage.ts"), "utf8");
+    const active = readFileSync(resolve(__dirname, "../../infrastructure/orders.storage.ts"), "utf8");
     const queueSql = active.slice(active.indexOf("async getPickQueueOrders"), active.indexOf("const orderRows ="));
     expect(queueSql).not.toContain("24 hours");
     expect(queueSql).not.toContain("o.warehouse_status = 'completed'");

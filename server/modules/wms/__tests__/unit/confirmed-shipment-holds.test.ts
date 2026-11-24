@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { confirmedShipmentHoldRelease } from "../../confirmed-shipment-holds";
-import { heldShipmentReleaseAction } from "../../line-item-hold";
+import { confirmedShipmentHoldRelease } from "../../application/confirmed-shipment-holds";
+import { heldShipmentReleaseAction } from "../../application/line-item-hold";
 
 // 2026-10-02: pre-order lines were held, ShipStation shipped them anyway, and a
 // picker's "Yes, it shipped" could never be recorded because every step refused

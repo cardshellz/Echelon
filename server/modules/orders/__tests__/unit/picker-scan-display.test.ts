@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { PickingUseCases, withScanDisplay } from "../../picking.use-cases";
+import { PickingUseCases, withScanDisplay } from "../../application/picking.use-cases";
 
 // 2026-10-05: after the picking ownership rewrite (#1672) the gun received no
 // barcode or photo for any line. Scans of product barcodes stopped matching
@@ -113,7 +113,7 @@ describe("picker payloads carry barcode and photo", () => {
   });
 
   it("adds them to the claim response the gun builds its picking screen from", () => {
-    const source = readFileSync(resolve(process.cwd(), "server/modules/orders/picking.use-cases.ts"), "utf8");
+    const source = readFileSync(resolve(process.cwd(), "server/modules/orders/application/picking.use-cases.ts"), "utf8");
     const claimResponse = source.slice(source.indexOf('actionType: "order_claimed"'), source.indexOf("return { order, items: plannedItems };"));
     expect(claimResponse).toContain("withScanDisplay(item, scanDisplay)");
   });

@@ -3,7 +3,7 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { CanonicalClaimDispatchCommand } from "@shared/types/inventory-availability-dispatch";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { WmsCanonicalClaimDispatchSourceOwner } from "../../canonical-claim-dispatch-source";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../../infrastructure/canonical-claim-dispatch-source";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

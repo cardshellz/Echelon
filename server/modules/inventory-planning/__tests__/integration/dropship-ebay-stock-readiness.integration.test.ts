@@ -12,7 +12,7 @@ import {
 } from "../fixtures/dropship-ebay-stock.fixture";
 import {
   ensureDropshipEbayStockReady, readDropshipEbayStockAuthority, readDropshipEbayStockDestination, reviewDropshipEbayStockReadiness,
-} from "../../quantity-publication";
+} from "../../application/quantity-publication";
 import { dropshipEbayStockCommandKey } from "../../domain/dropship-ebay-stock-readiness";
 import { quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";

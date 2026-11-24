@@ -5,7 +5,7 @@ import {
   closeReopenedFullyPickedWmsOrderItems,
   recoverCompletedWmsOrderItemPickState,
   repairOpenWmsOrderItemBarcode,
-} from "../../order-item-maintenance-commands";
+} from "../../application/order-item-maintenance-commands";
 
 function queryExecutor(rowCount = 1) {
   return {

@@ -2,16 +2,16 @@ import http, { type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerProductAssetRoutes } from "../../product-asset.routes";
-import { ProductAssetError } from "../../product-asset-errors";
+import { registerProductAssetRoutes } from "../../interfaces/http/product-asset.routes";
+import { ProductAssetError } from "../../domain/product-asset-errors";
 
 const mocks = vi.hoisted(() => ({ reorder: vi.fn(), read: vi.fn(), fetchImage: vi.fn(), createOriginal: vi.fn(), scope: vi.fn(), allowed: true, permissions: [] as string[] }));
 vi.mock("../../../../db", () => ({ db: {} }));
-vi.mock("../../product-asset-order.repository", () => ({ reorderCatalogAssets: mocks.reorder }));
-vi.mock("../../product-asset-scope.service", () => ({ createProductAssetScopeService: () => ({ apply: mocks.scope }) }));
-vi.mock("../../product-image-download.repository", () => ({ readProductImageDownload: mocks.read }));
-vi.mock("../../product-image-download.transport", () => ({ fetchProductImage: mocks.fetchImage }));
-vi.mock("../../catalog-image-originals.service", async importOriginal => ({ ...await importOriginal<typeof import("../../catalog-image-originals.service")>(),
+vi.mock("../../infrastructure/product-asset-order.repository", () => ({ reorderCatalogAssets: mocks.reorder }));
+vi.mock("../../application/product-asset-scope.service", () => ({ createProductAssetScopeService: () => ({ apply: mocks.scope }) }));
+vi.mock("../../infrastructure/product-image-download.repository", () => ({ readProductImageDownload: mocks.read }));
+vi.mock("../../infrastructure/product-image-download.transport", () => ({ fetchProductImage: mocks.fetchImage }));
+vi.mock("../../application/catalog-image-originals.service", async importOriginal => ({ ...await importOriginal<typeof import("../../application/catalog-image-originals.service")>(),
   createCatalogImageOriginalsService: () => ({create:mocks.createOriginal}) }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) => {
   mocks.permissions.push(`${resource}:${action}`);

@@ -7,7 +7,7 @@ import { EbayListingFeedReader } from "../../infrastructure/ebay-listing-feed.re
 import { EbayListingFeedInventoryService } from "../../application/ebay-listing-feed-inventory.service";
 import { ChannelReadCoordinator } from "../../../marketplace-listings/application/channel-read-coordinator";
 import { readEbayListingPhotoReadiness } from "../../ebay-listing-photo-readiness";
-import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
+import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
 
 // Supporting read-model fixture. Durable queue/index tests live in the sync
 // recovery suite, which installs the actual production migrations unchanged.

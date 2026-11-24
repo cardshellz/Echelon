@@ -11,7 +11,7 @@ const owners = vi.hoisted(() => ({
 vi.mock("../../channel-pricing.service", () => ({
   createChannelPricingService: owners.createPricingService,
 }));
-vi.mock("../../../catalog/catalog.storage", () => ({
+vi.mock("../../../catalog/infrastructure/catalog.storage", () => ({
   productMethods: { updateProductVariant: owners.updateVariant, createProductVariant: owners.createVariant },
 }));
 vi.mock("../../../catalog", () => ({ createSharedProductPhotoImporter: vi.fn() }));

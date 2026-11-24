@@ -4,7 +4,7 @@ import { purchaseTaxTargetSchema, purchaseTaxPreviewRequestSchema, purchaseTaxAp
   purchaseTaxResultSchema, purchaseTaxImpactSchema, type PurchaseTaxChange, type PurchaseTaxTarget } from "@shared/procurement/purchase-tax";
 import { createDrizzleFinancialCommandRepository } from "../../platform/commands/command-results.repository";
 import { runTransactionalFinancialCommand, FinancialCommandError, type FinancialCommandDescriptor } from "../../platform/commands/transactional-command.service";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory/application/cogs.service";
 import { costFingerprint, CostEvidenceError } from "../inventory/infrastructure/cost-evidence.repository";
 import { assertInvoiceQuantityAuthority, InvoiceQuantityCorrectionError } from "./invoice-quantity-correction.policy";
 import { readPurchaseTaxChangeSource, persistPurchaseTaxChange, recordPurchaseTaxApproval, readPurchaseTaxApprovals } from "./purchase-tax-change.repository";

@@ -3,8 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { repairCatalogImageScope, type ImageScopeRepair } from "../../product-image-scope-repair";
-import { readCatalogVariantPublicationImages } from "../../catalog-publication-images.reader";
+import { repairCatalogImageScope, type ImageScopeRepair } from "../../application/product-image-scope-repair";
+import { readCatalogVariantPublicationImages } from "../../infrastructure/catalog-publication-images.reader";
 vi.mock("../../../../db", () => ({ db: {} }));
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

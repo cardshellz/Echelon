@@ -8,7 +8,7 @@ import type {
 } from "../../inventory-planning/application/stock-link.ports";
 import { STOCK_LINK_ACTOR } from "../../inventory-planning/domain/stock-link";
 import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/domain/stock-link-errors";
-import { linkChannelEbayStock } from "../../inventory-planning/quantity-publication";
+import { linkChannelEbayStock } from "../../inventory-planning/quantity-publication.api";
 import { readOutstandingEbayListingWork } from "./channel-stock-selection.repository";
 
 /**

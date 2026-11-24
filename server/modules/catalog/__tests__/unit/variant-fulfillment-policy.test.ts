@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { coerceVariantFulfillmentOnPayload } from "../../catalog.routes";
+import { coerceVariantFulfillmentOnPayload } from "../../interfaces/http/catalog.routes";
 
 describe("catalog variant fulfillment policy", () => {
   it("accepts each supported fulfillment mode", () => {

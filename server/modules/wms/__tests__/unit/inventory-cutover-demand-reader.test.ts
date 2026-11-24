@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { readWmsCutoverDemand, WMS_CUTOVER_CAPTURE_LIMITS } from "../../inventory-cutover-demand-reader";
+import { readWmsCutoverDemand, WMS_CUTOVER_CAPTURE_LIMITS } from "../../infrastructure/inventory-cutover-demand-reader";
 
 const TIME = "2026-09-07T12:00:00.000Z";
 function fixture() {

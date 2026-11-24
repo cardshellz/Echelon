@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isArchivedCatalogMember } from "../marketplace-listings/listing-member-lifecycle";
+import { isArchivedCatalogMember } from "../marketplace-listings/listing-member-lifecycle.api";
 import { isVariantSellable, type VariantSellabilityInput } from "./ebay-listing-eligibility";
 import {
   marketplaceObservedListingPublicationSchema,

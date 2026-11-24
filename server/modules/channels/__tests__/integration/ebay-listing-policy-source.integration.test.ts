@@ -26,7 +26,7 @@ vi.mock("../../../../db", () => ({
 // is deterministic; media uses Catalog's canonical selector over fixture URLs.
 // Durable job/journal recovery has its own PostgreSQL composition suite.
 vi.mock("../../infrastructure/ebay-api-runtime", async () => {
-  const { resolveExplicitPublicationMediaPlan } = await import("../../../catalog/catalog-publication-media");
+  const { resolveExplicitPublicationMediaPlan } = await import("../../../catalog/domain/catalog-publication-media");
   return {
   EBAY_CHANNEL_ID: 67,
   getAuthService: () => ({

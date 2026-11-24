@@ -19,7 +19,7 @@ import {
   costFingerprint,
   costInteger,
 } from "../inventory/infrastructure/cost-evidence.repository";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory/application/cogs.service";
 import {
   assertInvoiceQuantityAuthority,
   InvoiceQuantityCorrectionError,

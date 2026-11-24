@@ -7,7 +7,7 @@ import {
   evaluateShopifyProductMappingRepair,
   normalizeShopifyId,
   type ShopifyProductMappingSource,
-} from "../../shopify-product-mapping.domain";
+} from "../../domain/shopify-product-mapping.domain";
 
 function source(input: Partial<ShopifyProductMappingSource> = {}): ShopifyProductMappingSource {
   return {

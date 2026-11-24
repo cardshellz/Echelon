@@ -11,8 +11,8 @@ import { createQuantityLedgerTestContext, prepareQuantityLotCreationMetadata,
   type QuantityLedgerTestContext } from "../../../inventory/__tests__/fixtures/quantity-ledger-database";
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
 import { PostgresInventoryAvailabilityClaimRepository } from "../../infrastructure/inventory-availability-claim.repository";
-import { PickCorrectionService } from "../../../orders/pick-correction.service";
-import { observeMissingPick } from "../../../wms/pick-correction.repository";
+import { PickCorrectionService } from "../../../orders/application/pick-correction.service";
+import { observeMissingPick } from "../../../wms/infrastructure/pick-correction.repository";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;

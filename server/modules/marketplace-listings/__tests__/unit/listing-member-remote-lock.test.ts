@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { PoolClient } from "pg";
 import { describe, expect, it } from "vitest";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
-import { listingMemberRemoteKey, tryLockListingMemberRemote } from "../../listing-member-lifecycle";
+import { listingMemberRemoteKey, tryLockListingMemberRemote } from "../../listing-member-lifecycle.api";
 import { PostgresListingMemberLifecycleRepository } from "../../infrastructure/pg-listing-member-lifecycle.repository";
 import { decideListingEndClaim } from "../../../dropship/domain/listing-end-claims";
 

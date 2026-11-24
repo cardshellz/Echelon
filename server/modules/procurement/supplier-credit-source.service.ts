@@ -6,7 +6,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { supplierCreditSourceLineInputSchema, type SourceLineInput } from "@shared/procurement/supplier-credit";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
 import type { CostIssue, CostInventoryEffect } from "@shared/procurement/cost-source-contracts";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory/application/cogs.service";
 import { costInteger, CostEvidenceError, lockInventoryCostGraph, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
 import { evaluateSupplierCreditSource, resolveSupplierCreditReductions, supplierCreditIssue,
   supplierCreditSourceEvidenceSchema, supplierCreditInvoiceSourceFingerprint, supplierTaxCreditCapIssues, type SupplierCreditSourceEvidence } from "./domain/supplier-credit-source";

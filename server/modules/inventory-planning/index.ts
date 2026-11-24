@@ -18,6 +18,6 @@ export {
 } from "./publication-target-hold.api";
 export * from "./dropship-stock-destination-health.api";
 export * from "./claim-execution.api";
-export * from "./channel-quantity";
-export * from "./stock-clearing-evidence";
-export * from "./stock-link-health";
+export * from "./channel-quantity.api";
+export * from "./stock-clearing-evidence.api";
+export * from "./stock-link-health.api";

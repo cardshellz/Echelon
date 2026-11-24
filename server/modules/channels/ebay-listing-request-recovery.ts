@@ -1,5 +1,5 @@
 import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
-import type { EbayAutomaticPublicationRecoveryService } from "../inventory-planning/quantity-publication";
+import type { EbayAutomaticPublicationRecoveryService } from "../inventory-planning/quantity-publication.api";
 import { EbayListingSyncError, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
 
 export interface EbayListingRequestRecovery {

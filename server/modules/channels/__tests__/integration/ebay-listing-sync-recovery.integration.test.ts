@@ -65,7 +65,7 @@ import { buildEbayRouteListingDraft } from "../../ebay-listing-draft";
 import { prepareEbayListingPackages } from "../../adapters/ebay/ebay-listing-package";
 import { EBAY_US_STANDARD_PACKAGE_TYPE } from "../../adapters/ebay/ebay-package-classification";
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
-import { releaseListingWorkPermit, tryAcquireListingWorkPermit } from "../../../marketplace-listings/listing-work-permits";
+import { releaseListingWorkPermit, tryAcquireListingWorkPermit } from "../../../marketplace-listings/listing-work-permits.api";
 vi.mock("../../../../db", () => ({ pool: {} }));
 const configured =
   process.env.ECHELON_TEST_DATABASE_URL &&

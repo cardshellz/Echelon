@@ -81,7 +81,7 @@ export async function createControlledRfqDatabase(url: string, at: Date) {
     try {
       const [dbModule, procurement, catalog, purchasing, warehouse] = await Promise.all([
         import("../../../../db"), import("../../procurement.storage"),
-        import("../../../catalog/catalog.storage"), import("../../purchasing.service"),
+        import("../../../catalog/infrastructure/catalog.storage"), import("../../purchasing.service"),
         import("../../../warehouse/infrastructure/warehouse.repository"),
       ]);
       // Existing legacy storage imports the module pool. Redirect its transport

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { invoiceCostReviewSchema, invoiceCostReviewResultSchema, invoiceCostImpactPreviewSchema, invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-review";
 import { financialCommandRepository } from "../../platform/commands/command-results.repository";
 import { FinancialCommandError, runTransactionalFinancialCommand, type FinancialCommandDescriptor, type FinancialCommandRepository } from "../../platform/commands/transactional-command.service";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory/application/cogs.service";
 import { costFingerprint, costInteger, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { buildCostDestinationImpact } from "./cost-change-impact";

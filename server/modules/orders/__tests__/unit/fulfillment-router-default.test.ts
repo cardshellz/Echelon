@@ -7,7 +7,7 @@ vi.mock("../../../warehouse/infrastructure/warehouse.repository", () => ({
   getDefaultFulfillmentWarehouse: h.getDefaultFulfillmentWarehouse,
 }));
 
-import { createFulfillmentRouterService } from "../../fulfillment-router.service";
+import { createFulfillmentRouterService } from "../../application/fulfillment-router.service";
 
 // Minimal chainable drizzle stub. orderBy resolves the rules query; limit
 // resolves the getWarehouse() lookup.

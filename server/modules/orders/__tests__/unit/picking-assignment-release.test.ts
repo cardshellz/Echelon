@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Order } from "@shared/schema";
 import { decidePickingAssignmentRelease, type PickingAssignmentState, type PickingReleaseActor } from "../../domain/picking-assignment-release";
-import { releasePickingAssignment, type PickingAssignmentReleaseTransaction, type PickingAssignmentReleaseRepository } from "../../picking-assignment-release.service";
+import { releasePickingAssignment, type PickingAssignmentReleaseTransaction, type PickingAssignmentReleaseRepository } from "../../application/picking-assignment-release.service";
 import { DEFAULT_PERMISSIONS, SYSTEM_ROLES } from "../../../identity/domain/identity.domain";
 
 const actor: PickingReleaseActor = { id: "picker", name: "Picker", role: "picker", active: true, permissions: ["picking:perform"] };

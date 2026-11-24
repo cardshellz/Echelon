@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const inventory = readFileSync(new URL("../../inventory.routes.ts", import.meta.url), "utf8");
-const catalog = readFileSync(new URL("../../../catalog/catalog.routes.ts", import.meta.url), "utf8");
+const inventory = readFileSync(new URL("../../interfaces/http/inventory.routes.ts", import.meta.url), "utf8");
+const catalog = readFileSync(new URL("../../../catalog/interfaces/http/catalog.routes.ts", import.meta.url), "utf8");
 function route(source: string, method: string, path: string): string {
   const start = source.indexOf(`app.${method}("${path}"`);
   expect(start, `Missing ${method} ${path}`).toBeGreaterThanOrEqual(0);

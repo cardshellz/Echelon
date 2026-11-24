@@ -20,7 +20,7 @@ describe("inactive variant availability contracts", () => {
   });
 
   it("preserves inventory, bins, and listing mappings during a normal archive", () => {
-    const routes = repoFile("server/modules/catalog/catalog.routes.ts");
+    const routes = repoFile("server/modules/catalog/interfaces/http/catalog.routes.ts");
     const productArchive = routes.slice(
       routes.indexOf('app.post("/api/products/:id/archive"'),
       routes.indexOf('app.delete("/api/products/:id"'),

@@ -23,7 +23,7 @@ import {
   cancelOrder,
   markOrderShipped,
   completeOrder,
-} from "../../order-status-core";
+} from "../../application/order-status-core";
 import {
   createShipStationEngine,
   toEngineRef,
@@ -326,7 +326,7 @@ describe("D-DUP regression: duplicate shipment prevention", () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(
-      resolve(__dirname, "../../../../modules/wms/create-shipment.ts"),
+      resolve(__dirname, "../../../../modules/wms/application/create-shipment.ts"),
       "utf8",
     );
     expect(src).toContain("getDefaultSessionAdvisoryLockRunner");
@@ -438,7 +438,7 @@ describe("Migrated writers use C4 functions", () => {
     const { resolve } = await import("path");
     const indexSrc = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf-8");
     const block = readFileSync(
-      resolve(__dirname, "../../oms-wms-cancel-reconcile.scheduler.ts"),
+      resolve(__dirname, "../../application/oms-wms-cancel-reconcile.scheduler.ts"),
       "utf-8",
     );
 
@@ -456,7 +456,7 @@ describe("Migrated writers use C4 functions", () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     // The repair moved out of index.ts into zombie-order-repair.ts.
-    const block = readFileSync(resolve(__dirname, "../../zombie-order-repair.ts"), "utf-8");
+    const block = readFileSync(resolve(__dirname, "../../application/zombie-order-repair.ts"), "utf-8");
 
     // Terminal transitions must release leftover reservations (P0.1c /
     // 'completed'-status fix) — the raw cancelOrder/completeOrder calls leaked.
@@ -486,7 +486,7 @@ describe("Migrated writers use C4 functions", () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(
-      resolve(__dirname, "../../orders.storage.ts"),
+      resolve(__dirname, "../../infrastructure/orders.storage.ts"),
       "utf-8",
     );
     const start = src.indexOf("async getPickQueueOrders(");
@@ -501,10 +501,10 @@ describe("Migrated writers use C4 functions", () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(
-      resolve(__dirname, "../../orders.storage.ts"),
+      resolve(__dirname, "../../infrastructure/orders.storage.ts"),
       "utf-8",
     );
-    const picking = readFileSync(resolve(__dirname, "../../picking.use-cases.ts"), "utf-8");
+    const picking = readFileSync(resolve(__dirname, "../../application/picking.use-cases.ts"), "utf-8");
     const start = picking.indexOf("async repairPickingProgress(");
     const end = picking.indexOf("async getReplenGuidanceForItem(", start);
     const block = picking.slice(start, end);

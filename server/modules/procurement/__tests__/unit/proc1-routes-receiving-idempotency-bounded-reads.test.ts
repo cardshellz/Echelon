@@ -120,7 +120,7 @@ import {
 import { RECEIVING_READ_GRANTS } from "../../receiving.routes";
 import { RECEIVING_READ_PERMISSIONS } from "../../../../../client/src/lib/procurement-access";
 import { createShipmentTrackingService } from "../../shipment-tracking.service";
-import { registerOperationsDashboardRoutes } from "../../../orders/operations-dashboard.routes";
+import { registerOperationsDashboardRoutes } from "../../../orders/interfaces/http/operations-dashboard.routes";
 import { registerPurchasingRoutes } from "../../procurement.routes";
 
 function startServer(app: Express): Promise<{ url: string; close: () => Promise<void> }> {

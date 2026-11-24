@@ -4,11 +4,11 @@ import express, { type Request, type Response, type NextFunction } from "express
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BULK_INVENTORY_TRACKING_PATH, MAX_BULK_INVENTORY_TRACKING_PRODUCTS,
   bulkInventoryTrackingRequestSchema } from "@shared/catalog/bulk-inventory-tracking";
-import { registerBulkInventoryTrackingRoutes } from "../../bulk-inventory-tracking.routes";
+import { registerBulkInventoryTrackingRoutes } from "../../interfaces/http/bulk-inventory-tracking.routes";
 
 const mocks = vi.hoisted(() => ({ preview: vi.fn(), apply: vi.fn(), permitted: true, authenticated: true,
   permission: vi.fn() }));
-vi.mock("../../bulk-inventory-tracking.service", () => ({ createBulkInventoryTrackingService: () => mocks }));
+vi.mock("../../application/bulk-inventory-tracking.service", () => ({ createBulkInventoryTrackingService: () => mocks }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) => {
   mocks.permission(resource, action);
   return (req: Request, res: Response, next: NextFunction) => {

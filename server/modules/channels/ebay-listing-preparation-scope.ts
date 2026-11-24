@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import type { InventoryEbayPublicationReadinessInput } from "@shared/types/ebay-publication-readiness";
-import { readCatalogStockProductVariantIds } from "../catalog/catalog-stock-selection.reader";
+import { readCatalogStockProductVariantIds } from "../catalog/infrastructure/catalog-stock-selection.reader";
 import { PgMarketplaceListingRegistrationRepository, type MarketplaceObservedListingPublication } from "../marketplace-listings";
 import { readChannelStockSelectionFacts } from "./infrastructure/channel-stock-selection.repository";
 import { resolveChannelStockSelection } from "./channel-stock-selection.domain";

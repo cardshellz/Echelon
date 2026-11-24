@@ -18,8 +18,8 @@ const root = (p: string) => readFileSync(resolve(__dirname, "../../..", p), "utf
 
 const MIGRATION = root("migrations/0629_wms_orders_completed_requires_timestamp.sql");
 const WMS_SYNC = root("server/modules/oms/wms-sync.service.ts");
-const STATUS_CORE = root("server/modules/orders/order-status-core.ts");
-const WMS_ORDER_MUTATIONS = root("server/modules/wms/wms-order-mutations.repository.ts");
+const STATUS_CORE = root("server/modules/orders/application/order-status-core.ts");
+const WMS_ORDER_MUTATIONS = root("server/modules/wms/infrastructure/wms-order-mutations.repository.ts");
 
 describe("wms-sync status rollup", () => {
   it("no longer answers 'completed' from an absence of pickable rows", () => {

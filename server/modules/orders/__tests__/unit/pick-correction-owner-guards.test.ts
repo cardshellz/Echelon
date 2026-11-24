@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 import { type PickCorrection } from "@shared/pick-corrections";
 
 const correction: PickCorrection = { id: 1, orderId: 70, orderItemId: 71, orderNumber: "#70", sku: "P5",

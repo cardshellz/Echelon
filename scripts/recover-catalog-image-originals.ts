@@ -17,11 +17,11 @@ import {
   createCatalogImageOriginalsService,
   MAX_RECOVERY_BATCH_BYTES,
   MAX_RECOVERY_PHOTOS_PER_PRODUCT,
-} from "../server/modules/catalog/catalog-image-originals.service";
-import { inspectCatalogImage } from "../server/modules/catalog/catalog-image-inspection";
-import { MAX_PRODUCT_IMAGE_BYTES } from "../server/modules/catalog/product-image-download.service";
-import { ProductAssetError } from "../server/modules/catalog/product-asset-errors";
-import { fetchProductImage } from "../server/modules/catalog/product-image-download.transport";
+} from "../server/modules/catalog/application/catalog-image-originals.service";
+import { inspectCatalogImage } from "../server/modules/catalog/domain/catalog-image-inspection";
+import { MAX_PRODUCT_IMAGE_BYTES } from "../server/modules/catalog/application/product-image-download.service";
+import { ProductAssetError } from "../server/modules/catalog/domain/product-asset-errors";
+import { fetchProductImage } from "../server/modules/catalog/infrastructure/product-image-download.transport";
 
 const manifestSchema = z
   .object({

@@ -11,7 +11,7 @@ const SHOPIFY_BRIDGE_SRC = readFileSync(
   "utf8",
 );
 const SHOPIFY_RECONCILIATION_SRC = readFileSync(
-  resolve(__dirname, "../../../orders/shopify-order-reconciliation.ts"),
+  resolve(__dirname, "../../../orders/application/shopify-order-reconciliation.ts"),
   "utf8",
 );
 const SYNC_RECOVERY_SRC = readFileSync(

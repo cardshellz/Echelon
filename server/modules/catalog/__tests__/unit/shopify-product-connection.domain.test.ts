@@ -5,8 +5,8 @@ import {
 import {
   buildShopifyConnectionCreateSpec, connectionFingerprint, parseShopifyProductReference,
   resolveConnectionBindings, type ShopifyConnectionRemoteProduct, type ShopifyConnectionSource,
-} from "../../shopify-product-connection.domain";
-import { buildShopifyProductMappingSummary } from "../../shopify-product-mapping.domain";
+} from "../../domain/shopify-product-connection.domain";
+import { buildShopifyProductMappingSummary } from "../../domain/shopify-product-mapping.domain";
 
 function source(): ShopifyConnectionSource {
   return {

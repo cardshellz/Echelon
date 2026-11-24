@@ -2,7 +2,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerCatalogPublicImageRoutes } from "../../catalog-public-image.routes";
+import { registerCatalogPublicImageRoutes } from "../../interfaces/http/catalog-public-image.routes";
 
 const hash = "ab".repeat(32);
 const data = Buffer.from("89504e470d0a1a0a00000000", "hex");

@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { InventoryLotService } from "../../lots.service";
+import { InventoryLotService } from "../../application/lots.service";
 import { BuildExecutionRepository } from "../../infrastructure/build-execution.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../../infrastructure/canonical-claim-inventory.repository";
 import { buildMillsToRoundedCents, normalizeBuildLotCosts } from "../../infrastructure/build.repository";

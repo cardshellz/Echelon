@@ -12,7 +12,7 @@ import type {
   RecipeBuildPromise,
   ReservationServiceContract,
 } from "../reservation-authority.api";
-import { createLegacyInventoryAtpService } from "../../inventory/atp.service";
+import { createLegacyInventoryAtpService } from "../../inventory/application/atp.service";
 import { InventoryAvailabilityClaimService } from "../application/inventory-availability-claim.service";
 import {
   AuthorityAwareReservationService,

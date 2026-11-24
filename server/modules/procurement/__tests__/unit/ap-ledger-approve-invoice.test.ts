@@ -11,7 +11,7 @@ vi.mock("../../shipment-billing-ownership.repository", () => ({
 
 // Keep the COGS dependency without importing unrelated inventory repository owners.
 vi.mock("../../../inventory", async () => ({
-  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+  COGSService: (await import("../../../inventory/application/cogs.service")).COGSService,
 }));
 
 // These owner fixtures isolate financial state changes. The real PostgreSQL
