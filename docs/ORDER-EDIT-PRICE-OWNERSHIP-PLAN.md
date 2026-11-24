@@ -52,7 +52,7 @@ Each step is its own pull request with tests.
 | --- | --- | --- |
 | 1a | Use Shopify's per-item share of a percentage code as given | Done in the pull request that adds this file |
 | 1b | Remaining places that recompute Shopify's edit figures and compare: fixed-credit shares, product-discount and subtotal reconciliation, balance arithmetic | Fixed-credit shares and the two reconciliations done 2026-11-24 (below). The balance check stays |
-| 2 | Member price: keep lookup and apply. Remove the "club price changed since the order" refusal and the checks that try to prove which Shopify discount gave the member price | Not started |
+| 2 | Member price: keep lookup and apply. Remove the "club price changed since the order" refusal and the checks that try to prove which Shopify discount gave the member price | Done 2026-11-24 (below) |
 | 3 | Test Shopify's own behaviour during an edit | Done 2026-11-24 on live open orders, nothing submitted (results below) |
 | 4 | Preview shows Shopify's numbers in place of the editor's own pricing (`priceOrderEditPreviewItems`) | Not started; depends on step 3 and on how fast Shopify answers |
 | 5 | Codes and rewards entered during an edit: owner decides whether the feature stays. If it does, the amount must come from Shopify | Not started |
@@ -95,14 +95,64 @@ Kept, because they are rules and not price arithmetic:
 Not changed here:
 
 - The code-entry path (`stageCodes`) keeps its own comparisons until step 5.
-- The member-price allocation check and the per-item price expectation
-  (`QUOTE_PRICE_MISMATCH`, `DISCOUNT_ROUNDING_UNSUPPORTED`) belong to step 2.
+- The member-price checks were handled in step 2 (below).
 - The live preview still uses the editor's own discount engine (step 4).
 
 Consequence to know about: when an item carrying part of a fixed credit (for
 example a points reward) is removed, that part of the credit is gone and the
 refund is the item's price less its share. This was already the behaviour on
 an order's first edit; it now also applies to orders edited before.
+
+### Step 2: what changed (2026-11-24)
+
+Found while starting this step, on live open orders with nothing submitted:
+
+- **Order #65936 could not be edited at all.** It carries seven "Member
+  discount" entries, two of them for exactly $7.00. When an edit opened, the
+  editor matched each member discount in Shopify's session to exactly one on
+  the order by label and amount, found two, and refused
+  (`PROMOTION_PARITY_UNVERIFIED`, before any change was staged). In the last
+  1,000 orders, 115 carry member discounts and 17 of those have two with the
+  same label and amount.
+- #65931, one more of a member-priced item: quoted. The original unit kept
+  Shopify's $15.00 member discount; the extra unit is a separate line with the
+  editor's $15.00 discount.
+- #65923, a member-priced item reduced from 4 to 3: quoted. Shopify scaled the
+  member discount from $1.40 to $1.05.
+
+Removed:
+
+- The one-to-one match of member discounts between the session and the order
+  (`automaticProductOrderAmounts`). Shopify's amounts are summed as given.
+- The lookup that asked Shopify which installed discount produced the member
+  price (`MEMBER_FUNCTION_UNPROVEN` and the uniqueness, status and app checks).
+  It was one extra Shopify request on every preview and review of a member
+  order, and it refused every member order if the discount was paused or
+  duplicated in the admin.
+- `MEMBER_PRICE_CHANGED`: extra units of a member-priced item were refused when
+  today's club price differed from the price on the order. The original units
+  keep their price and the extra units get today's.
+
+Kept, as rules read from the order itself:
+
+- The only automatic item discount the editor supports is the club member
+  price: labelled "Member discount", spread across the items it applies to. An
+  order with any other automatic item discount (for example buy one get one)
+  still goes to staff, because an edit could break that discount's conditions
+  in the same way as a coupon minimum. In the last 1,000 orders every automatic
+  item discount (342 of 342) had this label and shape, and it is the only
+  active automatic item discount in the store.
+- Shopify's session may not show an automatic discount the order did not carry.
+- An added item may not receive an automatic discount on top of the member
+  price the editor applies, and an original item's member discount must scale
+  exactly with its quantity (`verifyPreservedMemberAllocations`, unchanged; it
+  passed on #65923).
+- The member price is still read from the product for the customer's plan and
+  applied to added items.
+
+Not changed: the per-item price expectation for original items
+(`QUOTE_PRICE_MISMATCH`, `DISCOUNT_ROUNDING_UNSUPPORTED`). No failure from it
+was observed.
 
 ### Step 3: questions
 
@@ -147,7 +197,8 @@ What follows:
 
 - **Step 1b could proceed** (now done, see above). The fixed-credit checks
   guarded against a credit moving or multiplying, and Shopify does neither.
-- **Step 2 keeps the member-price step.** Only the checks around it go.
+- **Step 2 keeps the member-price step.** Only the checks around it go (now
+  done, see above).
 - **Coupon minimum: refuse the edit (owner, 2026-11-24).** A customer could
   qualify for a minimum-spend code, then remove items and keep the code's share
   on what remains. The editor now refuses a reviewed edit that takes the order
