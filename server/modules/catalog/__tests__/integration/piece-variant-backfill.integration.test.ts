@@ -8,7 +8,7 @@ import {
 import {
   applyPieceVariantBackfill,
   previewPieceVariantBackfill,
-} from "../../piece-variant-backfill.service";
+} from "../../application/piece-variant-backfill.service";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

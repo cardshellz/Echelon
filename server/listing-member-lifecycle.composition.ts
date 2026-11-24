@@ -10,7 +10,7 @@ import {
   PgDropshipMarketplaceCredentialRepository,
   RefreshingDropshipEbayRegistrationCredentialProvider,
 } from "./modules/dropship/ebay-registration-credentials.api";
-import { createChannelEbayQuantityRequestAdmission, createDropshipEbayQuantityRequestAdmission } from "./modules/inventory-planning/quantity-publication";
+import { createChannelEbayQuantityRequestAdmission, createDropshipEbayQuantityRequestAdmission } from "./modules/inventory-planning/quantity-publication.api";
 import { ListingMemberLifecycleError } from "./modules/marketplace-listings/domain/listing-member-lifecycle";
 import { EbayListingMemberAdapter } from "./modules/marketplace-listings/infrastructure/providers/ebay/ebay-listing-member.adapter";
 import { ShopifyListingMemberAdapter } from "./modules/marketplace-listings/infrastructure/providers/shopify-listing-member.adapter";

@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { recordAssemblyOutputPickLocation } from "../../assembly-output-pick-command";
+import { recordAssemblyOutputPickLocation } from "../../application/assembly-output-pick-command";
 
 describe("assembly output WMS evidence", () => {
   const evidence = { orderId: 70, orderItemId: 71, locationCode: "FINISHED", zone: "PACK" };

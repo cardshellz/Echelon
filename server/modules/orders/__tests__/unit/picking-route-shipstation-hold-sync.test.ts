@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const PICKING_ROUTES_SRC = readFileSync(
-  resolve(__dirname, "../../picking.routes.ts"),
+  resolve(__dirname, "../../interfaces/http/picking.routes.ts"),
   "utf8",
 );
 

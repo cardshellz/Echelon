@@ -227,7 +227,7 @@ async function main() {
 
   const { sql } = await import("drizzle-orm");
   const { db, pool } = await import("../server/db");
-  const { createOperationsDashboardService } = await import("../server/modules/orders/operations-dashboard.service");
+  const { createOperationsDashboardService } = await import("../server/modules/orders/application/operations-dashboard.service");
   const { notify } = await import("../server/modules/notifications/in-app-notifications.api");
 
   try {

@@ -12,7 +12,7 @@ import {
   assertShopifyImportStoreMatchesDefaultChannel,
   filterConnectionOwnedShopifyProducts,
   normalizeImportShopDomain,
-} from "../../shopify-import-connection-guard";
+} from "../../domain/shopify-import-connection-guard";
 import {
   fetchOrdersFulfillmentStatus,
   fetchShopifyCatalogProducts,
@@ -111,7 +111,7 @@ describe("Catalog Archive Replenishment Participant & Shopify Transport Bounds (
         "utf8",
       );
       const catalogStorage = readFileSync(
-        resolve(process.cwd(), "server/modules/catalog/catalog.storage.ts"),
+        resolve(process.cwd(), "server/modules/catalog/infrastructure/catalog.storage.ts"),
         "utf8",
       );
       expect(cmdRepo).toContain("archiveProductReplenishmentInTx(tx, command.sourceId, now)");

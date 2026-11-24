@@ -172,9 +172,9 @@ describe("page protection wiring", () => {
   });
   it.each([
     ["server/modules/channels/channels.routes.ts", ["/api/wms/orders", "/api/channel-allocation/grid"]],
-    ["server/modules/orders/picking.routes.ts", ["/api/picking/queue", "/api/orders", "/api/orders/history"]],
-    ["server/modules/orders/picking-history.routes.ts", ["/api/picking/history"]],
-    ["server/modules/inventory/inventory.routes.ts", ["/api/inventory/transactions"]],
+    ["server/modules/orders/interfaces/http/picking.routes.ts", ["/api/picking/queue", "/api/orders", "/api/orders/history"]],
+    ["server/modules/orders/interfaces/http/picking-history.routes.ts", ["/api/picking/history"]],
+    ["server/modules/inventory/interfaces/http/inventory.routes.ts", ["/api/inventory/transactions"]],
     ["server/routes/oms.routes.ts", ["/api/oms/orders"]],
     ["server/modules/shipping-engine/interfaces/http/outbound-shipments.routes.ts", ["/api/outbound-shipments"]],
   ] as const)("places the shared limiter after authentication in %s", (path, routes) => {

@@ -123,7 +123,7 @@ vi.mock("../../po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
   detectFinancialExceptions: mocks.detectFinancialExceptions,
 }));
-vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
+vi.mock("../../../inventory/application/cogs.service", () => ({ COGSService: class {} }));
 vi.mock("../../purchase-cost-application.service", () => ({
   reconcilePurchaseCostEvidence: mocks.reconcilePurchaseCostEvidence,
 }));

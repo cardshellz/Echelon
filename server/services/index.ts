@@ -40,7 +40,7 @@ import { createWalmartStockLinkAdapter } from "../modules/channels/adapters/walm
 import { createWalmartStockLinkSource, createWalmartStockLinkWriter } from "../modules/channels/infrastructure/walmart-stock-link-source";
 import { createChannelEbayStockLinkAdapter } from "../modules/channels/adapters/ebay/ebay-stock-link.adapter";
 import { createChannelEbayStockLinkSource, createChannelEbayStockLinkWriter } from "../modules/channels/infrastructure/ebay-stock-link-source";
-import { requestStockLinkChecks } from "../modules/inventory-planning/quantity-publication";
+import { requestStockLinkChecks } from "../modules/inventory-planning/quantity-publication.api";
 import { createListingUpdateService } from "../listing-update.composition";
 import { InventoryPublicationInitialScopeService } from "../modules/inventory-planning/application/inventory-publication-initial-scope.service";
 import { PostgresInitialPublicationScopeStore } from "../modules/inventory-planning/infrastructure/inventory-publication-initial-scope.repository";
@@ -83,7 +83,7 @@ import {
   createReceiveValidationService,
   createReceivingService,
 } from "../modules/procurement/runtime-services.api";
-import { createProductImportService } from "../modules/catalog/product-import.service";
+import { createProductImportService } from "../modules/catalog/application/product-import.service";
 import { createChannelProductPushService } from "../modules/channels/product-push.service";
 import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 import { InventoryPublicationWorkCoordinator } from "../modules/inventory-planning/application/inventory-publication-work-coordinator.service";
@@ -193,7 +193,7 @@ import { createWalmartFulfillmentExecutor } from "../modules/channels/adapters/w
 import { AesGcmFulfillmentProviderCredentialCipher } from "../modules/shipping-engine/fulfillment-routing-and-connections.api";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
 import { ChannelEbayListingPhotoResolver } from "../modules/channels/ebay-listing-photos.service";
-import { createCatalogPublicImageUrl } from "../modules/catalog/catalog-public-image";
+import { createCatalogPublicImageUrl } from "../modules/catalog/domain/catalog-public-image";
 import { ChannelAdapterRegistry } from "../modules/channels/channel-adapter.interface";
 import { ChannelInventoryPublicationTransportAdapter } from "../modules/channels/channel-inventory-publication-transport.adapter";
 import {
@@ -210,7 +210,7 @@ import { markPublicationProductsChanged } from "../modules/inventory-planning/in
 import { withChannelQuantityUpdates } from "../modules/inventory-planning/application/order-claim-channel-quantity";
 import { PostgresOrderClaimVariantReader } from "../modules/inventory-planning/infrastructure/order-claim-variant.reader";
 import { quantityPublicationAdmission, createQuantityPublicationCatchupService } from "../modules/inventory-planning/infrastructure/quantity-publication-runtime";
-import { EbayPublicationReconciliationService, ebayPublicationReconciliationRepository } from "../modules/inventory-planning/quantity-publication";
+import { EbayPublicationReconciliationService, ebayPublicationReconciliationRepository } from "../modules/inventory-planning/quantity-publication.api";
 import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sync";
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
@@ -927,7 +927,7 @@ export { createPickingService } from "../modules/orders/runtime-services.api";
 export { createOrderCombiningService } from "../modules/orders/runtime-services.api";
 export { createOperationsDashboardService } from "../modules/orders/runtime-services.api";
 export { createReceivingService } from "../modules/procurement/runtime-services.api";
-export { createProductImportService } from "../modules/catalog/product-import.service";
+export { createProductImportService } from "../modules/catalog/application/product-import.service";
 export { createChannelProductPushService } from "../modules/channels/product-push.service";
 
 // Re-export service types
@@ -942,7 +942,7 @@ export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineRe
 export type { CycleCountUseCases as CycleCountService, CycleCountError, ApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "../modules/inventory";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "../modules/orders/runtime-services.api";
 export type { ReceivingService, ReceivingError } from "../modules/procurement/runtime-services.api";
-export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";
+export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/application/product-import.service";
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "../modules/channels/product-push.service";
 export { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 export type { SyncSettingsService, SyncLogWriteParams } from "../modules/channels/sync-settings.service";
@@ -956,10 +956,10 @@ export { createRecommendationPoHandoffService } from "../modules/procurement/pla
 export type { RecommendationPoHandoffService, RecommendationPoHandoffError } from "../modules/procurement/planning-and-pipeline-jobs.api";
 export { createShipmentTrackingService } from "../modules/procurement/runtime-services.api";
 export type { ShipmentTrackingService, ShipmentTrackingError } from "../modules/procurement/runtime-services.api";
-export { createInventoryLotService } from "../modules/inventory/lots.service";
-export type { InventoryLotService } from "../modules/inventory/lots.service";
-export { createCOGSService } from "../modules/inventory/cogs.service";
-export type { COGSService, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/cogs.service";
+export { createInventoryLotService } from "../modules/inventory/application/lots.service";
+export type { InventoryLotService } from "../modules/inventory/application/lots.service";
+export { createCOGSService } from "../modules/inventory/application/cogs.service";
+export type { COGSService, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/application/cogs.service";
 export { createShipStationService } from "../modules/oms/shipstation-execution.api";
 export type { ShipStationService } from "../modules/oms/shipstation-execution.api";
 export type { DrizzleDb } from "../db";

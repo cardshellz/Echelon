@@ -72,7 +72,7 @@ describe("pick-floor line hold", () => {
     expect(PICKING).toContain("singleQueue.filter(o => o.onHold || hasHeldLine(o))");
     expect(PICKING).toContain('const itemOnHold = ("onHold" in item && item.onHold) || hasHeldLine(item);');
 
-    const storage = readFileSync("server/modules/orders/orders.storage.ts", "utf8");
+    const storage = readFileSync("server/modules/orders/infrastructure/orders.storage.ts", "utf8");
     const queueGuard = storage.slice(
       storage.indexOf("Exclude orders with zero shippable items"),
       storage.indexOf("Historical orders are read separately"),

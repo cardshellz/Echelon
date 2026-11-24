@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { InventoryAvailabilityRuntimeClaimContext } from "../../../inventory-planning/application/inventory-availability-runtime-claim.service";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 import { orders, warehouseLocations } from "@shared/schema";
 
 function configureProgressFixture(tx: any, line: any, updates: Array<Record<string,unknown>>, recordSet?: (value: unknown) => unknown) {

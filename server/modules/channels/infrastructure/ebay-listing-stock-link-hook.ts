@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { EbayListingSyncError } from "../ebay-listing-sync.domain";
-import type { ChannelEbayStockLinkInput, ChannelEbayStockLinkResult } from "../../inventory-planning/quantity-publication";
+import type { ChannelEbayStockLinkInput, ChannelEbayStockLinkResult } from "../../inventory-planning/quantity-publication.api";
 
 /**
  * The Card Shellz eBay update and rebuild hooks (channels PR4, PLAN-CH-v3 §5 "Edit / rebuild / relist"): before a

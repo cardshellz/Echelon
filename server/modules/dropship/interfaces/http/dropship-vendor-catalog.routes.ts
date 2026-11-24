@@ -34,7 +34,7 @@ import { PgDropshipSelectionAtpRepository } from "../../infrastructure/dropship-
 import { PgDropshipSelectionChangeRepository } from "../../infrastructure/dropship-selection-change.repository";
 import { platformDropshipLogger } from "../../infrastructure/dropship-listing-push-run.factory";
 import { DropshipError } from "../../domain/errors";
-import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work.api";
 import { requireDropshipAuth } from "./dropship-auth.routes";
 import { SELECTION_CHANGE_TOO_LARGE_MESSAGE, parseDropshipBulkJsonFor } from "./dropship-bulk-json.middleware";
 import { logger } from "../../../../platform/observability/logger";

@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { shopifyProductConnectionRequestSchema } from "@shared/catalog/shopify-product-connection";
-import { buildShopifyProductMappingSummary } from "../../shopify-product-mapping.domain";
-import { createShopifyProductConnectionService } from "../../shopify-product-connection.service";
-import { ShopifyConnectionProviderError, type ShopifyProductConnectionProvider } from "../../shopify-product-connection.provider";
-import { ShopifyProductConnectionError, type ShopifyConnectionRemoteProduct } from "../../shopify-product-connection.domain";
-import { type ShopifyProductConnectionRepository, type StoredShopifyConnection } from "../../shopify-product-connection.repository";
-import type { ShopifyProductMappingService } from "../../shopify-product-mapping.service";
+import { buildShopifyProductMappingSummary } from "../../domain/shopify-product-mapping.domain";
+import { createShopifyProductConnectionService } from "../../application/shopify-product-connection.service";
+import { ShopifyConnectionProviderError, type ShopifyProductConnectionProvider } from "../../infrastructure/shopify-product-connection.provider";
+import { ShopifyProductConnectionError, type ShopifyConnectionRemoteProduct } from "../../domain/shopify-product-connection.domain";
+import { type ShopifyProductConnectionRepository, type StoredShopifyConnection } from "../../infrastructure/shopify-product-connection.repository";
+import type { ShopifyProductMappingService } from "../../application/shopify-product-mapping.service";
 import { CONNECTION_ACTOR, CONNECTION_COMMAND_KEY, connectionSource, existingConnectionProduct } from "../support/shopify-product-connection.fixture";
 
 function fixture(variantCount = 2) {

@@ -1,4 +1,4 @@
-import { productMethods } from "../catalog/catalog.storage";
+import { productMethods } from "../catalog/infrastructure/catalog.storage";
 import { createSharedProductPhotoImporter } from "../catalog";
 import {
   updateProductFromShopifyBackfillInCatalog,
@@ -50,7 +50,7 @@ import {
   type Channel,
   type Warehouse,
 } from "@shared/schema";
-import { decideImportedShopifyProductMapping } from "../catalog/shopify-product-mapping.domain";
+import { decideImportedShopifyProductMapping } from "../catalog/domain/shopify-product-mapping.domain";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import { assertLegacyQuantityImportAllowed } from "../inventory/application/legacy-quantity-import";

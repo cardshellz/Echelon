@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { withoutRetiredVariantFields } from "../../catalog.routes";
+import { withoutRetiredVariantFields } from "../../interfaces/http/catalog.routes";
 
 describe("retired variant write fields", () => {
   it("drops the retired dropship flag from a variant write and keeps everything else", () => {
@@ -20,7 +20,7 @@ describe("retired variant write fields", () => {
   });
 
   it("is applied to both the variant create and the variant update writes", () => {
-    const source = readFileSync(resolve(process.cwd(), "server/modules/catalog/catalog.routes.ts"), "utf8");
+    const source = readFileSync(resolve(process.cwd(), "server/modules/catalog/interfaces/http/catalog.routes.ts"), "utf8");
 
     expect(source.match(/\.\.\.withoutRetiredVariantFields\(req\.body\)/g)).toHaveLength(2);
     expect(source).not.toContain("dropshipEligible: req.body.dropshipEligible");

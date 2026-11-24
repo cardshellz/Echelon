@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type PickCorrection } from "@shared/pick-corrections";
-import type { PickCorrectionService } from "../../pick-correction.service";
+import type { PickCorrectionService } from "../../application/pick-correction.service";
 
 vi.mock("../../../../routes/middleware", () => ({
   requireAuth: (req: Request, res: Response, next: NextFunction) => {
@@ -16,7 +16,7 @@ vi.mock("../../../../routes/middleware", () => ({
     next();
   },
 }));
-import { registerPickCorrectionRoutes } from "../../pick-correction.routes";
+import { registerPickCorrectionRoutes } from "../../interfaces/http/pick-correction.routes";
 
 describe("pick correction HTTP role boundary", () => {
   let server: Server; let url: string;

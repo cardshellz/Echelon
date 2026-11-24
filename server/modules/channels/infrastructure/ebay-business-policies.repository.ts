@@ -18,7 +18,7 @@ import {
   readCatalogEbayPolicyFields,
   readCatalogEbayPolicySelection,
   writeCatalogEbayPolicyFields,
-} from "../../catalog/catalog-ebay-policy-fields";
+} from "../../catalog/domain/catalog-ebay-policy-fields";
 
 const categoryColumns =
   'fulfillment_policy_override AS "fulfillmentPolicyId", return_policy_override AS "returnPolicyId", payment_policy_override AS "paymentPolicyId"';

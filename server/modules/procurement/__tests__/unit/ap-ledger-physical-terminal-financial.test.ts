@@ -11,7 +11,7 @@ vi.mock("../../shipment-billing-ownership.repository", () => ({
 
 // Keep the COGS dependency without importing unrelated inventory repository owners.
 vi.mock("../../../inventory", async () => ({
-  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+  COGSService: (await import("../../../inventory/application/cogs.service")).COGSService,
 }));
 
 // These owner fixtures isolate financial state changes. The real PostgreSQL
@@ -83,7 +83,7 @@ vi.mock("../../po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
   detectFinancialExceptions: vi.fn(),
 }));
-vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
+vi.mock("../../../inventory/application/cogs.service", () => ({ COGSService: class {} }));
 
 function selectChain(rows: unknown[]) {
   const chain: any = {};

@@ -17,7 +17,7 @@
  * reviewed path to a human. Duplicate ownership is never auto-resolved —
  * choosing which row survives is a judgement call.
  */
-import { createShopifyProductMappingReconciliationService } from "../modules/catalog/shopify-product-mapping-reconciliation.service";
+import { createShopifyProductMappingReconciliationService } from "../modules/catalog/application/shopify-product-mapping-reconciliation.service";
 import { channelsStorage } from "../modules/channels";
 
 const ACTOR = "scheduled-mapping-reconciler";

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { RecipeCapacityService } from "../../recipe-capacity.service";
+import { RecipeCapacityService } from "../../application/recipe-capacity.service";
 
 function rows(rows: Record<string, unknown>[]) {
   return { rows };

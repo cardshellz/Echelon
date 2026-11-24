@@ -5,13 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ShopifyMappingReconciliationError,
-} from "../../shopify-product-mapping-reconciliation.service";
+} from "../../application/shopify-product-mapping-reconciliation.service";
 import {
   ShopifyMappingVerificationError,
-} from "../../shopify-product-mapping-verifier";
+} from "../../infrastructure/shopify-product-mapping-verifier";
 import {
   registerShopifyProductMappingReconciliationRoutes,
-} from "../../shopify-product-mapping-reconciliation.routes";
+} from "../../interfaces/http/shopify-product-mapping-reconciliation.routes";
 
 const { requirePermissionMock, serviceMocks, createServiceMock } = vi.hoisted(
   () => {
@@ -40,10 +40,10 @@ vi.mock("../../../../routes/middleware", () => ({
 }));
 
 vi.mock(
-  "../../shopify-product-mapping-reconciliation.service",
+  "../../application/shopify-product-mapping-reconciliation.service",
   async (importOriginal) => ({
     ...await importOriginal<
-      typeof import("../../shopify-product-mapping-reconciliation.service")
+      typeof import("../../application/shopify-product-mapping-reconciliation.service")
     >(),
     createShopifyProductMappingReconciliationService: createServiceMock,
   }),

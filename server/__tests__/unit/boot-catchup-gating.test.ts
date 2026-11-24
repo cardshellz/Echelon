@@ -92,7 +92,7 @@ describe("runBootCatchUpIfBehind", () => {
  */
 const GATED = [
   { name: "fulfillment sweeper (outbound + inbound)", file: "server/modules/oms/fulfillment-sweeper.scheduler.ts", boots: 2, records: 2 },
-  { name: "cycle-count freeze guard", file: "server/modules/inventory/cycle-count-freeze-guard.scheduler.ts", boots: 1, records: 1 },
+  { name: "cycle-count freeze guard", file: "server/modules/inventory/application/cycle-count-freeze-guard.scheduler.ts", boots: 1, records: 1 },
   { name: "OMS flow reconciliation", file: "server/modules/oms/oms-flow-reconciliation.service.ts", boots: 1, records: 1 },
   { name: "financial command retention", file: "server/platform/commands/financial-command-retention.worker.ts", boots: 1, records: 1 },
   { name: "sync recovery", file: "server/modules/sync/application/sync-recovery.service.ts", boots: 1, records: 1 },

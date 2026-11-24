@@ -3,7 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { DropshipCatalogExposureService, makeDropshipCatalogExposureLogger, systemDropshipCatalogExposureClock } from "../../application/dropship-catalog-exposure-service";
 import { PgDropshipCatalogExposureRepository } from "../../infrastructure/dropship-catalog-exposure.repository";
 import { DropshipError } from "../../domain/errors";
-import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work.api";
 
 type SessionUser = {
   id: string;

@@ -90,7 +90,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   let createShipment: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
   let costUpdateCommands: ReturnType<typeof import("../../shipment-cost-update.commands").createShipmentCostUpdateCommands>;
   let inventory: import("../../../inventory/application/inventory.use-cases").InventoryUseCases;
-  let cogs: import("../../../inventory/cogs.service").COGSService;
+  let cogs: import("../../../inventory/application/cogs.service").COGSService;
   let reconcile: typeof import("../../ap-ledger.service").reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
 
   beforeAll(async () => {
@@ -156,9 +156,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       const [receivingModule, purchasingModule, shipmentModule, procurementModule, catalogModule,
         inventoryModule, repositoryModule, lotModule, cogsModule, apModule, dbModule] = await Promise.all([
         import("../../receiving.service"), import("../../purchasing.service"), import("../../shipment-tracking.service"),
-        import("../../procurement.storage"), import("../../../catalog/catalog.storage"),
+        import("../../procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
         import("../../../inventory/application/inventory.use-cases"), import("../../../inventory/infrastructure/inventory.repository"),
-        import("../../../inventory/lots.service"), import("../../../inventory/cogs.service"),
+        import("../../../inventory/application/lots.service"), import("../../../inventory/application/cogs.service"),
         import("../../ap-ledger.service"), import("../../../../db"),
       ]);
       defaultModulePool = dbModule.pool;
@@ -435,7 +435,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       FROM inventory.inventory_lots ORDER BY id`)).rows[0];
   }
   async function seedConsumedCost() {
-    const { InventoryLotService }=await import("../../../inventory/lots.service");
+    const { InventoryLotService }=await import("../../../inventory/application/lots.service");
     const source=(await pool.query("SELECT product_variant_id,warehouse_location_id FROM inventory.inventory_lots ORDER BY id LIMIT 1")).rows[0];
     await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
       productVariantId:Number(source.product_variant_id),warehouseLocationId:Number(source.warehouse_location_id),qty:1,orderId:1,orderItemId:1,
@@ -1041,7 +1041,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     transferAndSell: async () => {
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'AMENDMENT-PICK')");
       await inventory.transfer({ productVariantId: 200, fromLocationId: 99, toLocationId: 100, qty: 1, userId: actorId });
-      const { InventoryLotService } = await import("../../../inventory/lots.service");
+      const { InventoryLotService } = await import("../../../inventory/application/lots.service");
       await database.transaction(tx => new InventoryLotService(tx, () => NOW).pickFromLots({ productVariantId: 200,
         warehouseLocationId: 100, qty: 1, orderId: 1, orderItemId: 1 }));
     } });
@@ -1049,7 +1049,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     transferAndSell:async()=>{
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'CORRECTION-PICK')");
       await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
-      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      const {InventoryLotService}=await import("../../../inventory/application/lots.service");
       await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,
         warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
     }});
@@ -1297,7 +1297,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await receive();
     await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'AUDIT-PICK')");
     await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,
       warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
     await approveEvidence(); await shipment.finalizeAllocations(1,actorId); await shipment.pushLandedCostsToLots(1);
@@ -1312,7 +1312,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'AUDIT-PICK')");
     const [{ InventoryUseCases }, { createInventoryMethods }, { InventoryLotService }] = await Promise.all([
       import("../../../inventory/application/inventory.use-cases"),
-      import("../../../inventory/infrastructure/inventory.repository"), import("../../../inventory/lots.service"),
+      import("../../../inventory/infrastructure/inventory.repository"), import("../../../inventory/application/lots.service"),
     ]);
     let signalHeld!: () => void, releaseHeld!: () => void, signalWaitingPid!: (pid: number) => void;
     const held = new Promise<void>((resolveHeld) => { signalHeld = resolveHeld; });
@@ -1478,7 +1478,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   });
 
   async function exactPieceLot() {
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     const created=await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).createLot({
       productVariantId:201,warehouseLocationId:99,qty:80_000,unitCostCents:5,unitCostMills:500,costSource:"po",receivedAt:NOW,
     }));
@@ -1488,7 +1488,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   it("preserves a 1,190.72 shipment charge across large partial picks",async()=>{
     const lotId=await exactPieceLot();
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
       productVariantId:201,warehouseLocationId:99,qty:30_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
     }));
@@ -1508,7 +1508,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   it("restores exact cost after a partial unpick and conserves value on repick",async()=>{
     const lotId=await exactPieceLot();
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
       productVariantId:201,warehouseLocationId:99,qty:30_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
     }));
@@ -1526,7 +1526,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   it("serializes competing picks without overlapping exact cost quantities",async()=>{
     const lotId=await exactPieceLot();
-    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const {InventoryLotService}=await import("../../../inventory/application/lots.service");
     const pick=()=>database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
       productVariantId:201,warehouseLocationId:99,qty:60_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
     }));
@@ -1560,7 +1560,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   it.each(["shipment","cycle_count"] as const)("conserves exact remaining value after an on-hand %s loss",async(kind)=>{
     const lotId=await exactPieceLot();
     if (kind==="shipment") {
-      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      const {InventoryLotService}=await import("../../../inventory/application/lots.service");
       await database.transaction(async tx=>{
         await lockInventoryCostGraph(tx);
         await new InventoryLotService(tx,()=>NOW).shipFromLots({
@@ -1608,7 +1608,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     transferFirstAndSell: async()=>{
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'RECEIPT-COST-PICK')");
       await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
-      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      const {InventoryLotService}=await import("../../../inventory/application/lots.service");
       await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
     },
     breakFirst: async()=>{
@@ -1651,7 +1651,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     transferAndSell: async () => {
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'CREDIT-PICK')");
       await inventory.transfer({ productVariantId: 200, fromLocationId: 99, toLocationId: 100, qty: 1, userId: actorId });
-      const { InventoryLotService } = await import("../../../inventory/lots.service");
+      const { InventoryLotService } = await import("../../../inventory/application/lots.service");
       await database.transaction(tx => new InventoryLotService(tx, () => NOW).pickFromLots({ productVariantId: 200,
         warehouseLocationId: 100, qty: 1, orderId: 1, orderItemId: 1 }));
     } });

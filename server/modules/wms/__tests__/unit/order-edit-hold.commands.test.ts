@@ -4,7 +4,7 @@ import type { SQL } from "drizzle-orm";
 import {
   acquireOrderEditWarehouseHold,
   releaseOrderEditWarehouseHold,
-} from "../../order-edit-hold.commands";
+} from "../../application/order-edit-hold.commands";
 
 const operationId = "00000000-0000-4000-8000-000000000001";
 const dialect = new PgDialect();

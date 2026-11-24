@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { assertCatalogPublicationPhotoRequirements, createCatalogImageInspector, inspectCatalogImage } from "../../catalog-image-inspection";
-import { ProductAssetError } from "../../product-asset-errors";
+import { assertCatalogPublicationPhotoRequirements, createCatalogImageInspector, inspectCatalogImage } from "../../domain/catalog-image-inspection";
+import { ProductAssetError } from "../../domain/product-asset-errors";
 
 const png = (name: string) => ({ mimeType: "image/png", data: readFileSync(new URL(`../fixtures/photos/${name}.png`, import.meta.url)) });
 describe("Catalog original image inspection", () => {

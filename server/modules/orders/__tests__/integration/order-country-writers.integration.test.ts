@@ -16,7 +16,7 @@ import { validatePostgresTestEnvironment } from "../../../../../scripts/ci/postg
 
 const ports = vi.hoisted(() => ({ transaction: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: ports }));
-import { orderMethods } from "../../orders.storage";
+import { orderMethods } from "../../infrastructure/orders.storage";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

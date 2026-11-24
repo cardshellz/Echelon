@@ -1,7 +1,7 @@
 import { invoiceCorrectionCostImpactSchema } from "@shared/procurement/invoice-correction-cost-impact";
 import { supplierCostReviewTasks } from "@shared/procurement/cost-review-tasks";
 import { purchaseLineNeedsCostReview } from "@shared/procurement/purchase-cost-status";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory/application/cogs.service";
 import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 import { buildCostDestinationImpact } from "./cost-change-impact";
 import { resolvePurchaseCostSource } from "./domain/purchase-cost-source";

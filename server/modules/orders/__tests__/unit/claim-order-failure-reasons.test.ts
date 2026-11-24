@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 
 /**
  * Behavioral coverage for claimOrder failure classification.

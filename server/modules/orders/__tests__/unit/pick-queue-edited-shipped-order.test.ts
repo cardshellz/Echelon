@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ORDERS_STORAGE_SRC = readFileSync(
-  resolve(__dirname, "../../orders.storage.ts"),
+  resolve(__dirname, "../../infrastructure/orders.storage.ts"),
   "utf-8",
 );
 const PICK_QUEUE_SRC = ORDERS_STORAGE_SRC.slice(

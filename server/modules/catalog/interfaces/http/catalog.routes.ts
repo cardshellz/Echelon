@@ -1,0 +1,2956 @@
+import { protectEbayPolicyWriteBoundary } from "../../../channels/interfaces/ebay-policy-write-boundary";
+import type { Express, Response } from "express";
+import { sendInventoryQuantityError, validateInventoryCommandKey } from "../../../inventory/interfaces/quantity-command.middleware";
+import { CatalogInventoryCommandError } from "../../application/catalog-inventory-command.service";
+import { createCatalogInventoryCommandService } from "../../infrastructure/catalog-inventory-command.repository";
+import { renameDerivedVariantSkus } from "../../application/product-sku-rename";
+import { db, pool } from "../../../../db";
+import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
+import {
+  channelConnections,
+  channelFeeds,
+  channelListings,
+  channels,
+  productAssets,
+  productCategories,
+  products,
+  productVariants,
+  shippingGroups,
+} from "@shared/schema";
+import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
+import { catalogStorage } from "../..";
+import { createImageSyncService } from "../../application/image-sync.service";
+import { duplicateProduct, ProductDuplicateError } from "../../application/product-duplicate.service";
+import {
+  type ShopifyProductSearchResult,
+  fetchShopifyProductsForSearch,
+} from "../../infrastructure/shopify-product-search";
+import { enqueueShippingGroupMetafields } from "../../application/shipping-group-sync";
+import {
+  createShopifyProductMappingService,
+  ShopifyProductMappingError,
+} from "../../application/shopify-product-mapping.service";
+import {
+  registerShopifyProductMappingReconciliationRoutes,
+} from "./shopify-product-mapping-reconciliation.routes";
+import { registerShopifyProductConnectionRoutes } from "./shopify-product-connection.routes";
+import { normalizeCategorySlug, registerProductCategoryUpdateRoute } from "./product-category-update.routes";
+import {
+  coercePackageAttributesOnVariantPayload,
+  parsePackageAttributeBulkRows,
+  serializePackageAttributeUpdates,
+} from "../../domain/package-attributes";
+import { z } from "zod";
+import { validateVariantUomWrite } from "../../domain/variant-uom";
+import {
+  ProductInventoryStrategyError,
+  assertProductInventoryStrategyTransition,
+  parseProductInventoryStrategy,
+} from "../../domain/inventory-strategy-policy";
+import { updateProductInventoryTracking, InventoryTrackingPolicyError } from "../../infrastructure/inventory-tracking-policy.repository";
+import { registerBulkInventoryTrackingRoutes } from "./bulk-inventory-tracking.routes";
+import { registerProductMergeRoutes } from "./product-merge.routes";
+import { registerInventoryTrackingHistoryRoutes } from "./inventory-tracking-history.routes";
+import { ProductAssetError } from "../../domain/product-asset-errors";
+import { registerProductAssetRoutes } from "./product-asset.routes";
+import { registerCatalogPublicImageRoutes } from "./catalog-public-image.routes";
+import { readPublicCatalogImage } from "../../infrastructure/catalog-publication-images.reader";
+import { parseInventoryTrackingWrite } from "@shared/catalog/inventory-tracking-policy";
+import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import {
+  assertVariantSalesEligibilityTransitionAllowed,
+  assertVariantSalesIdentityCompatible,
+  coerceVariantSalesEligibilityOnPayload,
+  VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE,
+  VariantSalesEligibilityError,
+} from "../../domain/variant-sales-eligibility-policy";
+import {
+  createInventoryLegacyAdminControlService,
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  sendInventoryLegacyAdminControlError,
+} from "../../../inventory-planning/legacy-admin-control.api";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work.api";
+import {
+  assignProductsShippingGroupInTx,
+  clearPrimaryProductAssetsForProduct,
+  deactivateVariantChannelFeedsInTx,
+  insertProductCategoryRecord,
+  insertShippingGroupRecord,
+  linkVariantShopifyFeedAndListingInTx,
+  updateScopedVariantPackageAttributesInTx,
+  updateShippingGroupRecordById,
+  updateVariantPackageAttributesByIdInTx,
+} from "../../infrastructure/catalog-route-mutations.repository";
+
+type CatalogRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
+
+export const MAX_CATALOG_BATCH_SIZE = 500;
+
+function sendSelectionBusy(res: Response, error: unknown): boolean {
+  const busy = publicationSelectionBusyIssue(error);
+  if (!busy) return false;
+  // Some legacy catalog commands save multiple records separately. Do not claim
+  // the entire request rolled back when only its selection statement is known to fail.
+  const message = "A stock update is finishing. Refresh this product to check its saved changes, then retry the change that remains.";
+  res.status(409).json({ ...busy, message, error: message });
+  return true;
+}
+
+/**
+ * Fields a variant write may no longer set. `dropship_eligible` is retired:
+ * dropship decides from the admin catalog rules, never from a flag on the
+ * variant, and the variant routes spread req.body into the write.
+ */
+const RETIRED_VARIANT_WRITE_FIELDS = ["dropshipEligible"] as const;
+
+export function withoutRetiredVariantFields<T>(body: T): T {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const payload: Record<string, unknown> = { ...(body as Record<string, unknown>) };
+  for (const field of RETIRED_VARIANT_WRITE_FIELDS) delete payload[field];
+  return payload as T;
+}
+
+// Physical packing facts beyond weight/dims. Canonical on the variant since
+// migration 185; validated here because the variant PUT spreads req.body.
+const variantPackingFlagsSchema = z.object({
+  shipsInOwnContainer: z.boolean().optional(),
+  maxUnitsPerPackage: z.number().int().positive().nullable().optional(),
+}).strict();
+
+function coercePackingFlagsOnVariantPayload(input: unknown): {
+  shipsInOwnContainer?: boolean;
+  maxUnitsPerPackage?: number | null;
+} {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const source = input as Record<string, unknown>;
+  const candidate: Record<string, unknown> = {};
+  if (Object.prototype.hasOwnProperty.call(source, "shipsInOwnContainer")) {
+    candidate.shipsInOwnContainer = source.shipsInOwnContainer;
+  }
+  if (Object.prototype.hasOwnProperty.call(source, "maxUnitsPerPackage")) {
+    candidate.maxUnitsPerPackage = source.maxUnitsPerPackage;
+  }
+  if (Object.keys(candidate).length === 0) return {};
+  const parsed = variantPackingFlagsSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw Object.assign(
+      new Error("shipsInOwnContainer must be a boolean and maxUnitsPerPackage must be a positive integer or null"),
+      { statusCode: 400 },
+    );
+  }
+  return parsed.data;
+}
+
+const variantFulfillmentSchema = z.object({
+  requiresShipping: z.boolean().optional(),
+  trackInventory: z.boolean().optional(),
+  inventoryTrackingOverride: z.boolean().nullable().optional(),
+}).strict();
+
+export function coerceVariantFulfillmentOnPayload(
+  input: unknown,
+  existing?: { requiresShipping: boolean; trackInventory: boolean | null },
+): { requiresShipping?: boolean; trackInventory?: boolean; inventoryTrackingOverride?: boolean | null } {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const source = input as Record<string, unknown>;
+  const candidate: Record<string, unknown> = {};
+  for (const key of ["requiresShipping", "trackInventory", "inventoryTrackingOverride"] as const) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) candidate[key] = source[key];
+  }
+  if (Object.keys(candidate).length === 0) return {};
+
+  const parsed = variantFulfillmentSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw Object.assign(
+      new Error("requiresShipping and trackInventory must be booleans"),
+      { statusCode: 400 },
+    );
+  }
+  const requiresShipping = parsed.data.requiresShipping
+    ?? existing?.requiresShipping
+    ?? true;
+  const trackInventory = parsed.data.trackInventory
+    ?? existing?.trackInventory
+    ?? true;
+  if (!requiresShipping && trackInventory !== false && parsed.data.inventoryTrackingOverride === undefined) {
+    throw Object.assign(
+      new Error("Digital variants must set trackInventory to false"),
+      { statusCode: 400 },
+    );
+  }
+  try { parseInventoryTrackingWrite(parsed.data); }
+  catch (error) { throw Object.assign(error instanceof Error ? error : new Error("Invalid inventory policy"), { statusCode: 400 }); }
+  return parsed.data;
+}
+import { inventoryStorage } from "../../../inventory";
+import { ordersStorage } from "../../../orders";
+import { channelsStorage } from "../../../channels";
+import { warehouseStorage } from "../../../warehouse";
+import {
+  procurementStorage,
+  synchronizeProcurementSkuReferences,
+} from "../../../procurement";
+import {
+  BinAssignmentFilterError,
+  BinAssignmentValidationError,
+  parseBinAssignmentVariantIdsQuery,
+  parseBinAssignmentWriteRequest,
+} from "../../../warehouse/bin-assignment.api";
+const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
+import { requirePermission, requireAuth } from "../../../../routes/middleware";
+
+const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
+
+function authenticatedActor(req: any): string {
+  const identity = req.session?.user?.id ?? req.session?.user?.username ?? req.user?.username;
+  if (identity === null || identity === undefined || String(identity).trim() === "") {
+    throw Object.assign(new Error("Authenticated user identity is required"), { statusCode: 401 });
+  }
+  return `user:${String(identity).trim()}`;
+}
+
+function normalizeShopDomain(value: string): string {
+  const trimmed = value.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+  if (!trimmed) return trimmed;
+  return trimmed.includes(".") ? trimmed : `${trimmed}.myshopify.com`;
+}
+
+function normalizeShopifyNumericId(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/(\d+)$/);
+  return match ? match[1] : null;
+}
+
+export function extractShopifyVariantId(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const gidMatch = trimmed.match(/ProductVariant\/(\d+)/i);
+  if (gidMatch) return gidMatch[1];
+
+  const variantPathMatch = trimmed.match(/\/variants\/(\d+)/i);
+  if (variantPathMatch) return variantPathMatch[1];
+
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+function extractShopifyProductId(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const gidMatch = trimmed.match(/Product\/(\d+)/i);
+  if (gidMatch) return gidMatch[1];
+
+  const productPathMatch = trimmed.match(/\/products\/(\d+)/i);
+  if (productPathMatch) return productPathMatch[1];
+
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+async function getDefaultShopifyChannel(channelIdInput?: unknown) {
+  const requestedChannelId = channelIdInput === undefined || channelIdInput === null || channelIdInput === ""
+    ? null
+    : Number(channelIdInput);
+
+  if (requestedChannelId !== null && (!Number.isInteger(requestedChannelId) || requestedChannelId <= 0)) {
+    throw Object.assign(new Error("Invalid Shopify channel"), { statusCode: 400 });
+  }
+
+  const rows = await db
+    .select()
+    .from(channels)
+    .where(
+      requestedChannelId
+        ? and(eq(channels.id, requestedChannelId), eq(channels.provider, "shopify"))
+        : eq(channels.provider, "shopify"),
+    )
+    .orderBy(sql`CASE WHEN ${channels.isDefault} = 1 THEN 0 ELSE 1 END`, asc(channels.id))
+    .limit(1);
+
+  const channel = rows[0];
+  if (!channel) {
+    throw Object.assign(new Error("No Shopify channel is configured"), { statusCode: 400 });
+  }
+  return channel;
+}
+
+async function getShopifyCredentials(channelId: number) {
+  const [connection] = await db
+    .select()
+    .from(channelConnections)
+    .where(eq(channelConnections.channelId, channelId))
+    .limit(1);
+
+  const shopDomain = connection?.shopDomain || process.env.SHOPIFY_SHOP_DOMAIN;
+  const accessToken = connection?.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
+  if (!shopDomain || !accessToken) {
+    throw Object.assign(new Error("Shopify credentials are not configured for this channel"), { statusCode: 400 });
+  }
+
+  return {
+    shopDomain: normalizeShopDomain(shopDomain),
+    accessToken,
+    apiVersion: connection?.apiVersion || DEFAULT_SHOPIFY_API_VERSION,
+  };
+}
+
+async function fetchShopifyJson(credentials: { shopDomain: string; accessToken: string; apiVersion: string }, path: string) {
+  const response = await fetch(`https://${credentials.shopDomain}/admin/api/${credentials.apiVersion}${path}`, {
+    headers: {
+      "X-Shopify-Access-Token": credentials.accessToken,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw Object.assign(new Error(`Shopify API error ${response.status}: ${body || response.statusText}`), {
+      statusCode: response.status === 404 ? 404 : 502,
+    });
+  }
+
+  return response.json();
+}
+
+async function fetchShopifyProductForSearch(
+  credentials: { shopDomain: string; accessToken: string; apiVersion: string },
+  productId: string,
+): Promise<ShopifyProductSearchResult | null> {
+  try {
+    const data = await fetchShopifyJson(credentials, `/products/${productId}.json`);
+    const product = data?.product;
+    if (!product?.id) return null;
+    return {
+      id: String(product.id),
+      title: product.title || null,
+      handle: product.handle || null,
+      status: product.status || null,
+      variants: Array.isArray(product.variants) ? product.variants : [],
+    };
+  } catch (error: any) {
+    if (error?.statusCode === 404) return null;
+    throw error;
+  }
+}
+
+async function resolveShopifyVariant(input: {
+  credentials: { shopDomain: string; accessToken: string; apiVersion: string };
+  productShopifyId: string | null;
+  sku: string | null;
+  shopifyVariantRef?: string | null;
+}) {
+  const explicitVariantId = input.shopifyVariantRef ? extractShopifyVariantId(input.shopifyVariantRef) : null;
+  if (input.shopifyVariantRef && !explicitVariantId) {
+    throw Object.assign(new Error("Enter a valid Shopify variant URL or numeric variant ID"), { statusCode: 400 });
+  }
+
+  if (explicitVariantId) {
+    const data = await fetchShopifyJson(input.credentials, `/variants/${explicitVariantId}.json`);
+    if (!data?.variant?.id) {
+      throw Object.assign(new Error("Shopify variant was not found"), { statusCode: 404 });
+    }
+    return data.variant;
+  }
+
+  if (!input.productShopifyId) {
+    throw Object.assign(new Error("Parent product is not tied to a Shopify product; paste a Shopify variant URL or ID"), { statusCode: 400 });
+  }
+  if (!input.sku) {
+    throw Object.assign(new Error("Echelon variant has no SKU; paste a Shopify variant URL or ID"), { statusCode: 400 });
+  }
+
+  const productData = await fetchShopifyJson(input.credentials, `/products/${input.productShopifyId}.json`);
+  const normalizedSku = input.sku.trim().toUpperCase();
+  const matches = (productData?.product?.variants || []).filter((variant: any) => {
+    return String(variant.sku || "").trim().toUpperCase() === normalizedSku;
+  });
+
+  if (matches.length === 0) {
+    throw Object.assign(new Error(`No Shopify variant with SKU ${input.sku} exists under Shopify product ${input.productShopifyId}`), { statusCode: 404 });
+  }
+  if (matches.length > 1) {
+    throw Object.assign(new Error(`Multiple Shopify variants with SKU ${input.sku} exist under Shopify product ${input.productShopifyId}`), { statusCode: 409 });
+  }
+
+  return matches[0];
+}
+
+async function resolveProductCategory(input: { categoryId?: number | string | null; category?: string | null }) {
+  const rawCategoryId = input.categoryId;
+  if (rawCategoryId !== undefined && rawCategoryId !== null && String(rawCategoryId).trim() !== "") {
+    const categoryId = Number(rawCategoryId);
+    if (!Number.isInteger(categoryId) || categoryId <= 0) {
+      throw new Error("Invalid product category");
+    }
+    const [category] = await db
+      .select()
+      .from(productCategories)
+      .where(and(eq(productCategories.id, categoryId), eq(productCategories.isActive, true)));
+    if (!category) {
+      throw new Error("Product category does not exist or is inactive");
+    }
+    return { categoryId: category.id, category: category.name };
+  }
+
+  const rawCategory = input.category?.trim();
+  if (!rawCategory) {
+    return { categoryId: null, category: null };
+  }
+
+  const slug = normalizeCategorySlug(rawCategory);
+  const [category] = await db
+    .select()
+    .from(productCategories)
+    .where(and(eq(productCategories.slug, slug), eq(productCategories.isActive, true)));
+  if (!category) {
+    throw new Error("Product category must be selected from existing categories");
+  }
+  return { categoryId: category.id, category: category.name };
+}
+
+export async function registerProductRoutes(app: Express) {
+  const shopifyProductMapping = createShopifyProductMappingService();
+  const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService();
+  registerShopifyProductMappingReconciliationRoutes(app);
+  registerShopifyProductConnectionRoutes(app);
+  registerBulkInventoryTrackingRoutes(app);
+  registerProductMergeRoutes(app);
+  registerInventoryTrackingHistoryRoutes(app);
+  registerProductAssetRoutes(app);
+  registerCatalogPublicImageRoutes(app, (assetId, hash) => readPublicCatalogImage(pool, assetId, hash));
+  // ============================================================================
+  // Products API (Master Catalog)
+  // ============================================================================
+  app.get("/api/products", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const includeInactive = req.query.includeInactive === "true";
+
+      // Spec A follow-up: honour ?q= for server-side filtering.
+      // When q is absent, preserve the legacy full-list response shape so
+      // existing consumers (inventory page, reports) stay unchanged.
+      const qRaw = typeof req.query.q === "string" ? req.query.q : "";
+      const q = qRaw.trim();
+      const limitRaw = Number(req.query.limit);
+      // Legacy full-list path has no implicit cap; only apply the cap when
+      // a query or explicit limit is supplied.
+      const hasLimit = Number.isFinite(limitRaw) && limitRaw > 0;
+      const limit = hasLimit ? Math.min(100, Math.floor(limitRaw)) : q ? 50 : 0;
+
+      let allProducts;
+      if (q || hasLimit) {
+        // Narrow via storage.searchProducts → keep ordering by rank.
+        const ranked = await storage.searchProducts({
+          q,
+          limit: limit || 50,
+          includeInactive,
+        });
+        if (ranked.length === 0) {
+          res.json([]);
+          return;
+        }
+        const byId = new Map<number, number>();
+        ranked.forEach((r, idx) => byId.set(r.id, idx));
+        const hydrated = await storage.getProductsByIds(ranked.map((r) => r.id));
+        // Preserve the rank ordering returned by searchProducts.
+        allProducts = hydrated
+          .filter((p) => byId.has(p.id))
+          .sort((a, b) => (byId.get(a.id)! - byId.get(b.id)!));
+      } else {
+        allProducts = await storage.getAllProducts(includeInactive);
+      }
+      const allVariants = await storage.getAllProductVariants(includeInactive);
+
+      // Bulk-fetch primary images (one query instead of N)
+      const primaryAssets = await storage.getPrimaryProductAssets();
+      const primaryImageByProductId = new Map<number, string>();
+      for (const asset of primaryAssets) {
+        if (asset.productId && asset.url) {
+          primaryImageByProductId.set(asset.productId, asset.url);
+        }
+      }
+
+      // Bulk-fetch product line mappings
+      const plpResult = await db.execute(sql`SELECT product_id, product_line_id FROM catalog.product_line_products`);
+      const productLinesByProductId = new Map<number, number[]>();
+      for (const row of plpResult.rows as any[]) {
+        const pId = row.product_id;
+        if (!productLinesByProductId.has(pId)) productLinesByProductId.set(pId, []);
+        productLinesByProductId.get(pId)!.push(row.product_line_id);
+      }
+
+
+      // Build variant lookup
+      const variantsByProductId = new Map<number, typeof allVariants>();
+      for (const v of allVariants) {
+        if (!variantsByProductId.has(v.productId)) {
+          variantsByProductId.set(v.productId, []);
+        }
+        variantsByProductId.get(v.productId)!.push(v);
+      }
+
+      const productsWithData = allProducts.map(p => ({
+        ...p,
+        baseSku: p.sku,
+        name: p.name, // Use internal name, not Shopify title
+        active: p.status === "active" ? 1 : 0,
+        imageUrl: primaryImageByProductId.get(p.id) || null,
+        productLineIds: productLinesByProductId.get(p.id) || [],
+        variantCount: variantsByProductId.get(p.id)?.length || 0,
+        variants: variantsByProductId.get(p.id) || [],
+      }));
+
+      res.json(productsWithData);
+    } catch (error) {
+      console.error("Error fetching products:", error);
+      res.status(500).json({ error: "Failed to fetch products" });
+    }
+  });
+
+  app.get("/api/product-categories", requirePermission("inventory", "view"), async (_req, res) => {
+    try {
+      const categories = await db
+        .select({
+          id: productCategories.id,
+          name: productCategories.name,
+          slug: productCategories.slug,
+          description: productCategories.description,
+          sortOrder: productCategories.sortOrder,
+          isActive: productCategories.isActive,
+          createdAt: productCategories.createdAt,
+          updatedAt: productCategories.updatedAt,
+          productCount: sql<number>`count(${products.id})::int`,
+        })
+        .from(productCategories)
+        .leftJoin(products, eq(products.categoryId, productCategories.id))
+        .groupBy(
+          productCategories.id,
+          productCategories.name,
+          productCategories.slug,
+          productCategories.description,
+          productCategories.sortOrder,
+          productCategories.isActive,
+          productCategories.createdAt,
+          productCategories.updatedAt,
+        )
+        .orderBy(asc(productCategories.sortOrder), asc(productCategories.name));
+      res.json(categories);
+    } catch (error) {
+      console.error("Error fetching product categories:", error);
+      res.status(500).json({ error: "Failed to fetch product categories" });
+    }
+  });
+
+/**
+ * A shipping group answers "can this item ship with that item", so the screen
+ * only lists products that can actually ship. Two kinds are excluded:
+ *
+ *   - digital products (gift cards, donations, membership plans): every active
+ *     variant has requires_shipping = false. They sat in Unassigned for ever and
+ *     could be mis-assigned into a group whose metafield checkout ignores anyway
+ *     (the discount Function skips requiresShipping === false lines).
+ *   - rows with no active variants at all: duplicate shells left behind by
+ *     earlier imports. They ship nothing, and because they still carry the
+ *     Shopify mapping they were a common source of the "Multiple Echelon
+ *     products map to the same Shopify product" failure on bulk assign.
+ *
+ * Unknown (NULL) requires_shipping counts as shippable, so nothing disappears
+ * from the screen on incomplete data.
+ */
+const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
+  SELECT 1 FROM catalog.product_variants v
+  WHERE v.product_id = ${products.id}
+    AND v.is_active
+    AND COALESCE(v.requires_shipping, true)
+)`;
+
+  app.get("/api/shipping-groups", requirePermission("inventory", "view"), async (_req, res) => {
+    try {
+      const groups = await db
+        .select({
+          id: shippingGroups.id,
+          code: shippingGroups.code,
+          name: shippingGroups.name,
+          description: shippingGroups.description,
+          sortOrder: shippingGroups.sortOrder,
+          isActive: shippingGroups.isActive,
+          createdAt: shippingGroups.createdAt,
+          updatedAt: shippingGroups.updatedAt,
+          productCount: sql<number>`count(${products.id})::int`,
+        })
+        .from(shippingGroups)
+        // Count only ACTIVE products so the sidebar badge matches the products
+        // table (which filters is_active=true). Archived/soft-deleted members
+        // would otherwise inflate the count (e.g. archived Quad Box divider SKUs).
+        .leftJoin(
+          products,
+          and(
+            eq(products.shippingGroupId, shippingGroups.id),
+            eq(products.isActive, true),
+            HAS_SHIPPABLE_VARIANT,
+          ),
+        )
+        .groupBy(
+          shippingGroups.id,
+          shippingGroups.code,
+          shippingGroups.name,
+          shippingGroups.description,
+          shippingGroups.sortOrder,
+          shippingGroups.isActive,
+          shippingGroups.createdAt,
+          shippingGroups.updatedAt,
+        )
+        .orderBy(asc(shippingGroups.sortOrder), asc(shippingGroups.name));
+      res.json(groups);
+    } catch (error) {
+      console.error("Error fetching shipping groups:", error);
+      res.status(500).json({ error: "Failed to fetch shipping groups" });
+    }
+  });
+
+  // Paginated products with their current shipping group — drives the Shipping
+  // Groups admin table. filter = "all" | "unassigned" | "group:<id>".
+  // Registered before any "/:id" route so the literal "products" segment wins.
+  app.get("/api/shipping-groups/products", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const filterRaw = String(req.query.filter ?? "all");
+      const search = String(req.query.search ?? "").trim();
+      const page = Math.max(1, parseInt(String(req.query.page ?? "1")) || 1);
+      const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? "50")) || 50));
+      const offset = (page - 1) * limit;
+
+      const conds: any[] = [eq(products.isActive, true), HAS_SHIPPABLE_VARIANT];
+      if (filterRaw === "unassigned") {
+        conds.push(isNull(products.shippingGroupId));
+      } else if (filterRaw.startsWith("group:")) {
+        const gid = parseInt(filterRaw.slice("group:".length));
+        if (!Number.isInteger(gid) || gid <= 0) {
+          return res.status(400).json({ error: "Invalid group filter" });
+        }
+        conds.push(eq(products.shippingGroupId, gid));
+      }
+      if (search) {
+        const pattern = `%${search.toLowerCase()}%`;
+        conds.push(or(ilike(products.name, pattern), ilike(products.sku, pattern)));
+      }
+      const whereExpr = and(...conds);
+
+      const totalRows = await db.select({ c: sql<number>`count(*)::int` }).from(products).where(whereExpr);
+      const total = Number(totalRows[0]?.c ?? 0);
+      if (total === 0) return res.json({ rows: [], total: 0, page, limit });
+
+      const rows = await db
+        .select({
+          id: products.id,
+          name: products.name,
+          sku: products.sku,
+          status: products.status,
+          brand: products.brand,
+          shippingGroupId: products.shippingGroupId,
+        })
+        .from(products)
+        .where(whereExpr)
+        .orderBy(asc(products.name), asc(products.id))
+        .limit(limit)
+        .offset(offset);
+
+      res.json({ rows, total, page, limit });
+    } catch (error) {
+      console.error("Error listing shipping-group products:", error);
+      res.status(500).json({ error: "Failed to list products" });
+    }
+  });
+
+  // Bulk assign / reassign / clear the shipping group for a set of products.
+  // shippingGroupId null clears it. Single-membership: setting a new group
+  // automatically replaces the old one, so there is no separate "remove".
+  app.post("/api/shipping-groups/assign", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const requestedProductIds: unknown = req.body.productIds;
+      if (!Array.isArray(requestedProductIds) || requestedProductIds.length === 0) {
+        return res.status(400).json({ error: "productIds must be a non-empty array of positive integers" });
+      }
+      if (requestedProductIds.length > MAX_CATALOG_BATCH_SIZE) {
+        return res.status(400).json({
+          error: `Cannot assign more than ${MAX_CATALOG_BATCH_SIZE} products in a single request`,
+          code: "BATCH_LIMIT_EXCEEDED",
+          maxBatchSize: MAX_CATALOG_BATCH_SIZE,
+        });
+      }
+      if (requestedProductIds.some((value) => !Number.isInteger(value) || Number(value) <= 0)) {
+        return res.status(400).json({ error: "Every productId must be a positive integer" });
+      }
+      const productIds = [...new Set(requestedProductIds as number[])];
+
+      const rawGroup = req.body.shippingGroupId;
+      let shippingGroupId: number | null = null;
+      if (rawGroup !== null && rawGroup !== undefined && rawGroup !== "") {
+        const gid = Number(rawGroup);
+        if (!Number.isInteger(gid) || gid <= 0) {
+          return res.status(400).json({ error: "Invalid shippingGroupId" });
+        }
+        shippingGroupId = gid;
+      }
+
+      const actor = authenticatedActor(req);
+      const changedAt = new Date();
+      const result = await db.transaction(async (tx) => {
+        if (shippingGroupId !== null) {
+          await tx.execute(sql`
+            SELECT id
+            FROM catalog.shipping_groups
+            WHERE id = ${shippingGroupId}
+            FOR SHARE
+          `);
+          const [group] = await tx
+            .select({
+              id: shippingGroups.id,
+              isActive: shippingGroups.isActive,
+            })
+            .from(shippingGroups)
+            .where(eq(shippingGroups.id, shippingGroupId))
+            .limit(1);
+          if (!group) {
+            throw Object.assign(new Error("Shipping group not found"), { statusCode: 404 });
+          }
+          if (!group.isActive) {
+            throw Object.assign(new Error("Inactive shipping groups cannot receive products"), { statusCode: 409 });
+          }
+        }
+
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.products
+          WHERE id IN (${sql.join(productIds.map((id) => sql`${id}`), sql`, `)})
+          ORDER BY id
+          FOR UPDATE
+        `);
+        const currentProducts = await tx
+          .select({
+            id: products.id,
+            shippingGroupId: products.shippingGroupId,
+          })
+          .from(products)
+          .where(inArray(products.id, productIds))
+          .orderBy(asc(products.id));
+        if (currentProducts.length !== productIds.length) {
+          const foundIds = new Set(currentProducts.map((product) => product.id));
+          const missingProductIds = productIds.filter((id) => !foundIds.has(id));
+          throw Object.assign(
+            new Error(`Products not found: ${missingProductIds.join(", ")}`),
+            { statusCode: 404 },
+          );
+        }
+
+        const updated = await assignProductsShippingGroupInTx(
+          tx,
+          productIds,
+          shippingGroupId,
+          changedAt,
+        );
+        if (updated.length !== productIds.length) {
+          throw new Error("Shipping-group assignment did not update every locked product");
+        }
+
+        const syncResult = await enqueueShippingGroupMetafields(tx, productIds);
+        await persistAuditEvent(
+          tx,
+          {
+            actor,
+            action: "catalog.shipping_group_assignment.changed",
+            target: "catalog.products.shipping_group_id",
+            changes: {
+              before: {
+                assignments: currentProducts.map((product) => ({
+                  productId: product.id,
+                  shippingGroupId: product.shippingGroupId,
+                })),
+              },
+              after: {
+                assignments: currentProducts.map((product) => ({
+                  productId: product.id,
+                  shippingGroupId,
+                })),
+              },
+            },
+            context: {
+              requestedProductCount: requestedProductIds.length,
+              uniqueProductCount: productIds.length,
+              queuedShopifyMetafieldCount: syncResult.queuedProductCount,
+              skippedUnmappedProductCount: syncResult.skippedUnmappedProductCount,
+            },
+          },
+          { timestamp: changedAt },
+        );
+
+        return { updatedCount: updated.length, syncResult };
+      });
+
+      res.json({
+        shippingGroupId,
+        requested: requestedProductIds.length,
+        uniqueRequested: productIds.length,
+        updated: result.updatedCount,
+        shopifyMetafieldsQueued: result.syncResult.queuedProductCount,
+        unmappedProductsSkipped: result.syncResult.skippedUnmappedProductCount,
+      });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      console.error("Error assigning shipping group:", error);
+      res.status(500).json({ error: "Failed to assign shipping group" });
+    }
+  });
+
+  app.post("/api/shipping-groups", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const name = String(req.body.name ?? "").trim();
+      if (!name) return res.status(400).json({ error: "Shipping group name is required" });
+      // code is the stable storefront/sync key; lowercase snake to match seeds
+      // (e.g. "protection", "storage_boxes").
+      const code = String(req.body.code ?? name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+      if (!code) return res.status(400).json({ error: "Shipping group code must contain at least one letter or number" });
+
+      const group = await insertShippingGroupRecord({
+        code,
+        name,
+        description: req.body.description || null,
+        sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
+      });
+      res.status(201).json(group);
+    } catch (error: any) {
+      if (error?.code === "23505") return res.status(409).json({ error: "Shipping group code already exists" });
+      console.error("Error creating shipping group:", error);
+      res.status(500).json({ error: "Failed to create shipping group" });
+    }
+  });
+
+  app.patch("/api/shipping-groups/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid shipping group id" });
+      const existing = await db.select().from(shippingGroups).where(eq(shippingGroups.id, id));
+      if (!existing[0]) return res.status(404).json({ error: "Shipping group not found" });
+
+      const name = req.body.name !== undefined ? String(req.body.name).trim() : existing[0].name;
+      if (!name) return res.status(400).json({ error: "Shipping group name is required" });
+
+      // code is intentionally immutable on update (stable storefront/sync key).
+      const group = await updateShippingGroupRecordById(id, {
+        name,
+        description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
+        sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
+        isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
+        updatedAt: new Date(),
+      });
+      res.json(group);
+    } catch (error) {
+      console.error("Error updating shipping group:", error);
+      res.status(500).json({ error: "Failed to update shipping group" });
+    }
+  });
+
+  app.post("/api/product-categories", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const name = String(req.body.name ?? "").trim();
+      if (!name) {
+        return res.status(400).json({ error: "Category name is required" });
+      }
+      const slug = normalizeCategorySlug(req.body.slug ? String(req.body.slug) : name);
+      if (!slug) {
+        return res.status(400).json({ error: "Category slug is required" });
+      }
+      const category = await insertProductCategoryRecord({
+        name,
+        slug,
+        description: req.body.description || null,
+        sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
+      });
+      res.status(201).json(category);
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        return res.status(409).json({ error: "Category already exists" });
+      }
+      console.error("Error creating product category:", error);
+      res.status(500).json({ error: "Failed to create product category" });
+    }
+  });
+
+  registerProductCategoryUpdateRoute(app, db);
+
+  app.get("/api/products/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const product = await storage.getProductById(id);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      const variants = await storage.getProductVariantsByProductId(id);
+
+      // Get product assets directly (content fields are now on the product itself)
+      const assets = await storage.getProductAssetsByProductId(id);
+
+      res.json({ ...product, productId: product.id, variants, assets });
+    } catch (error) {
+      console.error("Error fetching product:", error);
+      res.status(500).json({ error: "Failed to fetch product" });
+    }
+  });
+
+  app.get("/api/products/:id/shopify-mapping", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const productId = Number(req.params.id);
+      const channelId = req.query.channelId === undefined ? null : Number(req.query.channelId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id", code: "INVALID_PRODUCT_ID" });
+      }
+      if (channelId !== null && (!Number.isInteger(channelId) || channelId <= 0)) {
+        return res.status(400).json({ error: "Invalid channel id", code: "INVALID_CHANNEL_ID" });
+      }
+      res.json(await shopifyProductMapping.getSummary(productId, channelId));
+    } catch (error: unknown) {
+      if (error instanceof ShopifyProductMappingError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          context: error.context,
+        });
+      }
+      console.error("Error loading Shopify product mapping:", error);
+      res.status(500).json({ error: "Failed to load Shopify product mapping" });
+    }
+  });
+
+  app.post("/api/products/:id/shopify-mapping/repair", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const productId = Number(req.params.id);
+      const channelId = req.body?.channelId === undefined ? null : Number(req.body.channelId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id", code: "INVALID_PRODUCT_ID" });
+      }
+      if (channelId !== null && (!Number.isInteger(channelId) || channelId <= 0)) {
+        return res.status(400).json({ error: "Invalid channel id", code: "INVALID_CHANNEL_ID" });
+      }
+      const actorId = req.session.user?.id || req.session.user?.username || "unknown";
+      const result = await shopifyProductMapping.repair({
+        productId,
+        channelId,
+        targetProductId: req.body?.targetProductId,
+        allowProductOnlyAdoption: req.body?.allowProductOnlyAdoption === true,
+        actor: `user:${actorId}`,
+      });
+      res.json(result);
+    } catch (error: unknown) {
+      if (error instanceof ShopifyProductMappingError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          context: error.context,
+        });
+      }
+      console.error("Error repairing Shopify product mapping:", error);
+      res.status(500).json({ error: "Failed to repair Shopify product mapping" });
+    }
+  });
+
+  app.post("/api/products", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
+    try {
+      const { variants, ...productData } = req.body;
+      const requestedLegacyInventoryStrategy = Object.prototype.hasOwnProperty.call(
+        productData,
+        "inventoryStrategy",
+      );
+      const inventoryStrategy = parseProductInventoryStrategy(productData.inventoryStrategy, { useDefaultWhenMissing: true });
+      const category = await resolveProductCategory(productData);
+      const createProduct = async (executor: CatalogRouteTransaction = db) => {
+        const product = await storage.createProduct({
+          ...productData,
+          ...category,
+          inventoryStrategy,
+        }, executor);
+
+        // Create variants if provided
+        if (variants && Array.isArray(variants)) {
+          for (const variant of variants) {
+            await storage.createProductVariant({
+              ...variant,
+              productId: product.id,
+            }, executor);
+          }
+        }
+
+        const createdVariants = await storage.getProductVariantsByProductId(product.id, executor);
+        return { ...product, variants: createdVariants };
+      };
+      const created = requestedLegacyInventoryStrategy
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+            createProduct,
+          )
+        : await db.transaction((tx) => createProduct(tx));
+      res.json(created);
+    } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
+      if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      if (error instanceof ProductInventoryStrategyError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          context: error.context,
+        });
+      }
+      if (error?.message?.includes("category")) {
+        return res.status(400).json({ error: error.message });
+      }
+      console.error("Error creating product:", error);
+      res.status(500).json({ error: "Failed to create product" });
+    }
+  });
+
+  // Duplicate an existing product into a NEW draft product with fresh SKUs.
+  // Copies base fields, active variants, and images; resets identity + all
+  // Shopify sync keys so the copy is unlinked. See product-duplicate.service.
+  app.post("/api/products/:id/duplicate", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
+    try {
+      const sourceId = parseInt(req.params.id);
+      if (Number.isNaN(sourceId)) return res.status(400).json({ error: "Invalid product id" });
+      const created = await duplicateProduct(storage, sourceId, req.body ?? {});
+      res.status(201).json(created);
+    } catch (error: any) {
+      if (error instanceof ProductDuplicateError) {
+        return res.status(error.statusCode).json({ error: error.message, ...(error.details ?? {}) });
+      }
+      if (sendSelectionBusy(res, error)) return;
+      console.error("Error duplicating product:", error);
+      res.status(500).json({ error: "Failed to duplicate product" });
+    }
+  });
+
+  app.put("/api/products/:id", requirePermission("inventory", "edit"), protectEbayPolicyWriteBoundary("update"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { variants, ...updates } = req.body;
+      const requestedLegacyInventoryStrategy = Object.prototype.hasOwnProperty.call(
+        updates,
+        "inventoryStrategy",
+      );
+      const requestedInventoryStrategy = parseProductInventoryStrategy(
+        updates.inventoryStrategy,
+        { useDefaultWhenMissing: false },
+      );
+
+      if (Object.prototype.hasOwnProperty.call(updates, "shopifyProductId")) {
+        const existing = await storage.getProductById(id);
+        if (!existing) return res.status(404).json({ error: "Product not found" });
+        const requestedMapping = normalizeShopifyNumericId(updates.shopifyProductId);
+        const existingMapping = normalizeShopifyNumericId(existing.shopifyProductId);
+        if (updates.shopifyProductId !== null && !requestedMapping) {
+          return res.status(400).json({
+            error: "Invalid Shopify product ID",
+            code: "INVALID_SHOPIFY_PRODUCT_ID",
+          });
+        }
+        if (requestedMapping !== existingMapping) {
+          return res.status(400).json({
+            error: "Shopify product identity must be changed through the Shopify mapping repair workflow",
+            code: "SHOPIFY_PRODUCT_MAPPING_WRITE_RESTRICTED",
+          });
+        }
+        delete updates.shopifyProductId;
+      }
+
+      // Check for SKU conflict when SKU is being changed
+      let oldProductSku: string | null = null;
+      const requestedProductSku: unknown = updates.sku;
+      if (
+        requestedProductSku !== undefined &&
+        (typeof requestedProductSku !== "string" || !requestedProductSku.trim() || requestedProductSku.trim().length > 100)
+      ) {
+        return res.status(400).json({ error: "SKU must be a non-empty string of at most 100 characters" });
+      }
+      const newProductSku = typeof requestedProductSku === "string" ? requestedProductSku.trim() : undefined;
+      if (newProductSku) {
+        const existing = await storage.getProductById(id);
+        if (existing) oldProductSku = existing.sku ?? null;
+
+        if (newProductSku !== oldProductSku) {
+          const conflict = await storage.getProductBySku(newProductSku);
+          if (conflict && conflict.id !== id) {
+            return res.status(409).json({
+              error: `SKU "${newProductSku}" already belongs to product "${conflict.name}" (id ${conflict.id})`,
+            });
+          }
+        }
+      }
+
+      const normalizedUpdates = { ...updates };
+      if (newProductSku) normalizedUpdates.sku = newProductSku;
+      if (requestedInventoryStrategy !== undefined) {
+        normalizedUpdates.inventoryStrategy = requestedInventoryStrategy;
+      }
+      if ("categoryId" in updates || "category" in updates) {
+        Object.assign(normalizedUpdates, await resolveProductCategory(updates));
+      }
+      if ("shippingGroupId" in updates) {
+        const rawShippingGroupId = updates.shippingGroupId;
+        if (rawShippingGroupId === null || rawShippingGroupId === "") {
+          normalizedUpdates.shippingGroupId = null;
+        } else {
+          const shippingGroupId = Number(rawShippingGroupId);
+          if (!Number.isInteger(shippingGroupId) || shippingGroupId <= 0) {
+            return res.status(400).json({ error: "Invalid shippingGroupId" });
+          }
+          normalizedUpdates.shippingGroupId = shippingGroupId;
+        }
+      }
+
+      const actor = authenticatedActor(req);
+      const updateProduct = (
+        assertLegacyInventoryStrategyMutation: () => void = () => undefined,
+        transaction?: CatalogRouteTransaction,
+      ) => {
+        const run = async (tx: CatalogRouteTransaction) => {
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.products
+          WHERE id = ${id}
+          FOR UPDATE
+        `);
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.product_variants
+          WHERE product_id = ${id}
+          ORDER BY id
+          FOR UPDATE
+        `);
+        const currentProduct = await storage.getProductById(id, tx);
+        if (!currentProduct) {
+          return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
+        }
+
+        const persistedUpdates = { ...normalizedUpdates };
+        if (requestedInventoryStrategy !== undefined) {
+          if (currentProduct.inventoryStrategy === requestedInventoryStrategy) {
+            // A compatibility client may repeat the historical value. Do not
+            // write that retired control when the effective value is unchanged.
+            delete persistedUpdates.inventoryStrategy;
+          } else {
+            assertLegacyInventoryStrategyMutation();
+            let hasBuildRecipes = false;
+            if (
+              currentProduct.inventoryStrategy === "recipe_managed"
+              && requestedInventoryStrategy !== "recipe_managed"
+            ) {
+              const recipeResult = await tx.execute(sql`
+                SELECT id
+                FROM inventory.build_recipes
+                WHERE output_product_id = ${id}
+                LIMIT 1
+                FOR SHARE
+              `);
+              hasBuildRecipes = recipeResult.rows.length > 0;
+            }
+            assertProductInventoryStrategyTransition({
+              productId: id,
+              current: currentProduct.inventoryStrategy,
+              requested: requestedInventoryStrategy,
+              hasBuildRecipes,
+            });
+          }
+        }
+
+        if (
+          "shippingGroupId" in normalizedUpdates &&
+          normalizedUpdates.shippingGroupId !== null
+        ) {
+          await tx.execute(sql`
+            SELECT id
+            FROM catalog.shipping_groups
+            WHERE id = ${normalizedUpdates.shippingGroupId}
+            FOR SHARE
+          `);
+          const [group] = await tx
+            .select({
+              id: shippingGroups.id,
+              isActive: shippingGroups.isActive,
+            })
+            .from(shippingGroups)
+            .where(eq(shippingGroups.id, normalizedUpdates.shippingGroupId))
+            .limit(1);
+          if (!group) {
+            throw Object.assign(new Error("Shipping group not found"), { statusCode: 404 });
+          }
+          if (!group.isActive) {
+            throw Object.assign(new Error("Inactive shipping groups cannot receive products"), { statusCode: 409 });
+          }
+        }
+
+        if (persistedUpdates.inventoryTrackingDefault !== undefined) {
+          await updateProductInventoryTracking(tx, id, persistedUpdates.inventoryTrackingDefault, actor, new Date());
+        }
+        const product = await storage.updateProduct(id, persistedUpdates, tx);
+        if (!product) {
+          return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
+        }
+
+        const lockedOldSku = currentProduct.sku ?? null;
+        const renamedVariants = await renameDerivedVariantSkus(tx, storage, {
+          productId: id, oldProductSku: lockedOldSku, newProductSku: newProductSku ?? null, actor,
+        });
+
+        if ("shippingGroupId" in normalizedUpdates) {
+          const syncResult = await enqueueShippingGroupMetafields(tx, [id]);
+          if (currentProduct.shippingGroupId !== product.shippingGroupId) {
+            await persistAuditEvent(tx, {
+              actor,
+              action: "catalog.shipping_group_assignment.changed",
+              target: `catalog.products:${id}`,
+              changes: {
+                before: { shippingGroupId: currentProduct.shippingGroupId },
+                after: { shippingGroupId: product.shippingGroupId },
+              },
+              context: {
+                queuedShopifyMetafieldCount: syncResult.queuedProductCount,
+                skippedUnmappedProductCount: syncResult.skippedUnmappedProductCount,
+              },
+            });
+          }
+        }
+
+        if (
+          requestedInventoryStrategy !== undefined
+          && currentProduct.inventoryStrategy !== product.inventoryStrategy
+        ) {
+          await persistAuditEvent(tx, {
+            actor,
+            action: "catalog.inventory_strategy.changed",
+            target: `catalog.products:${id}`,
+            changes: {
+              before: { inventoryStrategy: currentProduct.inventoryStrategy },
+              after: { inventoryStrategy: product.inventoryStrategy },
+            },
+            context: {
+              productSku: product.sku,
+            },
+          });
+        }
+
+          return { product, renamedVariants, renamedFrom: lockedOldSku };
+        };
+        return transaction ? run(transaction) : db.transaction(run);
+      };
+      const updateResult = requestedLegacyInventoryStrategy
+        ? await inventoryLegacyAdminControl.executeGuardedLegacyWrite(
+            INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+            (guard, transaction) => updateProduct(guard.assertLegacyMutation, transaction),
+          )
+        : await updateProduct();
+
+      if (!updateResult.product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+
+      if (newProductSku && updateResult.renamedFrom && updateResult.renamedVariants > 0) {
+        console.log(
+          `[SKU CASCADE] Product base SKU ${updateResult.renamedFrom} -> ${newProductSku}, ` +
+          `updated ${updateResult.renamedVariants} variants and cached references atomically`,
+        );
+      }
+
+      const existingVariants = await storage.getProductVariantsByProductId(id);
+      res.json({ ...updateResult.product, variants: existingVariants });
+    } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
+      if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      if (error?.code === "23505" || error?.cause?.code === "23505") {
+        return res.status(409).json({ error: "SKU already exists" });
+      }
+      if (error instanceof ProductInventoryStrategyError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          context: error.context,
+        });
+      }
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      if (error?.message?.includes("category")) {
+        return res.status(400).json({ error: error.message });
+      }
+      console.error("Error updating product:", error);
+      res.status(500).json({ error: "Failed to update product", detail: error?.message || String(error) });
+    }
+  });
+
+  // Archive product — soft-delete with dependency cleanup
+  app.post("/api/products/:id/archive", requirePermission("inventory", "edit"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const force = req.body?.force === true;
+      const transferToVariantId = req.body?.transferToVariantId == null ? null : Number(req.body.transferToVariantId);
+
+      if (force) {
+        const owner = createCatalogInventoryCommandService(db, req.app.locals.services.inventoryCore);
+        return res.json(await owner.execute({ operation: "product_archive", sourceId: id,
+          targetVariantId: transferToVariantId, commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
+      }
+
+      const product = await storage.getProductById(id);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+
+      const variants = await storage.getProductVariantsByProductId(id);
+      const variantIds = variants.map(v => v.id);
+
+      // Pre-flight dependency check with per-level detail
+      let totalInventory = 0;
+      let totalReserved = 0;
+      let inventoryBins = 0;
+      const variantInventory: { variantId: number; sku: string | null; totalQty: number; bins: number; reservedQty: number }[] = [];
+      const inventoryDetails: { variantId: number; sku: string | null; warehouseLocationId: number; locationCode: string; variantQty: number; reservedQty: number }[] = [];
+      for (const v of variants) {
+        const levels = await storage.getInventoryLevelsByVariantId(v.id);
+        const qty = levels.reduce((sum, l) => sum + l.variantQty, 0);
+        const reserved = levels.reduce((sum, l) => sum + l.reservedQty, 0);
+        const bins = levels.filter(l => l.variantQty !== 0).length;
+        totalInventory += qty;
+        totalReserved += reserved;
+        inventoryBins += bins;
+        if (qty > 0) {
+          variantInventory.push({ variantId: v.id, sku: v.sku, totalQty: qty, bins, reservedQty: reserved });
+        }
+        // Collect per-level details for transfer preview
+        for (const level of levels) {
+          if (level.variantQty > 0) {
+            // Get location code
+            const locCode = await storage.getWarehouseLocationCodeById(level.warehouseLocationId);
+            inventoryDetails.push({
+              variantId: v.id,
+              sku: v.sku,
+              warehouseLocationId: level.warehouseLocationId,
+              locationCode: locCode ?? `LOC-${level.warehouseLocationId}`,
+              variantQty: level.variantQty,
+              reservedQty: level.reservedQty,
+            });
+          }
+        }
+      }
+
+      const pendingShipments = await storage.getPendingShipmentItemsByVariantIds(variantIds);
+
+      // Count active channel feeds with details
+      let activeFeeds = 0;
+      const feedDetails: { channelName: string; provider: string; channelSku: string | null; variantSku: string | null }[] = [];
+      for (const v of variants) {
+        const feeds = await storage.getChannelFeedsByProductVariantId(v.id);
+        const activeFeedList = feeds.filter((f: any) => f.isActive === 1);
+        activeFeeds += activeFeedList.length;
+        for (const feed of activeFeedList) {
+          let channelName = feed.channelType || "Unknown";
+          if (feed.channelId) {
+            const name = await storage.getChannelNameById(feed.channelId);
+            if (name) channelName = name;
+          }
+          feedDetails.push({ channelName, provider: feed.channelType, channelSku: feed.channelSku, variantSku: v.sku });
+        }
+      }
+
+      // Build dependency report
+      const dependencies = {
+        inventory: { totalQty: totalInventory, bins: inventoryBins, variants: variantInventory, hasReserved: totalReserved > 0, inventoryDetails },
+        shipments: { pending: pendingShipments.length, items: pendingShipments.slice(0, 10) },
+        channelFeeds: { active: activeFeeds, details: feedDetails },
+        variants: { total: variants.length, active: variants.filter(v => v.isActive).length },
+      };
+
+      const hasBlockers = totalInventory > 0 || pendingShipments.length > 0;
+
+      return res.json({ blocked: hasBlockers, dependencies, product: { id: product.id, sku: product.sku, name: product.name } });
+    } catch (error) {
+      if (sendSelectionBusy(res, error)) return;
+      console.error("Error archiving product:", error);
+      if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      res.status(500).json({ error: "Failed to archive product" });
+    }
+  });
+
+  app.delete("/api/products/:id", requirePermission("inventory", "delete"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
+      }
+      // Delete all variants and the product atomically so a mid-loop FK failure rolls back.
+      const success = await db.transaction(async (tx) => {
+        const variants = await storage.getProductVariantsByProductId(id, tx);
+        for (const variant of variants) {
+          await storage.deleteProductVariant(variant.id, tx);
+        }
+        return storage.deleteProduct(id, tx);
+      });
+      if (!success) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
+      console.error("Error deleting product:", error);
+      if (error.message && error.message.includes("foreign key constraint")) {
+        return res.status(400).json({ error: "Cannot completely delete this product because it has historical records linked to it (e.g. cycle counts, transactions, or purchase orders). Please Archive it instead." });
+      }
+      res.status(500).json({ error: "Failed to delete product" });
+    }
+  });
+
+  // ============================================================================
+  // Product Inventory — all variants' inventory levels with location context
+  // ============================================================================
+  app.get("/api/products/:id/inventory", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.id);
+      const rows = await storage.getProductInventoryByProductId(productId);
+      res.json(rows);
+    } catch (error) {
+      console.error("Error fetching product inventory:", error);
+      res.status(500).json({ error: "Failed to fetch product inventory" });
+    }
+  });
+
+  // ============================================================================
+  // Product Assets API
+  // ============================================================================
+  app.get("/api/products/:id/assets", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.id);
+      const assets = await storage.getProductAssetsByProductId(productId);
+      res.json(assets);
+    } catch (error) {
+      console.error("Error fetching product assets:", error);
+      res.status(500).json({ error: "Failed to fetch assets" });
+    }
+  });
+
+  app.post("/api/products/:id/assets", requirePermission("inventory", "create"), async (req, res) => {
+    if (!["video", "document"].includes(req.body.assetType))
+      return res.status(400).json({ code: "ASSET_SOURCE_ENDPOINT_REQUIRED", error: "Create photos through the Catalog image source owner." });
+    try {
+      const productId = parseInt(req.params.id);
+
+      // Check if this product already has images — if not, auto-set as primary
+      const existingAssets = await db
+        .select({ id: productAssets.id })
+        .from(productAssets)
+        .where(eq(productAssets.productId, productId))
+        .limit(1);
+
+      const isPrimary = existingAssets.length === 0 ? 1 : (req.body.isPrimary ? 1 : 0);
+
+      // If setting as primary, unset existing primary
+      if (isPrimary && existingAssets.length > 0) {
+        await clearPrimaryProductAssetsForProduct(productId);
+      }
+
+      const asset = await storage.createProductAsset({
+        ...req.body,
+        productId,
+        isPrimary,
+      });
+      res.status(201).json(asset);
+    } catch (error) {
+      console.error("Error creating product asset:", error);
+      res.status(500).json({ error: "Failed to create asset" });
+    }
+  });
+
+  app.patch("/api/product-assets/:id", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      // Scope edits require an observed assignment and a durable command key.
+      // Keep the metadata endpoint from bypassing the Catalog scope owner.
+      if (Object.hasOwn(req.body, "productVariantId") || Object.hasOwn(req.body, "productId")) {
+        return res.status(400).json({ code: "ASSET_SCOPE_ENDPOINT_REQUIRED", error: "Change photo assignments using the product image scope endpoint." });
+      }
+      const metadata = z.object({ altText: z.string().max(500).nullable().optional() }).strict().safeParse(req.body);
+      if (!metadata.success) return res.status(400).json({ code: "ASSET_METADATA_ENDPOINT_REQUIRED",
+        error: "This endpoint edits photo captions only. Use Images to upload a replacement, change the primary photo, reorder photos or change their assignment." });
+      const asset = await storage.updateProductAsset(id, metadata.data);
+      if (!asset) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+      res.json(asset);
+    } catch (error) {
+      console.error("Error updating product asset:", error);
+      res.status(500).json({ error: "Failed to update asset" });
+    }
+  });
+
+  app.delete("/api/product-assets/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const success = await storage.deleteProductAsset(id);
+      if (!success) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting product asset:", error);
+      res.status(500).json({ error: "Failed to delete asset" });
+    }
+  });
+
+  app.put("/api/product-assets/:id/primary", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const assetId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(assetId) || assetId <= 0) {
+        return res.status(400).json({ error: "Invalid asset id", code: "ASSET_PRIMARY_INVALID" });
+      }
+      const rawProductId = req.body?.productId;
+      if (rawProductId === undefined || rawProductId === null || rawProductId === "") {
+        return res.status(400).json({ error: "productId required", code: "ASSET_PRIMARY_INVALID" });
+      }
+      const productId = Number(rawProductId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "productId must be a positive integer", code: "ASSET_PRIMARY_INVALID" });
+      }
+      await storage.setPrimaryProductAsset(productId, assetId);
+      res.json({ success: true });
+    } catch (error) {
+      if (error instanceof ProductAssetError) {
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      }
+      console.error("Error setting primary asset:", error);
+      res.status(500).json({ error: "Failed to set primary asset" });
+    }
+  });
+
+  // ============================================================================
+  // Product Variants API
+  // ============================================================================
+  app.get("/api/product-variants", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const includeInactive = req.query.includeInactive === "true";
+      const variants = await storage.getAllProductVariants(includeInactive);
+      res.json(variants);
+    } catch (error) {
+      console.error("Error fetching all variants:", error);
+      res.status(500).json({ error: "Failed to fetch variants" });
+    }
+  });
+
+  app.get("/api/products/:productId/variants", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const vendorId = req.query.vendorId ? parseInt(req.query.vendorId as string) : undefined;
+      const variants = await storage.getProductVariantsByProductId(productId);
+      
+      if (vendorId && !isNaN(vendorId)) {
+        // Look up vendor products to get vendor-specific pricing
+        const vendorProducts = await req.app.locals.services.purchasing.getVendorProducts({ vendorId, productId });
+        const enrichedVariants = variants.map(v => {
+          const vp = vendorProducts.find((vp: any) => vp.productVariantId === v.id) || 
+                     vendorProducts.find((vp: any) => vp.productVariantId === null);
+          return {
+            ...v,
+            vendorCostMills: vp ? vp.unitCostMills : undefined,
+            vendorCostCents: vp ? vp.unitCostCents : undefined,
+            vendorSku: vp ? vp.vendorSku : undefined,
+            vendorProductId: vp ? vp.id : undefined,
+            isVendorCatalog: !!vp,
+          };
+        });
+        return res.json(enrichedVariants);
+      }
+
+      res.json(variants);
+    } catch (error) {
+      console.error("Error fetching variants:", error);
+      res.status(500).json({ error: "Failed to fetch variants" });
+    }
+  });
+
+  app.post("/api/products/:productId/variants", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
+      }
+      // Check for SKU conflict with existing active variants
+      if (req.body.sku) {
+        const conflict = await storage.getActiveVariantBySku(req.body.sku);
+        if (conflict) {
+          const conflictProduct = conflict.productId ? await storage.getProductById(conflict.productId) : null;
+          return res.status(409).json({
+            error: "SKU already exists",
+            conflictVariant: { id: conflict.id, sku: conflict.sku, productId: conflict.productId, productName: conflictProduct?.name || null },
+          });
+        }
+      }
+      const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
+      const packingFlags = coercePackingFlagsOnVariantPayload(req.body);
+      const fulfillment = coerceVariantFulfillmentOnPayload(req.body);
+      const salesIdentity = coerceVariantSalesEligibilityOnPayload(req.body);
+      assertVariantSalesIdentityCompatible({
+        salesEligibility: salesIdentity.salesEligibility ?? "sellable",
+        shopifyVariantId: req.body.shopifyVariantId,
+        shopifyInventoryItemId: req.body.shopifyInventoryItemId,
+      });
+      const uomAttributes = validateVariantUomWrite(req.body);
+      const variant = await storage.createProductVariant({
+        ...withoutRetiredVariantFields(req.body),
+        ...packageAttributes,
+        ...packingFlags,
+        ...fulfillment,
+        ...salesIdentity,
+        ...uomAttributes,
+        productId,
+      });
+      res.json(variant);
+    } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
+      if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          ...(error instanceof VariantSalesEligibilityError
+            ? { code: error.code, blockers: error.blockers }
+            : {}),
+        });
+      }
+      console.error("Error creating variant:", error);
+      res.status(500).json({ error: "Failed to create variant" });
+    }
+  });
+
+  app.put("/api/product-variants/:id", requirePermission("inventory", "edit"), protectEbayPolicyWriteBoundary("update"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid variant id" });
+      }
+      const newSku: string | undefined = req.body.sku;
+      if (newSku !== undefined && (typeof newSku !== "string" || !newSku.trim() || newSku.trim().length > 100)) {
+        return res.status(400).json({ error: "SKU must be a non-empty string of at most 100 characters" });
+      }
+      const normalizedNewSku = newSku?.trim();
+
+      // Check for SKU conflict when SKU is being changed
+      if (normalizedNewSku) {
+        const conflict = await storage.getActiveVariantBySku(normalizedNewSku, id);
+        if (conflict) {
+          const conflictProduct = conflict.productId ? await storage.getProductById(conflict.productId) : null;
+          return res.status(409).json({
+            error: "SKU already exists",
+            conflictVariant: { id: conflict.id, sku: conflict.sku, productId: conflict.productId, productName: conflictProduct?.name || null },
+          });
+        }
+      }
+
+      const targetVariant = await storage.getProductVariantById(id);
+      if (!targetVariant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+
+      const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
+      const packingFlags = coercePackingFlagsOnVariantPayload(req.body);
+      const salesIdentity = coerceVariantSalesEligibilityOnPayload(req.body);
+      const actor = authenticatedActor(req);
+      const updateResult = await db.transaction(async (tx) => {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            ${VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE},
+            ${id}
+          )
+        `);
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.products
+          WHERE id = ${targetVariant.productId}
+          FOR UPDATE
+        `);
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.product_variants
+          WHERE id = ${id}
+          FOR UPDATE
+        `);
+        const existing = await storage.getProductVariantById(id, tx);
+        if (!existing) return { variant: null, renamed: false };
+        if (existing.productId !== targetVariant.productId) {
+          throw Object.assign(new Error("Variant parent changed during SKU update"), { statusCode: 409 });
+        }
+
+        const nextSalesEligibility = salesIdentity.salesEligibility ?? existing.salesEligibility;
+        assertVariantSalesIdentityCompatible({
+          salesEligibility: nextSalesEligibility,
+          shopifyVariantId: Object.prototype.hasOwnProperty.call(req.body, "shopifyVariantId")
+            ? req.body.shopifyVariantId
+            : existing.shopifyVariantId,
+          shopifyInventoryItemId: Object.prototype.hasOwnProperty.call(req.body, "shopifyInventoryItemId")
+            ? req.body.shopifyInventoryItemId
+            : existing.shopifyInventoryItemId,
+        });
+        await assertVariantSalesEligibilityTransitionAllowed(tx, existing, nextSalesEligibility);
+
+        const payload = {
+          ...withoutRetiredVariantFields(req.body),
+          ...packageAttributes,
+          ...packingFlags,
+          ...salesIdentity,
+          ...coerceVariantFulfillmentOnPayload(req.body, existing),
+          ...validateVariantUomWrite(req.body, existing),
+          ...(normalizedNewSku ? { sku: normalizedNewSku } : {}),
+        };
+        const updatedVariant = await storage.updateProductVariant(id, payload, tx);
+        if (!updatedVariant) return { variant: null, renamed: false };
+        if (!isInventoryManagedVariant(updatedVariant)) {
+          await deactivateVariantChannelFeedsInTx(tx, id);
+        }
+        if (
+          existing.requiresShipping !== updatedVariant.requiresShipping
+          || existing.trackInventory !== updatedVariant.trackInventory
+          || existing.inventoryTrackingOverride !== updatedVariant.inventoryTrackingOverride
+        ) {
+          await persistAuditEvent(tx, {
+            actor,
+            action: "catalog.variant_fulfillment_updated",
+            target: `product_variant:${id}`,
+            changes: {
+              before: {
+                requiresShipping: existing.requiresShipping,
+                trackInventory: existing.trackInventory,
+                inventoryTrackingOverride: existing.inventoryTrackingOverride,
+              },
+              after: {
+                requiresShipping: updatedVariant.requiresShipping,
+                trackInventory: updatedVariant.trackInventory,
+                inventoryTrackingOverride: updatedVariant.inventoryTrackingOverride,
+              },
+            },
+            context: {
+              inventoryManaged: isInventoryManagedVariant(updatedVariant),
+              inventoryFeedsDeactivated: !isInventoryManagedVariant(updatedVariant),
+            },
+          });
+        }
+        if (existing.salesEligibility !== updatedVariant.salesEligibility) {
+          await persistAuditEvent(tx, {
+            actor,
+            action: "catalog.variant_sales_eligibility_updated",
+            target: `product_variant:${id}`,
+            changes: {
+              before: { salesEligibility: existing.salesEligibility },
+              after: { salesEligibility: updatedVariant.salesEligibility },
+            },
+            context: {
+              customerSellable: updatedVariant.salesEligibility === "sellable",
+              inventoryManaged: isInventoryManagedVariant(updatedVariant),
+            },
+          });
+        }
+
+        const oldSku = existing.sku;
+        let renamed = false;
+        if (normalizedNewSku && oldSku && normalizedNewSku !== oldSku) {
+          await storage.cascadeOperationalSkuRename(id, oldSku, normalizedNewSku, tx);
+          await synchronizeProcurementSkuReferences({
+            productVariantId: id,
+            oldSku,
+            newSku: normalizedNewSku,
+            actor,
+          }, { executor: tx });
+          renamed = true;
+        }
+        return { variant: updatedVariant, renamed };
+      });
+      if (!updateResult.variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+
+      if (updateResult.renamed) {
+        console.log(`[SKU CASCADE] Variant ${id} cached references synchronized atomically`);
+      }
+
+      res.json(updateResult.variant);
+    } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
+      if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      if (error?.code === "23505" || error?.cause?.code === "23505") {
+        return res.status(409).json({ error: "SKU already exists" });
+      }
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          ...(error instanceof VariantSalesEligibilityError
+            ? { code: error.code, blockers: error.blockers }
+            : {}),
+        });
+      }
+      const constraint = error?.constraint ?? error?.cause?.constraint;
+      if (
+        (error?.code === "23514" || error?.cause?.code === "23514")
+        && [
+          "customer_sellable_variant_required",
+          "internal_only_variant_has_customer_exposure",
+          "product_variants_internal_only_identity_chk",
+        ].includes(constraint)
+      ) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY_DEPENDENCIES",
+          error: "Remove customer-facing variant dependencies before marking it internal-only.",
+        });
+      }
+      console.error("Error updating variant:", error);
+      res.status(500).json({ error: "Failed to update variant" });
+    }
+  });
+
+  app.put("/api/products/:productId/variants/package-attributes/bulk", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
+      }
+
+      const rows = parsePackageAttributeBulkRows(req.body?.rows);
+
+      const requestedIds = [...new Set(rows.map((row) => row.variantId))];
+      const productVariantRows = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(and(eq(productVariants.productId, productId), inArray(productVariants.id, requestedIds)));
+      const ownedVariantIds = new Set(productVariantRows.map((row) => row.id));
+      const missingVariantIds = requestedIds.filter((id) => !ownedVariantIds.has(id));
+      if (missingVariantIds.length > 0) {
+        return res.status(400).json({
+          error: "One or more variants do not belong to this product",
+          missingVariantIds,
+        });
+      }
+
+      const updatedVariants = await db.transaction(async (tx) => {
+        const updated = [];
+        for (const row of rows) {
+          const variant = await updateScopedVariantPackageAttributesInTx(
+            tx,
+            productId,
+            row.variantId,
+            serializePackageAttributeUpdates(row.updates),
+          );
+          if (!variant) {
+            throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
+          }
+          updated.push(variant);
+        }
+        return updated;
+      });
+
+      res.json({ updated: updatedVariants.length, variants: updatedVariants });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      console.error("Error bulk updating variant package attributes:", error);
+      res.status(500).json({ error: "Failed to bulk update variant package attributes" });
+    }
+  });
+
+  app.put("/api/product-variants/package-attributes/bulk", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const rows = parsePackageAttributeBulkRows(req.body?.rows);
+
+      const requestedIds = [...new Set(rows.map((row) => row.variantId))];
+      const variantRows = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(inArray(productVariants.id, requestedIds));
+      const existingVariantIds = new Set(variantRows.map((row) => row.id));
+      const missingVariantIds = requestedIds.filter((id) => !existingVariantIds.has(id));
+      if (missingVariantIds.length > 0) {
+        return res.status(400).json({
+          error: "One or more variants do not exist",
+          missingVariantIds,
+        });
+      }
+
+      const updatedVariants = await db.transaction(async (tx) => {
+        const updated = [];
+        for (const row of rows) {
+          const variant = await updateVariantPackageAttributesByIdInTx(
+            tx,
+            row.variantId,
+            serializePackageAttributeUpdates(row.updates),
+          );
+          if (!variant) {
+            throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
+          }
+          updated.push(variant);
+        }
+        return updated;
+      });
+
+      res.json({ updated: updatedVariants.length, variants: updatedVariants });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      console.error("Error bulk updating catalog variant package attributes:", error);
+      res.status(500).json({ error: "Failed to bulk update variant package attributes" });
+    }
+  });
+
+  app.get("/api/product-variants/:id/shopify-candidates", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid variant id" });
+      }
+
+      const [variant] = await db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, id))
+        .limit(1);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      if (!isCustomerSellableVariant(variant)) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY",
+          error: "Internal-only variants cannot be linked to Shopify",
+        });
+      }
+
+      const [product] = await db
+        .select()
+        .from(products)
+        .where(eq(products.id, variant.productId))
+        .limit(1);
+      if (!product) {
+        return res.status(404).json({ error: "Parent product not found" });
+      }
+
+      const channel = await getDefaultShopifyChannel(req.query.channelId);
+      const credentials = await getShopifyCredentials(channel.id);
+      const query = typeof req.query.q === "string" && req.query.q.trim()
+        ? req.query.q.trim()
+        : String(variant.sku || "").trim();
+      const normalizedQuery = query.toUpperCase();
+      const explicitVariantId = query ? extractShopifyVariantId(query) : null;
+      const explicitProductId = typeof req.query.shopifyProductRef === "string"
+        ? extractShopifyProductId(req.query.shopifyProductRef)
+        : null;
+      const mappedProductId = normalizeShopifyNumericId(product.shopifyProductId);
+      const scope = req.query.scope === "all" ? "all" : "mapped";
+      // Upper bound on products scanned in "all" scope. Defaults high enough to
+      // cover the whole catalog (the fetch early-exits on an exact SKU match, so
+      // this is a safety ceiling, not the usual work). Was 250 — which silently
+      // hid every product past the first page.
+      const maxProductsRaw = Number(req.query.maxProducts || 5000);
+      const maxProducts = Number.isInteger(maxProductsRaw)
+        ? Math.min(Math.max(maxProductsRaw, 1), 10000)
+        : 5000;
+      const limitRaw = Number(req.query.limit || 25);
+      const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), 50) : 25;
+
+      let productsToSearch: ShopifyProductSearchResult[] = [];
+      let searchedScope: "mapped" | "explicit-product" | "all" = "mapped";
+
+      if (explicitVariantId && !explicitProductId) {
+        const variantData = await fetchShopifyJson(credentials, `/variants/${explicitVariantId}.json`);
+        const variantProductId = normalizeShopifyNumericId(variantData?.variant?.product_id);
+        const shopifyProduct = variantProductId
+          ? await fetchShopifyProductForSearch(credentials, variantProductId)
+          : null;
+        productsToSearch = shopifyProduct ? [shopifyProduct] : [];
+        searchedScope = "explicit-product";
+      } else if (explicitProductId) {
+        const shopifyProduct = await fetchShopifyProductForSearch(credentials, explicitProductId);
+        productsToSearch = shopifyProduct ? [shopifyProduct] : [];
+        searchedScope = "explicit-product";
+      } else if (scope === "mapped" && mappedProductId) {
+        const shopifyProduct = await fetchShopifyProductForSearch(credentials, mappedProductId);
+        productsToSearch = shopifyProduct ? [shopifyProduct] : [];
+        searchedScope = "mapped";
+      } else {
+        // Scan the whole catalog (early-exiting on an exact SKU hit) rather than
+        // just the first page — products past the first 250 (Shopify returns
+        // them oldest-first) were previously unreachable.
+        productsToSearch = await fetchShopifyProductsForSearch(credentials, maxProducts, normalizedQuery || null);
+        searchedScope = "all";
+      }
+
+      const candidates: Array<{
+        variantId: string;
+        productId: string;
+        inventoryItemId: string | null;
+        sku: string | null;
+        variantTitle: string | null;
+        productTitle: string | null;
+        productHandle: string | null;
+        productStatus: string | null;
+        matchType: string;
+        productMatchesMappedProduct: boolean;
+        currentlyLinked: boolean;
+        conflicts: Array<{ type: string; id: number; productVariantId?: number | null; sku?: string | null }>;
+      }> = [];
+
+      for (const shopifyProduct of productsToSearch) {
+        for (const shopifyVariant of shopifyProduct.variants || []) {
+          const shopifyVariantId = normalizeShopifyNumericId(shopifyVariant.id);
+          if (!shopifyVariantId) continue;
+
+          const shopifySku = shopifyVariant.sku ? String(shopifyVariant.sku).trim() : "";
+          const haystack = [
+            shopifySku,
+            shopifyVariant.title,
+            shopifyProduct.title,
+            shopifyProduct.handle,
+          ].filter(Boolean).join(" ").toUpperCase();
+
+          let matchType: string | null = null;
+          if (explicitVariantId && shopifyVariantId === explicitVariantId) {
+            matchType = "variant_id";
+          } else if (normalizedQuery && shopifySku.toUpperCase() === normalizedQuery) {
+            matchType = "exact_sku";
+          } else if (normalizedQuery && shopifySku.toUpperCase().includes(normalizedQuery)) {
+            matchType = "sku_contains";
+          } else if (normalizedQuery && haystack.includes(normalizedQuery)) {
+            matchType = "title_contains";
+          } else if (!normalizedQuery) {
+            matchType = "product_variant";
+          }
+
+          if (!matchType) continue;
+
+          candidates.push({
+            variantId: shopifyVariantId,
+            productId: String(shopifyProduct.id),
+            inventoryItemId: normalizeShopifyNumericId(shopifyVariant.inventory_item_id),
+            sku: shopifySku || null,
+            variantTitle: shopifyVariant.title || null,
+            productTitle: shopifyProduct.title,
+            productHandle: shopifyProduct.handle,
+            productStatus: shopifyProduct.status,
+            matchType,
+            productMatchesMappedProduct: !mappedProductId || String(shopifyProduct.id) === mappedProductId,
+            currentlyLinked: normalizeShopifyNumericId(variant.shopifyVariantId) === shopifyVariantId,
+            conflicts: [],
+          });
+        }
+      }
+
+      candidates.sort((a, b) => {
+        const score = (candidate: typeof candidates[number]) => {
+          if (candidate.currentlyLinked) return 0;
+          if (candidate.productMatchesMappedProduct && candidate.matchType === "exact_sku") return 1;
+          if (candidate.matchType === "exact_sku") return 2;
+          if (candidate.productMatchesMappedProduct) return 3;
+          if (candidate.matchType === "variant_id") return 4;
+          if (candidate.matchType === "sku_contains") return 5;
+          return 6;
+        };
+        return score(a) - score(b) || a.productTitle?.localeCompare(b.productTitle || "") || 0;
+      });
+
+      const sliced = candidates.slice(0, limit);
+      const candidateVariantIds = Array.from(new Set(sliced.map((candidate) => candidate.variantId)));
+      const candidateInventoryItemIds = Array.from(new Set(sliced.map((candidate) => candidate.inventoryItemId).filter((value): value is string => Boolean(value))));
+
+      if (candidateVariantIds.length > 0) {
+        const catalogConflicts = await db
+          .select({
+            id: productVariants.id,
+            sku: productVariants.sku,
+            shopifyVariantId: productVariants.shopifyVariantId,
+            shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
+          })
+          .from(productVariants)
+          .where(and(
+            sql`${productVariants.id} <> ${id}`,
+            or(
+              inArray(productVariants.shopifyVariantId, candidateVariantIds),
+              candidateInventoryItemIds.length > 0
+                ? inArray(productVariants.shopifyInventoryItemId, candidateInventoryItemIds)
+                : sql`false`,
+            ),
+          ));
+
+        const feedConflicts = await db
+          .select({
+            id: channelFeeds.id,
+            productVariantId: channelFeeds.productVariantId,
+            channelVariantId: channelFeeds.channelVariantId,
+          })
+          .from(channelFeeds)
+          .where(and(
+            eq(channelFeeds.channelId, channel.id),
+            eq(channelFeeds.channelType, "shopify"),
+            inArray(channelFeeds.channelVariantId, candidateVariantIds),
+            sql`${channelFeeds.productVariantId} <> ${id}`,
+          ));
+
+        const listingConflicts = await db
+          .select({
+            id: channelListings.id,
+            productVariantId: channelListings.productVariantId,
+            externalVariantId: channelListings.externalVariantId,
+          })
+          .from(channelListings)
+          .where(and(
+            eq(channelListings.channelId, channel.id),
+            inArray(channelListings.externalVariantId, candidateVariantIds),
+            sql`${channelListings.productVariantId} <> ${id}`,
+          ));
+
+        for (const candidate of sliced) {
+          for (const conflict of catalogConflicts) {
+            if (
+              normalizeShopifyNumericId(conflict.shopifyVariantId) === candidate.variantId ||
+              (candidate.inventoryItemId && normalizeShopifyNumericId(conflict.shopifyInventoryItemId) === candidate.inventoryItemId)
+            ) {
+              candidate.conflicts.push({
+                type: "catalog_variant",
+                id: conflict.id,
+                productVariantId: conflict.id,
+                sku: conflict.sku,
+              });
+            }
+          }
+
+          for (const conflict of feedConflicts) {
+            if (normalizeShopifyNumericId(conflict.channelVariantId) === candidate.variantId) {
+              candidate.conflicts.push({
+                type: "channel_feed",
+                id: conflict.id,
+                productVariantId: conflict.productVariantId,
+              });
+            }
+          }
+
+          for (const conflict of listingConflicts) {
+            if (normalizeShopifyNumericId(conflict.externalVariantId) === candidate.variantId) {
+              candidate.conflicts.push({
+                type: "channel_listing",
+                id: conflict.id,
+                productVariantId: conflict.productVariantId,
+              });
+            }
+          }
+        }
+      }
+
+      res.json({
+        channel: {
+          id: channel.id,
+          name: channel.name,
+        },
+        echelon: {
+          variantId: variant.id,
+          sku: variant.sku,
+          productId: product.id,
+          productName: product.name,
+          mappedShopifyProductId: mappedProductId,
+        },
+        query,
+        scope: searchedScope,
+        searchedProducts: productsToSearch.length,
+        candidates: sliced,
+      });
+    } catch (error: any) {
+      const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+      if (statusCode >= 500) {
+        console.error("Error searching Shopify variants:", error);
+      }
+      res.status(statusCode).json({ error: error?.message || "Failed to search Shopify variants" });
+    }
+  });
+
+  app.post("/api/product-variants/:id/shopify-link", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid variant id" });
+      }
+
+      const [variant] = await db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, id))
+        .limit(1);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      if (!isCustomerSellableVariant(variant)) {
+        return res.status(409).json({
+          code: "VARIANT_INTERNAL_ONLY",
+          error: "Internal-only variants cannot be linked to Shopify",
+        });
+      }
+
+      const [product] = await db
+        .select()
+        .from(products)
+        .where(eq(products.id, variant.productId))
+        .limit(1);
+      if (!product) {
+        return res.status(404).json({ error: "Parent product not found" });
+      }
+
+      const channel = await getDefaultShopifyChannel(req.body?.channelId);
+      const credentials = await getShopifyCredentials(channel.id);
+      const shopifyVariant = await resolveShopifyVariant({
+        credentials,
+        productShopifyId: normalizeShopifyNumericId(product.shopifyProductId),
+        sku: variant.sku,
+        shopifyVariantRef: req.body?.shopifyVariantRef,
+      });
+
+      const shopifyVariantId = normalizeShopifyNumericId(shopifyVariant.id);
+      const shopifyProductId = normalizeShopifyNumericId(shopifyVariant.product_id);
+      const shopifyInventoryItemId = normalizeShopifyNumericId(shopifyVariant.inventory_item_id);
+      const shopifySku = shopifyVariant.sku ? String(shopifyVariant.sku).trim() : null;
+      const echelonSku = variant.sku ? String(variant.sku).trim() : null;
+
+      if (!shopifyVariantId || !shopifyProductId) {
+        return res.status(502).json({ error: "Shopify variant response did not include required ids" });
+      }
+      if (
+        echelonSku
+        && shopifySku
+        && echelonSku.toUpperCase() !== shopifySku.toUpperCase()
+        && req.body?.allowSkuMismatch !== true
+      ) {
+        return res.status(409).json({
+          error: "Shopify SKU does not match this Echelon SKU",
+          code: "SHOPIFY_SKU_MISMATCH",
+          echelonSku,
+          shopifySku,
+        });
+      }
+
+      const existingProductShopifyId = normalizeShopifyNumericId(product.shopifyProductId);
+      const productRemapRequested = req.body?.allowProductRemap === true;
+      const productIdentityWillChange = existingProductShopifyId !== shopifyProductId;
+      const actor = `user:${req.session.user?.id || req.session.user?.username || "unknown"}`;
+      if (existingProductShopifyId && existingProductShopifyId !== shopifyProductId && !productRemapRequested) {
+        return res.status(409).json({
+          error: "Shopify variant belongs to a different Shopify product",
+          code: "SHOPIFY_PRODUCT_MISMATCH",
+          echelonProductId: product.id,
+          echelonProductName: product.name,
+          catalogShopifyProductId: existingProductShopifyId,
+          shopifyVariantProductId: shopifyProductId,
+        });
+      }
+
+      if (productIdentityWillChange) {
+        const mappingRepair = await shopifyProductMapping.repair({
+          productId: product.id,
+          targetProductId: shopifyProductId,
+          channelId: channel.id,
+          actor,
+          expectedVariant: {
+            variantId: id,
+            remoteVariantId: shopifyVariantId,
+          },
+          operatorVariantBindings: [{ variantId: id, remoteVariantId: shopifyVariantId }],
+        });
+
+        const [repairedVariant] = await db
+          .select()
+          .from(productVariants)
+          .where(eq(productVariants.id, id))
+          .limit(1);
+        if (!repairedVariant) {
+          throw Object.assign(new Error("Variant disappeared after Shopify product repair"), { statusCode: 500 });
+        }
+        const repairedFeeds = await db
+          .select({ id: channelFeeds.id })
+          .from(channelFeeds)
+          .where(and(
+            eq(channelFeeds.channelId, channel.id),
+            eq(channelFeeds.channelType, "shopify"),
+            eq(channelFeeds.productVariantId, id),
+          ));
+        const repairedListings = await db
+          .select({ id: channelListings.id })
+          .from(channelListings)
+          .where(and(
+            eq(channelListings.channelId, channel.id),
+            eq(channelListings.productVariantId, id),
+          ));
+
+        req.app.locals.services?.inventoryCore?.triggerNotifyChange?.(id, "shopify_variant_link");
+        return res.json({
+          variant: repairedVariant,
+          shopify: {
+            channelId: channel.id,
+            channelName: channel.name,
+            productId: shopifyProductId,
+            variantId: shopifyVariantId,
+            inventoryItemId: shopifyInventoryItemId,
+            sku: shopifySku,
+          },
+          channelFeedIds: repairedFeeds.map((feed) => feed.id),
+          channelListingIds: repairedListings.map((listing) => listing.id),
+          productMappingRepair: {
+            mappedVariantCount: mappingRepair.mappedVariantCount,
+            shippingGroupMetafieldQueued: mappingRepair.shippingGroupMetafieldQueued,
+          },
+        });
+      }
+
+      const duplicateVariant = await db
+        .select({
+          id: productVariants.id,
+          sku: productVariants.sku,
+          productId: productVariants.productId,
+        })
+        .from(productVariants)
+        .where(sql`
+          ${productVariants.id} <> ${id}
+          AND (
+            ${productVariants.shopifyVariantId} = ${shopifyVariantId}
+            ${shopifyInventoryItemId ? sql`OR ${productVariants.shopifyInventoryItemId} = ${shopifyInventoryItemId}` : sql``}
+          )
+        `)
+        .limit(1);
+      if (duplicateVariant[0]) {
+        return res.status(409).json({
+          error: "Shopify variant is already tied to another Echelon variant",
+          code: "SHOPIFY_VARIANT_ALREADY_MAPPED",
+          conflictVariant: duplicateVariant[0],
+        });
+      }
+
+      const duplicateFeed = await db
+        .select({
+          id: channelFeeds.id,
+          productVariantId: channelFeeds.productVariantId,
+          channelVariantId: channelFeeds.channelVariantId,
+        })
+        .from(channelFeeds)
+        .where(and(
+          eq(channelFeeds.channelId, channel.id),
+          eq(channelFeeds.channelType, "shopify"),
+          eq(channelFeeds.channelVariantId, shopifyVariantId),
+          sql`${channelFeeds.productVariantId} <> ${id}`,
+        ))
+        .limit(1);
+      if (duplicateFeed[0]) {
+        return res.status(409).json({
+          error: "Shopify feed mapping is already tied to another Echelon variant",
+          code: "SHOPIFY_FEED_ALREADY_MAPPED",
+          conflictFeed: duplicateFeed[0],
+        });
+      }
+
+      const duplicateListing = await db
+        .select({
+          id: channelListings.id,
+          productVariantId: channelListings.productVariantId,
+          externalVariantId: channelListings.externalVariantId,
+        })
+        .from(channelListings)
+        .where(and(
+          eq(channelListings.channelId, channel.id),
+          eq(channelListings.externalVariantId, shopifyVariantId),
+          sql`${channelListings.productVariantId} <> ${id}`,
+        ))
+        .limit(1);
+      if (duplicateListing[0]) {
+        return res.status(409).json({
+          error: "Shopify listing is already tied to another Echelon variant",
+          code: "SHOPIFY_LISTING_ALREADY_MAPPED",
+          conflictListing: duplicateListing[0],
+        });
+      }
+
+      const result = await db.transaction(async (tx) => {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            ${VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE},
+            ${id}
+          )
+        `);
+        const [currentVariant] = await tx
+          .select({ salesEligibility: productVariants.salesEligibility })
+          .from(productVariants)
+          .where(eq(productVariants.id, id))
+          .limit(1);
+        if (!currentVariant || !isCustomerSellableVariant(currentVariant)) {
+          throw Object.assign(
+            new Error("Internal-only variants cannot be linked to Shopify"),
+            { statusCode: 409, code: "VARIANT_INTERNAL_ONLY" },
+          );
+        }
+
+        const variantUpdates: Partial<typeof productVariants.$inferInsert> = {
+          shopifyVariantId,
+          shopifyInventoryItemId,
+          updatedAt: new Date(),
+        };
+        if (!variant.barcode && shopifyVariant.barcode) {
+          variantUpdates.barcode = String(shopifyVariant.barcode).trim();
+        }
+
+        const { updatedVariant, feedIds, listingIds } = await linkVariantShopifyFeedAndListingInTx(tx, {
+          variantId: id,
+          channelId: channel.id,
+          shopifyProductId,
+          shopifyVariantId,
+          shopifyInventoryItemId,
+          effectiveSku: shopifySku || echelonSku,
+          variantUpdates,
+        });
+
+        await persistAuditEvent(tx, {
+          actor,
+          action: "catalog.shopify_variant_linked",
+          target: `catalog.product_variant:${id}`,
+          changes: {
+            before: {
+              catalogProductId: existingProductShopifyId,
+              catalogVariantId: normalizeShopifyNumericId(variant.shopifyVariantId),
+              catalogInventoryItemId: normalizeShopifyNumericId(variant.shopifyInventoryItemId),
+            },
+            after: {
+              catalogProductId: shopifyProductId,
+              catalogVariantId: shopifyVariantId,
+              catalogInventoryItemId: shopifyInventoryItemId,
+            },
+          },
+          context: {
+            channelId: channel.id,
+            channelName: channel.name,
+            productIdentityChanged: productIdentityWillChange,
+            productRemapRequested,
+            feedIds,
+            listingIds,
+          },
+        });
+
+        return { updatedVariant, feedIds, listingIds };
+      });
+
+      req.app.locals.services?.inventoryCore?.triggerNotifyChange?.(id, "shopify_variant_link");
+
+      res.json({
+        variant: result.updatedVariant,
+        shopify: {
+          channelId: channel.id,
+          channelName: channel.name,
+          productId: shopifyProductId,
+          variantId: shopifyVariantId,
+          inventoryItemId: shopifyInventoryItemId,
+          sku: shopifySku,
+        },
+        channelFeedIds: result.feedIds,
+        channelListingIds: result.listingIds,
+      });
+    } catch (error: any) {
+      const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+      if (statusCode >= 500) {
+        console.error("Error linking Shopify variant:", error);
+      }
+      res.status(statusCode).json({
+        error: error?.message || "Failed to link Shopify variant",
+        ...(error instanceof ShopifyProductMappingError
+          ? { code: error.code, context: error.context }
+          : error?.code === "VARIANT_INTERNAL_ONLY"
+            ? { code: error.code }
+            : {}),
+      });
+    }
+  });
+
+  // Merge source variant's inventory into target variant, then deactivate source
+  app.post("/api/product-variants/:id/merge", requirePermission("inventory", "update"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const sourceId = Number(req.body.sourceVariantId);
+      const owner = createCatalogInventoryCommandService(db, req.app.locals.services.inventoryCore);
+      return res.json(await owner.execute({ operation: "variant_merge", sourceId, targetVariantId: targetId,
+        commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
+    } catch (error) {
+      if (sendSelectionBusy(res, error)) return;
+      console.error("Error merging variants:", error);
+      if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      res.status(500).json({ error: "Failed to merge variants" });
+    }
+  });
+
+  // Archive variant — soft-delete with dependency cleanup (mirrors product archive)
+  app.post("/api/product-variants/:id/archive", requirePermission("inventory", "edit"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const force = req.body?.force === true;
+      const transferToVariantId = req.body?.transferToVariantId == null ? null : Number(req.body.transferToVariantId);
+
+      if (force) {
+        const owner = createCatalogInventoryCommandService(db, req.app.locals.services.inventoryCore);
+        return res.json(await owner.execute({ operation: "variant_archive", sourceId: id,
+          targetVariantId: transferToVariantId, commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
+      }
+
+      const variant = await storage.getProductVariantById(id);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+
+      // Dependency scan
+      const levels = await storage.getInventoryLevelsByVariantId(id);
+      const totalQty = levels.reduce((sum, l) => sum + l.variantQty, 0);
+      const totalReserved = levels.reduce((sum, l) => sum + l.reservedQty, 0);
+      const bins = levels.filter(l => l.variantQty > 0).length;
+
+      const inventoryDetails: { warehouseLocationId: number; locationCode: string; variantQty: number; reservedQty: number }[] = [];
+      for (const level of levels) {
+        if (level.variantQty > 0) {
+          const locCode = await storage.getWarehouseLocationCodeById(level.warehouseLocationId);
+          inventoryDetails.push({
+            warehouseLocationId: level.warehouseLocationId,
+            locationCode: locCode ?? `LOC-${level.warehouseLocationId}`,
+            variantQty: level.variantQty,
+            reservedQty: level.reservedQty,
+          });
+        }
+      }
+
+      const pendingShipments = await storage.getPendingShipmentItemsByVariantIds([id]);
+      const feeds = await storage.getChannelFeedsByProductVariantId(id);
+      const activeFeedList = feeds.filter((f: any) => f.isActive === 1);
+      const feedDetails: { channelName: string; provider: string; channelSku: string | null }[] = [];
+      for (const feed of activeFeedList) {
+        let channelName = feed.channelType || "Unknown";
+        if (feed.channelId) {
+          const name = await storage.getChannelNameById(feed.channelId);
+          if (name) channelName = name;
+        }
+        feedDetails.push({ channelName, provider: feed.channelType, channelSku: feed.channelSku });
+      }
+
+      const dependencies = {
+        inventory: { totalQty, bins, hasReserved: totalReserved > 0, inventoryDetails },
+        shipments: { pending: pendingShipments.length },
+        channelFeeds: { active: activeFeedList.length, details: feedDetails },
+      };
+
+      const hasBlockers = totalQty > 0 || pendingShipments.length > 0;
+
+      return res.json({ blocked: hasBlockers, dependencies, variant: { id: variant.id, sku: variant.sku, name: variant.name } });
+    } catch (error) {
+      if (sendSelectionBusy(res, error)) return;
+      console.error("Error archiving variant:", error);
+      if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      res.status(500).json({ error: "Failed to archive variant" });
+    }
+  });
+
+  app.delete("/api/product-variants/:id", requirePermission("inventory", "delete"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const success = await storage.deleteProductVariant(id);
+      if (!success) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      if (sendSelectionBusy(res, error)) return;
+      console.error("Error deleting variant:", error);
+      res.status(500).json({ error: "Failed to delete variant" });
+    }
+  });
+
+  // Bulk update parentVariantId via sku → parent_sku mapping
+  app.post("/api/product-variants/bulk-parent", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const rows: { sku: string; parent_sku: string }[] = req.body.rows;
+      if (!Array.isArray(rows)) {
+        return res.status(400).json({ error: "rows array required" });
+      }
+      if (rows.length > MAX_CATALOG_BATCH_SIZE) {
+        return res.status(400).json({
+          error: `Cannot update more than ${MAX_CATALOG_BATCH_SIZE} variant rows in a single request`,
+          code: "BATCH_LIMIT_EXCEEDED",
+          maxBatchSize: MAX_CATALOG_BATCH_SIZE,
+        });
+      }
+
+      const outcome = await db.transaction(async (tx) => {
+        // Build SKU → variant lookup inside the transaction
+        const allVariants = await storage.getAllProductVariants(false, tx);
+        const skuMap = new Map<string, typeof allVariants[0]>();
+        for (const v of allVariants) {
+          if (v.sku) skuMap.set(v.sku.toUpperCase(), v);
+        }
+
+        let updated = 0;
+        let skipped = 0;
+        const errors: string[] = [];
+
+        for (const row of rows) {
+          const sku = row.sku?.trim().toUpperCase();
+          if (!sku) { skipped++; continue; }
+
+          const variant = skuMap.get(sku);
+          if (!variant) {
+            errors.push(`SKU not found: ${row.sku}`);
+            continue;
+          }
+
+          const parentSku = row.parent_sku?.trim().toUpperCase();
+          if (!parentSku) {
+            // Clear parent (set to base variant)
+            await storage.updateProductVariant(variant.id, { parentVariantId: null } as any, tx);
+            updated++;
+            continue;
+          }
+
+          const parentVariant = skuMap.get(parentSku);
+          if (!parentVariant) {
+            errors.push(`Parent SKU not found: ${row.parent_sku} (for ${row.sku})`);
+            continue;
+          }
+
+          if (parentVariant.productId !== variant.productId) {
+            errors.push(`Parent ${row.parent_sku} belongs to different product than ${row.sku}`);
+            continue;
+          }
+
+          await storage.updateProductVariant(variant.id, { parentVariantId: parentVariant.id }, tx);
+          updated++;
+        }
+
+        return { updated, skipped, errors, total: rows.length };
+      });
+
+      res.json(outcome);
+    } catch (error) {
+      console.error("Error bulk updating parent variants:", error);
+      res.status(500).json({ error: "Failed to bulk update parent variants" });
+    }
+  });
+
+  app.get("/api/products/:productId/locations", requireAuth, async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) {
+        return res.status(400).json({ error: "Invalid product ID" });
+      }
+      const locations = await storage.getProductLocationsByProductId(productId);
+      res.json(locations);
+    } catch (error: any) {
+      console.error("Error fetching locations for product:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch locations" });
+    }
+  });
+
+  // Set a location as primary for a product
+  app.post("/api/product-locations/:id/set-primary", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const productLocationId = parseInt(req.params.id);
+      if (isNaN(productLocationId)) {
+        return res.status(400).json({ error: "Invalid product location ID" });
+      }
+      const updated = await storage.setPrimaryLocation(productLocationId);
+      if (!updated) {
+        return res.status(404).json({ error: "Product location not found" });
+      }
+      res.json(updated);
+    } catch (error: any) {
+      console.error("Error setting primary location:", error);
+      res.status(500).json({ error: error.message || "Failed to set primary location" });
+    }
+  });
+
+  // ============================================================================
+  // Bin Assignments (variant-centric pick location management)
+  // ============================================================================
+  const { binAssignment } = app.locals.services;
+
+  app.get("/api/bin-assignments", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { search, unassignedOnly, zone, warehouseId, variantIds: rawVariantIds } = req.query;
+      const variantIds = parseBinAssignmentVariantIdsQuery(rawVariantIds);
+      const assignments = await binAssignment.getAssignmentsView({
+        search: search as string || undefined,
+        unassignedOnly: unassignedOnly === "true",
+        zone: zone as string || undefined,
+        warehouseId: warehouseId ? parseInt(warehouseId as string) : undefined,
+        variantIds,
+      });
+      res.json(assignments);
+    } catch (error: any) {
+      if (error instanceof BinAssignmentFilterError) {
+        return res.status(400).json({
+          error: {
+            code: error.code,
+            message: error.message,
+          },
+        });
+      }
+      console.error("Error fetching bin assignments:", error);
+      res.status(500).json({ error: "Failed to fetch bin assignments" });
+    }
+  });
+
+  app.put("/api/bin-assignments", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      // Validated at the boundary: an unchecked isPrimary from the body once
+      // wrote 0 onto a variant's only slot (see bin-assignment-contracts.ts).
+      const request = parseBinAssignmentWriteRequest(req.body);
+      const result = await binAssignment.assignVariantToLocation(request);
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof BinAssignmentValidationError) {
+        return res.status(400).json({ error: error.message, code: error.code });
+      }
+      console.error("Error upserting bin assignment:", error);
+      res.status(500).json({ error: error.message || "Failed to update bin assignment" });
+    }
+  });
+
+  app.delete("/api/bin-assignments/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await binAssignment.unassignVariant(id);
+      if (!deleted) return res.status(404).json({ error: "Assignment not found" });
+
+
+      res.status(204).end();
+    } catch (error: any) {
+      console.error("Error deleting bin assignment:", error);
+      res.status(500).json({ error: "Failed to delete bin assignment" });
+    }
+  });
+
+  app.post("/api/bin-assignments/import", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { assignments } = req.body;
+      if (!Array.isArray(assignments) || assignments.length === 0) {
+        return res.status(400).json({ error: "assignments array is required" });
+      }
+
+      const results = await binAssignment.importAssignments(assignments);
+      res.json(results);
+    } catch (error: any) {
+      console.error("Error importing bin assignments:", error);
+      res.status(500).json({ error: "Failed to import bin assignments" });
+    }
+  });
+
+  app.get("/api/bin-assignments/export", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const csv = await binAssignment.exportAssignments();
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=bin-assignments.csv");
+      res.send(csv);
+    } catch (error: any) {
+      console.error("Error exporting bin assignments:", error);
+      res.status(500).json({ error: "Failed to export bin assignments" });
+    }
+  });
+
+  // ============================================================================
+  // PRODUCT ASSET UPLOAD (file storage)
+  // ============================================================================
+
+  // Photo source mutations are registered by registerProductAssetRoutes.
+
+  /**
+   * GET /api/product-assets/:id/file
+   * Serve a stored image file from the database.
+   */
+  app.get("/api/product-assets/:id/file", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const result = await db.execute(sql`
+        SELECT file_data, mime_type, alt_text FROM catalog.product_assets WHERE id = ${id}
+      `);
+
+      if (!result.rows.length || !result.rows[0].file_data) {
+        return res.status(404).json({ error: "File not found" });
+      }
+
+      const row = result.rows[0] as any;
+      res.set("Content-Type", row.mime_type || "image/jpeg");
+      res.set("Cache-Control", "public, max-age=86400"); // Cache 24h
+      if (row.alt_text) {
+        res.set("Content-Disposition", `inline; filename="${row.alt_text || "image"}"`);
+      }
+      res.send(row.file_data);
+    } catch (error: any) {
+      console.error("Error serving asset file:", error);
+      res.status(500).json({ error: "Failed to serve file" });
+    }
+  });
+
+  /**
+   * GET /api/product-assets/:id
+   * Get asset metadata (without file data).
+   */
+  app.get("/api/product-assets/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const [asset] = await db
+        .select()
+        .from(productAssets)
+        .where(eq(productAssets.id, id))
+        .limit(1);
+
+      if (!asset) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+
+      res.json({
+        ...asset,
+        fileUrl: ((asset as any).storageType === "file" || (asset as any).storageType === "both")
+          ? `/api/product-assets/${asset.id}/file`
+          : asset.url,
+      });
+    } catch (error: any) {
+      console.error("Error getting asset:", error);
+      res.status(500).json({ error: "Failed to get asset" });
+    }
+  });
+
+  // ============================================================================
+  // IMAGE SYNC — Pull/Push between Echelon and channels
+  // ============================================================================
+
+  const imageSync = createImageSyncService();
+
+  /**
+   * POST /api/images/pull/ebay
+   * Pull images from eBay listings into Echelon catalog.
+   * Body: { productIds?: number[] } — optional filter to specific products
+   */
+  app.post("/api/images/pull/ebay", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      console.log(`[ImageSync] Pulling images from eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+
+      // A failed authenticated read cannot become an unscoped page scrape.
+      let ebayAccessToken: string;
+      let ebayEnvironment: "production" | "sandbox";
+      try {
+        const { EbayAuthService, createEbayAuthConfig } = await import("../../../channels/ebay-connector.api");
+        const config = createEbayAuthConfig();
+        const authService = new EbayAuthService(db as any, config);
+        ebayAccessToken = await authService.getAccessToken(67);
+        ebayEnvironment = authService.getEnvironment();
+      } catch (authErr: any) {
+        console.warn(JSON.stringify({ event: "catalog_photo_import_auth_failed", provider: "ebay" }));
+        return res.status(503).json({ code: "EBAY_AUTH_REQUIRED", error: "Reconnect eBay before importing its listing photos." });
+      }
+
+      // Respond immediately — processing 90+ products takes too long for a single request
+      res.json({ status: "started", message: "eBay image pull started in background. Check Heroku logs for progress." });
+
+      // Run in background
+      imageSync.pullFromEbay(productIds, ebayAccessToken, ebayEnvironment).then((results) => {
+        const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
+        const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+        console.log(`[ImageSync] pullFromEbay complete: ${results.length} products, ${totalAdded} images added, ${totalErrors} errors`);
+        results.filter(r => r.errors.length > 0).forEach(r => {
+          console.log(`[ImageSync]   ${r.sku}: errors=${JSON.stringify(r.errors)}`);
+        });
+      }).catch((err) => {
+        console.error("[ImageSync] pullFromEbay background error:", err.message);
+      });
+    } catch (error: any) {
+      console.error("Error pulling eBay images:", error);
+      res.status(500).json({ error: error.message || "Failed to pull eBay images" });
+    }
+  });
+
+  /**
+   * POST /api/images/pull/shopify
+   * Pull images from Shopify products into Echelon catalog.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/pull/shopify", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      if (!shopDomain || !accessToken) {
+        return res.status(500).json({ error: "Shopify credentials not configured" });
+      }
+
+      console.log(`[ImageSync] Pulling images from Shopify${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+      const results = await imageSync.pullFromShopify(shopDomain, accessToken, productIds);
+      const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
+      const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+      res.json({ results, summary: { products: results.length, imagesAdded: totalAdded, errors: totalErrors } });
+    } catch (error: any) {
+      console.error("Error pulling Shopify images:", error);
+      res.status(500).json({ error: error.message || "Failed to pull Shopify images" });
+    }
+  });
+
+  /**
+   * POST /api/images/push/shopify
+   * Push Echelon catalog images to Shopify.
+   * Body: { productIds?: number[] }
+   */
+  /**
+   * POST /api/images/push/shopify
+   * Push Echelon catalog images to Shopify.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/push/shopify", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      if (!shopDomain || !accessToken) {
+        return res.status(500).json({ error: "Shopify credentials not configured" });
+      }
+
+      console.log(`[ImageSync] === PUSH STARTED ===`);
+      console.log(`[ImageSync] Domain: ${shopDomain}`);
+      console.log(`[ImageSync] Product IDs: ${productIds?.join(", ") || "ALL"}`);
+
+      const results = await imageSync.pushToShopify(shopDomain, accessToken, productIds);
+      const totalPushed = results.reduce((sum, r) => sum + r.imagesPushed, 0);
+      const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+
+      console.log(`[ImageSync] === RESULT: ${totalPushed} pushed, ${totalErrors} errors ===`);
+      for (const r of results) {
+        console.log(`[ImageSync]   ${r.sku}: pushed=${r.imagesPushed}, errors=${JSON.stringify(r.errors)}`);
+      }
+
+      res.json({ results, summary: { products: results.length, imagesPushed: totalPushed, errors: totalErrors } });
+    } catch (error: any) {
+      console.error("[ImageSync] === FATAL ERROR ===", error.message, error.stack);
+      res.status(500).json({ error: error.message || "Failed to push images to Shopify" });
+    }
+  });
+
+  /**
+   * POST /api/images/push/ebay
+   * Push Echelon catalog images to eBay listings.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/push/ebay", requirePermission("inventory", "edit"), (_req, res) => {
+    return res.status(410).json({ code: "CATALOG_IMAGE_PUSH_USE_CHANNEL_SYNC",
+      error: "Open the eBay channel and use Sync to publish the product's current Catalog originals.",
+      action: { label: "Open eBay channel", href: "/channels/ebay" } });
+  });
+}

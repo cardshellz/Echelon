@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   selectLateOrderShipmentTarget,
   type LateOrderShipmentCandidate,
-} from "../../late-order-shipment-selection";
+} from "../../domain/late-order-shipment-selection";
 
 function shipment(
   overrides: Partial<LateOrderShipmentCandidate> = {},

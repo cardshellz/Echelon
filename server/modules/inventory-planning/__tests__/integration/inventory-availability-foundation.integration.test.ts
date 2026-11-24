@@ -22,14 +22,14 @@ import { installOperationalPublicationPrerequisites } from "../fixtures/shipment
 import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
 import { installUnopenedQuantityLedgerFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { PostgresOperationalShipmentDispatchRepository } from "../../../inventory/infrastructure/operational-shipment-dispatch.repository";
-import { WmsOperationalShipmentSourceOwner } from "../../../wms/operational-shipment-source";
+import { WmsOperationalShipmentSourceOwner } from "../../../wms/infrastructure/operational-shipment-source";
 import { publishOperationalShipmentInsideTransaction } from "../../infrastructure/inventory-availability-dispatch-publication";
 import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
 import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
 import { InventoryAvailabilityBackfillService } from "../../application/inventory-availability-backfill.service";
 import { InventoryCatalogBatchService } from "../../application/inventory-catalog-batch.service";
 import { GradedCardPolicyCorrection } from "../../../../../scripts/lib/graded-card-policy-correction";
-import { createLegacyInventoryAtpService } from "../../../inventory/atp.service";
+import { createLegacyInventoryAtpService } from "../../../inventory/application/atp.service";
 import { catalogBatchExecutionPreview } from "@shared/types/inventory-catalog-batch";
 import { PostgresInventoryAvailabilityBackfillRepository } from "../../infrastructure/inventory-availability-backfill.repository";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EbayListingFeedInventoryService } from "../../application/ebay-listing-feed-inventory.service";
-import { InventoryChannelQuantityRuntimeError, InventoryPublicationSelectionError } from "../../../inventory-planning/channel-quantity";
+import { InventoryChannelQuantityRuntimeError, InventoryPublicationSelectionError } from "../../../inventory-planning/channel-quantity.api";
 
 const reference = "ea7e6ab5-5074-4fc1-a8b8-950a308dd725";
 function setup(rows: readonly { productVariantId: number; atpUnits: number }[] = []) {

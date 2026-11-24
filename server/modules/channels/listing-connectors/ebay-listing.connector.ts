@@ -3,7 +3,7 @@ import { assertEbayPreparedIntent } from "../ebay-prepared-intent";
 import { prepareEbayListingPackages, assertEbayPackagePreservation, readEbayPackageVerificationView } from "../adapters/ebay/ebay-listing-package";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
+import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication.api";
 import { ebayPublicationRequestJournalContract } from "../ebay-publication-preflight-evidence";
 import {
   EbayListingSyncError,

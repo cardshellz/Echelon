@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import type { CatalogPublicationImageOverride } from "../catalog/catalog-publication-images.reader";
+import type { CatalogPublicationImageOverride } from "../catalog/infrastructure/catalog-publication-images.reader";
 import { EbayListingPhotoError } from "./ebay-listing-photos.domain";
 
 /** A channel may explicitly name an SKU differently; no fuzzy or cross-channel matching. */

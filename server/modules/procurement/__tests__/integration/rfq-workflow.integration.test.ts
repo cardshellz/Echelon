@@ -91,7 +91,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     delete process.env.DATABASE_URL; delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [dbModule, procurement, catalog, purchasing, workflow, commandModule, repository] = await Promise.all([
-        import("../../../../db"), import("../../procurement.storage"), import("../../../catalog/catalog.storage"),
+        import("../../../../db"), import("../../procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
         import("../../purchasing.service"), import("../../rfq-workflow.service"), import("../../rfq-workflow.commands"),
         import("../../../../platform/commands/command-results.repository"),
       ]);

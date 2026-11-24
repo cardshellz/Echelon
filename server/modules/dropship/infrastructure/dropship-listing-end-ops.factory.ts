@@ -1,6 +1,6 @@
 import { pool } from "../../../db";
 import { logger } from "../../../platform/observability/logger";
-import { quantityProviderResponseRecovery } from "../../inventory-planning/quantity-publication";
+import { quantityProviderResponseRecovery } from "../../inventory-planning/quantity-publication.api";
 import { DropshipListingEndOpsService, type ListingEndOpsLog } from "../application/dropship-listing-end-ops-service";
 import { PgDropshipListingEndOpsRepository } from "./dropship-listing-end-ops.repository";
 

@@ -4,7 +4,7 @@ import { VARIANT_SALES_ELIGIBILITIES, type VariantSalesEligibility } from "@shar
 import { VARIANT_UOM_TYPES } from "@shared/catalog/variant-uom";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import type { DropshipCatalogExposureRule, DropshipCatalogVariantCandidate } from "../../domain/catalog-exposure";
-import { readDropshipListingStockSelection } from "../../stock-publication-selection";
+import { readDropshipListingStockSelection } from "../../stock-publication-selection.api";
 import type { LegacyVendorSelectionRule } from "./legacy-vendor-selection";
 
 /**

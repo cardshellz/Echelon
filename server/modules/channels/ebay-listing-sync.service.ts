@@ -25,12 +25,12 @@ import { syncContentIntentHash } from "./ebay-listing-sync-content";
 import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listing-identity";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayListingFailureDiagnostic, type EbayListingFailureDiagnostic } from "./ebay-listing-failure-diagnostic";
-import type { EbayAutomaticPublicationRecoveryService, EbayRequestJournalContract } from "../inventory-planning/quantity-publication";
-import { withEbayQuantityRequestJournalContract } from "../inventory-planning/quantity-publication";
+import type { EbayAutomaticPublicationRecoveryService, EbayRequestJournalContract } from "../inventory-planning/quantity-publication.api";
+import { withEbayQuantityRequestJournalContract } from "../inventory-planning/quantity-publication.api";
 import { ebayListingPublicationScopes, recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
 import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
 import { logger as platformLogger } from "../../platform/observability/logger";
-import { runDueListingWork } from "../marketplace-listings/listing-work-runner";
+import { runDueListingWork } from "../marketplace-listings/listing-work-runner.api";
 
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;

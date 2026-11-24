@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { InventoryAvailabilityRuntimeClaimContext } from "../../../inventory-planning/application/inventory-availability-runtime-claim.service";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 
 // A line claimed while stock was missing has planned 0. Before this fix every
 // pick on it failed forever with CLAIM_LINE_PICK_OVERAGE (#63658, #63669, #63678).

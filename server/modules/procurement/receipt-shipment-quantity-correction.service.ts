@@ -22,7 +22,7 @@ import {
   type FinancialCommandDescriptor,
 } from "../../platform/commands/transactional-command.service";
 import { readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory/application/cogs.service";
 import {
   costFingerprint,
   costInteger,

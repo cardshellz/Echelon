@@ -1,4 +1,4 @@
 export {
   confirmProductVariantShipsInOwnContainer,
   type CatalogVariantShippingFlagsWriteExecutor,
-} from "./variant-shipping-flags.command";
+} from "./application/variant-shipping-flags.command";

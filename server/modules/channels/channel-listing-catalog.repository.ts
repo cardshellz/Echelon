@@ -11,8 +11,8 @@ import {
 } from "@shared/types/channel-listing-publication";
 import { resolveChannelListingPrice } from "./channel-pricing-resolver";
 import { createChannelPricingService } from "./channel-pricing.service";
-import type { CatalogPublicImageUrl } from "../catalog/catalog-public-image";
-import { PgCatalogVariantPublicationPhotoReader, readCatalogPublicationImageIds } from "../catalog/catalog-publication-images.reader";
+import type { CatalogPublicImageUrl } from "../catalog/domain/catalog-public-image";
+import { PgCatalogVariantPublicationPhotoReader, readCatalogPublicationImageIds } from "../catalog/infrastructure/catalog-publication-images.reader";
 import {
   ListingPublicationError,
   listingHash,

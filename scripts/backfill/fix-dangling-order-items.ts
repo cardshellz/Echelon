@@ -1,14 +1,14 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as dotenv from "dotenv";
-import { repairDanglingCompletedWmsOrderItems } from "../../server/modules/wms/order-item-maintenance-commands";
+import { repairDanglingCompletedWmsOrderItems } from "../../server/modules/wms/application/order-item-maintenance-commands";
 
 // Load environment variables
 dotenv.config();
 
 /**
  * P1-18 Backfill Script: Fix dangling completed order items.
- * 
+ *
  * Execution:
  * npx tsx scripts/backfill/fix-dangling-order-items.ts
  */
@@ -25,9 +25,9 @@ async function runBackfill() {
 
   try {
     console.log("Running backfill for dangling 0/x completed line items...");
-    
+
     const repaired = await repairDanglingCompletedWmsOrderItems(db as any);
-    
+
     if (repaired > 0) {
       console.log(`[Success] Fixed ${repaired} dangling 0/x completed line items.`);
     } else {

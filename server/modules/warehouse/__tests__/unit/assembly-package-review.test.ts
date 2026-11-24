@@ -3,7 +3,7 @@ import { normalizeShipStationLabelObservation } from "../../../shipping/carrier-
 import type { LockedPackageAllocationAuthorityEvidence } from "../../../shipping/package-allocation-ledger.repository";
 import { buildAssemblyPackageReview } from "../../work/domain/assembly-package-review";
 import { readObservedPackagesForSources } from "../../../shipping/package-allocation-ledger.repository";
-import { readOrderPackingSources } from "../../../wms/packing-source-reader";
+import { readOrderPackingSources } from "../../../wms/infrastructure/packing-source-reader";
 import type { PoolClient } from "pg";
 
 const time = "2026-09-06T20:00:00.000Z";

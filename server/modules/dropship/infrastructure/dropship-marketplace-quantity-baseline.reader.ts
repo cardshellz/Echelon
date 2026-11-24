@@ -3,7 +3,7 @@ import {
   readDropshipEbayPublishedQuantities,
   readDropshipEbayStockAuthority,
   type DropshipEbayPublishedQuantity,
-} from "../../inventory-planning/quantity-publication";
+} from "../../inventory-planning/quantity-publication.api";
 import type {
   MarketplaceQuantityBaselinePort,
   MarketplaceSyncListing,

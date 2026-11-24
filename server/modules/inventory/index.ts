@@ -46,17 +46,17 @@ export interface InventorySourceContract {
 }
 
 // Services
-export { createRecipeCapacityService, RecipeCapacityService } from "./recipe-capacity.service";
-export { createInventoryLotService, InventoryLotService } from "./lots.service";
-export { createInventoryAlertService } from "./alerts.service";
+export { createRecipeCapacityService, RecipeCapacityService } from "./application/recipe-capacity.service";
+export { createInventoryLotService, InventoryLotService } from "./application/lots.service";
+export { createInventoryAlertService } from "./application/alerts.service";
 // Application Layer (Use Cases)
 export { createReplenishmentService, ReplenishmentUseCases as ReplenishmentService } from "./application/replenishment.use-cases";
 export { createCycleCountService, CycleCountUseCases as CycleCountService } from "./application/cycle-count.use-cases";
 export { createBreakAssemblyService, BreakAssemblyUseCases as BreakAssemblyService } from "./application/break-assembly.use-cases";
 export { createBuildUseCases, BuildUseCases } from "./application/build.use-cases";
-export { createCOGSService, COGSService } from "./cogs.service";
-export { registerReplenishmentRoutes } from "./replenishment.routes";
-export { registerBuildRoutes } from "./build.routes";
+export { createCOGSService, COGSService } from "./application/cogs.service";
+export { registerReplenishmentRoutes } from "./interfaces/http/replenishment.routes";
+export { registerBuildRoutes } from "./interfaces/http/build.routes";
 export {
   CostEvidenceError,
   costFingerprint,
@@ -71,7 +71,7 @@ export {
   type CostApplicationOptions,
   type CostComponentWriter,
   type CostRevisionApplicationResult,
-} from "./cost-application-public";
+} from "./application/cost-application-public";
 
 // Service types
 export type {
@@ -81,6 +81,6 @@ export type {
   ProductAtpSummary,
   InventoryItemAtpSummary,
   InventoryAtpServiceContract,
-} from "./atp.service";
+} from "./application/atp.service";
 export type { BreakResult, AssembleResult, ConversionPreview } from "./application/break-assembly.use-cases";
 export type { CycleCountUseCases, CycleCountError, ApproveResult, BulkApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "./application/cycle-count.use-cases";

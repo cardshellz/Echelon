@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { deriveWmsPickingProgress, type WmsPickingProgressLine } from "@shared/wms-picking-progress";
 
 const STORAGE_SRC = readFileSync(
-  resolve(__dirname, "../../orders.storage.ts"),
+  resolve(__dirname, "../../infrastructure/orders.storage.ts"),
   "utf-8",
 );
 
@@ -54,7 +54,7 @@ describe("Zombie order prevention", () => {
     });
 
     it("the startup zombie repair counts held lines as pending shippable", () => {
-      const repair = readFileSync(resolve(__dirname, "../../zombie-order-repair.ts"), "utf-8");
+      const repair = readFileSync(resolve(__dirname, "../../application/zombie-order-repair.ts"), "utf-8");
       expect(repair).toContain("oi.status NOT IN ('cancelled', 'completed', 'short')");
       expect(repair).not.toMatch(/on_hold/);
     });
@@ -93,7 +93,7 @@ describe("Startup zombie repair", () => {
   );
   // The repair SQL moved out of index.ts into zombie-order-repair.ts.
   const repairSection = readFileSync(
-    resolve(__dirname, "../../zombie-order-repair.ts"),
+    resolve(__dirname, "../../application/zombie-order-repair.ts"),
     "utf-8",
   );
 

@@ -20,8 +20,8 @@ vi.mock("../../../orders", () => ({
 vi.mock("../../../warehouse/settings.api", () => ({
   getSlaCutoffConfig: async () => ({ timezone: "UTC", cutoffLocal: "12:00" }),
 }));
-vi.mock("../../../orders/sort-rank", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../orders/sort-rank")>()),
+vi.mock("../../../orders/domain/sort-rank", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../orders/domain/sort-rank")>()),
   resolveSlaDueAt: async () => null,
 }));
 vi.mock("../../webhook-inbox.service", () => ({

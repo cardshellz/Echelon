@@ -13,7 +13,7 @@ function method(source: string, name: string, nextName?: string): string {
 }
 
 describe("inter-warehouse transit availability boundary", () => {
-  const atp = read("../../atp.service.ts");
+  const atp = read("../../application/atp.service.ts");
 
   it.each([
     ["getAtpBase", "getAtpBaseByWarehouse"],
@@ -27,7 +27,7 @@ describe("inter-warehouse transit availability boundary", () => {
   });
 
   it("keeps in-transit custody out of recipe build capacity", () => {
-    const recipe = read("../../recipe-capacity.service.ts");
+    const recipe = read("../../application/recipe-capacity.service.ts");
     expect(recipe).toMatch(/location\.location_type\s*<>\s*'in_transit'/);
   });
 });

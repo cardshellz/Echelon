@@ -4,15 +4,15 @@ import { AssemblyExecutionService } from "../../work/application/assembly-execut
 import { AssemblyWorkOwner } from "../../work/application/assembly-work-owner";
 import { AssemblyWorkRepository } from "../../work/infrastructure/assembly-work.repository";
 import { WorkConfigurationRepository } from "../../work/infrastructure/work-configuration.repository";
-import { readAssemblyOrder } from "../../../orders/assembly-order-reader";
+import { readAssemblyOrder } from "../../../orders/infrastructure/assembly-order-reader";
 import { readAssemblyOwnership } from "../../../inventory-planning/application/assembly-ownership-reader";
 import { readWarehouseWorkActor } from "../../../identity";
-import { readAssemblyVariantLabels } from "../../../catalog/assembly-variant-reader";
+import { readAssemblyVariantLabels } from "../../../catalog/infrastructure/assembly-variant-reader";
 import { config, task, TIME, COMMAND, locations } from "../assembly-work.fixture";
 
 vi.mock("../../../identity", () => ({ readWarehouseWorkActor: vi.fn() }));
-vi.mock("../../../orders/assembly-order-reader", () => ({ readAssemblyOrder: vi.fn() }));
-vi.mock("../../../catalog/assembly-variant-reader", () => ({ readAssemblyVariantLabels: vi.fn() }));
+vi.mock("../../../orders/infrastructure/assembly-order-reader", () => ({ readAssemblyOrder: vi.fn() }));
+vi.mock("../../../catalog/infrastructure/assembly-variant-reader", () => ({ readAssemblyVariantLabels: vi.fn() }));
 vi.mock("../../../inventory-planning/application/assembly-ownership-reader", () => ({ readAssemblyOwnership: vi.fn() }));
 
 function harness() {

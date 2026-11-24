@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
-import { readProviderAccountDestinations } from "../../listing-member-lifecycle";
+import { readProviderAccountDestinations } from "../../listing-member-lifecycle.api";
 
 /**
  * Which Card Shellz channels sell on a provider account (PR C, PLAN-C v4.1 §5.8, SAF-4; QC2 default a): the Card

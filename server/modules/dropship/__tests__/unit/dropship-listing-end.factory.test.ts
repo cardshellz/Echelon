@@ -13,7 +13,7 @@ vi.mock("../../../../db", () => ({ db: {}, pool: { query: mocks.query, connect: 
 vi.mock("../../../../platform/observability/logger", () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
-vi.mock("../../../inventory-planning/quantity-publication", () => ({
+vi.mock("../../../inventory-planning/application/quantity-publication", () => ({
   createDropshipEbayQuantityRequestAdmission: vi.fn(),
   quantityProviderResponseRecovery: { reconcile: vi.fn() },
 }));

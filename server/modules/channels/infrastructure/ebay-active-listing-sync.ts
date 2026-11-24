@@ -48,7 +48,7 @@ import {
 import { admitEbayListingSyncProducts } from "../ebay-listing-sync-admission";
 import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay-marketplace-registration.factory";
 import { quantityProviderResponseRecovery, automaticEbayPublicationRecovery, ebayPublicationReconciliationRepository, ebayPublicationRejectionReader,
-  EbayPublicationContentRefreshRejectedError } from "../../inventory-planning/quantity-publication";
+  EbayPublicationContentRefreshRejectedError } from "../../inventory-planning/quantity-publication.api";
 import {
   type EbayProductSyncResult,
 } from "@shared/types/ebay-listing-sync";
@@ -64,14 +64,14 @@ import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibi
 import { EbayListingWithdrawalExecution,EbayWithdrawalOperationExecution } from "../ebay-listing-withdrawal.service";
 import { prepareEbayWithdrawal } from "./ebay-listing-withdrawal";
 import { ensureEbayListingInventoryReady } from "./ebay-listing-inventory-readiness";
-import { requestStockLinkChecks } from "../../inventory-planning/quantity-publication";
+import { requestStockLinkChecks } from "../../inventory-planning/quantity-publication.api";
 import { quantityPublicationScopeSchema, type QuantityPublicationScope } from "../../inventory-planning/domain/quantity-publication-admission";
 import { ChannelRecoverySyncService } from "../../marketplace-listings/application/channel-recovery-sync.service";
 import { retainedPublicationEffectEvidenceSchema, type RetainedPublicationEffectEvidence,
   type ReconciliationContentVerification } from "../../inventory-planning/domain/publication-recovery-evidence";
 import { ebayListingFailureDiagnostic } from "../ebay-listing-failure-diagnostic";
 import { logger } from "../../../platform/observability/logger";
-import { withListingWorkPermit } from "../../marketplace-listings/listing-work-permits";
+import { withListingWorkPermit } from "../../marketplace-listings/listing-work-permits.api";
 import { ebayListingPublicationScopes } from "../ebay-listing-request-recovery";
 import { proveEbayStockOnlyEffects } from "../adapters/ebay/ebay-recovery-effects";
 export interface SyncFilter {

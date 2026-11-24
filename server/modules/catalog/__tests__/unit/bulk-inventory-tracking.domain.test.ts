@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBulkInventoryTrackingPreview, type BulkInventoryTrackingSelection } from "../../bulk-inventory-tracking.domain";
+import { buildBulkInventoryTrackingPreview, type BulkInventoryTrackingSelection } from "../../domain/bulk-inventory-tracking.domain";
 
 function selection(): BulkInventoryTrackingSelection {
   return [{ productId: 1, snapshot: { product: { name: "Product", sku: "PRODUCT", inventoryTrackingDefault: true, updatedAt: new Date("2026-09-21T12:00:00Z") },

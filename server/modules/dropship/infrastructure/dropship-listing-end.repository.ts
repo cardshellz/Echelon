@@ -3,12 +3,12 @@ import { z } from "zod";
 import {
   readCatalogStockProductVariantIds,
   readCatalogStockSelectionFactsForVariants,
-} from "../../catalog/catalog-stock-selection.reader";
+} from "../../catalog/infrastructure/catalog-stock-selection.reader";
 import {
   isArchivedCatalogMember,
   readProviderAccountDestinations,
   tryLockListingMemberRemote,
-} from "../../marketplace-listings/listing-member-lifecycle";
+} from "../../marketplace-listings/listing-member-lifecycle.api";
 import type {
   DropshipListingEndRepository,
   ListingEndClaimResult,

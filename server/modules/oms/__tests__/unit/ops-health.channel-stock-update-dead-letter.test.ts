@@ -3,7 +3,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   channelStockUpdateDeadLetterDestinationCountSql,
   channelStockUpdateDeadLetterDestinationSampleSql,
-} from "../../../inventory-planning/channel-stock-update-dead-letters";
+} from "../../../inventory-planning/channel-stock-update-dead-letters.api";
 import {
   CHANNEL_STOCK_UPDATE_DEAD_LETTER_CODE,
   CHANNEL_STOCK_UPDATE_DEAD_LETTER_MESSAGE,

@@ -6,7 +6,7 @@ import { z } from "zod";
 import * as schema from "../../shared/schema";
 import { canonicalJson } from "../../shared/utils/canonical-json";
 import { persistAuditEvent } from "../../server/infrastructure/auditLogger";
-import { assertProductInventoryStrategyTransition } from "../../server/modules/catalog/inventory-strategy-policy";
+import { assertProductInventoryStrategyTransition } from "../../server/modules/catalog/domain/inventory-strategy-policy";
 import { InventoryLegacyAdminControlService, INVENTORY_LEGACY_ADMIN_CONTROLS } from "../../server/modules/inventory-planning/application/inventory-legacy-admin-control.service";
 import { PostgresInventoryAvailabilityRuntimeAtpExecutor, type PostgresInventoryAvailabilityRuntimeTransaction } from "../../server/modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { InventoryAvailabilityMasterDataService } from "../../server/modules/inventory-planning/application/inventory-availability-master-data.service";

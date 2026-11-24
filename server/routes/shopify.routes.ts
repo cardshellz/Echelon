@@ -30,7 +30,7 @@ import {
   type ShopifyFulfillmentWebhookTopic,
   type WebhookInboxReceipt,
 } from "../modules/oms/shopify-intake.api";
-import { retireDeletedShopifyProduct } from "../modules/catalog/shopify-product-retirement.service";
+import { retireDeletedShopifyProduct } from "../modules/catalog/application/shopify-product-retirement.service";
 import { sendShopifyProductSyncFailure } from "./shopify-product-sync.response";
 
 // ---------------------------------------------------------------------------

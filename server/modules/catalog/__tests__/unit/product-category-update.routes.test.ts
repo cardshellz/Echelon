@@ -3,8 +3,8 @@ import type { AddressInfo } from "node:net";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { productCategories, products } from "@shared/schema";
-import { registerProductCategoryUpdateRoute } from "../../product-category-update.routes";
-import { PRODUCT_CATEGORY_BUSY } from "../../product-category-update.repository";
+import { registerProductCategoryUpdateRoute } from "../../interfaces/http/product-category-update.routes";
+import { PRODUCT_CATEGORY_BUSY } from "../../infrastructure/product-category-update.repository";
 
 const mocks = vi.hoisted(() => ({ permission: vi.fn() }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) => {

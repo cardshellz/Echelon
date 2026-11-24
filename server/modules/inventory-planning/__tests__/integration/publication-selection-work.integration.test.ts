@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { PostgresPublicationSelectionWork } from "../../infrastructure/publication-selection-work.repository";
-import { publicationSelectionBusyIssue } from "../../publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../application/publication-selection-work";
 import type { InventoryAvailabilityTransactionQueryClient } from "../../application/inventory-availability-transaction-query.port";
 import { PICKS_SELECTION_TRIGGERS_SQL } from "../../../dropship/infrastructure/dropship-selection-conversion.sql";
 

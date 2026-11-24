@@ -38,7 +38,7 @@ import {
 import {
   LineItemHoldEligibilityError,
   holdLineItemWithSplit,
-} from "../../../wms/line-item-hold";
+} from "../../../wms/application/line-item-hold";
 import { dispatchShipStationShipmentCancelRetry } from "../../../oms/webhook-retry.worker";
 
 const SAMPLE_SHOPIFY_BODY = {

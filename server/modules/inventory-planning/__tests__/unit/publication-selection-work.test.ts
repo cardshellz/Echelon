@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { publicationSelectionBusyIssue } from "../../publication-selection-work";
+import { publicationSelectionBusyIssue } from "../../application/publication-selection-work";
 import { runInventoryPublicationWorkerTick } from "../../application/inventory-publication-outbox.worker";
 
 describe("selection replan worker boundary", () => {

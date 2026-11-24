@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchShopifyProductsForSearch, getShopifyNextPageInfo } from "../../shopify-product-search";
+import { fetchShopifyProductsForSearch, getShopifyNextPageInfo } from "../../infrastructure/shopify-product-search";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Regression: the Shopify variant-link search used to scan only the first page

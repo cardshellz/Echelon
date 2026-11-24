@@ -36,8 +36,8 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
 
 const SHIPSTATION_SRC = readShipStationSource();
 const FULFILLMENT_PUSH_SRC = readSource("../../fulfillment-push.service.ts");
-const WMS_SHIPMENTS_REPO_SRC = readSource("../../../wms/outbound-shipments-mutations.repository.ts");
-const WMS_SHIPMENT_ITEMS_REPO_SRC = readSource("../../../wms/outbound-shipment-items-mutations.repository.ts");
+const WMS_SHIPMENTS_REPO_SRC = readSource("../../../wms/infrastructure/outbound-shipments-mutations.repository.ts");
+const WMS_SHIPMENT_ITEMS_REPO_SRC = readSource("../../../wms/infrastructure/outbound-shipment-items-mutations.repository.ts");
 const SHIP_NOTIFY_TEST_SRC = readSource("ship-notify-v2.test.ts");
 const WRITEBACK_GUARDS_TEST_SRC = readSource("c7-writeback-guards.test.ts");
 const PUSH_SHOPIFY_FULFILLMENT_TEST_SRC = readSource(

@@ -8,7 +8,7 @@ import {
   type EbayResolvedPublishedOffer,
 } from "../../channels/ebay-connector.api";
 import { observeEbayQuantityRequest } from "../../inventory-planning/application/quantity-provider-request-evidence";
-import { readDropshipEbayPublishedQuantities } from "../../inventory-planning/quantity-publication";
+import { readDropshipEbayPublishedQuantities } from "../../inventory-planning/quantity-publication.api";
 import { logger as platformLogger } from "../../../platform/observability/logger";
 
 import { pool as defaultPool } from "../../../db";

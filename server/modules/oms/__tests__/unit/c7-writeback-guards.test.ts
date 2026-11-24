@@ -97,7 +97,7 @@ describe("D-SINGLEWRITER: physical shipment projection has one authority", () =>
   it("does not infer WMS shipped state from an OMS aggregate", () => {
     const omsWmsCancelReconcileSrc = readFileSync(
       fileURLToPath(
-        new URL("../../../orders/oms-wms-cancel-reconcile.scheduler.ts", import.meta.url),
+        new URL("../../../orders/application/oms-wms-cancel-reconcile.scheduler.ts", import.meta.url),
       ),
       "utf8",
     );
@@ -198,7 +198,7 @@ describe("D-PUSHIDEM: legacy fulfillment handle persistence", () => {
     expect(persistBlock).toContain("rowCount");
 
     const wmsShipmentsRepoSrc = readFileSync(
-      fileURLToPath(new URL("../../../wms/outbound-shipments-mutations.repository.ts", import.meta.url)),
+      fileURLToPath(new URL("../../../wms/infrastructure/outbound-shipments-mutations.repository.ts", import.meta.url)),
       "utf8",
     );
     const repoBlock = wmsShipmentsRepoSrc.substring(

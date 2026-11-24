@@ -41,7 +41,7 @@ import {
   dispatchShipmentEvent,
   handleAddressChangeOnShipment,
   handleCustomerCancelOnShipment,
-} from "../../shipment-rollup";
+} from "../../application/shipment-rollup";
 
 // ─── Scripted DB mock ────────────────────────────────────────────────
 

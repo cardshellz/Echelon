@@ -4,11 +4,11 @@ import type { ChannelImagePayload } from "./channel-adapter.interface";
 import {
   PgCatalogVariantPublicationPhotoReader,
   readCatalogPublicationPhotoScope,
-} from "../catalog/catalog-publication-images.reader";
+} from "../catalog/infrastructure/catalog-publication-images.reader";
 import { readChannelPhotoOverrides, readChannelPhotoSkuAliases } from "./ebay-listing-photos.repository";
-import type { CatalogPublicImageUrl } from "../catalog/catalog-public-image";
-import { assertCatalogPublicationPhotoRequirements, createCatalogImageInspector, type CatalogImageInspector } from "../catalog/catalog-image-inspection";
-import { ProductAssetError } from "../catalog/product-asset-errors";
+import type { CatalogPublicImageUrl } from "../catalog/domain/catalog-public-image";
+import { assertCatalogPublicationPhotoRequirements, createCatalogImageInspector, type CatalogImageInspector } from "../catalog/domain/catalog-image-inspection";
+import { ProductAssetError } from "../catalog/domain/product-asset-errors";
 import { ChannelProviderReadError } from "@shared/channel-provider-read";
 import { EBAY_MINIMUM_PHOTO_LONGEST_SIDE, ebayOriginalPhotoUrl } from "./adapters/ebay/ebay-photo-requirements";
 import {

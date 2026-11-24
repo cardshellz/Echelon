@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PoolClient } from "pg";
-import { packingReadinessBlockers, recordAssemblyPackingReady, type PackingReadiness } from "../../assembly-packing-readiness";
+import { packingReadinessBlockers, recordAssemblyPackingReady, type PackingReadiness } from "../../domain/assembly-packing-readiness";
 const evidence = (): PackingReadiness => ({ order: { id: 70, warehouse_id: 1, warehouse_status: "in_progress", on_hold: 0 },
   items: [{ id: 71, sku: "P5", quantity: 2, picked_quantity: 2, status: "completed", on_hold: false, requires_shipping: 1, location: "FINISHED" }], exceptionIds: [] });
 describe("packing readiness", () => {

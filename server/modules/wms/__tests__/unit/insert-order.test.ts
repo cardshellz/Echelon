@@ -15,7 +15,7 @@ import {
   insertWmsOrder,
   WmsOrderInvariantError,
   type WmsOrderInsert,
-} from "../../insert-order";
+} from "../../application/insert-order";
 import { wmsOrders } from "@shared/schema";
 
 // ─── Mock db factory ─────────────────────────────────────────────────

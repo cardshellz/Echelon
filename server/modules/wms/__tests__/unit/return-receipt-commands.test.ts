@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
 
-import { receiveExpectedWmsReturn } from "../../return-receipt-commands";
+import { receiveExpectedWmsReturn } from "../../application/return-receipt-commands";
 
 const NOW = new Date("2026-08-22T15:00:00.000Z");
 

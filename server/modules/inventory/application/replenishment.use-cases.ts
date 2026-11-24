@@ -28,7 +28,7 @@ import {
   cycleCounts,
   cycleCountItems,
 } from "@shared/schema";
-import { calculateRemainingCapacity, findOverflowBin } from "../inventory-utils";
+import { calculateRemainingCapacity, findOverflowBin } from "../domain/inventory-utils";
 import { notify } from "../../notifications/in-app-notifications.api";
 import { getSettingsForWarehouse as sharedGetSettingsForWarehouse } from "../../warehouse/settings.api";
 import type {

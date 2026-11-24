@@ -9,7 +9,7 @@ vi.mock("../../../oms/shopify-line-readiness.service", () => ({ reconcileShopify
 vi.mock("../../../oms/shopify-paid-event-replay", () => ({ queueOmsPaidEventReplay: ports.replay }));
 vi.mock("../../../oms/infrastructure/channel-authority-gap.repository", () => ({ recordChannelAuthorityGap: ports.gap }));
 vi.mock("../../../oms/webhook-retry.api", () => ({ enqueueOmsWmsSyncRetry: ports.wmsRetry }));
-import { initReconciliation, runReconciliationNow } from "../../shopify-order-reconciliation";
+import { initReconciliation, runReconciliationNow } from "../../application/shopify-order-reconciliation";
 
 const dialect = new PgDialect();
 let providerOrder: Record<string, unknown>;

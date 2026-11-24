@@ -8,7 +8,7 @@ import {
   parseCutoffMinutes,
   resolveSlaDueAt,
   type PickPrioritySettingsDb,
-} from "../../sort-rank";
+} from "../../domain/sort-rank";
 
 const NY = "America/New_York";
 

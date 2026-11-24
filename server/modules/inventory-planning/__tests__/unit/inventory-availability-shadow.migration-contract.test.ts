@@ -81,8 +81,8 @@ describe("inventory availability Phase 2 shadow evidence contract", () => {
 
   it("does not attach the proposed planner to operational ATP or publishers", () => {
     const operationalConsumers = [
-      "server/modules/inventory/atp.service.ts",
-      "server/modules/inventory/recipe-capacity.service.ts",
+      "server/modules/inventory/application/atp.service.ts",
+      "server/modules/inventory/application/recipe-capacity.service.ts",
       "server/modules/channels/reservation.service.ts",
       "server/modules/channels/allocation-engine.service.ts",
       "server/modules/channels/sync.service.ts",

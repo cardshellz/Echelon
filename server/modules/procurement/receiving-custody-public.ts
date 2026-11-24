@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { readVariantProductIdentity } from "../catalog/variant-product.reader";
+import { readVariantProductIdentity } from "../catalog/infrastructure/variant-product.reader";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import type { ReceivingIntegrityTransaction } from "./receiving-close-integrity.repository";
 import { ReceivingQuarantineError } from "./domain/receiving-quarantine";

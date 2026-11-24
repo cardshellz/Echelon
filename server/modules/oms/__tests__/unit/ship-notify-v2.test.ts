@@ -2464,11 +2464,11 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   it("shipment creation is unreachable for terminal or unknown parents (source invariants)", async () => {
     const src = readShipStationSource();
     const wmsShipmentsRepoSrc = readFileSync(
-      resolve(__dirname, "../../../wms/outbound-shipments-mutations.repository.ts"),
+      resolve(__dirname, "../../../wms/infrastructure/outbound-shipments-mutations.repository.ts"),
       "utf-8",
     );
     const wmsShipmentItemsRepoSrc = readFileSync(
-      resolve(__dirname, "../../../wms/outbound-shipment-items-mutations.repository.ts"),
+      resolve(__dirname, "../../../wms/infrastructure/outbound-shipment-items-mutations.repository.ts"),
       "utf-8",
     );
     const fnStart = src.indexOf("async function resolveShipmentByOrderKey(");

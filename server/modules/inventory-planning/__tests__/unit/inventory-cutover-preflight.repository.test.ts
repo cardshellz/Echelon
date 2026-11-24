@@ -1,12 +1,12 @@
 import type { Pool } from "pg";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PostgresInventoryCutoverPreflightRepository } from "../../infrastructure/inventory-cutover-preflight.repository";
-import { readWmsCutoverDemand } from "../../../wms/inventory-cutover-demand-reader";
+import { readWmsCutoverDemand } from "../../../wms/infrastructure/inventory-cutover-demand-reader";
 import { captureInventoryCutoverEncumbranceInsideTransaction } from "../../../inventory/infrastructure/inventory-cutover-encumbrance.repository";
 import { cutoverPreflightFacts } from "../fixtures/inventory-cutover-preflight.fixture";
 
 vi.mock("../../../../db", () => ({ pool: { connect: vi.fn() } }));
-vi.mock("../../../wms/inventory-cutover-demand-reader", () => ({ readWmsCutoverDemand: vi.fn() }));
+vi.mock("../../../wms/infrastructure/inventory-cutover-demand-reader", () => ({ readWmsCutoverDemand: vi.fn() }));
 vi.mock("../../../inventory/infrastructure/inventory-cutover-encumbrance.repository", () => ({
   captureInventoryCutoverEncumbranceInsideTransaction: vi.fn(),
 }));

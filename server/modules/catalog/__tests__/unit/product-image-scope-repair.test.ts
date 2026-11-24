@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { planImageScopeRepair, type ImageScopeRepair, type ImageScopeSnapshot } from "../../product-image-scope-repair";
+import { planImageScopeRepair, type ImageScopeRepair, type ImageScopeSnapshot } from "../../application/product-image-scope-repair";
 vi.mock("../../../../db", () => ({ db: {} }));
 
 const image: ImageScopeSnapshot = { id: 7192, productId: 103, productVariantId: 78, variantProductId: 39,

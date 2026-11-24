@@ -46,7 +46,7 @@ import { sql } from "drizzle-orm";
 import { OrderEditPaidProjection } from "../../../oms/order-edit-paid-projection";
 import { paidRewardFixture } from "../fixtures/order-edit-paid-reward.fixture";
 import { settledRefundEditFixture } from "../fixtures/settled-refund-edit.fixture";
-import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../../orders/cancel-wms-order";
+import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../../orders/application/cancel-wms-order";
 import { OrderCancellationService } from "../../../customer-account/application/order-cancellation.service";
 import { PostgresCancellationRefundProgressReader } from "../../../customer-account/infrastructure/cancellation-refund-progress.reader";
 import { OrderEditProviderError } from "../../application/order-edit-provider";

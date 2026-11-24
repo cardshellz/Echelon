@@ -12,7 +12,7 @@ import { createPurchasingService } from "../../purchasing.service";
 import { procurementMethods } from "../../procurement.storage";
 import { InventoryUseCases } from "../../../inventory/application/inventory.use-cases";
 import { createInventoryMethods } from "../../../inventory/infrastructure/inventory.repository";
-import { InventoryLotService } from "../../../inventory/lots.service";
+import { InventoryLotService } from "../../../inventory/application/lots.service";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { lockReceivingCustodyFence } from "../../receiving-custody-public";
 import { insertCustodyObservation } from "../../receiving-quarantine.repository";

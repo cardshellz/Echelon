@@ -1,6 +1,6 @@
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
-import { InventoryChannelQuantityRuntimeError, InventoryPublicationSelectionError } from "../../inventory-planning/channel-quantity";
+import { InventoryChannelQuantityRuntimeError, InventoryPublicationSelectionError } from "../../inventory-planning/channel-quantity.api";
 
 export interface EbayFeedInventoryReader {
   getAtpPerVariant(productId: number): Promise<readonly { productVariantId: number; atpUnits: number }[]>;

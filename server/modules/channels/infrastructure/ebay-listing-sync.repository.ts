@@ -1,8 +1,8 @@
 import { CHANNEL_SYNC_BATCH_LIMIT } from "@shared/types/channel-sync-batch";
 import { channelPreparedIntentSchema, type ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
-import { assertPreparedChannelIntent } from "../../marketplace-listings/prepared-channel-intent";
+import { assertPreparedChannelIntent } from "../../marketplace-listings/prepared-channel-intent.api";
 import { ebayIntentAccount, EBAY_PREPARED_INTENT_CAPABILITY } from "../ebay-prepared-intent";
-import { pinCatalogPublicationMediaVersions } from "../../catalog/catalog-publication-media-versions";
+import { pinCatalogPublicationMediaVersions } from "../../catalog/domain/catalog-publication-media-versions";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -36,10 +36,10 @@ import { assertEbayPublicationTargetUnchanged } from "../ebay-publication-comple
 import { assertEbayMappingOwnership } from "./ebay-listing-mapping-ownership";
 import { withEbayListingJobProgress } from "./ebay-listing-job-progress.reader";
 import { ebayListingFailureDiagnosticSchema } from "../ebay-listing-failure-diagnostic";
-import type { EbayPublicationRejectionReader, EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
+import type { EbayPublicationRejectionReader, EbayRequestJournalContract } from "../../inventory-planning/quantity-publication.api";
 import { ebayListingPublicationScopes } from "../ebay-listing-request-recovery";
 import { proveLegacyEbayPublicationPreflight, validateEbayPublicationStageContract, type EbayPublicationStageEvent } from "../ebay-publication-preflight-evidence";
-import { releaseListingWorkPermit, tryAcquireListingWorkPermit } from "../../marketplace-listings/listing-work-permits";
+import { releaseListingWorkPermit, tryAcquireListingWorkPermit } from "../../marketplace-listings/listing-work-permits.api";
 
 const LOCK_NAMESPACE = 918427;
 import { canSettleUnsentListingFailure } from "../../marketplace-listings/domain/listing-work-obligation";

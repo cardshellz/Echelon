@@ -57,11 +57,11 @@ describe("resolveDedicatedReplenBin", () => {
 
 describe("GET /api/picking/replen-bins (gun pick-screen label)", () => {
   const ROUTES_SRC = readFileSync(
-    resolve(__dirname, "../../orders/picking.routes.ts"),
+    resolve(__dirname, "../../orders/interfaces/http/picking.routes.ts"),
     "utf8",
   );
   const USE_CASES_SRC = readFileSync(
-    resolve(__dirname, "../../orders/picking.use-cases.ts"),
+    resolve(__dirname, "../../orders/application/picking.use-cases.ts"),
     "utf8",
   );
   const routeStart = ROUTES_SRC.indexOf('"/api/picking/replen-bins"');

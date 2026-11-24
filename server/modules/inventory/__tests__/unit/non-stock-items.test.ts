@@ -19,7 +19,7 @@ const read = (p: string) =>
 
 describe("non-stock items (track_inventory=false)", () => {
   it("pick is confirmation-only — bypass precedes any level read", () => {
-    const src = read("../../../orders/picking.use-cases.ts");
+    const src = read("../../../orders/application/picking.use-cases.ts");
     const guardPos = src.indexOf("productVariant.trackInventory === false");
     const levelReadPos = src.indexOf(
       "getInventoryLevelsByProductVariantId(productVariant.id)",

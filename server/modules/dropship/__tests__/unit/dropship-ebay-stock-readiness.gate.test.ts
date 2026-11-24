@@ -3,7 +3,7 @@ import type { Pool } from "pg";
 import { DropshipEbayStockReadinessGate, type DropshipStockLinkLogger } from "../../infrastructure/dropship-ebay-stock-readiness.gate";
 import type { DropshipMarketplaceListingPushRequest } from "../../application/dropship-marketplace-listing-push-provider";
 import type { DropshipStockLinkCredential } from "../../application/dropship-ebay-stock-readiness-port";
-import type { DropshipEbayStockReadinessInput, DropshipEbayStockReadinessResult } from "../../../inventory-planning/quantity-publication";
+import type { DropshipEbayStockReadinessInput, DropshipEbayStockReadinessResult } from "../../../inventory-planning/application/quantity-publication";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import { DROPSHIP_STOCK_LINK_REFUSAL_WORDS } from "../../../../../shared/dropship/stock-link-refusals";
 import { DropshipError } from "../../domain/errors";

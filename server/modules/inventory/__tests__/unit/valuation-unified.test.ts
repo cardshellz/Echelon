@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
-import { InventoryLotService } from "../../lots.service";
-import { COGSService } from "../../cogs.service";
+import { InventoryLotService } from "../../application/lots.service";
+import { COGSService } from "../../application/cogs.service";
 
 function sqlText(query: any): string {
   return new PgDialect().sqlToQuery(query).sql.replace(/\s+/g," ").toLowerCase();
@@ -44,7 +44,7 @@ describe("Inventory and COGS valuation projections of the same raw lot evidence"
   });
   it("filters landed pending lots by provisional shipment-linked lots", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
 
     const db = {
       select: vi.fn(),

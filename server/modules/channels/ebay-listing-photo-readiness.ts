@@ -1,9 +1,9 @@
 import type { PoolClient } from "pg";
-import type { CatalogPublicImageUrl } from "../catalog/catalog-public-image";
+import type { CatalogPublicImageUrl } from "../catalog/domain/catalog-public-image";
 import {
   PgCatalogVariantPublicationPhotoReader,
   readCatalogPublicationPhotoScope,
-} from "../catalog/catalog-publication-images.reader";
+} from "../catalog/infrastructure/catalog-publication-images.reader";
 import { readChannelPhotoOverrides } from "./ebay-listing-photos.repository";
 import { EBAY_LISTING_MAX_PHOTOS } from "./ebay-listing-photos.domain";
 import { EBAY_MINIMUM_PHOTO_LONGEST_SIDE } from "./adapters/ebay/ebay-photo-requirements";

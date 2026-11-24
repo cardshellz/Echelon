@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { sql } from "drizzle-orm";
 
-import { setWmsOrderItemHoldState } from "../order-item-commands";
+import { setWmsOrderItemHoldState } from "./order-item-commands";
 import {
   RecipeCapacityError,
   type BuildOrderCompletedContext,

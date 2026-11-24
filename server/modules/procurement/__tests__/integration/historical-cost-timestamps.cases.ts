@@ -3,7 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type pg from "pg";
 import { expect, it } from "vitest";
 import type * as schema from "@shared/schema";
-import type { COGSService } from "../../../inventory/cogs.service";
+import type { COGSService } from "../../../inventory/application/cogs.service";
 import { lotCostsForIntervals } from "../../../inventory/domain/lot-cost";
 import type { CostQuantityInterval } from "../../../inventory/domain/cost-quantity-intervals";
 import {
@@ -207,7 +207,7 @@ export function registerHistoricalCostTimestampCases(fixture: {
     await fixture.pool().query(`UPDATE inventory.inventory_lots SET cost_basis_qty=1,
       product_total_cost_mills=5,packaging_total_cost_mills=0,landed_total_cost_mills=0,
       unit_cost_mills=5,po_unit_cost_mills=5,total_unit_cost_mills=5 WHERE id=$1`, [SOURCE_LOT_ID]);
-    const { InventoryLotService } = await import("../../../inventory/lots.service");
+    const { InventoryLotService } = await import("../../../inventory/application/lots.service");
     const occurredAt = new Date("2026-10-05T14:54:13.394Z");
     let clockCalls = 0;
     await fixture.database().transaction(async tx => {

@@ -93,7 +93,7 @@ async function main(): Promise<void> {
   const {
     applyPieceVariantBackfill,
     previewPieceVariantBackfill,
-  } = await import("../server/modules/catalog/piece-variant-backfill.service");
+  } = await import("../server/modules/catalog/application/piece-variant-backfill.service");
 
   try {
     if (!options.execute) {

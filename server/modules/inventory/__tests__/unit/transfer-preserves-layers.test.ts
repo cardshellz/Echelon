@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 describe("InventoryLotService.transferLots — layer preservation", () => {
   it("creates one destination lot per source layer with original cost", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
 
     const createdLots: any[] = [];
     const now = new Date("2024-06-01");
@@ -116,7 +116,7 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
     { patch: { operationKey: " " }, code: "COST_TRANSFER_INPUT_INVALID" },
   ])("rejects invalid transfer evidence before any database operation: $patch", async ({ patch, code }) => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const db = { select: vi.fn(), execute: vi.fn(), insert: vi.fn() } as any;
     await expect(new InventoryLotService(db).transferLots({
       productVariantId: 10, fromLocationId: 20, toLocationId: 30, qty: 2,
@@ -128,7 +128,7 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
   });
   it("fails closed before writing when exact unreserved FIFO quantity is unavailable", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { InventoryLotService } = await import("../../lots.service");
+    const { InventoryLotService } = await import("../../application/lots.service");
     const db = {
       select: vi.fn(() => ({
         from: vi.fn().mockReturnThis(),

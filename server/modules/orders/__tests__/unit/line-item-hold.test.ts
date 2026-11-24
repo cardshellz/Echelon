@@ -3,13 +3,13 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { pickingReadinessBlockers, type WmsPickingProgressLine } from "@shared/wms-picking-progress";
 
-const ROUTES_SRC = readFileSync(resolve(__dirname, "../../picking.routes.ts"), "utf8");
-const STORAGE_SRC = readFileSync(resolve(__dirname, "../../orders.storage.ts"), "utf8");
+const ROUTES_SRC = readFileSync(resolve(__dirname, "../../interfaces/http/picking.routes.ts"), "utf8");
+const STORAGE_SRC = readFileSync(resolve(__dirname, "../../infrastructure/orders.storage.ts"), "utf8");
 const ORDER_ITEM_COMMANDS_SRC = readFileSync(
-  resolve(__dirname, "../../../wms/order-item-commands.ts"),
+  resolve(__dirname, "../../../wms/application/order-item-commands.ts"),
   "utf8",
 );
-const SPLIT_SRC = readFileSync(resolve(__dirname, "../../../wms/line-item-hold.ts"), "utf8");
+const SPLIT_SRC = readFileSync(resolve(__dirname, "../../../wms/application/line-item-hold.ts"), "utf8");
 const omsDir = resolve(__dirname, "../../../oms");
 const shipStationSubDir = resolve(omsDir, "shipstation");
 const SHIPSTATION_SRC = [
@@ -21,7 +21,7 @@ const SHIPSTATION_SRC = [
         .map((f) => readFileSync(resolve(shipStationSubDir, f), "utf8"))
     : []),
 ].join("\n");
-const PICKING_SRC = readFileSync(resolve(__dirname, "../../picking.use-cases.ts"), "utf8");
+const PICKING_SRC = readFileSync(resolve(__dirname, "../../application/picking.use-cases.ts"), "utf8");
 const FLOW_WATERFALL_SRC = readFileSync(resolve(__dirname, "../../../oms/flow-waterfall.service.ts"), "utf8");
 const OPS_HEALTH_SRC = readFileSync(resolve(__dirname, "../../../oms/ops-health.service.ts"), "utf8");
 const HOLD_MONITORING_SRC = readFileSync(resolve(__dirname, "../../../oms/line-item-hold-monitoring.ts"), "utf8");

@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { stockPublicationSelectionSchema, type StockPublicationSelection } from "@shared/types/stock-publication-selection";
-import type { CatalogStockSelectionFacts } from "../catalog/catalog-stock-selection.reader";
+import type { CatalogStockSelectionFacts } from "../catalog/infrastructure/catalog-stock-selection.reader";
 import { isVariantSellable } from "./ebay-listing-eligibility";
-import { archivedListingMemberSelection, isArchivedCatalogMember } from "../marketplace-listings/listing-member-lifecycle";
+import { archivedListingMemberSelection, isArchivedCatalogMember } from "../marketplace-listings/listing-member-lifecycle.api";
 import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 
 export interface ChannelStockSelectionFacts {

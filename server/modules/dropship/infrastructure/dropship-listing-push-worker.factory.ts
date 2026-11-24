@@ -13,7 +13,7 @@ import { createDropshipListingPreviewServiceFromEnv } from "./dropship-listing-p
 import { createDropshipCostChangePolicyServiceFromEnv } from "./dropship-cost-change-policy.factory";
 import { createDropshipMarketplaceSyncServiceFromEnv } from "./dropship-marketplace-sync.factory";
 import { createDropshipLiveListingZeroQuantityServiceFromEnv } from "./dropship-live-listing-zero-quantity.factory";
-import { readDropshipEbayStockAuthority } from "../../inventory-planning/quantity-publication";
+import { readDropshipEbayStockAuthority } from "../../inventory-planning/quantity-publication.api";
 
 export function createDropshipListingPushWorkerServiceFromEnv(): DropshipListingPushWorkerService {
   const logger = makeDropshipListingPushWorkerLogger();

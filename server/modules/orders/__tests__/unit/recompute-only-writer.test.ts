@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Mock recomputeOrderStatusFromShipments so we can observe whether the
 // storage function invokes it. vi.mock is hoisted; factory closes over
 // no outer variables.
-vi.mock("../../shipment-rollup", () => ({
+vi.mock("../../application/shipment-rollup", () => ({
   recomputeOrderStatusFromShipments: vi.fn(),
 }));
 
@@ -34,8 +34,8 @@ vi.mock("../../../../db", () => {
 });
 
 import { db as mockedDb } from "../../../../db";
-import { recomputeOrderStatusFromShipments } from "../../shipment-rollup";
-import { orderMethods as ordersStorage } from "../../orders.storage";
+import { recomputeOrderStatusFromShipments } from "../../application/shipment-rollup";
+import { orderMethods as ordersStorage } from "../../infrastructure/orders.storage";
 
 const recomputeMock = recomputeOrderStatusFromShipments as unknown as ReturnType<
   typeof vi.fn

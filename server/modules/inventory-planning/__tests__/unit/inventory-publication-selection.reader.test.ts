@@ -6,12 +6,12 @@ const readers = vi.hoisted(() => ({ channel: vi.fn(), dropship: vi.fn() }));
 vi.mock("../../../channels/channel-stock-selection", async importOriginal => ({
   ...await importOriginal<typeof import("../../../channels/channel-stock-selection")>(), readChannelStockSelection: readers.channel,
 }));
-vi.mock("../../../dropship/stock-publication-selection", async importOriginal => ({
-  ...await importOriginal<typeof import("../../../dropship/stock-publication-selection")>(), readDropshipListingStockSelection: readers.dropship,
+vi.mock("../../../dropship/stock-publication-selection.api", async importOriginal => ({
+  ...await importOriginal<typeof import("../../../dropship/stock-publication-selection.api")>(), readDropshipListingStockSelection: readers.dropship,
 }));
 
 import { ChannelStockSelectionError } from "../../../channels/channel-stock-selection";
-import { DropshipError } from "../../../dropship/stock-publication-selection";
+import { DropshipError } from "../../../dropship/stock-publication-selection.api";
 import { InventoryPublicationSelectionError, readPublicationStockSelection, type StockSelectionDestination } from "../../infrastructure/inventory-publication-selection.reader";
 
 const client: StockSelectionQueryClient = { query: async () => ({ rows: [] }) };

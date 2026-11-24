@@ -4,12 +4,12 @@ import sharp from "sharp";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@shared/schema";
-import { createCatalogImageOriginalsService, type CatalogOriginalReplacement } from "../../catalog-image-originals.service";
-import { createCatalogImageInspector } from "../../catalog-image-inspection";
-import { createSharedProductPhotoImporter } from "../../shared-product-photos.service";
-import { PgCatalogVariantPublicationPhotoReader, readPublicCatalogImage, readCatalogPublicationImages, resolveCatalogPublicationPhotos } from "../../catalog-publication-images.reader";
-import { createCatalogPublicImageUrl } from "../../catalog-public-image";
-import { pinCatalogPublicationMediaVersions } from "../../catalog-publication-media-versions";
+import { createCatalogImageOriginalsService, type CatalogOriginalReplacement } from "../../application/catalog-image-originals.service";
+import { createCatalogImageInspector } from "../../domain/catalog-image-inspection";
+import { createSharedProductPhotoImporter } from "../../application/shared-product-photos.service";
+import { PgCatalogVariantPublicationPhotoReader, readPublicCatalogImage, readCatalogPublicationImages, resolveCatalogPublicationPhotos } from "../../infrastructure/catalog-publication-images.reader";
+import { createCatalogPublicImageUrl } from "../../domain/catalog-public-image";
+import { pinCatalogPublicationMediaVersions } from "../../domain/catalog-publication-media-versions";
 import { ChannelEbayListingPhotoResolver } from "../../../channels/ebay-listing-photos.service";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 
@@ -211,7 +211,7 @@ INSERT INTO catalog.product_variants VALUES(10,1,'PACK'),(11,1,'CASE'),(20,2,'OT
     expect(sized.variants.map(row => row.gallery.selected[0].versionHash)).toEqual([published.versionHash,published.versionHash]);
     const copy = await readPublicCatalogImage(database.pool,1,published.versionHash!);
     expect(copy).not.toBeNull();
-    expect((await import("../../catalog-image-inspection")).inspectCatalogImage(copy!)).toMatchObject({width:500,height:500});
+    expect((await import("../../domain/catalog-image-inspection")).inspectCatalogImage(copy!)).toMatchObject({width:500,height:500});
     expect((await readPublicCatalogImage(database.pool,1,hash(thumbnail)))?.data).toEqual(thumbnail);
     const mapping = await database.pool.query("SELECT source_hash,rendition_hash FROM catalog.product_asset_renditions WHERE asset_id=1 AND source_hash=$1",[hash(thumbnail)]);
     expect(mapping.rows).toEqual([{source_hash:hash(thumbnail),rendition_hash:published.versionHash}]);
@@ -287,7 +287,7 @@ INSERT INTO catalog.product_variants VALUES(10,1,'PACK'),(11,1,'CASE'),(20,2,'OT
       const result = await database.pool.query("SELECT rendition_hash FROM catalog.product_asset_renditions WHERE asset_id=$1 AND source_hash=$2",[id,hash(thumbnail)]);
       expect(result.rows).toHaveLength(1);
       const copy = await readPublicCatalogImage(database.pool,id,result.rows[0].rendition_hash);
-      expect((await import("../../catalog-image-inspection")).inspectCatalogImage(copy!)).toMatchObject({width:500,height:500});
+      expect((await import("../../domain/catalog-image-inspection")).inspectCatalogImage(copy!)).toMatchObject({width:500,height:500});
     }
   });
   it("selects an enlarged copy only when a channel's own minimum exceeds the source size", async () => {
@@ -299,7 +299,7 @@ INSERT INTO catalog.product_variants VALUES(10,1,'PACK'),(11,1,'CASE'),(20,2,'OT
     expect((await select(150)).versionHash).toBe(hash(bytes));
     const larger = await select(300);
     expect(larger.versionHash).not.toBe(hash(bytes));
-    expect((await import("../../catalog-image-inspection")).inspectCatalogImage((await readPublicCatalogImage(database.pool,asset.id,larger.versionHash!))!))
+    expect((await import("../../domain/catalog-image-inspection")).inspectCatalogImage((await readPublicCatalogImage(database.pool,asset.id,larger.versionHash!))!))
       .toMatchObject({width:500,height:250});
   });
   it("saves a valid original and records a warning when a publication copy exceeds processing limits", async () => {

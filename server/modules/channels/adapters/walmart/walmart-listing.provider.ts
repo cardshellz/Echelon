@@ -1,4 +1,4 @@
-import { limitPublicationMediaPlan, resolveExplicitPublicationMediaPlan } from "../../../catalog/catalog-publication-media";
+import { limitPublicationMediaPlan, resolveExplicitPublicationMediaPlan } from "../../../catalog/domain/catalog-publication-media";
 import { prepareWalmartChannelIntent, assertWalmartPreparedIntent } from "./walmart-prepared-intent";
 import { z } from "zod";
 import {

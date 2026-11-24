@@ -2,7 +2,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { InventoryLotService } from "../../lots.service";
+import { InventoryLotService } from "../../application/lots.service";
 import type { RecordInventoryShipmentInput } from "../../application/inventory.use-cases";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../fixtures/inventory-cutover-database";
 import { legacyShipmentFixtureSql, shipmentLotFixtureSql } from "../fixtures/legacy-shipment-database";

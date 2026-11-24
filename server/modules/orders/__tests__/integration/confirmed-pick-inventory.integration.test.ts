@@ -9,10 +9,10 @@ import { orderItems } from "@shared/schema";
 import { createQuantityLedgerTestContext, type QuantityLedgerTestContext } from "../../../inventory/__tests__/fixtures/quantity-ledger-database";
 import { InventoryUseCases } from "../../../inventory/application/inventory.use-cases";
 import { createInventoryMethods } from "../../../inventory/infrastructure/inventory.repository";
-import { createInventoryLotService } from "../../../inventory/lots.service";
-import { observeMissingPick, readPickCorrection } from "../../../wms/pick-correction.repository";
-import { createPickCorrectionService, type PickCorrectionService } from "../../pick-correction.service";
-import { PickingUseCases } from "../../picking.use-cases";
+import { createInventoryLotService } from "../../../inventory/application/lots.service";
+import { observeMissingPick, readPickCorrection } from "../../../wms/infrastructure/pick-correction.repository";
+import { createPickCorrectionService, type PickCorrectionService } from "../../application/pick-correction.service";
+import { PickingUseCases } from "../../application/picking.use-cases";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;

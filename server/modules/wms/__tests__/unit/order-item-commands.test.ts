@@ -7,7 +7,7 @@ import {
   persistWmsOrderItemPickProgress,
   reconcileWmsOrderItemAuthority,
   replaceUnstartedWmsOrderItemsForRepair,
-} from "../../order-item-commands";
+} from "../../application/order-item-commands";
 
 function updateExecutor(rows: unknown[]) {
   const returning = vi.fn().mockResolvedValue(rows);

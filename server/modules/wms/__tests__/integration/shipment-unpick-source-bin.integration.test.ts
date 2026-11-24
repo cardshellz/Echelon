@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { persistCanonicalWmsPickProgress } from "../../order-item-commands";
+import { persistCanonicalWmsPickProgress } from "../../application/order-item-commands";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { shipmentCompatibilityFixtureSql, shipmentCompatibilitySeedSql } from "../../../oms/__tests__/fixtures/shipment-compatibility";
 

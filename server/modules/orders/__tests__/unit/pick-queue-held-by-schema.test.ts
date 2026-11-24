@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const ORDERS_STORAGE_SRC = readFileSync(
-  resolve(__dirname, "../../orders.storage.ts"),
+  resolve(__dirname, "../../infrastructure/orders.storage.ts"),
   "utf8",
 );
 const ORDERS_SCHEMA_SRC = readFileSync(

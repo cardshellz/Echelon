@@ -20,12 +20,12 @@ vi.mock("../../oms-line-authority-ledger", () => ({
   recordOmsLineAuthorityEvent: mocks.recordAuthorityEvent,
 }));
 
-vi.mock("../../../orders/shipment-rollup", () => ({
+vi.mock("../../../orders/application/shipment-rollup", () => ({
   markShipmentCancelled: mocks.markShipmentCancelled,
   recomputeOrderStatusFromShipments: mocks.recomputeOrderStatusFromShipments,
 }));
 
-vi.mock("../../../wms/oms-wms-authority-cleanup-audit.repository", () => ({
+vi.mock("../../../wms/infrastructure/oms-wms-authority-cleanup-audit.repository", () => ({
   recordOmsWmsAuthorityCleanupAudit: mocks.recordCleanupAudit,
 }));
 

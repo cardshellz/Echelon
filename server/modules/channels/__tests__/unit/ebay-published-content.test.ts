@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
-import { createCatalogImageInspector } from "../../../catalog/catalog-image-inspection";
-import { ProductAssetError } from "../../../catalog/product-asset-errors";
+import { createCatalogImageInspector } from "../../../catalog/domain/catalog-image-inspection";
+import { ProductAssetError } from "../../../catalog/domain/product-asset-errors";
 import { readEbayPublishedContent } from "../../adapters/ebay/ebay-published-content.reader";
 import { ebayOriginalPhotoUrl } from "../../adapters/ebay/ebay-photo-requirements";
 

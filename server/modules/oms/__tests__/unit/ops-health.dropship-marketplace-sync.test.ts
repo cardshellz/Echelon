@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../../../dropship/marketplace-sync-health";
+import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../../../dropship/marketplace-sync-health.api";
 import { getOmsOpsHealth } from "../../ops-health.service";
 import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveCost } from "../../cost-resolver";
+import { resolveCost } from "../../application/cost-resolver";
 
 function database(variant: unknown) {
   const db: any = { select: vi.fn(() => db), from: () => db, where: () => db,

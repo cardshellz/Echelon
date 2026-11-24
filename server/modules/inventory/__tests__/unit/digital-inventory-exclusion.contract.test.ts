@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
-const atp = read("../../atp.service.ts");
+const atp = read("../../application/atp.service.ts");
 
 function method(name: string, nextName?: string): string {
   const start = atp.indexOf(`async ${name}(`);
@@ -33,8 +33,8 @@ describe("digital inventory exclusion contract", () => {
 
   it("guards reservation and picking even when callers bypass ATP readers", () => {
     const reservation = read("../../../channels/reservation.service.ts");
-    const picking = read("../../../orders/picking.use-cases.ts");
-    const inventoryRoutes = read("../../inventory.routes.ts");
+    const picking = read("../../../orders/application/picking.use-cases.ts");
+    const inventoryRoutes = read("../../interfaces/http/inventory.routes.ts");
     expect(reservation).toContain(
       "variant.requiresShipping === false || variant.trackInventory === false",
     );

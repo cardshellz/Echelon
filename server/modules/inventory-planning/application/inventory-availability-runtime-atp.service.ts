@@ -8,7 +8,7 @@ import type {
   InventoryItemAtpSummary,
   ProductAtpSummary,
   VariantAtp,
-} from "../../inventory/atp.service";
+} from "../../inventory/application/atp.service";
 import { projectCanonicalAtp } from "../domain/inventory-availability-planner";
 import { totalBalanceBaseUnits, type InventoryProductBalances } from "./inventory-product-balances";
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { PickingUseCases } from "../../picking.use-cases";
+import { PickingUseCases } from "../../application/picking.use-cases";
 const progressOwner = vi.hoisted(() => vi.fn());
-vi.mock("../../../wms/picking-progress.repository", () => ({reconcileWmsPickingProgress:progressOwner}));
+vi.mock("../../../wms/infrastructure/picking-progress.repository", () => ({reconcileWmsPickingProgress:progressOwner}));
 
 function buildService(
   planResult: { complete: boolean } | null | Promise<{ complete: boolean } | null>,

@@ -11,10 +11,10 @@ const calls = vi.hoisted(() => ({
   insertOrder: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: calls }));
-vi.mock("../../../wms/insert-order", () => ({
+vi.mock("../../../wms/application/insert-order", () => ({
   insertWmsOrder: calls.insertOrder,
 }));
-import { orderMethods } from "../../orders.storage";
+import { orderMethods } from "../../infrastructure/orders.storage";
 
 const order = {
   orderNumber: "MANUAL-1",

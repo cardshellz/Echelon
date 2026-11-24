@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeSortRank } from "../../sort-rank";
+import { computeSortRank } from "../../domain/sort-rank";
 
 /**
  * Sort rank is DESC-sorted: higher value = higher priority.

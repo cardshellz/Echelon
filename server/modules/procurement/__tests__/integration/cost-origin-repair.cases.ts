@@ -25,7 +25,7 @@ import { originRepairContextSchema } from "@shared/procurement/cost-origin-repai
 import { readPurchaseCostApplications } from "../../purchase-cost-application-read.repository";
 import { projectPurchaseCostApplications } from "../../purchase-cost-application-read.service";
 import { reconcilePurchaseCostEvidence } from "../../purchase-cost-application.service";
-import { COGSService } from "../../../inventory/cogs.service";
+import { COGSService } from "../../../inventory/application/cogs.service";
 import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
 import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
 

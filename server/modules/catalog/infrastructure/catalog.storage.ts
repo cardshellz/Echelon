@@ -1,0 +1,630 @@
+import { assertEbayPolicyWriteOwned } from "@shared/ebay-business-policies";
+import {
+  db,
+  products,
+  productVariants,
+  productAssets,
+  productLocations,
+  inventoryLevels,
+  channelFeeds,
+  outboundShipments,
+  outboundShipmentItems,
+  warehouseLocations,
+  orderItemFinancials,
+  inventoryTransactions,
+  eq,
+  and,
+  inArray,
+  isNull,
+  asc,
+  sql,
+} from "../../../storage/base";
+import { OPEN_SHIPMENT_STATUSES } from "@shared/enums/order-status";
+import { prepareVariantInventoryTracking, updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
+import { renameWmsOrderItemSku } from "../../wms/order-intake-and-items.api";
+import { renameWmsPickingLogSku } from "../../wms/picking-logs.api";
+import { reorderCatalogAssets } from "./product-asset-order.repository";
+import { ProductAssetError } from "../domain/product-asset-errors";
+import { deactivateActiveChannelFeedsByVariantIdInChannels } from "../../channels/channel-feed-listing-mutations.api";
+import { deleteZeroPreLedgerInventoryLevelsByVariantIdInInventory } from "../../inventory/cross-module-inventory-mutations.api";
+import {
+  deleteProductLocationsByVariantIdInWarehouse,
+  updateProductLocationsSkuByVariantIdInWarehouse,
+  reassignProductLocationsToVariantInWarehouse,
+} from "../../warehouse/cross-module-warehouse-mutations.api";
+import {
+  cancelProductReplenishmentTasksInTx,
+  deactivateProductReplenishmentRulesInTx,
+} from "../../inventory/catalog-inventory.api";
+import type {
+  Product,
+  InsertProduct,
+  ProductVariant,
+  InsertProductVariant,
+  InventoryLevel,
+  ProductAsset,
+  InsertProductAsset,
+} from "../../../storage/base";
+
+export interface IProductStorage {
+  getAllProducts(includeInactive?: boolean, executor?: any): Promise<Product[]>;
+  getProductById(id: number, executor?: any): Promise<Product | undefined>;
+  getProductBySku(sku: string, executor?: any): Promise<Product | undefined>;
+  getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined>;
+  createProduct(product: InsertProduct, executor?: any): Promise<Product>;
+  updateProduct(id: number, updates: Partial<InsertProduct>, executor?: any): Promise<Product | null>;
+  deleteProduct(id: number, executor?: any): Promise<boolean>;
+
+  getAllProductVariants(includeInactive?: boolean, executor?: any): Promise<ProductVariant[]>;
+  getProductVariantById(id: number, executor?: any): Promise<ProductVariant | undefined>;
+  getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
+  getActiveVariantBySku(sku: string, excludeId?: number, executor?: any): Promise<ProductVariant | undefined>;
+  getProductVariantsByProductId(productId: number, executor?: any): Promise<ProductVariant[]>;
+  getProductVariantsByIds(ids: number[], executor?: any): Promise<ProductVariant[]>;
+  getProductsByIds(ids: number[], executor?: any): Promise<Product[]>;
+  createProductVariant(variant: InsertProductVariant, executor?: any): Promise<ProductVariant>;
+  updateProductVariant(id: number, updates: Partial<InsertProductVariant>, executor?: any): Promise<ProductVariant | null>;
+  deleteProductVariant(id: number, executor?: any): Promise<boolean>;
+
+  getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]>;
+  deleteInventoryLevelsByVariantId(variantId: number): Promise<number>;
+  deleteProductLocationsByVariantId(variantId: number): Promise<number>;
+  deactivateChannelFeedsByVariantId(variantId: number): Promise<number>;
+  deactivateReplenRulesByProductId(productId: number): Promise<number>;
+  cancelReplenTasksByProductId(productId: number): Promise<number>;
+  getPendingShipmentItemsByVariantIds(variantIds: number[]): Promise<{ id: number; shipmentId: number; productVariantId: number | null; qty: number; status: string }[]>;
+
+  getProductAssetsByProductId(productId: number, executor?: any): Promise<ProductAsset[]>;
+  getProductAssetsByVariantId(productVariantId: number): Promise<ProductAsset[]>;
+  createProductAsset(asset: InsertProductAsset, executor?: any): Promise<ProductAsset>;
+  deleteProductAsset(id: number, executor?: any): Promise<boolean>;
+  deleteProductAssetsByProductId(productId: number): Promise<number>;
+  updateProductAsset(id: number, updates: Partial<InsertProductAsset>): Promise<ProductAsset | null>;
+  reorderProductAssets(productId: number, orderedIds: number[]): Promise<void>;
+  setPrimaryProductAsset(productId: number, assetId: number, executor?: any): Promise<void>;
+
+  withCatalogTransaction?<T>(fn: (txStorage: IProductStorage, tx: any) => Promise<T>): Promise<T>;
+
+  getItemImageUrlBySku(sku: string): Promise<string | null>;
+
+  getAllProductsWithLocations(): Promise<{
+    id: number;
+    productLocationId: number | null;
+    shopifyProductId: string | null;
+    sku: string | null;
+    name: string;
+    location: string | null;
+    zone: string | null;
+    warehouseLocationId: number | null;
+    warehouseId: number | null;
+    status: string;
+    imageUrl: string | null;
+    updatedAt: Date | null;
+  }[]>;
+  getProductsWithoutLocations(): Promise<{
+    id: number;
+    shopifyProductId: string | null;
+    sku: string | null;
+    title: string;
+    imageUrl: string | null;
+  }[]>;
+
+  getPrimaryProductAssets(): Promise<ProductAsset[]>;
+
+  getProductInventoryByProductId(productId: number): Promise<Record<string, unknown>[]>;
+
+  cascadeOperationalSkuRename(variantId: number, oldSku: string, newSku: string, executor?: any): Promise<void>;
+
+  reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number>;
+
+  searchCatalogProductsWithImage(searchPattern: string, limit: number): Promise<{
+    product_id: number;
+    variant_id: number;
+    variant_sku: string;
+    variant_name: string;
+    product_sku: string | null;
+    product_title: string | null;
+    image_url: string | null;
+  }[]>;
+
+  /**
+   * Server-side product search (Spec A follow-up).
+   * Returns product IDs matching a free-text query on product.sku, product.name,
+   * or any variant.sku. Ranking: exact SKU prefix > SKU contains > name contains
+   > alphabetical name. Caller is responsible for hydrating variants / assets.
+   */
+  searchProducts(opts: {
+    q: string;
+    limit: number;
+    includeInactive?: boolean;
+  }): Promise<Array<{ id: number }>>;
+}
+
+export const productMethods: IProductStorage = {
+  async getAllProducts(includeInactive = false, executor: any = db): Promise<Product[]> {
+    if (includeInactive) {
+      return await executor.select().from(products).orderBy(asc(products.name));
+    }
+    return await executor.select().from(products).where(eq(products.isActive, true)).orderBy(asc(products.name));
+  },
+
+  async getProductById(id: number, executor: any = db): Promise<Product | undefined> {
+    const result = await executor.select().from(products).where(eq(products.id, id));
+    return result[0];
+  },
+
+  async getProductBySku(sku: string, executor: any = db): Promise<Product | undefined> {
+    const result = await executor.select().from(products)
+      .where(eq(products.sku, sku.toUpperCase()));
+    return result[0];
+  },
+
+  async getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined> {
+    const result = await db.select().from(products).where(eq(products.shopifyProductId, shopifyProductId));
+    return result[0];
+  },
+
+  async createProduct(product: InsertProduct, executor: any = db): Promise<Product> {
+    assertEbayPolicyWriteOwned(product, { operation: "create" });
+    if (product.inventoryTrackingDefault !== undefined && typeof product.inventoryTrackingDefault !== "boolean") {
+      throw new InventoryTrackingPolicyError("INVENTORY_POLICY_INVALID", "Product inventory tracking must be a boolean", 400);
+    }
+    const result = await executor.insert(products).values(product).returning();
+    return result[0];
+  },
+
+  async updateProduct(id: number, updates: Partial<InsertProduct>, executor: any = db): Promise<Product | null> {
+    assertEbayPolicyWriteOwned(updates, { operation: "update" });
+    if (updates.inventoryTrackingDefault !== undefined) {
+      if (executor === db) return db.transaction(tx => productMethods.updateProduct(id, updates, tx));
+      await updateProductInventoryTracking(executor, id, updates.inventoryTrackingDefault, "catalog.storage", new Date());
+    }
+    const result = await executor.update(products)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(products.id, id))
+      .returning();
+    return result[0] || null;
+  },
+
+  async deleteProduct(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(products).where(eq(products.id, id)).returning();
+    return result.length > 0;
+  },
+
+  async getAllProductVariants(includeInactive = false, executor: any = db): Promise<ProductVariant[]> {
+    if (includeInactive) {
+      return await executor.select().from(productVariants).orderBy(asc(productVariants.sku));
+    }
+    return await executor.select().from(productVariants).where(eq(productVariants.isActive, true)).orderBy(asc(productVariants.sku));
+  },
+
+  async getProductVariantById(id: number, executor: any = db): Promise<ProductVariant | undefined> {
+    const result = await executor.select().from(productVariants).where(eq(productVariants.id, id));
+    return result[0];
+  },
+
+  async getProductVariantBySku(sku: string): Promise<ProductVariant | undefined> {
+    const result = await db.select().from(productVariants)
+      .where(sql`UPPER(${productVariants.sku}) = ${sku.trim().toUpperCase()}`);
+    return result[0];
+  },
+
+  async getActiveVariantBySku(sku: string, excludeId?: number, executor: any = db): Promise<ProductVariant | undefined> {
+    const upperSku = sku.trim().toUpperCase();
+    const result = await executor.select().from(productVariants)
+      .where(sql`UPPER(${productVariants.sku}) = ${upperSku} AND ${productVariants.isActive} = true${excludeId ? sql` AND ${productVariants.id} != ${excludeId}` : sql``}`);
+    return result[0];
+  },
+
+  async getProductVariantsByProductId(productId: number, executor: any = db): Promise<ProductVariant[]> {
+    return await executor.select().from(productVariants)
+      .where(eq(productVariants.productId, productId))
+      .orderBy(asc(productVariants.hierarchyLevel));
+  },
+
+  async getProductVariantsByIds(ids: number[], executor: any = db): Promise<ProductVariant[]> {
+    if (ids.length === 0) return [];
+    return executor.select().from(productVariants).where(inArray(productVariants.id, ids));
+  },
+
+  async getProductsByIds(ids: number[], executor: any = db): Promise<Product[]> {
+    if (ids.length === 0) return [];
+    return executor.select().from(products).where(inArray(products.id, ids));
+  },
+
+  async createProductVariant(variant: InsertProductVariant, executor: any = db): Promise<ProductVariant> {
+    assertEbayPolicyWriteOwned(variant, { operation: "create" });
+    if (executor === db) return db.transaction(tx => productMethods.createProductVariant(variant, tx));
+    const policy = await prepareVariantInventoryTracking(executor, variant);
+    const result = await executor.insert(productVariants).values({ ...variant, ...policy }).returning();
+    return result[0];
+  },
+
+  async updateProductVariant(id: number, updates: Partial<InsertProductVariant>, executor: any = db): Promise<ProductVariant | null> {
+    assertEbayPolicyWriteOwned(updates, { operation: "update" });
+    const policyChanged = ["trackInventory", "inventoryTrackingOverride", "requiresShipping"].some(key => Object.prototype.hasOwnProperty.call(updates, key));
+    let policy: Partial<InsertProductVariant> = {};
+    if (policyChanged) {
+      if (executor === db) return db.transaction(tx => productMethods.updateProductVariant(id, updates, tx));
+      const existing = await productMethods.getProductVariantById(id, executor);
+      if (!existing) return null;
+      policy = await prepareVariantInventoryTracking(executor, { ...updates, productId: existing.productId }, id);
+    }
+    const result = await executor.update(productVariants)
+      .set({ ...updates, ...policy, updatedAt: new Date() })
+      .where(eq(productVariants.id, id))
+      .returning();
+    return result[0] || null;
+  },
+
+  async deleteProductVariant(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(productVariants).where(eq(productVariants.id, id)).returning();
+    return result.length > 0;
+  },
+
+  async getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]> {
+    return db.select().from(inventoryLevels).where(eq(inventoryLevels.productVariantId, variantId));
+  },
+
+  async deleteInventoryLevelsByVariantId(variantId: number): Promise<number> {
+    // A ledger-era level is a permanent identity even after stock moves away.
+    // Legacy cleanup may remove only genuinely empty, unclaimed rows.
+    return deleteZeroPreLedgerInventoryLevelsByVariantIdInInventory(db, variantId);
+  },
+
+  async deleteProductLocationsByVariantId(variantId: number): Promise<number> {
+    return deleteProductLocationsByVariantIdInWarehouse(db, variantId);
+  },
+
+  async deactivateChannelFeedsByVariantId(variantId: number): Promise<number> {
+    return deactivateActiveChannelFeedsByVariantIdInChannels(db, variantId);
+  },
+
+  async deactivateReplenRulesByProductId(productId: number): Promise<number> {
+    return db.transaction((tx) => deactivateProductReplenishmentRulesInTx(tx, productId, new Date()));
+  },
+
+  async cancelReplenTasksByProductId(productId: number): Promise<number> {
+    return db.transaction((tx) => cancelProductReplenishmentTasksInTx(tx, productId, new Date()));
+  },
+
+  async getPendingShipmentItemsByVariantIds(variantIds: number[]): Promise<{ id: number; shipmentId: number; productVariantId: number | null; qty: number; status: string }[]> {
+    if (variantIds.length === 0) return [];
+    const result = await db.select({
+      id: outboundShipmentItems.id,
+      shipmentId: outboundShipmentItems.shipmentId,
+      productVariantId: outboundShipmentItems.productVariantId,
+      qty: outboundShipmentItems.qty,
+      status: outboundShipments.status,
+    })
+      .from(outboundShipmentItems)
+      .innerJoin(outboundShipments, eq(outboundShipmentItems.shipmentId, outboundShipments.id))
+      .where(and(
+        inArray(outboundShipmentItems.productVariantId, variantIds),
+        inArray(outboundShipments.status, [...OPEN_SHIPMENT_STATUSES]),
+      ));
+    return result;
+  },
+
+  async getProductAssetsByProductId(productId: number, executor: any = db): Promise<ProductAsset[]> {
+    return await executor.select().from(productAssets)
+      .where(eq(productAssets.productId, productId))
+      .orderBy(asc(productAssets.position));
+  },
+
+  async getProductAssetsByVariantId(productVariantId: number): Promise<ProductAsset[]> {
+    return await db.select().from(productAssets)
+      .where(eq(productAssets.productVariantId, productVariantId))
+      .orderBy(asc(productAssets.position));
+  },
+
+  async createProductAsset(asset: InsertProductAsset, executor: any = db): Promise<ProductAsset> {
+    const result = await executor.insert(productAssets).values(asset).returning();
+    return result[0];
+  },
+
+  async deleteProductAsset(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(productAssets).where(eq(productAssets.id, id)).returning();
+    return result.length > 0;
+  },
+
+  async deleteProductAssetsByProductId(productId: number): Promise<number> {
+    const result = await db.delete(productAssets).where(eq(productAssets.productId, productId)).returning();
+    return result.length;
+  },
+
+  async updateProductAsset(id: number, updates: Partial<InsertProductAsset>): Promise<ProductAsset | null> {
+    const result = await db.update(productAssets)
+      .set(updates)
+      .where(eq(productAssets.id, id))
+      .returning();
+    return result[0] || null;
+  },
+
+  async reorderProductAssets(productId: number, orderedIds: number[]): Promise<void> {
+    await reorderCatalogAssets(db, productId, { orderedIds });
+  },
+
+  async setPrimaryProductAsset(productId: number, assetId: number, executor: any = db): Promise<void> {
+    if (!Number.isInteger(productId) || productId <= 0 || !Number.isInteger(assetId) || assetId <= 0) {
+      throw new ProductAssetError(
+        "ASSET_PRIMARY_INVALID",
+        "Product and asset IDs must be positive integers.",
+        400,
+      );
+    }
+    if (executor === db) {
+      return db.transaction((tx) => productMethods.setPrimaryProductAsset(productId, assetId, tx));
+    }
+    const targetRows = await executor
+      .select({ id: productAssets.id })
+      .from(productAssets)
+      .where(and(eq(productAssets.id, assetId), eq(productAssets.productId, productId)));
+    if (targetRows.length === 0) {
+      throw new ProductAssetError(
+        "ASSET_NOT_FOUND",
+        "Product asset not found for this product.",
+        404,
+      );
+    }
+    await executor.update(productAssets)
+      .set({ isPrimary: 0 })
+      .where(and(eq(productAssets.productId, productId), eq(productAssets.isPrimary, 1)));
+    await executor.update(productAssets)
+      .set({ isPrimary: 1 })
+      .where(and(eq(productAssets.id, assetId), eq(productAssets.productId, productId)));
+  },
+
+  async withCatalogTransaction<T>(fn: (txStorage: IProductStorage, tx: any) => Promise<T>): Promise<T> {
+    return db.transaction(async (tx) => {
+      const txStorage: IProductStorage = {
+        ...productMethods,
+        getAllProducts: (includeInactive) => productMethods.getAllProducts(includeInactive, tx),
+        getProductById: (id) => productMethods.getProductById(id, tx),
+        getProductBySku: (sku) => productMethods.getProductBySku(sku, tx),
+        createProduct: (product) => productMethods.createProduct(product, tx),
+        updateProduct: (id, updates) => productMethods.updateProduct(id, updates, tx),
+        deleteProduct: (id) => productMethods.deleteProduct(id, tx),
+        getAllProductVariants: (includeInactive) => productMethods.getAllProductVariants(includeInactive, tx),
+        getProductVariantById: (id) => productMethods.getProductVariantById(id, tx),
+        getActiveVariantBySku: (sku, excludeId) => productMethods.getActiveVariantBySku(sku, excludeId, tx),
+        getProductVariantsByProductId: (productId) => productMethods.getProductVariantsByProductId(productId, tx),
+        getProductVariantsByIds: (ids) => productMethods.getProductVariantsByIds(ids, tx),
+        getProductsByIds: (ids) => productMethods.getProductsByIds(ids, tx),
+        createProductVariant: (variant) => productMethods.createProductVariant(variant, tx),
+        updateProductVariant: (id, updates) => productMethods.updateProductVariant(id, updates, tx),
+        deleteProductVariant: (id) => productMethods.deleteProductVariant(id, tx),
+        getProductAssetsByProductId: (productId) => productMethods.getProductAssetsByProductId(productId, tx),
+        createProductAsset: (asset) => productMethods.createProductAsset(asset, tx),
+        deleteProductAsset: (id) => productMethods.deleteProductAsset(id, tx),
+        setPrimaryProductAsset: (productId, assetId) => productMethods.setPrimaryProductAsset(productId, assetId, tx),
+        withCatalogTransaction: (nestedFn) => nestedFn(txStorage, tx),
+      };
+      return fn(txStorage, tx);
+    });
+  },
+
+  async getItemImageUrlBySku(sku: string): Promise<string | null> {
+    const upperSku = sku.toUpperCase();
+    const result = await db.execute<{ image_url: string | null }>(sql`
+      SELECT image_url FROM (
+        SELECT pl.image_url FROM warehouse.product_locations pl
+        WHERE UPPER(pl.sku) = ${upperSku} AND pl.image_url IS NOT NULL
+        UNION ALL
+        SELECT COALESCE(
+          (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_variant_id = pv.id AND pa.is_primary = 1 LIMIT 1),
+          (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1)
+        ) as image_url
+        FROM catalog.product_variants pv
+        WHERE UPPER(pv.sku) = ${upperSku}
+          AND EXISTS (SELECT 1 FROM product_assets pa WHERE (pa.product_variant_id = pv.id OR (pa.product_id = pv.product_id AND pa.product_variant_id IS NULL)) AND pa.is_primary = 1)
+      ) sub
+      LIMIT 1
+    `);
+    return result.rows[0]?.image_url || null;
+  },
+
+  async getAllProductsWithLocations(): Promise<{
+    id: number;
+    productLocationId: number | null;
+    shopifyProductId: string | null;
+    sku: string | null;
+    name: string;
+    location: string | null;
+    zone: string | null;
+    warehouseLocationId: number | null;
+    warehouseId: number | null;
+    status: string;
+    imageUrl: string | null;
+    updatedAt: Date | null;
+  }[]> {
+    const result = await db
+      .select({
+        id: products.id,
+        productLocationId: productLocations.id,
+        shopifyProductId: products.shopifyProductId,
+        sku: products.sku,
+        name: sql<string>`COALESCE(${products.title}, ${products.name})`.as('name'),
+        location: productLocations.location,
+        zone: productLocations.zone,
+        warehouseLocationId: productLocations.warehouseLocationId,
+        warehouseId: warehouseLocations.warehouseId,
+        status: sql<string>`COALESCE(${productLocations.status}, 'unassigned')`.as('status'),
+        imageUrl: sql<string | null>`(SELECT CASE WHEN storage_type IN ('file', 'both') THEN '/api/product-assets/' || id || '/file' ELSE url END FROM catalog.product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
+        updatedAt: productLocations.updatedAt,
+      })
+      .from(products)
+      .leftJoin(productLocations, eq(products.id, productLocations.productId))
+      .leftJoin(warehouseLocations, eq(productLocations.warehouseLocationId, warehouseLocations.id))
+      .orderBy(sql`COALESCE(${products.title}, ${products.name})`);
+    return result;
+  },
+
+  async getProductsWithoutLocations(): Promise<{
+    id: number;
+    shopifyProductId: string | null;
+    sku: string | null;
+    title: string;
+    imageUrl: string | null;
+  }[]> {
+    const result = await db
+      .select({
+        id: products.id,
+        shopifyProductId: products.shopifyProductId,
+        sku: products.sku,
+        title: sql<string>`COALESCE(${products.title}, ${products.name})`.as('title'),
+        imageUrl: sql<string | null>`(SELECT CASE WHEN storage_type IN ('file', 'both') THEN '/api/product-assets/' || id || '/file' ELSE url END FROM catalog.product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
+      })
+      .from(products)
+      .leftJoin(productLocations, eq(products.id, productLocations.productId))
+      .where(isNull(productLocations.id))
+      .orderBy(sql`COALESCE(${products.title}, ${products.name})`);
+    return result;
+  },
+
+  async getPrimaryProductAssets(): Promise<ProductAsset[]> {
+    return await db.select().from(productAssets).where(eq(productAssets.isPrimary, 1));
+  },
+
+  async getProductInventoryByProductId(productId: number): Promise<Record<string, unknown>[]> {
+    const result = await db.execute(sql`
+      SELECT
+        pv.id AS variant_id,
+        pv.sku,
+        pv.name AS variant_name,
+        pv.hierarchy_level,
+        pv.units_per_variant,
+        pv.is_base_unit,
+        il.id AS level_id,
+        il.warehouse_location_id AS location_id,
+        il.variant_qty,
+        il.reserved_qty,
+        il.picked_qty,
+        COALESCE(il.packed_qty, 0) AS packed_qty,
+        COALESCE(il.backorder_qty, 0) AS backorder_qty,
+        il.updated_at AS level_updated_at,
+        wl.code AS location_code,
+        wl.location_type,
+        wl.zone,
+        wl.is_pickable,
+        w.name AS warehouse_name
+      FROM catalog.product_variants pv
+      LEFT JOIN inventory.inventory_levels il ON il.product_variant_id = pv.id
+      LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+      LEFT JOIN warehouse.warehouses w ON w.id = wl.warehouse_id
+      WHERE pv.product_id = ${productId}
+      ORDER BY pv.hierarchy_level ASC, pv.sku ASC, wl.code ASC
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async cascadeOperationalSkuRename(variantId: number, oldSku: string, newSku: string, executor: any = db): Promise<void> {
+    const now = new Date();
+    // Procurement references are updated through Procurement's published command.
+    // These remaining operational caches stay in the caller's transaction.
+    await updateProductLocationsSkuByVariantIdInWarehouse(executor, variantId, newSku, now);
+
+    // Tables without productVariantId FK — match by old SKU string
+    await renameWmsOrderItemSku(executor, { oldSku, newSku });
+    await renameWmsPickingLogSku(executor, { oldSku, newSku });
+    await executor.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
+  },
+
+  async reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number> {
+    return reassignProductLocationsToVariantInWarehouse(db, sourceVariantId, targetVariantId);
+  },
+
+  async searchProducts(opts: { q: string; limit: number; includeInactive?: boolean }): Promise<Array<{ id: number }>> {
+    // Rule #1: DB-side search lives in the storage layer.
+    // Rule #12: q is parameterised — no interpolation into raw SQL fragments.
+    const q = (opts.q ?? "").trim();
+    const limit = Math.max(1, Math.min(100, Math.floor(opts.limit) || 50));
+    if (q.length === 0) {
+      // Empty query: fall back to alphabetical product listing, respecting active-flag.
+      const rows = await db
+        .select({ id: products.id })
+        .from(products)
+        .where(opts.includeInactive ? sql`true` : eq(products.isActive, true))
+        .orderBy(asc(products.name))
+        .limit(limit);
+      return rows;
+    }
+    const like = `%${q.toLowerCase()}%`;
+    const prefix = `${q.toLowerCase()}%`;
+    // Rank: 0 = exact SKU prefix, 1 = SKU contains, 2 = name contains, 3 = other.
+    const rows = await db.execute<{ id: number }>(sql`
+      WITH matched AS (
+        SELECT
+          p.id,
+          MIN(
+            CASE
+              WHEN LOWER(p.sku) LIKE ${prefix} THEN 0
+              WHEN LOWER(pv.sku) LIKE ${prefix} THEN 0
+              WHEN LOWER(p.sku) LIKE ${like} THEN 1
+              WHEN LOWER(pv.sku) LIKE ${like} THEN 1
+              WHEN LOWER(p.name) LIKE ${like} THEN 2
+              ELSE 3
+            END
+          ) AS rank,
+          MIN(LOWER(p.name)) AS name_key
+        FROM catalog.products p
+        LEFT JOIN catalog.product_variants pv
+          ON pv.product_id = p.id
+          ${opts.includeInactive ? sql`` : sql`AND pv.is_active = true`}
+        WHERE ${opts.includeInactive ? sql`true` : sql`p.is_active = true`}
+          AND (
+            LOWER(COALESCE(p.sku, '')) LIKE ${like}
+            OR LOWER(p.name) LIKE ${like}
+            OR LOWER(COALESCE(pv.sku, '')) LIKE ${like}
+          )
+        GROUP BY p.id
+      )
+      SELECT id FROM matched
+      ORDER BY rank ASC, name_key ASC
+      LIMIT ${limit}
+    `);
+    return rows.rows.map((r) => ({ id: Number(r.id) }));
+  },
+
+  async searchCatalogProductsWithImage(searchPattern: string, limit: number): Promise<{
+    product_id: number;
+    variant_id: number;
+    variant_sku: string;
+    variant_name: string;
+    product_sku: string | null;
+    product_title: string | null;
+    image_url: string | null;
+  }[]> {
+    const result = await db.execute<{
+      product_id: number;
+      variant_id: number;
+      variant_sku: string;
+      variant_name: string;
+      product_sku: string | null;
+      product_title: string | null;
+      image_url: string | null;
+    }>(sql`
+      SELECT
+        p.id as product_id,
+        pv.id as variant_id,
+        pv.sku as variant_sku,
+        pv.name as variant_name,
+        p.sku as product_sku,
+        COALESCE(p.title, p.name) as product_title,
+        (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url
+      FROM catalog.product_variants pv
+      JOIN catalog.products p ON p.id = pv.product_id
+      WHERE pv.is_active = true
+        AND pv.sku IS NOT NULL
+        AND (
+          LOWER(pv.sku) LIKE ${searchPattern} OR
+          LOWER(pv.name) LIKE ${searchPattern} OR
+          LOWER(p.sku) LIKE ${searchPattern} OR
+          LOWER(COALESCE(p.title, p.name)) LIKE ${searchPattern}
+        )
+      ORDER BY pv.sku
+      LIMIT ${limit}
+    `);
+    return result.rows;
+  },
+};

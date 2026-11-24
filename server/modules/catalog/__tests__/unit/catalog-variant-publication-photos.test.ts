@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
-import { createCatalogPublicImageUrl } from "../../catalog-public-image";
+import { createCatalogPublicImageUrl } from "../../domain/catalog-public-image";
 import {
   PgCatalogVariantPublicationPhotoReader,
   readCatalogVariantPublicationImages,
   resolveCatalogPublicationImages,
   resolveCatalogPublicationPhotos,
   type CatalogPublicationImage,
-} from "../../catalog-publication-images.reader";
-import { MAX_PRODUCT_IMAGE_BYTES } from "../../product-image-download.service";
+} from "../../infrastructure/catalog-publication-images.reader";
+import { MAX_PRODUCT_IMAGE_BYTES } from "../../application/product-image-download.service";
 
 const hash = "ab".repeat(32);
 const pngHeader = Buffer.from("89504e470d0a1a0a00000000", "hex");

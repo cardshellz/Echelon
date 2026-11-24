@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SRC = readFileSync(resolve(__dirname, "../../combining.service.ts"), "utf8");
+const SRC = readFileSync(resolve(__dirname, "../../application/combining.service.ts"), "utf8");
 
 /**
  * `GET /api/orders/combinable` returned 500 on every call:

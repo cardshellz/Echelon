@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { listingIntentBase } from "../fixtures/listing-intent.fixture";
 import { PostgresListingIntentPropagationRepository } from "../../infrastructure/pg-listing-intent-propagation.repository";
-import { coercePackageAttributesOnVariantPayload, serializePackageAttributeUpdates } from "../../../catalog/package-attributes";
+import { coercePackageAttributesOnVariantPayload, serializePackageAttributeUpdates } from "../../../catalog/domain/package-attributes";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

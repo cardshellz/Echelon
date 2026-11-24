@@ -139,7 +139,7 @@ describe("PROC-2: costing boundary decoupling, legacy bypass retirement, and sha
 
       expect(purchaseCostApplicationSource).not.toContain("inventory.cost_applications");
       expect(purchaseCostApplicationSource).not.toContain("../inventory/application/");
-      expect(purchaseCostApplicationSource).toContain('from "../inventory/cost-application-public"');
+      expect(purchaseCostApplicationSource).toContain('from "../inventory/cost-application-public.api"');
     });
   });
 

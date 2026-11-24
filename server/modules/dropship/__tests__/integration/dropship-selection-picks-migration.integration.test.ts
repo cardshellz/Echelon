@@ -22,7 +22,7 @@ import { PgDropshipVendorProvisioningRepository } from "../../infrastructure/dro
 import { readDropshipSelectionEffectsFacts } from "../../infrastructure/dropship-selection-effects.reader";
 import { FOLLOW_UP_REPAIR_BATCH_SIZE } from "../../application/dropship-selection-conversion-followup";
 import { PgDropshipSelectionConversionFollowUpRepository } from "../../infrastructure/dropship-selection-conversion-followup.repository";
-import { readDropshipListingStockSelection } from "../../stock-publication-selection";
+import { readDropshipListingStockSelection } from "../../stock-publication-selection.api";
 import { legacyEvaluateVendorSelection } from "../fixtures/legacy-vendor-selection";
 import { legacyDecisionUnderPicks } from "../fixtures/legacy-vendor-selection-meaning";
 import {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { duplicateProduct, ProductDuplicateError } from "../../product-duplicate.service";
+import { duplicateProduct, ProductDuplicateError } from "../../application/product-duplicate.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // duplicateProduct — clones a product into a new DRAFT with fresh SKUs.

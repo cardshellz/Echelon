@@ -1,5 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
-import { readInventoryCostDisplay } from "../../catalog/inventory-cost-display.reader";
+import { readInventoryCostDisplay } from "../../catalog/infrastructure/inventory-cost-display.reader";
 import { valueInventory, type ValuationLot } from "../domain/inventory-valuation";
 import { costInteger, CostEvidenceError } from "../infrastructure/cost-evidence-values";
 import { readUnallocatedLotCosts } from "../infrastructure/cost-quantity.repository";

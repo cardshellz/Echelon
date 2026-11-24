@@ -15,7 +15,7 @@ import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipment
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { deriveShipmentCostAdjustment } from "./domain/shipment-cost-adjustment";
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "./shipment-cost-application.service";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory/application/cogs.service";
 import type { CostApplicationOptions } from "../inventory/application/apply-cost-revision";
 /**
  * Inbound Shipment Tracking + Landed Cost Allocation Service

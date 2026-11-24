@@ -26,7 +26,7 @@ import {
   linkChildToParentShipment,
   ChildWithoutParentShipmentError,
   ECHELON_COMBINED_CHILD_SHIPMENT_SOURCE,
-} from "../../create-shipment";
+} from "../../application/create-shipment";
 
 // ─── Mock db factory ─────────────────────────────────────────────────
 //

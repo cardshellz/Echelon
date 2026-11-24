@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
   STOCK_LINK_HEALTH_CHECKS, STOCK_LINK_HEALTH_CHECKS_RUNNER_OFF, stockLinkHealthChecks, stockLinkHealthChecksForProcess,
-} from "../../../inventory-planning/stock-link-health";
+} from "../../../inventory-planning/stock-link-health.api";
 import {
   STOCK_LINK_HEALTH_ENGINE_ACTOR, STOCK_LINK_HEALTH_ESCALATION, STOCK_LINK_HEALTH_RETIRE_HOLD, STOCK_LINK_HEALTH_RETIRES_HELD_CODE,
   STOCK_LINK_HEALTH_SKU_CHANGED_CODE, stockLinkRetiresHeldCountText,

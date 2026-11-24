@@ -12,14 +12,14 @@ import { requireAuth, requireAuthOrInternalApiKey, requirePermission } from "../
 import { createStaffStreamObserver } from "../../modules/identity";
 import { getAuthService, getChannelConnection, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { resolveChannelPrice } from "../../modules/channels/infrastructure/ebay-listing-helpers";
-import { createCatalogPublicImageUrl } from "../../modules/catalog/catalog-public-image";
+import { createCatalogPublicImageUrl } from "../../modules/catalog/domain/catalog-public-image";
 import { readEbayListingPhotoReadiness } from "../../modules/channels/ebay-listing-photo-readiness";
 import {
   EbayMarketplaceListingConnector,
 } from "../../modules/channels/listing-connectors/ebay-listing.connector";
 import { ebayListingSyncService } from '../../modules/channels/ebay-listing-sync';
 import { EbayListingRecoveryService } from '../../modules/channels/ebay-listing-sync';
-import { EbayPublicationRecoveryService, PostgresEbayPublicationRecoveryRepository } from '../../modules/inventory-planning/quantity-publication';
+import { EbayPublicationRecoveryService, PostgresEbayPublicationRecoveryRepository } from '../../modules/inventory-planning/quantity-publication.api';
 import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
 import { EbayListingFeedInventoryService } from '../../modules/channels/ebay-listing-feed-inventory';
 import { listingFailure, listingFailureStatus } from './ebay-listing-errors';

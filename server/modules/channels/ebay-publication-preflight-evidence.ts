@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { legacyEbayPublicationPreflightProofSchema, ebayRequestJournalContractSchema,
-  type EbayRequestJournalContract, type LegacyEbayPublicationPreflightProof } from "../inventory-planning/quantity-publication";
+  type EbayRequestJournalContract, type LegacyEbayPublicationPreflightProof } from "../inventory-planning/quantity-publication.api";
 import { syncStageHash, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
 
 /** Only a client using the versioned admission/journal protocol can advertise

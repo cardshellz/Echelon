@@ -5,8 +5,8 @@ import { getTableConfig, PgDialect, type PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@shared/schema";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { createPickingAssignmentReleaseRepository } from "../../picking-assignment-release.repository";
-import { releasePickingAssignment, type PickingAssignmentReleaseRepository } from "../../picking-assignment-release.service";
+import { createPickingAssignmentReleaseRepository } from "../../infrastructure/picking-assignment-release.repository";
+import { releasePickingAssignment, type PickingAssignmentReleaseRepository } from "../../application/picking-assignment-release.service";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

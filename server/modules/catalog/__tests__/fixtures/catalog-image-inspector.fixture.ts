@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { CatalogImageInspector } from "../../catalog-image-inspection";
+import type { CatalogImageInspector } from "../../domain/catalog-image-inspection";
 
 /** Source-selection tests isolate network inspection. Resolution regressions
  * use actual PNG files through createCatalogImageInspector instead. */

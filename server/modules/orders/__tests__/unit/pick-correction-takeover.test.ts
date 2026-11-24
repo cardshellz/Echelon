@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { PICK_CORRECTION_TAKEOVER_IDLE_MS, type PickCorrection } from "@shared/pick-corrections";
-import { PickCorrectionService } from "../../pick-correction.service";
+import { PickCorrectionService } from "../../application/pick-correction.service";
 
 // #63936, #63938: a picker answered "No" on 2026-10-07 and never did the
 // corrective scan. The correction stayed locked to them, so every other picker

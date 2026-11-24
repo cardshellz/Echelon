@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 
 describe("picking replen-bins query contract", () => {
   const source = readFileSync(
-    resolve(process.cwd(), "server/modules/orders/picking.routes.ts"),
+    resolve(process.cwd(), "server/modules/orders/interfaces/http/picking.routes.ts"),
     "utf8",
   );
 

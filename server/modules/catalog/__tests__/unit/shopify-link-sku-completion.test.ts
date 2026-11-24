@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertLinkSkuProgress, assertLinkSkusAvailable, planLinkSkuAssignments, shopifyConnectionRemoteFingerprint } from "../../shopify-link-sku-completion";
+import { assertLinkSkuProgress, assertLinkSkusAvailable, planLinkSkuAssignments, shopifyConnectionRemoteFingerprint } from "../../application/shopify-link-sku-completion";
 import { connectionSource, existingConnectionProduct } from "../support/shopify-product-connection.fixture";
 
 function fixture() {

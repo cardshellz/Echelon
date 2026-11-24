@@ -11,13 +11,13 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../orders/bin-location-backfill", () => ({
+vi.mock("../../../orders/application/bin-location-backfill", () => ({
   backfillOpenOrderItemBinAssignment: vi.fn(async () => 0),
 }));
 
 import { BinAssignmentService } from "../../application/bin-assignment.service";
 import { BinAssignmentValidationError } from "../../domain/bin-assignment-contracts";
-import { backfillOpenOrderItemBinAssignment } from "../../../orders/bin-location-backfill";
+import { backfillOpenOrderItemBinAssignment } from "../../../orders/application/bin-location-backfill";
 
 function sqlTextOf(query: any): string {
   const chunks: unknown[] = query?.queryChunks ?? [];

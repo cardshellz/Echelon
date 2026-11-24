@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveCost } from "../../cost-resolver";
+import { resolveCost } from "../../application/cost-resolver";
 
 function mockDb(variantRow?: any, cogsRows?: any[]) {
   const selectChain = {

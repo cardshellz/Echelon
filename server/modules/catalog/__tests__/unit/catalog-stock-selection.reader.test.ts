@@ -3,7 +3,7 @@ import type { StockSelectionQueryClient } from "@shared/types/stock-publication-
 import {
   readCatalogStockSelectionFactsForProducts,
   readCatalogStockSelectionFactsForVariants,
-} from "../../catalog-stock-selection.reader";
+} from "../../infrastructure/catalog-stock-selection.reader";
 
 /**
  * The catalog's stock facts readers for many sizes (TST-7; no unit test of this reader existed before PR C): the

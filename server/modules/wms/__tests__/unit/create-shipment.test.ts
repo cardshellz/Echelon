@@ -23,7 +23,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createShipmentForOrder,
   ECHELON_SYNC_SHIPMENT_SOURCE,
-} from "../../create-shipment";
+} from "../../application/create-shipment";
 
 // The session-lock path pins a real pool connection in production. Replace the
 // default runner with a recording fake so these tests stay pool-free and can
@@ -43,7 +43,7 @@ vi.mock("../../../../infrastructure/session-advisory-lock", () => ({
 }));
 
 const CREATE_SHIPMENT_SRC = readFileSync(
-  fileURLToPath(new URL("../../create-shipment.ts", import.meta.url)),
+  fileURLToPath(new URL("../../application/create-shipment.ts", import.meta.url)),
   "utf8",
 );
 

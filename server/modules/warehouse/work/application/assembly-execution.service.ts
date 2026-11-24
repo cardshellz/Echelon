@@ -6,7 +6,7 @@ import { warehouseIdSchema } from "@shared/warehouse-work";
 import { workEvidenceIdSchema } from "@shared/warehouse-assembly-work";
 import { readWarehouseWorkActor } from "../../../identity";
 import { readAssemblyOrder } from "../../../orders/assembly-order-authority.api";
-import { readAssemblyVariantLabels } from "../../../catalog/assembly-variant-reader";
+import { readAssemblyVariantLabels } from "../../../catalog/infrastructure/assembly-variant-reader";
 import { readAssemblyOwnership } from "../../../inventory-planning/application/assembly-ownership-reader";
 import type { InventoryAvailabilityClaimService } from "../../../inventory-planning/application/inventory-availability-claim.service";
 import { AssemblyWorkOwner } from "./assembly-work-owner";

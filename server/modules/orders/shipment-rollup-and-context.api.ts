@@ -5,5 +5,5 @@
  * `shipment-context-boundary.test.ts` enforces that only `outbound-shipment-access.query.ts`
  * may consume that private same-transaction participant directly.
  */
-export * from "./shipment-rollup";
-export * from "./shipment-push-payload";
+export * from "./application/shipment-rollup";
+export * from "./application/shipment-push-payload";

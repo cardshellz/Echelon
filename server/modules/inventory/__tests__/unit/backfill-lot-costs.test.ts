@@ -13,7 +13,7 @@ vi.mock("../../infrastructure/cost-evidence.repository", async (importOriginal) 
 describe("COGSService.backfillLotCostsBySku", () => {
   it("stamps cost on zero-cost lots and cascades to COGS", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
 
     let executeCallCount = 0;
     const db = {
@@ -111,7 +111,7 @@ describe("COGSService.backfillLotCostsBySku", () => {
 
   it("skips unknown SKUs and invalid entries", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
 
     const db = {
       select: vi.fn(),
@@ -140,7 +140,7 @@ describe("COGSService.backfillLotCostsBySku", () => {
 
   it("skips SKUs that have no zero-cost lots", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const { COGSService } = await import("../../cogs.service");
+    const { COGSService } = await import("../../application/cogs.service");
 
     let executeCallCount = 0;
     const db = {

@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isTransitionAllowed } from "../../../orders/order-status-core";
+import { isTransitionAllowed } from "../../../orders/application/order-status-core";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 
 const WEBHOOKS_SRC = readFileSync(

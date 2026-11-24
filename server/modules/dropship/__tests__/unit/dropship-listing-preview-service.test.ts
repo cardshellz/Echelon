@@ -18,7 +18,7 @@ import type { DropshipLogEvent } from "../../application/dropship-ports";
 import type {
   CatalogVariantPublicationPhotos,
   CatalogVariantPublicationPhotoReader,
-} from "../../../catalog/catalog-publication-images.reader";
+} from "../../../catalog/infrastructure/catalog-publication-images.reader";
 import {
   DROPSHIP_LISTING_MAX_PHOTOS,
   DropshipListingPreviewService,

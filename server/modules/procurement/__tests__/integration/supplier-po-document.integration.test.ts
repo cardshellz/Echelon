@@ -17,7 +17,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target, property) {
   return typeof value === "function" ? value.bind(connection.database) : value;
 } }) }));
 import { procurementMethods } from "../../procurement.storage";
-import { productMethods } from "../../../catalog/catalog.storage";
+import { productMethods } from "../../../catalog/infrastructure/catalog.storage";
 import { createPurchasingService, type CreatePurchaseOrderWithLinesInput } from "../../purchasing.service";
 import { buildSupplierPoDocument } from "../../supplier-po-document";
 import { renderPoHtml } from "../../po-document";

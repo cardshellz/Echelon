@@ -8,7 +8,7 @@ import {
   productLocations,
   warehouseLocations,
 } from "@shared/schema";
-import type { VariantAtp } from "../inventory/atp.service";
+import type { VariantAtp } from "../inventory/application/atp.service";
 import type { ProductInventoryStrategy } from "@shared/catalog/inventory-strategy";
 import {
   canonicalAvailabilityCycleCountReconciliationCommandSchema,

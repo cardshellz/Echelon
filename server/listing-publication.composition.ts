@@ -9,7 +9,7 @@ import { WalmartListingProvider } from "./modules/channels/adapters/walmart/walm
 import type { WalmartChannelService } from "./modules/channels/adapters/walmart/walmart-channel.service";
 import type { ChannelCatalogDirectory } from "./modules/channels/channel-catalog.routes";
 import type { QuantityPublicationAdmission } from "./modules/inventory-planning/application/quantity-publication-admission.port";
-import { createCatalogPublicImageUrl } from "./modules/catalog/catalog-public-image";
+import { createCatalogPublicImageUrl } from "./modules/catalog/domain/catalog-public-image";
 import type { ListingSnapshot } from "./modules/marketplace-listings/domain/listing-publication";
 import type { VerifiedListingStockService } from "./modules/inventory-planning/application/verified-listing-stock.service";
 import { InventoryPublicationMembershipError } from "./modules/inventory-planning/application/inventory-publication-membership.service";

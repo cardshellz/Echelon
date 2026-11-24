@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { recomputeOrderStatusFromShipments } from "../../shipment-rollup";
-import { projectPhysicalShipmentToWms } from "../../../wms/channel-fulfillment-projection.repository";
+import { recomputeOrderStatusFromShipments } from "../../application/shipment-rollup";
+import { projectPhysicalShipmentToWms } from "../../../wms/infrastructure/channel-fulfillment-projection.repository";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

@@ -23,7 +23,7 @@ const read = (p: string) =>
 
 const INDEX_SRC = read("../../../../index.ts");
 const OMS_WMS_RECONCILE_SRC = read(
-  "../../../orders/oms-wms-cancel-reconcile.scheduler.ts",
+  "../../../orders/application/oms-wms-cancel-reconcile.scheduler.ts",
 );
 const WMS_SHIPSTATION_RECONCILE_SRC = read(
   "../../wms-shipstation-reconcile.scheduler.ts",
@@ -72,7 +72,7 @@ describe("P0.3 — engine-cancel discrimination", () => {
       OMS_WMS_RECONCILE_SRC.indexOf("[OMS<->WMS Reconcile] Cancelled engine order"),
     );
     expect(cascade).toContain("cancelOutboundShipmentAfterEngineCascadeInWms(");
-    const wmsShipmentsRepoSrc = read("../../../wms/outbound-shipments-mutations.repository.ts");
+    const wmsShipmentsRepoSrc = read("../../../wms/infrastructure/outbound-shipments-mutations.repository.ts");
     const helperStart = wmsShipmentsRepoSrc.indexOf(
       "export async function cancelOutboundShipmentAfterEngineCascadeInWms(",
     );

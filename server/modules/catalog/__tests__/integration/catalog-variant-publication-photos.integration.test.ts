@@ -2,13 +2,13 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { createCatalogPublicImageUrl } from "../../catalog-public-image";
-import { pinCatalogPublicationMediaVersions } from "../../catalog-publication-media-versions";
+import { createCatalogPublicImageUrl } from "../../domain/catalog-public-image";
+import { pinCatalogPublicationMediaVersions } from "../../domain/catalog-publication-media-versions";
 import {
   PgCatalogVariantPublicationPhotoReader,
   readCatalogVariantPublicationImages,
   readPublicCatalogImage,
-} from "../../catalog-publication-images.reader";
+} from "../../infrastructure/catalog-publication-images.reader";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
