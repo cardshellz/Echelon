@@ -78,12 +78,21 @@ describe("CSV counts cannot recognize pending receiving custody", () => {
     expect(adjustInventory).not.toHaveBeenCalled();
   });
 
-  it("creates an unheld CSV row and its evidence in the guarded transaction", async () => {
+  it("creates an unheld CSV row and its evidence through lot-safe adjustInventory in the guarded transaction", async () => {
     guard.mockResolvedValue(undefined);
+    adjustInventory.mockResolvedValue({ orphanedQty: 0, adjustmentTransactionId: 1 });
     const response = await requestLocalHttp(`${baseUrl}/api/inventory/import-csv`, { method: "POST" });
     expect(await response.json()).toMatchObject({ processed: 1, created: 1, errors: [] });
-    expect(state.storage.createInventoryLevel).toHaveBeenCalledWith(expect.objectContaining({ productVariantId: 101, variantQty: 10 }), state.tx);
-    expect(state.storage.createInventoryTransaction).toHaveBeenCalledWith(expect.objectContaining({ productVariantId: 101, variantQtyDelta: 10 }), state.tx);
+    expect(adjustInventory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        productVariantId: 101,
+        warehouseLocationId: 2,
+        qtyDelta: 10,
+        reason: "CSV_UPLOAD",
+      }),
+    );
+    expect(state.storage.createInventoryLevel).not.toHaveBeenCalled();
+    expect(state.storage.createInventoryTransaction).not.toHaveBeenCalled();
     expect(committed).toBe(true);
   });
 });

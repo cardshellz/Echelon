@@ -1612,7 +1612,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
     },
     breakFirst: async()=>{
-      await pool.query("UPDATE catalog.product_variants SET parent_variant_id=201 WHERE id=200");
+      await pool.query("UPDATE catalog.product_variants SET parent_variant_id=200 WHERE id=201");
       const {BreakAssemblyUseCases}=await import("../../../inventory/application/break-assembly.use-cases");
       const {legacyTransformationExecutionAuthority}=await import("../../../inventory/application/transformation-execution-authority.port");
       // This suite explicitly owns a pre-cutover fixture. Package/runtime

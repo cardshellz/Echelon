@@ -289,6 +289,12 @@ export class InventoryUseCases {
     await assertReceivingCustodyCountable(quantityTransactionFromDrizzle(this.db), input);
   }
 
+  /** Refresh catalog variant lastCostCents / avgCostCents after a posted conversion. */
+  async refreshVariantCostRollup(productVariantId: number, fallbackCostCents: number): Promise<void> {
+    if (!this.lotService) return;
+    await this.lotService.withTx(this.db).updateVariantCosts(productVariantId, fallbackCostCents);
+  }
+
   // ---------------------------------------------------------------------------
   // RECEIVE
   // ---------------------------------------------------------------------------
@@ -536,34 +542,48 @@ export class InventoryUseCases {
       if (quantityPosting && !activeLevel) throw new IntegrityError("Receipt reversal requires the exact receipt SKU/location level");
 
       // 1. Lots created by this receiving line (resolved through the ledger —
-      //    the receipt transaction row carries the exact lot linkage).
+      //    the receipt transaction row carries the exact lot linkage), plus any
+      //    same-variant descendant lots created when putaway/transfer relocated
+      //    the received stock before reversal.
       const lotRows = await tx.execute(sql`
-        SELECT l.id, l.qty_on_hand, l.qty_reserved, l.unit_cost_mills,l.cost_basis_qty
+        WITH RECURSIVE traced_lots AS (
+          SELECT t.inventory_lot_id AS lot_id, 0 AS depth
+          FROM inventory.inventory_transactions t
+          WHERE t.receiving_line_id = ${params.receivingLineId}
+            AND t.transaction_type = 'receipt'
+            AND t.voided_at IS NULL
+            AND t.inventory_lot_id IS NOT NULL
+          UNION
+          SELECT c.output_lot_id AS lot_id, tl.depth + 1 AS depth
+          FROM traced_lots tl
+          JOIN inventory.lot_cost_contributions c
+            ON c.source_lot_id = tl.lot_id
+           AND c.operation_kind = 'transfer'
+          WHERE tl.depth < 8
+        )
+        SELECT l.id, l.warehouse_location_id, l.qty_on_hand, l.qty_reserved, l.unit_cost_mills, l.cost_basis_qty
         FROM inventory.inventory_lots l
-        JOIN inventory.inventory_transactions t
-          ON t.inventory_lot_id = l.id
-        WHERE t.receiving_line_id = ${params.receivingLineId}
-          AND t.transaction_type = 'receipt'
-          AND t.voided_at IS NULL
+        WHERE l.product_variant_id = ${params.productVariantId}
+          AND l.id IN (SELECT lot_id FROM traced_lots)
         ORDER BY l.id
         FOR UPDATE OF l
       `);
 
+      const deductionsByLocation = new Map<number, number>();
       let lotUnitCostMills: number | null = null;
       if (lotRows.rows.length > 0) {
-        // Pre-check total availability BEFORE any mutation (Rule #7: the
-        // transaction would roll back anyway, but failing fast keeps the
-        // error deterministic and avoids lock churn).
+        // Pre-check total unreserved availability BEFORE any mutation (Rule #7).
         if (!allowNegative) {
-          const totalOnHand = lotRows.rows.reduce(
-            (sum: number, lot: any) => sum + Math.max(0, Number(lot.qty_on_hand) || 0),
+          const totalAvailable = lotRows.rows.reduce(
+            (sum: number, lot: any) =>
+              sum + Math.max(0, (Number(lot.qty_on_hand) || 0) - Math.max(0, Number(lot.qty_reserved) || 0)),
             0,
           );
-          if (totalOnHand < params.qty) {
+          if (totalAvailable < params.qty) {
             throw new InsufficientOnHandForReversalError({
               receivingLineId: params.receivingLineId,
               qty: params.qty,
-              available: totalOnHand,
+              available: totalAvailable,
             });
           }
         }
@@ -572,16 +592,32 @@ export class InventoryUseCases {
         for (const lot of lotRows.rows) {
           if (remainingToReverse <= 0) break;
           const lotId = Number(lot.id);
+          const lotLocId = lot.warehouse_location_id != null
+            ? Number(lot.warehouse_location_id)
+            : params.warehouseLocationId;
+          if (lotLocId !== null && lotLocId !== params.warehouseLocationId) {
+            await this.assertNotFrozen(lotLocId, tx);
+            if (quantityPosting) {
+              const movedLevel = await this.storage.lockInventoryLevel(lotLocId, params.productVariantId, tx);
+              if (!movedLevel) {
+                throw new IntegrityError("Receipt reversal requires the relocated SKU/location level");
+              }
+            }
+          }
           const onHand = Number(lot.qty_on_hand) || 0;
-          const available = quantityPosting ? onHand - Number(lot.qty_reserved) : onHand;
-          const decrement = Math.min(
-            remainingToReverse,
-            allowNegative ? remainingToReverse : available,
-          );
+          const reserved = Math.max(0, Number(lot.qty_reserved) || 0);
+          const unreserved = onHand - reserved;
+          const isLastTracedLot = lot === lotRows.rows[lotRows.rows.length - 1];
+          // Never consume reserved units on a lot; allowNegative only permits negative
+          // balance on a non-reserved lot after all traced positive lots are exhausted.
+          const maxLotTake = allowNegative && reserved === 0 && isLastTracedLot
+            ? remainingToReverse
+            : Math.max(0, unreserved);
+          const decrement = Math.min(remainingToReverse, maxLotTake);
           if (decrement <= 0) continue;
           if (lot.cost_basis_qty!=null) {
             const {allocateLotQuantityCost}=await import("../infrastructure/cost-quantity.repository");
-            const costQuantity=Math.min(decrement,Math.max(0,available));
+            const costQuantity=Math.min(decrement,Math.max(0,unreserved));
             if (costQuantity>0) await allocateLotQuantityCost(tx,Number(lot.id),costQuantity,params.userId || "system:receipt-reversal",
               this.clock(),{kind:"receipt_reversal",reversalId:params.reversalId},`receipt_reversal_cost:${params.reversalId}:${lot.id}`);
           }
@@ -597,7 +633,7 @@ export class InventoryUseCases {
             UPDATE inventory.inventory_lots
             SET qty_on_hand = qty_on_hand - ${decrement},
                 status = CASE
-                  WHEN qty_on_hand - ${decrement} <= 0 THEN 'depleted'::varchar
+                  WHEN qty_on_hand - ${decrement} <= 0 AND qty_reserved = 0 AND qty_picked = 0 THEN 'depleted'::varchar
                   ELSE status
                 END
             WHERE id = ${lotId}
@@ -608,46 +644,61 @@ export class InventoryUseCases {
             throw new InsufficientOnHandForReversalError({
               receivingLineId: params.receivingLineId,
               qty: params.qty,
-              available: onHand,
+              available: Math.max(0, unreserved),
             });
           }
+          }
+          if (lotLocId !== null) {
+            deductionsByLocation.set(lotLocId, (deductionsByLocation.get(lotLocId) ?? 0) + decrement);
           }
           remainingToReverse -= decrement;
         }
-        if (quantityPosting && remainingToReverse !== 0) throw new InsufficientOnHandForReversalError({
+        if (remainingToReverse !== 0) throw new InsufficientOnHandForReversalError({
           receivingLineId: params.receivingLineId, qty: params.qty, available: params.qty - remainingToReverse,
         });
+      } else if (params.warehouseLocationId !== null) {
+        deductionsByLocation.set(params.warehouseLocationId, params.qty);
       }
       if (quantityPosting && lotRows.rows.length === 0) throw new IntegrityError("Receipt reversal requires exact original lot evidence");
 
-      // 2. Location level decrement.
+      // 2. Location level decrement across each actual deducted location.
       let qtyBefore: number | null = activeLevel?.variantQty ?? null;
-      if (!quantityPosting && params.warehouseLocationId !== null) {
-        const levelRows = await tx.execute(sql`
-          SELECT id, variant_qty
-          FROM inventory.inventory_levels
-          WHERE product_variant_id = ${params.productVariantId}
-            AND warehouse_location_id = ${params.warehouseLocationId}
-          FOR UPDATE
-        `);
-        const level = levelRows.rows?.[0];
-        if (level) {
-          const currentQty = Number(level.variant_qty) || 0;
-          if (currentQty < params.qty && !allowNegative) {
-            throw new InsufficientOnHandForReversalError({
-              receivingLineId: params.receivingLineId,
-              qty: params.qty,
-              available: currentQty,
-            });
-          }
-          qtyBefore = currentQty;
-          await tx.execute(sql`
-            UPDATE inventory.inventory_levels
-            SET variant_qty = variant_qty - ${params.qty},
-                updated_at = NOW()
-            WHERE id = ${level.id}
+      let primaryLedgerLocId: number | null = params.warehouseLocationId;
+      if (!quantityPosting && deductionsByLocation.size > 0) {
+        for (const [locId, deductQty] of deductionsByLocation.entries()) {
+          const levelRows = await tx.execute(sql`
+            SELECT id, variant_qty, reserved_qty
+            FROM inventory.inventory_levels
+            WHERE product_variant_id = ${params.productVariantId}
+              AND warehouse_location_id = ${locId}
+            FOR UPDATE
           `);
+          const level = levelRows.rows?.[0];
+          if (level) {
+            const currentQty = Number(level.variant_qty) || 0;
+            const currentReserved = Math.max(0, Number(level.reserved_qty) || 0);
+            const currentUnreserved = currentQty - currentReserved;
+            if ((currentQty < deductQty && !allowNegative) || (currentReserved > 0 && currentQty - deductQty < currentReserved)) {
+              throw new InsufficientOnHandForReversalError({
+                receivingLineId: params.receivingLineId,
+                qty: deductQty,
+                available: Math.max(0, currentUnreserved),
+              });
+            }
+            if (qtyBefore === null) {
+              qtyBefore = currentQty;
+              primaryLedgerLocId = locId;
+            }
+            await tx.execute(sql`
+              UPDATE inventory.inventory_levels
+              SET variant_qty = variant_qty - ${deductQty},
+                  updated_at = NOW()
+              WHERE id = ${level.id}
+            `);
+          }
         }
+      } else if (deductionsByLocation.size === 1) {
+        primaryLedgerLocId = [...deductionsByLocation.keys()][0];
       }
 
       // 3. Ledger audit row (Rule #8).
@@ -659,7 +710,7 @@ export class InventoryUseCases {
            receiving_order_id, receiving_line_id, notes, user_id, unit_cost_cents)
         VALUES (
           ${params.productVariantId},
-          ${params.warehouseLocationId},
+          ${primaryLedgerLocId},
           'receipt_reversal',
           ${-params.qty},
           ${qtyBefore},
@@ -1240,6 +1291,8 @@ export class InventoryUseCases {
     cycleCountItemId?: number;
     userId?: string;
     allowNegative?: boolean;
+    /** Explicit workflow opt-in when an adjustment is coupled with orphaned reservation reallocation (e.g. cycle count, short-pick zeroing). */
+    allowConsumeReserved?: boolean;
     unitCostCents?: number;
     /** Internal conversion owner requests exact evidence in JSON-safe decimal strings. */
     includeConsumedCostEvidence?: boolean;
@@ -1301,11 +1354,26 @@ export class InventoryUseCases {
       }
 
       // Handle the case where the adjustment reduces on-hand below reserved.
-      // This violates the chk_reserved_lte_onhand database constraint, so we must
-      // explicitly reduce reservedQty and return the orphaned amount for reallocation.
+      // This violates the chk_reserved_lte_onhand database constraint, so only
+      // workflows that reallocate orphaned reservations (cycle count or explicit
+      // allowConsumeReserved) may reduce reservedQty.
       const expectedNewQty = level.variantQty + params.qtyDelta;
       let adjustReserved = 0;
       if (params.qtyDelta < 0 && expectedNewQty < level.reservedQty) {
+        if (!params.cycleCountId && !params.allowConsumeReserved) {
+          throw new AppError(
+            `Cannot reduce on-hand below reserved quantity (${level.reservedQty} reserved at this location). Release or move reservations first, or reconcile via cycle count.`,
+            "ADJUSTMENT_BLOCKED_BY_RESERVATION",
+            409,
+            {
+              productVariantId: params.productVariantId,
+              warehouseLocationId: params.warehouseLocationId,
+              onHand: level.variantQty,
+              reserved: level.reservedQty,
+              requestedDelta: params.qtyDelta,
+            },
+          );
+        }
         orphanedQty = level.reservedQty - expectedNewQty;
         adjustReserved = -orphanedQty;
       }
@@ -1316,22 +1384,39 @@ export class InventoryUseCases {
         reservedQty: adjustReserved !== 0 ? adjustReserved : undefined
       }, tx);
 
+      let conversionOutputCostCents: number | undefined;
+      let primaryConversionLotId: number | null = null;
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
         if (params.conversion) {
           if (params.qtyDelta <= 0 || params.conversion.sourceLots.length === 0) throw new IntegrityError("A conversion output requires positive quantity and exact source lots");
+          const inheritedLineage = (await lotSvc.resolveConversionLineage?.(
+            params.conversion.sourceLots.map((s) => s.lotId),
+            params.conversion.occurredAt,
+          )) ?? { receivedAt: params.conversion.occurredAt };
           const layers = allocateBuildCostLayers({ poMills: params.conversion.productMills, packagingMills: params.conversion.packagingMills, landedMills: params.conversion.landedMills }, params.qtyDelta);
           let outputStartQty = 0;
           for (const layer of layers) {
             const totalMills = safeMillsNumber(layer.totalMills, "conversion.totalMills");
+            const layerCostCents = millsToCents(totalMills);
             const output = await lotSvc.createLot({ productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
-              qty: layer.qty, unitCostCents: millsToCents(totalMills), unitCostMills: totalMills,
+              qty: layer.qty, unitCostCents: layerCostCents, unitCostMills: totalMills,
               packagingCostMills: safeMillsNumber(layer.packagingMills, "conversion.packagingMills"),
-              landedCostMills: safeMillsNumber(layer.landedMills, "conversion.landedMills"), costSource: "transformation",
-              costProvisional: params.conversion.provisional ? 1 : 0, receivedAt: params.conversion.occurredAt, notes: params.reason, quantityPosting });
+              landedCostMills: safeMillsNumber(layer.landedMills, "conversion.landedMills"),
+              purchaseOrderId: inheritedLineage.purchaseOrderId,
+              receivingOrderId: inheritedLineage.receivingOrderId,
+              inboundShipmentId: inheritedLineage.inboundShipmentId,
+              poLineId: inheritedLineage.poLineId,
+              costSource: "transformation",
+              costProvisional: params.conversion.provisional ? 1 : 0, receivedAt: inheritedLineage.receivedAt, notes: params.reason, quantityPosting });
+            conversionOutputCostCents = layerCostCents;
+            if (primaryConversionLotId === null) primaryConversionLotId = output.id;
             for (const source of params.conversion.sourceLots) await recordLotCostContribution(tx, { sourceLotId: source.lotId, outputLotId: output.id,
               sourceQty: source.qty, costQuantityAllocationId:source.costQuantityAllocationId, outputQty: params.qtyDelta, outputStartQty, operationKind: "conversion", operationKey: params.conversion.operationKey }, params.userId || "system:conversion", params.conversion.occurredAt);
             outputStartQty += layer.qty;
+          }
+          if (!quantityPosting && conversionOutputCostCents !== undefined) {
+            await lotSvc.updateVariantCosts?.(params.productVariantId, conversionOutputCostCents);
           }
         } else {
         const lotResult = await lotSvc.adjustLots({
@@ -1371,14 +1456,21 @@ export class InventoryUseCases {
           : params.cycleCountId ? String(params.cycleCountId) : null,
         notes: params.reason,
         userId: params.userId ?? null,
+        unitCostCents: conversionOutputCostCents ?? params.unitCostCents ?? null,
+        inventoryLotId: primaryConversionLotId ?? (consumedDetail?.consumedLots.length === 1 ? consumedDetail.consumedLots[0].lotId : null),
       }, tx);
       adjustmentTransactionId = transaction.id;
-      if (quantityPosting && !sharedPosting) await quantityPosting.post({
-        idempotencyKey: quantityKey!, kind: params.conversion ? "transform" : "adjust",
-        actor: params.userId || "system:inventory_adjustment", reason: params.reason,
-        reference: { type: "inventory_transaction", id: String(transaction.id) },
-        occurredAt: (params.conversion?.occurredAt ?? this.clock()).toISOString(),
-      });
+      if (quantityPosting && !sharedPosting) {
+        await quantityPosting.post({
+          idempotencyKey: quantityKey!, kind: params.conversion ? "transform" : "adjust",
+          actor: params.userId || "system:inventory_adjustment", reason: params.reason,
+          reference: { type: "inventory_transaction", id: String(transaction.id) },
+          occurredAt: (params.conversion?.occurredAt ?? this.clock()).toISOString(),
+        });
+        if (params.conversion && conversionOutputCostCents !== undefined && this.lotService) {
+          await this.lotService.withTx(tx).updateVariantCosts(params.productVariantId, conversionOutputCostCents);
+        }
+      }
       if (quantityPosting && !sharedPosting) await quantityPosting.finishOperation({ orphanedQty, adjustmentTransactionId, consumedCostCents, consumedQty,
         consumedLots: params.includeConsumedCostEvidence ? consumedDetail?.consumedLots : undefined,
         consumedPoCostMills: params.includeConsumedCostEvidence ? consumedDetail?.consumedPoCostMills.toString() : undefined,
@@ -1926,31 +2018,44 @@ export class InventoryUseCases {
         await this.storage.adjustInventoryLevel(targetLevel.id, { variantQty: plan.qtyPickUnits }, tx);
       }
 
+      const inheritedLineage = (await lotService.resolveConversionLineage?.(
+        consumed.consumedLots.map((s) => s.lotId),
+        occurredAt,
+      )) ?? { receivedAt: occurredAt };
       const outputLayers = allocateBuildCostLayers({
         poMills: consumed.consumedPoCostMills,
         packagingMills: consumed.consumedPackagingCostMills,
         landedMills: consumed.consumedLandedCostMills,
       }, plan.qtyPickUnits);
       let outputStartQty = 0;
+      let lastOutputCostCents: number | undefined;
+      let firstOutputLotId: number | null = null;
       for (const layer of outputLayers) {
         const totalMills = safeMillsNumber(layer.totalMills, "replenishment.output.totalMills");
+        const layerCostCents = millsToCents(totalMills);
         const outputLot = await lotService.createLot({
           productVariantId: plan.pickVariantId,
           warehouseLocationId: params.toLocationId,
           qty: layer.qty,
-          unitCostCents: millsToCents(totalMills),
+          unitCostCents: layerCostCents,
           unitCostMills: totalMills,
           packagingCostMills: safeMillsNumber(
             layer.packagingMills,
             "replenishment.output.packagingMills",
           ),
           landedCostMills: safeMillsNumber(layer.landedMills, "replenishment.output.landedMills"),
+          purchaseOrderId: inheritedLineage.purchaseOrderId,
+          receivingOrderId: inheritedLineage.receivingOrderId,
+          inboundShipmentId: inheritedLineage.inboundShipmentId,
+          poLineId: inheritedLineage.poLineId,
           costSource: "transformation",
           costProvisional: consumed.consumedCostProvisional ? 1 : 0,
-          receivedAt: occurredAt,
+          receivedAt: inheritedLineage.receivedAt,
           notes: params.notes ?? `Output from replen task #${params.taskId}`,
           quantityPosting,
         });
+        lastOutputCostCents = layerCostCents;
+        if (firstOutputLotId === null) firstOutputLotId = outputLot.id;
         for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
           sourceLotId: source.lotId, outputLotId: outputLot.id, sourceQty: source.qty,
           costQuantityAllocationId:source.costQuantityAllocationId,
@@ -1958,7 +2063,13 @@ export class InventoryUseCases {
         }, params.userId || "system:replenishment", occurredAt);
         outputStartQty += layer.qty;
       }
+      if (!quantityPosting && lastOutputCostCents !== undefined) {
+        await lotService.updateVariantCosts?.(plan.pickVariantId, lastOutputCostCents);
+      }
 
+      const sourceUnitCostCents = plan.qtySourceUnits > 0
+        ? Math.round(consumed.consumedCostCents / plan.qtySourceUnits)
+        : null;
       const referenceId = String(params.taskId);
       const notes = params.notes ?? `Replen task #${params.taskId} case break`;
       await this.storage.createInventoryTransaction({
@@ -1974,6 +2085,8 @@ export class InventoryUseCases {
         referenceId,
         userId: params.userId ?? null,
         notes,
+        unitCostCents: sourceUnitCostCents,
+        inventoryLotId: consumed.consumedLots.length === 1 ? consumed.consumedLots[0].lotId : null,
       }, tx);
       await this.storage.createInventoryTransaction({
         productVariantId: plan.pickVariantId,
@@ -1988,13 +2101,20 @@ export class InventoryUseCases {
         referenceId,
         userId: params.userId ?? null,
         notes,
+        unitCostCents: lastOutputCostCents ?? null,
+        inventoryLotId: firstOutputLotId,
       }, tx);
-      if (quantityPosting) await quantityPosting.post({
-        idempotencyKey: quantityKey, kind: "transform",
-        actor: params.userId || "system:replenishment", reason: notes,
-        reference: { type: "replenishment_task", id: String(params.taskId) }, occurredAt: occurredAt.toISOString(),
-      });
-      if (quantityPosting) await quantityPosting.finishOperation({ movedBaseUnits: plan.movedBaseUnits, qtyPickUnits: plan.qtyPickUnits });
+      if (quantityPosting) {
+        await quantityPosting.post({
+          idempotencyKey: quantityKey, kind: "transform",
+          actor: params.userId || "system:replenishment", reason: notes,
+          reference: { type: "replenishment_task", id: String(params.taskId) }, occurredAt: occurredAt.toISOString(),
+        });
+        if (lastOutputCostCents !== undefined) {
+          await lotService.updateVariantCosts?.(plan.pickVariantId, lastOutputCostCents);
+        }
+        await quantityPosting.finishOperation({ movedBaseUnits: plan.movedBaseUnits, qtyPickUnits: plan.qtyPickUnits });
+      }
     });
 
     const notifyAfterCommit = async () => {
@@ -2193,11 +2313,13 @@ export class InventoryUseCases {
       // already picked at the source bin, refuse and ask the user to finish or
       // cancel that pick first.
       if (reservedToMove > 0) {
+        if (fromLoc.warehouseId !== toLoc.warehouseId) {
+          throw new AppError("Reserved order stock must remain in its order's warehouse.", "TRANSFER_RESERVED_WAREHOUSE_MISMATCH", 409);
+        }
+        if (quantityPosting ? toLoc.isPickable !== 1 : (toLoc.isPickable === 0 || (toLoc.locationType && toLoc.locationType !== "pick"))) {
+          throw new AppError("Reserved order stock must move to a pickable destination bin.", "TRANSFER_RESERVED_DESTINATION_UNAVAILABLE", 409);
+        }
         if (quantityPosting) {
-          if (fromLoc.warehouseId !== toLoc.warehouseId) throw new AppError("Reserved order stock must remain in its order's warehouse.", "TRANSFER_RESERVED_WAREHOUSE_MISMATCH", 409);
-          if (toLoc.isPickable !== 1) {
-            throw new AppError("Reserved order stock must move to a pickable destination bin.", "TRANSFER_RESERVED_DESTINATION_UNAVAILABLE", 409);
-          }
           reservedPlan = await this.reservedTransferOwner!.plan(quantityTransactionFromDrizzle(tx), {
             productVariantId: params.productVariantId, fromLocationId: params.fromLocationId, toLocationId: params.toLocationId, sourceLevelId: sourceLevel.id, warehouseId: fromLoc.warehouseId,
             quantity: params.qty, onHand: sourceLevel.variantQty, reserved,
@@ -2259,14 +2381,16 @@ export class InventoryUseCases {
       );
 
       // Re-point eligible pending order lines so the picker is sent to the new
-      // bin. Only fully un-started lines (picked_quantity = 0, status 'pending')
-      // on live orders are moved; mid-pick lines were rejected above.
+      // bin. Bounded strictly to `reservedToMove` units so unmoved reservations
+      // remain pointed at the source bin.
       if (reservedToMove > 0 && !quantityPosting) {
         orderItemsRepointed = await repointPendingWmsOrderItemsForInventoryTransfer(tx, {
           productVariantId: params.productVariantId,
           fromLocationCode: fromLoc.code,
           toLocationCode: toLoc.code,
           toZone: toLoc.zone ?? "U",
+          maxUnitsToRepoint: reservedToMove,
+          warehouseId: fromLoc.warehouseId,
         });
       }
 
@@ -2287,6 +2411,7 @@ export class InventoryUseCases {
           operationKey: params.referenceId ? `${params.referenceType ?? "internal"}:${params.referenceId}` : undefined,
           quantityPosting,
           reservedLots: [...reservedByLot].map(([inventoryLotId, quantity]) => ({ inventoryLotId, quantity })),
+          reservedQtyToMove: quantityPosting ? 0 : reservedToMove,
         });
         if (reservedPlan) {
           await this.reservedTransferOwner!.relocate(quantityTransactionFromDrizzle(tx), {
@@ -2400,6 +2525,7 @@ export class InventoryUseCases {
         SELECT
           il.warehouse_location_id as warehouse_location_id,
           il.variant_qty as variant_qty,
+          il.reserved_qty as reserved_qty,
           wl.code as location_code
         FROM inventory.inventory_levels il
         JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
@@ -2415,23 +2541,32 @@ export class InventoryUseCases {
         throw new IntegrityError("No inventory found for source variant");
       }
 
-      const totalAvailable = sourceInventory.reduce((s: number, l: any) => s + Number(l.variant_qty), 0);
+      const totalAvailable = sourceInventory.reduce(
+        (s: number, l: any) => s + Math.max(0, Number(l.variant_qty) - Math.max(0, Number(l.reserved_qty || 0))),
+        0,
+      );
+      if (totalAvailable <= 0) {
+        throw new IntegrityError("No unreserved inventory available for source variant");
+      }
       if (convertQty !== null && convertQty > totalAvailable) {
-        throw new IntegrityError(`Requested ${convertQty} but only ${totalAvailable} available`);
+        throw new IntegrityError(`Requested ${convertQty} but only ${totalAvailable} unreserved unit(s) available`);
       }
 
       let remaining = convertQty ?? totalAvailable;
+      let lastSkuCorrectionCostCents: number | undefined;
 
       for (const inv of sourceInventory) {
         if (remaining <= 0) break;
-        const qtyToConvert = Math.min(Number(inv.variant_qty), remaining);
+        const unreservedAtLoc = Math.max(0, Number(inv.variant_qty) - Math.max(0, Number(inv.reserved_qty || 0)));
+        if (unreservedAtLoc <= 0) continue;
+        const qtyToConvert = Math.min(unreservedAtLoc, remaining);
 
         // Adjust-out from old variant
         const sourceLevel = await this.storage.upsertInventoryLevel({
           productVariantId: params.fromVariantId,
           warehouseLocationId: inv.warehouse_location_id,
         }, tx);
-        if (quantityPosting) await this.assertNotFrozen(inv.warehouse_location_id, tx);
+        await this.assertNotFrozen(inv.warehouse_location_id, tx);
 
         if (!quantityPosting) await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -qtyToConvert }, tx);
 
@@ -2457,30 +2592,51 @@ export class InventoryUseCases {
           warehouseLocationId: inv.warehouse_location_id,
         }, tx);
 
-        if (quantityPosting) {
-          const lotService = this.lotService!.withTx(tx);
-          const consumed = await lotService.adjustLots({ productVariantId: params.fromVariantId,
-            warehouseLocationId: inv.warehouse_location_id, qtyDelta: -qtyToConvert, quantityPosting, notes: params.notes });
-          const layers = allocateBuildCostLayers({ poMills: consumed.consumedPoCostMills,
-            packagingMills: consumed.consumedPackagingCostMills, landedMills: consumed.consumedLandedCostMills }, qtyToConvert);
-          let outputStartQty = 0;
-          const occurredAt = this.clock();
-          for (const layer of layers) {
-            const total = safeMillsNumber(layer.totalMills, "sku_correction.totalMills");
-            const lot = await lotService.createLot({ productVariantId: params.toVariantId, warehouseLocationId: inv.warehouse_location_id,
-              qty: layer.qty, unitCostCents: millsToCents(total), unitCostMills: total,
-              packagingCostMills: safeMillsNumber(layer.packagingMills, "sku_correction.packagingMills"),
-              landedCostMills: safeMillsNumber(layer.landedMills, "sku_correction.landedMills"),
-              costSource: "sku_correction", costProvisional: consumed.consumedCostProvisional ? 1 : 0,
-              notes: params.notes, receivedAt: occurredAt, quantityPosting });
-            for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
-              sourceLotId: source.lotId, outputLotId: lot.id, sourceQty: source.qty, outputQty: qtyToConvert,
-              costQuantityAllocationId:source.costQuantityAllocationId,
-              outputStartQty, operationKind: "conversion", operationKey: batchId,
-            }, params.userId || "system:sku_correction", occurredAt);
-            outputStartQty += layer.qty;
+        if (!quantityPosting) {
+          await this.storage.adjustInventoryLevel(destLevel.id, { variantQty: qtyToConvert }, tx);
+        }
+
+        if (this.lotService) {
+          const lotService = this.lotService.withTx(tx);
+          const shouldConvertLots = Boolean(quantityPosting)
+            || (await lotService.getLotsAtLocation(params.fromVariantId, inv.warehouse_location_id)).length > 0;
+          if (shouldConvertLots) {
+            const consumed = await lotService.adjustLots({ productVariantId: params.fromVariantId,
+              warehouseLocationId: inv.warehouse_location_id, qtyDelta: -qtyToConvert, quantityPosting, notes: params.notes });
+            const occurredAt = this.clock();
+            const inheritedLineage = (await lotService.resolveConversionLineage?.(
+              consumed.consumedLots.map((s) => s.lotId),
+              occurredAt,
+            )) ?? { receivedAt: occurredAt };
+            const layers = allocateBuildCostLayers({ poMills: consumed.consumedPoCostMills,
+              packagingMills: consumed.consumedPackagingCostMills, landedMills: consumed.consumedLandedCostMills }, qtyToConvert);
+            let outputStartQty = 0;
+            for (const layer of layers) {
+              const total = safeMillsNumber(layer.totalMills, "sku_correction.totalMills");
+              const layerCostCents = millsToCents(total);
+              const lot = await lotService.createLot({ productVariantId: params.toVariantId, warehouseLocationId: inv.warehouse_location_id,
+                qty: layer.qty, unitCostCents: layerCostCents, unitCostMills: total,
+                packagingCostMills: safeMillsNumber(layer.packagingMills, "sku_correction.packagingMills"),
+                landedCostMills: safeMillsNumber(layer.landedMills, "sku_correction.landedMills"),
+                purchaseOrderId: inheritedLineage.purchaseOrderId,
+                receivingOrderId: inheritedLineage.receivingOrderId,
+                inboundShipmentId: inheritedLineage.inboundShipmentId,
+                poLineId: inheritedLineage.poLineId,
+                costSource: "sku_correction", costProvisional: consumed.consumedCostProvisional ? 1 : 0,
+                notes: params.notes, receivedAt: inheritedLineage.receivedAt, quantityPosting });
+              lastSkuCorrectionCostCents = layerCostCents;
+              for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
+                sourceLotId: source.lotId, outputLotId: lot.id, sourceQty: source.qty, outputQty: qtyToConvert,
+                costQuantityAllocationId:source.costQuantityAllocationId,
+                outputStartQty, operationKind: "conversion", operationKey: batchId,
+              }, params.userId || "system:sku_correction", occurredAt);
+              outputStartQty += layer.qty;
+            }
+            if (!quantityPosting && lastSkuCorrectionCostCents !== undefined) {
+              await lotService.updateVariantCosts?.(params.toVariantId, lastSkuCorrectionCostCents);
+            }
           }
-        } else await this.storage.adjustInventoryLevel(destLevel.id, { variantQty: qtyToConvert }, tx);
+        }
 
         await this.storage.createInventoryTransaction({
           productVariantId: params.toVariantId,
@@ -2500,19 +2656,6 @@ export class InventoryUseCases {
           userId: params.userId ?? null,
         }, tx);
 
-        // Cleanup empty source
-        if (!quantityPosting && sourceLevel.variantQty - qtyToConvert <= 0) {
-          const hasAssignment = await tx.execute(sql`
-            SELECT 1 FROM product_locations
-            WHERE product_variant_id = ${params.fromVariantId}
-              AND warehouse_location_id = ${inv.warehouse_location_id}
-            LIMIT 1
-          `);
-          if (hasAssignment.rows.length === 0) {
-            await tx.execute(sql`DELETE FROM inventory_levels WHERE id = ${sourceLevel.id}`);
-          }
-        }
-
         conversions.push({ locationCode: inv.location_code, qty: qtyToConvert });
         remaining -= qtyToConvert;
       }
@@ -2522,6 +2665,9 @@ export class InventoryUseCases {
         await quantityPosting.post({ idempotencyKey: params.commandKey!, kind: "transform",
           actor: params.userId || "system:sku_correction", reason: params.notes || "Explicit SKU inventory correction",
           reference: { type: "sku_correction", id: batchId }, occurredAt: this.clock().toISOString() });
+        if (lastSkuCorrectionCostCents !== undefined && this.lotService) {
+          await this.lotService.withTx(tx).updateVariantCosts(params.toVariantId, lastSkuCorrectionCostCents);
+        }
         await quantityPosting.finishOperation(result);
       }
       return result;

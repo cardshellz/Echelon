@@ -380,8 +380,11 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
       ORDER BY id
     `);
     expect(outputLotReadback.rows).not.toHaveLength(0);
+    // WH-1: Case-break replenishment preserves the consumed parent lot's original FIFO received_at.
     expect(outputLotReadback.rows).toEqual(
-      expect.arrayContaining([expect.objectContaining({ received_epoch: executionAt.getTime() / 1000 })]),
+      expect.arrayContaining([
+        expect.objectContaining({ received_epoch: new Date("2026-09-03T12:00:00.000Z").getTime() / 1000 }),
+      ]),
     );
 
     const auditRows = await db.execute(sql`

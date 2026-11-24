@@ -50,6 +50,7 @@ import { convertReceiptCounts, receiptInteger, receivingUnitVersion, withReceivi
 import { toBasePieces, UnitQuantityError } from "@shared/procurement/unit-quantity";
 import { Decimal } from "decimal.js";
 import { resolveReceiptCostEvidence } from "./receipt-cost-evidence.service";
+import { recordShipmentCostRevisions } from "./shipment-cost-application.service";
 import {
   millsToCents,
   centsToMills,
@@ -1698,6 +1699,53 @@ export class ReceivingService {
             const scaled = BigInt(unitCostMills) * BigInt(unitsPerVariant);
             if (scaled > BigInt(Number.MAX_SAFE_INTEGER)) throw new ReceivingError("Receipt cost exceeds the supported mills range", 409, { code: "RECEIPT_COST_OVERFLOW" });
             lotUnitCostMills = Number(scaled);
+          }
+          if (
+            line.costSourceKind === "manual_override" &&
+            inboundShipmentId !== undefined &&
+            line.inboundShipmentLineId != null &&
+            line.purchaseOrderLineId != null
+          ) {
+            const shipmentSources = await recordShipmentCostRevisions(
+              tx as any,
+              inboundShipmentId,
+              userId || "system:receiving",
+              this.clock(),
+              { inboundShipmentLineId: line.inboundShipmentLineId },
+            );
+            const shipmentSource = shipmentSources.revisions.find(
+              (rev) => rev.contract.scope.kind === "shipment_line"
+                && rev.contract.scope.inboundShipmentLineId === line.inboundShipmentLineId,
+            );
+            if (shipmentSource && shipmentSource.contract.scope.purchaseOrderLineId === line.purchaseOrderLineId) {
+              const src = shipmentSource.contract;
+              if (
+                ["estimated", "confirmed"].includes(src.evidence) &&
+                src.currency === "USD" &&
+                src.totalMills !== null &&
+                src.totalMills >= 0 &&
+                src.basePieces !== null &&
+                src.basePieces > 0
+              ) {
+                const num = BigInt(src.totalMills) * BigInt(unitsPerVariant);
+                const den = BigInt(src.basePieces);
+                const scaledFreight = (num * BigInt(2) + den) / (den * BigInt(2));
+                if (scaledFreight > BigInt(Number.MAX_SAFE_INTEGER)) {
+                  throw new ReceivingError("Shipment freight exceeds the supported mills range", 409, { code: "RECEIPT_COST_OVERFLOW" });
+                }
+                lotLandedCostMills = Number(scaledFreight);
+                if (lotLandedCostMills > 0) {
+                  const combined = BigInt(lotUnitCostMills ?? 0) + BigInt(lotLandedCostMills);
+                  if (combined > BigInt(Number.MAX_SAFE_INTEGER)) {
+                    throw new ReceivingError("Combined receipt cost exceeds the supported mills range", 409, { code: "RECEIPT_COST_OVERFLOW" });
+                  }
+                  lotUnitCostMills = Number(combined);
+                }
+              }
+              await this.storage.updateReceivingLine(line.id, {
+                costSourceEvidence: { contractVersion: 1, revisionIds: [shipmentSource.id] },
+              }, tx);
+            }
           }
           // An old copied number or a manual price is not provenance. Keep its
           // physical receipt possible and its financial state visibly provisional.

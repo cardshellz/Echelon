@@ -389,8 +389,8 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
       INSERT INTO catalog.product_variants(id,product_id,sku,is_active) VALUES(103,20,'EA',true);
       INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,is_active,is_pickable) VALUES(101,1,'STOW',1,1)`);
     if (packageDirection) await pool.query(`UPDATE catalog.products SET inventory_strategy='physical_fungible' WHERE id=20;
-      UPDATE catalog.product_variants SET units_per_variant=5,parent_variant_id=${packageDirection === "break" ? 103 : "NULL"} WHERE id=101;
-      UPDATE catalog.product_variants SET units_per_variant=1,parent_variant_id=${packageDirection === "assemble" ? 101 : "NULL"} WHERE id=103`);
+      UPDATE catalog.product_variants SET units_per_variant=5,parent_variant_id=NULL WHERE id=101;
+      UPDATE catalog.product_variants SET units_per_variant=1,parent_variant_id=101 WHERE id=103`);
     await open();
   }
 

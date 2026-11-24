@@ -24,7 +24,12 @@ export async function readShipmentReceiptCustodyCoverage(executor: CoverageExecu
   const context = { purchaseOrderId: scope.purchaseOrderId, inboundShipmentId: scope.inboundShipmentId };
   const sourceIds = sql.join(scope.shipmentLines.map(line => sql`${line.id}`), sql`, `);
   const poLineIds = [...new Set(scope.shipmentLines.flatMap(line => line.purchaseOrderLineId === null ? [] : [line.purchaseOrderLineId]))];
-  const purchaseLineList = sql.join(poLineIds.map(id => sql`${id}`), sql`, `);
+  const receiptPoLineClause = poLineIds.length > 0
+    ? sql`OR rl.purchase_order_line_id=ANY(ARRAY[${sql.join(poLineIds.map(id => sql`${id}`), sql`, `)}]::integer[])`
+    : sql``;
+  const custodyPoLineClause = poLineIds.length > 0
+    ? sql`OR q.purchase_order_line_id=ANY(ARRAY[${sql.join(poLineIds.map(id => sql`${id}`), sql`, `)}]::integer[])`
+    : sql``;
   const result = await executor.execute(sql`
     WITH receipt_rows AS MATERIALIZED (
       SELECT rl.id,rl.receiving_order_id AS "receivingOrderId",ro.purchase_order_id AS "purchaseOrderId",
@@ -33,7 +38,7 @@ export async function readShipmentReceiptCustodyCoverage(executor: CoverageExecu
         rl.units_per_variant_snapshot AS "unitsPerVariantSnapshot",rl.received_qty AS "receivedQty",rl.reversed_qty AS "reversedQty"
       FROM procurement.receiving_lines rl JOIN procurement.receiving_orders ro ON ro.id=rl.receiving_order_id
       WHERE ro.status='closed' AND ((ro.inbound_shipment_id=${scope.inboundShipmentId}
-        AND (ro.purchase_order_id=${scope.purchaseOrderId} OR rl.purchase_order_line_id=ANY(ARRAY[${purchaseLineList}]::integer[])))
+        AND (ro.purchase_order_id=${scope.purchaseOrderId} ${receiptPoLineClause}))
         OR rl.inbound_shipment_line_id=ANY(ARRAY[${sourceIds}]::integer[]))
       ORDER BY rl.id LIMIT ${MAX_EVIDENCE_ROWS + 1}
     ), posting_rows AS MATERIALIZED (
@@ -59,7 +64,7 @@ export async function readShipmentReceiptCustodyCoverage(executor: CoverageExecu
       LEFT JOIN procurement.receiving_lines rl ON rl.id=q.receiving_line_id
       LEFT JOIN procurement.purchase_order_lines pol ON pol.id=q.purchase_order_line_id
       WHERE (ro.inbound_shipment_id=${scope.inboundShipmentId} AND
-        (ro.purchase_order_id=${scope.purchaseOrderId} OR q.purchase_order_line_id=ANY(ARRAY[${purchaseLineList}]::integer[])))
+        (ro.purchase_order_id=${scope.purchaseOrderId} ${custodyPoLineClause}))
         OR q.inbound_shipment_line_id=ANY(ARRAY[${sourceIds}]::integer[])
       ORDER BY q.id LIMIT ${MAX_EVIDENCE_ROWS + 1}
     ), acceptance_rows AS MATERIALIZED (

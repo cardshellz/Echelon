@@ -62,6 +62,8 @@ export interface IInventoryStorage {
     quantity: number;
     userId: string;
     notes?: string;
+    referenceType?: string;
+    referenceId?: string;
   }, tx?: any): Promise<InventoryTransaction>;
   getTransferHistory(limit?: number): Promise<{
     id: number;
@@ -329,6 +331,8 @@ export function createInventoryMethods(
     quantity: number;
     userId: string;
     notes?: string;
+    referenceType?: string;
+    referenceId?: string;
   }, tx: any = db): Promise<InventoryTransaction> {
     if (tx === db) {
       return await db.transaction(async (t) => {
@@ -336,7 +340,7 @@ export function createInventoryMethods(
       });
     }
 
-    const { fromLocationId, toLocationId, productVariantId, quantity, userId, notes } = params;
+    const { fromLocationId, toLocationId, productVariantId, quantity, userId, notes, referenceType, referenceId } = params;
     const quantityPosting = await openOperationalQuantityPosting(tx);
     if (quantityPosting) {
       const replay = await quantityPosting.beginOperation(params.commandKey, { operation: "storage_transfer", ...params });
@@ -350,17 +354,25 @@ export function createInventoryMethods(
         if (!Number.isFinite(createdAt.getTime())) throw new Error("Stored transfer replay has an invalid receipt time");
         return { ...restored, createdAt, voidedAt: restored.voidedAt ? new Date(restored.voidedAt) : null };
       }
-      for (const value of [fromLocationId, toLocationId, productVariantId, quantity]) {
-        if (!Number.isInteger(value) || value <= 0 || value > 2_147_483_647) throw new Error("Transfer identities and quantity must be positive PostgreSQL integers");
+    }
+    for (const value of [fromLocationId, toLocationId, productVariantId, quantity]) {
+      if (!Number.isInteger(value) || value <= 0 || value > 2_147_483_647) {
+        throw new Error("Transfer identities and quantity must be positive PostgreSQL integers");
       }
-      if (fromLocationId === toLocationId || !userId.trim()) throw new Error("Transfer requires distinct locations and an actor");
-      await lockInventoryCostGraph(tx);
-      const locations = (await tx.execute(sql`SELECT id, warehouse_id, is_active, cycle_count_freeze_id
-        FROM warehouse.warehouse_locations WHERE id IN (${fromLocationId}, ${toLocationId}) ORDER BY id FOR SHARE`)).rows;
-      if (locations.length !== 2 || locations.some((location: any) => location.is_active !== 1 || location.cycle_count_freeze_id !== null)
-        || locations[0].warehouse_id == null || locations[0].warehouse_id !== locations[1].warehouse_id) {
-        throw new Error("Transfer requires active unfrozen locations in the same warehouse");
-      }
+    }
+    if (fromLocationId === toLocationId || !userId.trim()) {
+      throw new Error("Transfer requires distinct locations and an actor");
+    }
+    await lockInventoryCostGraph(tx);
+    const locations = (await tx.execute(sql`SELECT id, code, zone, warehouse_id, is_active, is_pickable, location_type, cycle_count_freeze_id
+      FROM warehouse.warehouse_locations WHERE id IN (${fromLocationId}, ${toLocationId}) ORDER BY id FOR SHARE`)).rows as any[];
+    if (locations.length !== 2 || locations.some((location: any) => location.is_active !== 1 || location.cycle_count_freeze_id !== null)
+      || locations[0].warehouse_id == null || locations[0].warehouse_id !== locations[1].warehouse_id) {
+      throw new Error("Transfer requires active unfrozen locations in the same warehouse");
+    }
+    const fromLocRow = locations.find((l: any) => Number(l.id) === fromLocationId)!;
+    const toLocRow = locations.find((l: any) => Number(l.id) === toLocationId)!;
+    if (quantityPosting) {
       await tx.execute(sql`SELECT id FROM inventory.inventory_levels
         WHERE warehouse_location_id IN (${fromLocationId}, ${toLocationId}) AND product_variant_id = ${productVariantId}
         ORDER BY warehouse_location_id, product_variant_id, id FOR UPDATE`);
@@ -396,6 +408,26 @@ export function createInventoryMethods(
       reservedToMove = Math.min(sourceReserved - sourceOnHandAfter, quantity, sourceReserved);
     }
     if (quantityPosting && reservedToMove > 0) throw new Error("Transfer cannot relocate canonical claim ownership; release and replan the claim first");
+    if (!quantityPosting && reservedToMove > 0) {
+      if (Number(toLocRow.is_pickable) !== 1) {
+        throw new Error("Reserved order stock must move to a pickable destination bin");
+      }
+      const conflict = await tx.execute(sql`
+        SELECT oi.id
+        FROM wms.order_items oi
+        JOIN wms.orders o ON o.id = oi.order_id
+        JOIN catalog.product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
+        WHERE pv.id = ${productVariantId}
+          AND UPPER(oi.location) = UPPER(${String(fromLocRow.code)})
+          AND oi.requires_shipping = 1
+          AND (oi.picked_quantity > 0 OR oi.status = 'picked')
+          AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
+        LIMIT 1
+      `);
+      if (conflict.rows.length > 0) {
+        throw new Error(`Cannot move reserved stock from ${String(fromLocRow.code)}: an order at this bin is mid-pick`);
+      }
+    }
 
     // Source: decrement on-hand and (if needed) reserved in a SINGLE update so the
     // row never transiently violates check_reserved_lte_on_hand.
@@ -439,27 +471,17 @@ export function createInventoryMethods(
 
     // Re-point pending, un-started order lines (matched to the variant by SKU —
     // order_items has no variant FK) so the picker follows the stock to the new
-    // bin. Only when reserved actually moved.
+    // bin. Bounded strictly to reservedToMove units.
     let repointed = 0;
     if (reservedToMove > 0) {
-      const [fromLoc] = await tx
-        .select({ code: warehouseLocations.code })
-        .from(warehouseLocations)
-        .where(eq(warehouseLocations.id, fromLocationId))
-        .limit(1);
-      const [toLoc] = await tx
-        .select({ code: warehouseLocations.code, zone: warehouseLocations.zone })
-        .from(warehouseLocations)
-        .where(eq(warehouseLocations.id, toLocationId))
-        .limit(1);
-      if (fromLoc && toLoc) {
-        repointed = await repointPendingWmsOrderItemsForInventoryTransfer(tx, {
-          productVariantId,
-          fromLocationCode: fromLoc.code,
-          toLocationCode: toLoc.code,
-          toZone: toLoc.zone ?? "U",
-        });
-      }
+      repointed = await repointPendingWmsOrderItemsForInventoryTransfer(tx, {
+        productVariantId,
+        fromLocationCode: String(fromLocRow.code),
+        toLocationCode: String(toLocRow.code),
+        toZone: toLocRow.zone ?? "U",
+        maxUnitsToRepoint: reservedToMove,
+        warehouseId: Number(fromLocRow.warehouse_id),
+      });
     }
 
     const batchId = `TRANSFER-${Date.now()}`;
@@ -468,26 +490,54 @@ export function createInventoryMethods(
       fromLocationId,
       toLocationId,
       transactionType: "transfer",
+      unitsPerVariantSnapshot: variant[0].unitsPerVariant,
       variantQtyDelta: quantity,
       variantQtyBefore: sourceLevel.variant_qty,
       variantQtyAfter: sourceLevel.variant_qty - quantity,
       batchId,
       sourceState: "on_hand",
       targetState: "on_hand",
+      referenceType: referenceType ?? "internal",
+      referenceId: referenceId ?? null,
       notes: notes || `Transfer by ${userId}`,
       userId
     }).returning();
 
+    const receipt = transaction[0];
+    const lotSvc = new InventoryLotService(tx);
     if (quantityPosting) {
-      const receipt = transaction[0];
-      await new InventoryLotService(tx).transferLots({ productVariantId, fromLocationId, toLocationId, qty: quantity,
-        notes, actorId: userId, occurredAt: receipt.createdAt, operationKey: `inventory_transfer:${receipt.id}`, quantityPosting });
+      await lotSvc.transferLots({
+        productVariantId,
+        fromLocationId,
+        toLocationId,
+        qty: quantity,
+        notes,
+        actorId: userId,
+        occurredAt: receipt.createdAt,
+        operationKey: `inventory_transfer:${receipt.id}`,
+        quantityPosting,
+      });
       await quantityPosting.post({
         idempotencyKey: params.commandKey!, kind: "transfer", actor: userId,
         reason: notes || "Warehouse stock transfer", occurredAt: receipt.createdAt.toISOString(),
         reference: { type: "inventory_transaction", id: String(receipt.id) },
       });
       await quantityPosting.finishOperation({ transaction: receipt });
+    } else {
+      const existingLots = await lotSvc.getLotsAtLocation(productVariantId, fromLocationId);
+      if (existingLots.length > 0) {
+        await lotSvc.transferLots({
+          productVariantId,
+          fromLocationId,
+          toLocationId,
+          qty: quantity,
+          notes,
+          actorId: userId,
+          occurredAt: receipt.createdAt,
+          operationKey: `inventory_transfer:${receipt.id}`,
+          reservedQtyToMove: reservedToMove,
+        });
+      }
     }
 
     // Separate ledger row for the reserved movement, for a complete audit trail.
@@ -503,6 +553,8 @@ export function createInventoryMethods(
         batchId,
         sourceState: "reserved",
         targetState: "reserved",
+        referenceType: referenceType ?? "internal",
+        referenceId: referenceId ?? null,
         notes:
           `Moved ${reservedToMove} reserved unit(s) with stock transfer; ` +
           `re-pointed ${repointed} pending order line(s)` +
@@ -525,8 +577,6 @@ export function createInventoryMethods(
     createdAt: Date;
     canUndo: boolean;
   }[]> {
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-
     const results = await db
       .select({
         id: inventoryTransactions.id,
@@ -536,12 +586,31 @@ export function createInventoryMethods(
         quantity: inventoryTransactions.variantQtyDelta,
         userId: inventoryTransactions.userId,
         createdAt: inventoryTransactions.createdAt,
-        batchId: inventoryTransactions.batchId
+        batchId: inventoryTransactions.batchId,
+        referenceType: inventoryTransactions.referenceType,
+        notes: inventoryTransactions.notes,
       })
       .from(inventoryTransactions)
       .where(eq(inventoryTransactions.transactionType, "transfer"))
       .orderBy(desc(inventoryTransactions.createdAt))
       .limit(limit);
+
+    const txIds = results.map((r) => r.id);
+    const creditedIds = new Set<number>();
+    if (txIds.length > 0) {
+      const regRes = await db.execute(sql`SELECT to_regclass('inventory.replen_transfer_credits') AS reg`);
+      if (regRes.rows?.[0]?.reg) {
+        const idSql = sql.join(txIds.map((id) => sql`${id}`), sql`, `);
+        const creditRows = await db.execute(sql`
+          SELECT transfer_transaction_id
+          FROM inventory.replen_transfer_credits
+          WHERE transfer_transaction_id IN (${idSql})
+        `);
+        for (const row of (creditRows.rows ?? []) as any[]) {
+          creditedIds.add(Number(row.transfer_transaction_id));
+        }
+      }
+    }
 
     const enriched = await Promise.all(results.map(async (row) => {
       const fromLoc = row.fromLocationId
@@ -555,13 +624,20 @@ export function createInventoryMethods(
         : [];
 
       const reverseExists = await db
-        .select()
+        .select({ id: inventoryTransactions.id })
         .from(inventoryTransactions)
         .where(and(
           eq(inventoryTransactions.transactionType, "transfer"),
-          eq(inventoryTransactions.notes, `Undo of transfer ${row.id}`)
+          sql`(${inventoryTransactions.notes} = ${`Undo of transfer ${row.id}`} OR (${inventoryTransactions.referenceType} = 'transfer_reversal' AND ${inventoryTransactions.referenceId} = ${String(row.id)}))`
         ))
         .limit(1);
+
+      const nonReversibleWorkflow =
+        row.referenceType === "interwarehouse_transfer" ||
+        row.referenceType === "replenishment_task" ||
+        row.referenceType === "transfer_reversal" ||
+        Boolean(row.notes?.startsWith("Undo of transfer ")) ||
+        creditedIds.has(row.id);
 
       return {
         id: row.id,
@@ -572,7 +648,7 @@ export function createInventoryMethods(
         quantity: row.quantity || 0,
         userId: row.userId || "system",
         createdAt: row.createdAt,
-        canUndo: row.createdAt > fiveMinutesAgo && reverseExists.length === 0
+        canUndo: !nonReversibleWorkflow && reverseExists.length === 0,
       };
     }));
 
@@ -598,13 +674,34 @@ export function createInventoryMethods(
     if (txn.transactionType !== "transfer") {
       throw new Error("Can only undo transfer transactions");
     }
+    if (txn.referenceType === "interwarehouse_transfer") {
+      throw new Error("Inter-warehouse transfer legs cannot be undone directly; reconcile or cancel the transfer order");
+    }
+    if (txn.referenceType === "replenishment_task") {
+      throw new Error("Replenishment task transfers cannot be undone directly");
+    }
+    if (txn.referenceType === "transfer_reversal" || txn.notes?.startsWith("Undo of transfer ")) {
+      throw new Error("A reverse transfer cannot itself be undone; create a new transfer instead");
+    }
+
+    const creditReg = await tx.execute(sql`SELECT to_regclass('inventory.replen_transfer_credits') AS reg`);
+    if (creditReg.rows?.[0]?.reg) {
+      const credited = await tx.execute(sql`
+        SELECT 1 FROM inventory.replen_transfer_credits
+        WHERE transfer_transaction_id = ${transactionId}
+        LIMIT 1
+      `);
+      if ((credited.rows ?? []).length > 0) {
+        throw new Error("Transfers already credited to a replenishment task cannot be undone");
+      }
+    }
 
     const alreadyUndone = await tx
-      .select()
+      .select({ id: inventoryTransactions.id })
       .from(inventoryTransactions)
       .where(and(
         eq(inventoryTransactions.transactionType, "transfer"),
-        eq(inventoryTransactions.notes, `Undo of transfer ${transactionId}`)
+        sql`(${inventoryTransactions.notes} = ${`Undo of transfer ${transactionId}`} OR (${inventoryTransactions.referenceType} = 'transfer_reversal' AND ${inventoryTransactions.referenceId} = ${String(transactionId)}))`
       ))
       .limit(1);
 
@@ -619,6 +716,8 @@ export function createInventoryMethods(
       productVariantId: txn.productVariantId!,
       quantity: txn.variantQtyDelta || 0,
       userId,
+      referenceType: "transfer_reversal",
+      referenceId: String(transactionId),
       notes: `Undo of transfer ${transactionId}`
     }, tx);
     });
