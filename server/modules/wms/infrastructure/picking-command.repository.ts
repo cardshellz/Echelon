@@ -53,9 +53,14 @@ const recordSchema = z
     followup_result: z.record(z.unknown()).nullable(),
     committed_at: z.coerce.date().nullable(),
     completed_at: z.coerce.date().nullable(),
+    attempt_count: z.number().int().nonnegative().optional(),
+    last_error: z.string().nullable().optional(),
   })
   .passthrough();
 export type PickingCommandRecord = z.infer<typeof recordSchema>;
+
+export const MAX_PICKING_FOLLOWUP_ATTEMPTS = 10;
+const PICKING_RETRY_NEXT_RE = /^\[retry next=([^\]]+)\]\s*/;
 
 function timestamp(clock: () => Date): Date {
   const now = clock();
@@ -369,9 +374,36 @@ export async function deliverPickingFollowup<
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await database.execute(sql`UPDATE wms.picking_commands SET last_error=${message.slice(0, 2000)},attempt_count=attempt_count+1
+    const now = timestamp(clock);
+    const updated = await database.execute(sql`UPDATE wms.picking_commands
+      SET attempt_count = attempt_count + 1
+      WHERE command_key = ${key} AND completed_at IS NULL
+      RETURNING attempt_count`);
+    const attempts = Math.max(1, Number(updated.rows?.[0]?.attempt_count ?? 1));
+    const deadLettered = attempts >= MAX_PICKING_FOLLOWUP_ATTEMPTS;
+    const backoffMs = Math.min(300_000, 5_000 * Math.pow(2, attempts - 1));
+    const nextRetryIso = new Date(now.getTime() + backoffMs).toISOString();
+    const formattedError = deadLettered
+      ? `[DEAD_LETTER attempts=${attempts}] ${message}`.slice(0, 2000)
+      : `[retry next=${nextRetryIso}] ${message}`.slice(0, 2000);
+    await database.execute(sql`UPDATE wms.picking_commands SET last_error=${formattedError}
       WHERE command_key=${key} AND completed_at IS NULL`);
-    logger.error("picking_followup_pending", { event: "picking_followup_pending", commandKey: key, message });
+    if (deadLettered) {
+      logger.error("picking_followup_dead_letter", {
+        event: "picking_followup_dead_letter",
+        commandKey: key,
+        attempts,
+        message,
+      });
+    } else {
+      logger.error("picking_followup_pending", {
+        event: "picking_followup_pending",
+        commandKey: key,
+        attempts,
+        nextRetryAt: nextRetryIso,
+        message,
+      });
+    }
     return null;
   }
 }
@@ -379,13 +411,32 @@ export async function deliverPickingFollowup<
 export async function pendingPickingCommandKeys(
   database: Transaction,
   limit = 20,
+  now: Date = new Date(),
 ): Promise<string[]> {
   z.number().int().positive().max(100).parse(limit);
+  const fetchLimit = Math.min(100, limit * 3);
   const result =
-    await database.execute(sql`SELECT command_key FROM wms.picking_commands
-    WHERE physical_receipt IS NOT NULL AND completed_at IS NULL
-    ORDER BY attempt_count ASC, committed_at ASC, command_key ASC LIMIT ${limit}`);
-  return result.rows.map((row) => keySchema.parse(row.command_key));
+    await database.execute(sql`SELECT command_key, last_error FROM wms.picking_commands
+    WHERE physical_receipt IS NOT NULL
+      AND completed_at IS NULL
+      AND attempt_count < ${MAX_PICKING_FOLLOWUP_ATTEMPTS}
+      AND (last_error IS NULL OR last_error NOT LIKE '[DEAD_LETTER%')
+    ORDER BY attempt_count ASC, committed_at ASC, command_key ASC LIMIT ${fetchLimit}`);
+  const ready: string[] = [];
+  for (const row of result.rows) {
+    if (ready.length >= limit) break;
+    const lastError = typeof row.last_error === "string" ? row.last_error : "";
+    if (lastError.startsWith("[DEAD_LETTER")) continue;
+    const match = PICKING_RETRY_NEXT_RE.exec(lastError);
+    if (match) {
+      const nextTs = new Date(match[1]);
+      if (!Number.isNaN(nextTs.getTime()) && now.getTime() < nextTs.getTime()) {
+        continue;
+      }
+    }
+    ready.push(keySchema.parse(row.command_key));
+  }
+  return ready;
 }
 
 export function pickingCommandBeforeItem(

@@ -53,7 +53,9 @@ describe("ShipStation WMS hold/release sync", () => {
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/topic: "shipstation_hold_sync"/);
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/dispatchShipStationHoldSyncRetry/);
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/FROM wms\.orders/);
-    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/Number\(orderRow\.on_hold\) === 1 \|\| orderRow\.order_edit_operation_id != null \? "hold" : "release"/);
+    expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(
+      /Number\(orderRow\.on_hold\) === 1\s*\|\|\s*orderRow\.order_edit_operation_id != null\s*\|\|\s*orderRow\.warehouse_status === "exception"\s*\?\s*"hold"\s*:\s*"release"/,
+    );
   });
 
   it("routes sort-rank refreshes through a durable retry topic", () => {

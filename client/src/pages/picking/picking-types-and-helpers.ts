@@ -4,6 +4,19 @@ import type { PickingAssignmentSnapshot } from "@shared/types/picking-assignment
 import { derivePickerLineProgress } from "@/lib/picking-progress";
 import type { Order, OrderItem, ItemStatus } from "@shared/schema";
 
+export type ReplenSourceCandidateOption = {
+  locationId: number;
+  locationCode: string;
+  variantId: number;
+  variantSku: string | null;
+  variantName: string | null;
+  availableQty: number;
+  unitsPerVariant: number;
+  qtySourceUnits: number;
+  qtyTargetUnits: number;
+  replenMethod: string;
+};
+
 export type ReplenPrediction = {
   systemQty: number;
   postPickQty: number;
@@ -13,11 +26,15 @@ export type ReplenPrediction = {
   autoReplen: number;
   stockout: boolean;
   executionMode: string;
+  sourceLocationId?: number | null;
   sourceLocationCode: string | null;
   sourceQty: number;
   sourceVariantName: string | null;
+  qtySourceUnits?: number;
+  qtyTargetUnits?: number;
+  availableSources?: ReplenSourceCandidateOption[];
   existingTaskId?: number | null;
-  existingTaskStatus?: string | null;
+  existingTaskStatus?: number | string | null;
   existingTaskExecutionMode?: string | null;
   existingTaskBlocksShipment?: boolean;
 };
@@ -298,21 +315,44 @@ export async function updateOrderItem(
   pickedQuantity?: number,
   shortReason?: string,
   pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short",
-  warehouseLocationId?: number
+  warehouseLocationId?: number,
+  options?: {
+    replenSourceLocationId?: number;
+    confirmFoundOnShelf?: boolean;
+  },
 ): Promise<PickResponse> {
-  return sendPickingCommand("pick", itemId, { status, pickedQuantity, shortReason, pickMethod, warehouseLocationId }, async ({ commandId, payload }) => {
-    const res = await fetch(`/api/picking/items/${itemId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, commandId }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: "Unknown error" }));
-      const message = err.message || err.error || `Failed to update item (${res.status})`;
-      throw isDefiniteCommandRejection(res.status, err) ? new PickingCommandRejectedError(message) : new Error(message);
-    }
-    return res.json();
-  });
+  return sendPickingCommand(
+    "pick",
+    itemId,
+    {
+      status,
+      pickedQuantity,
+      shortReason,
+      pickMethod,
+      warehouseLocationId,
+      ...(options?.replenSourceLocationId !== undefined
+        ? { replenSourceLocationId: options.replenSourceLocationId }
+        : {}),
+      ...(options?.confirmFoundOnShelf !== undefined
+        ? { confirmFoundOnShelf: options.confirmFoundOnShelf }
+        : {}),
+    },
+    async ({ commandId, payload }) => {
+      const res = await fetch(`/api/picking/items/${itemId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, commandId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Unknown error" }));
+        const message = err.message || err.error || `Failed to update item (${res.status})`;
+        throw isDefiniteCommandRejection(res.status, err)
+          ? new PickingCommandRejectedError(message, err?.error || err?.code, err)
+          : new Error(message);
+      }
+      return res.json();
+    },
+  );
 }
 
 export async function resolveAllocationBin(itemId: number, locationCode: string): Promise<ResolveAllocationResponse> {

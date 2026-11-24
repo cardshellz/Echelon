@@ -1156,3 +1156,78 @@ export async function linkShipStationOrderIdentityOnOutboundShipmentInWms(
     status: row ? String(row.status) : null,
   };
 }
+
+export async function finalizePreLabelShipmentsForShipPartialInWms(
+  executor: SqlExecutor,
+  input: { orderId: number; now: Date },
+): Promise<{ pushShipmentIds: number[]; cancelShipmentIds: number[] }> {
+  const cancelledEmpty = await executor.execute(sql`
+    UPDATE wms.outbound_shipments os
+    SET status = 'cancelled',
+        cancelled_at = ${input.now},
+        voided_reason = 'ship_partial_empty_shipment',
+        held = false,
+        on_hold_reason = NULL,
+        updated_at = ${input.now}
+    WHERE os.order_id = ${input.orderId}
+      AND os.status IN ('planned', 'queued', 'on_hold')
+      AND os.shipped_at IS NULL
+      AND os.tracking_number IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM wms.outbound_shipment_items osi WHERE osi.shipment_id = os.id AND osi.qty > 0
+      )
+    RETURNING os.id, os.shipstation_order_id, os.engine_order_ref
+  `);
+
+  const active = await executor.execute(sql`
+    UPDATE wms.outbound_shipments os
+    SET held = false,
+        held_at = NULL,
+        on_hold_reason = NULL,
+        status = CASE WHEN os.status = 'on_hold' THEN 'queued'::wms.shipment_status ELSE os.status END,
+        updated_at = ${input.now}
+    WHERE os.order_id = ${input.orderId}
+      AND os.status IN ('planned', 'queued', 'on_hold')
+      AND os.shipped_at IS NULL
+      AND os.tracking_number IS NULL
+      AND EXISTS (
+        SELECT 1 FROM wms.outbound_shipment_items osi WHERE osi.shipment_id = os.id AND osi.qty > 0
+      )
+    RETURNING os.id
+  `);
+
+  const cancelShipmentIds = ((cancelledEmpty?.rows ?? []) as Array<Record<string, unknown>>)
+    .filter((r) => r.shipstation_order_id != null || r.engine_order_ref != null)
+    .map((r) => Number(r.id));
+  const pushShipmentIds = ((active?.rows ?? []) as Array<Record<string, unknown>>).map((r) => Number(r.id));
+
+  return { pushShipmentIds, cancelShipmentIds };
+}
+
+export async function cancelOpenPreLabelShipmentsForOrderInWms(
+  executor: SqlExecutor,
+  input: { orderId: number; reason: string; now: Date },
+): Promise<{ cancelledShipmentIds: number[]; pushedShipmentIds: number[] }> {
+  const cancelled = await executor.execute(sql`
+    UPDATE wms.outbound_shipments os
+    SET status = 'cancelled',
+        cancelled_at = ${input.now},
+        voided_reason = ${input.reason},
+        held = false,
+        on_hold_reason = NULL,
+        updated_at = ${input.now}
+    WHERE os.order_id = ${input.orderId}
+      AND os.status IN ('planned', 'queued', 'on_hold')
+      AND os.shipped_at IS NULL
+      AND os.tracking_number IS NULL
+    RETURNING os.id, os.shipstation_order_id, os.engine_order_ref
+  `);
+
+  const rows = (cancelled?.rows ?? []) as Array<Record<string, unknown>>;
+  return {
+    cancelledShipmentIds: rows.map((r) => Number(r.id)),
+    pushedShipmentIds: rows
+      .filter((r) => r.shipstation_order_id != null || r.engine_order_ref != null)
+      .map((r) => Number(r.id)),
+  };
+}

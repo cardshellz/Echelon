@@ -50,7 +50,7 @@ import {
   PickingQueueView,
 } from "./picking/PickingQueueViews";
 import { PickingActiveItemView } from "./picking/PickingActiveItemView";
-import { PickingDialogs } from "./picking/PickingDialogs";
+import { PickingDialogs, type FoundOnShelfPromptState } from "./picking/PickingDialogs";
 
 export * from "./picking/picking-types-and-helpers";
 export * from "./picking/PickingBadges";
@@ -190,7 +190,10 @@ function PickingWorkspace() {
   const [replenGuidanceData, setReplenGuidanceData] = useState<ReplenGuidanceData | null>(null);
   const [replenGuidanceLoading, setReplenGuidanceLoading] = useState(false);
   const [multiQtyOpen, setMultiQtyOpen] = useState(false);
+  const [multiQtyMethod, setMultiQtyMethod] = useState<"scan" | "manual">("scan");
   const [pickQty, setPickQty] = useState(1);
+  const [selectedReplenSourceByItem, setSelectedReplenSourceByItem] = useState<Record<number, number>>({});
+  const [foundOnShelfPrompt, setFoundOnShelfPrompt] = useState<FoundOnShelfPromptState | null>(null);
   const [allocationDialogOpen, setAllocationDialogOpen] = useState(false);
   const [allocationTargetIndex, setAllocationTargetIndex] = useState<number | null>(null);
   const [allocationBinCode, setAllocationBinCode] = useState("");
@@ -320,18 +323,31 @@ function PickingWorkspace() {
 
   // Mutation for updating items
   const updateItemMutation = useMutation({
-    mutationFn: ({ itemId, status, pickedQuantity, shortReason, pickMethod }: {
+    mutationFn: ({
+      itemId,
+      status,
+      pickedQuantity,
+      shortReason,
+      pickMethod,
+      replenSourceLocationId,
+      confirmFoundOnShelf,
+    }: {
       itemId: number;
       status: ItemStatus;
       pickedQuantity?: number;
       shortReason?: string;
       pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short";
+      replenSourceLocationId?: number;
+      confirmFoundOnShelf?: boolean;
     }) => {
       const item = singleQueue.flatMap(order => order.items).find(item => item.id === itemId)
         ?? queue.flatMap(batch => batch.items).find(item => item.id === itemId);
       if (item?.sourcePlan?.status === "blocked") throw new Error(item.sourcePlan.message);
       const source = item?.sourcePlan?.status === "ready" ? item.sourcePlan.warehouseLocationId : undefined;
-      return updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod, source);
+      return updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod, source, {
+        replenSourceLocationId,
+        confirmFoundOnShelf,
+      });
     },
     onSuccess: (data: PickResponse) => {
       const { item: updatedItem, inventory } = data;
@@ -412,6 +428,29 @@ function PickingWorkspace() {
       setBinCountContext(null);
       setMultiQtyOpen(false);
       discardOptimisticLocalOrderForItem(variables.itemId);
+
+      const errCode = (error as any)?.code;
+      const errDetails = (error as any)?.details ?? {};
+      if (errCode === "found_on_shelf_confirmation_required" && variables.status !== "short") {
+        const matchedItem =
+          singleQueue.flatMap((o) => o.items).find((it) => it.id === variables.itemId) ??
+          queue.flatMap((b) => b.items).find((it) => it.id === variables.itemId);
+        setFoundOnShelfPrompt({
+          itemId: variables.itemId,
+          sku: matchedItem?.sku || "SKU",
+          locationCode: String(errDetails.locationCode || matchedItem?.location || "Bin"),
+          systemQty: Number(errDetails.systemQty ?? 0),
+          status: variables.status as FoundOnShelfPromptState["status"],
+          pickedQuantity: Number(variables.pickedQuantity ?? matchedItem?.qty ?? 1),
+          pickMethod:
+            variables.pickMethod && variables.pickMethod !== "short"
+              ? variables.pickMethod
+              : "manual",
+          replenSourceLocationId: variables.replenSourceLocationId,
+        });
+        playSound("error");
+        return;
+      }
 
       // Show error to user
       console.error("[PICK ERROR]", error.message, "status:", error);
@@ -680,7 +719,7 @@ function PickingWorkspace() {
     }
   };
 
-  const confirmPick = (qty: number) => {
+  const confirmPick = (qty: number, method: "scan" | "manual" = "scan") => {
     if (!activeWork || !currentItem) return;
     if (scanPickInFlightRef.current.has(currentItem.id)) return;
     scanPickInFlightRef.current.add(currentItem.id);
@@ -692,7 +731,9 @@ function PickingWorkspace() {
       itemId: currentItem.id,
       status: newStatus,
       pickedQuantity: newPicked,
-      pickMethod: "scan",
+      pickMethod: method,
+      replenSourceLocationId: selectedReplenSourceByItem[currentItem.id],
+      confirmFoundOnShelf: false,
     });
 
     let orderCompleted = false;
@@ -742,6 +783,7 @@ function PickingWorkspace() {
     setScanStatus("idle");
     setScanInput("");
     setMultiQtyOpen(false);
+    setMultiQtyMethod("scan");
     setPickQty(1);
 
     if (orderCompleted) {
@@ -903,7 +945,9 @@ function PickingWorkspace() {
       itemId: item.id,
       status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
       pickedQuantity: newPicked,
-      pickMethod: "scan"
+      pickMethod: "scan",
+      replenSourceLocationId: selectedReplenSourceByItem[item.id],
+      confirmFoundOnShelf: false,
     });
     
     const checkAndHandleCompletion = (items: typeof activeWork.items) => {
@@ -973,7 +1017,9 @@ function PickingWorkspace() {
       itemId: item.id,
       status: "completed" as ItemStatus,
       pickedQuantity: qty,
-      pickMethod: "pick_all"
+      pickMethod: "pick_all",
+      replenSourceLocationId: selectedReplenSourceByItem[item.id],
+      confirmFoundOnShelf: false,
     });
     
     let orderCompleted = false;
@@ -1075,7 +1121,9 @@ function PickingWorkspace() {
       itemId: item.id, 
       status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
       pickedQuantity: newPicked,
-      pickMethod: "manual"
+      pickMethod: "manual",
+      replenSourceLocationId: selectedReplenSourceByItem[item.id],
+      confirmFoundOnShelf: false,
     });
     
     let orderCompleted = false;
@@ -1169,6 +1217,8 @@ function PickingWorkspace() {
       status: newStatus,
       pickedQuantity: newPicked,
       pickMethod: "manual",
+      replenSourceLocationId: selectedReplenSourceByItem[item.id],
+      confirmFoundOnShelf: false,
     });
 
     let orderCompleted = false;
@@ -1369,8 +1419,19 @@ function PickingWorkspace() {
       canViewReplenTasks={canViewReplenTasks}
       handleScan={handleScan}
       processFocusedScan={processFocusedScan}
-      setMultiQtyOpen={setMultiQtyOpen}
+      setMultiQtyOpen={(open) => {
+        if (!open) setMultiQtyMethod("scan");
+        setMultiQtyOpen(open);
+      }}
+      openManualMultiQty={() => {
+        setMultiQtyMethod("manual");
+        setMultiQtyOpen(true);
+      }}
       confirmPick={confirmPick}
+      selectedReplenSourceByItem={selectedReplenSourceByItem}
+      onSelectReplenSource={(itemId, locationId) =>
+        setSelectedReplenSourceByItem((prev) => ({ ...prev, [itemId]: locationId }))
+      }
       checkReplenGuidance={checkReplenGuidance}
       replenGuidanceLoading={replenGuidanceLoading}
       canManageHolds={canManageHolds}
@@ -1405,11 +1466,40 @@ function PickingWorkspace() {
     >
       <PickingDialogs
         multiQtyOpen={multiQtyOpen}
-        setMultiQtyOpen={setMultiQtyOpen}
+        setMultiQtyOpen={(open) => {
+          if (!open) setMultiQtyMethod("scan");
+          setMultiQtyOpen(open);
+        }}
+        multiQtyMethod={multiQtyMethod}
         pickQty={pickQty}
         setPickQty={setPickQty}
         currentItem={currentItem}
         confirmPick={confirmPick}
+        foundOnShelfPrompt={foundOnShelfPrompt}
+        setFoundOnShelfPrompt={setFoundOnShelfPrompt}
+        onConfirmFoundOnShelf={() => {
+          if (!foundOnShelfPrompt) return;
+          const prompt = foundOnShelfPrompt;
+          setFoundOnShelfPrompt(null);
+          updateItemMutation.mutate({
+            itemId: prompt.itemId,
+            status: prompt.status,
+            pickedQuantity: prompt.pickedQuantity,
+            pickMethod: prompt.pickMethod,
+            replenSourceLocationId: prompt.replenSourceLocationId,
+            confirmFoundOnShelf: true,
+          });
+        }}
+        onShortFromFoundOnShelf={() => {
+          if (!foundOnShelfPrompt) return;
+          const targetIdx = activeWork?.items.findIndex((it) => it.id === foundOnShelfPrompt.itemId) ?? -1;
+          const target = targetIdx >= 0 ? activeWork?.items[targetIdx] : currentItem;
+          setFoundOnShelfPrompt(null);
+          setShortPickListIndex(pickerViewMode === "list" && targetIdx >= 0 ? targetIdx : null);
+          setShortPickQty(String(target?.picked || 0));
+          setShortPickReason("out_of_stock");
+          setShortPickOpen(true);
+        }}
         editQtyOpen={editQtyOpen}
         setEditQtyOpen={setEditQtyOpen}
         editQtyIdx={editQtyIdx}

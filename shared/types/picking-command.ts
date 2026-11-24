@@ -10,6 +10,8 @@ export const pickingCommandSchema = z
       .enum(["scan", "manual", "pick_all", "button", "short"])
       .optional(),
     warehouseLocationId: quantity.positive().optional(),
+    replenSourceLocationId: quantity.positive().optional(),
+    confirmFoundOnShelf: z.boolean().optional(),
   })
   .strict();
 export const unpickingCommandSchema = z

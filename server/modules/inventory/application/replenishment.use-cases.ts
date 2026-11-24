@@ -4,6 +4,10 @@ import { reportReplenishmentException } from "./report-replenishment-exception";
 import { changeReplenishmentTask } from "./replenishment-task-command";
 import { createManualReplenishmentTask } from "./create-manual-replenishment-task";
 import { creditTransferToReplenishment, recordReplenishmentFollowup } from "../infrastructure/replenishment-transfer-credit.repository";
+import {
+  formatFollowupRetryError,
+  isFollowupReadyForRetry,
+} from "../domain/followup-retry-metadata";
 import { eq, and, or, sql, inArray, isNull, asc } from "drizzle-orm";
 import { logger } from "../../../platform/observability/logger";
 import { validateReplenishmentTrigger } from "../domain/replenishment-trigger";
@@ -76,6 +80,19 @@ export type ReplenGuidance = {
   skipReason?: string | null;
 };
 
+export type ReplenSourceCandidateOption = {
+  locationId: number;
+  locationCode: string;
+  variantId: number;
+  variantSku: string | null;
+  variantName: string | null;
+  availableQty: number;
+  unitsPerVariant: number;
+  qtySourceUnits: number;
+  qtyTargetUnits: number;
+  replenMethod: string;
+};
+
 export type ReplenPickPrediction = {
   systemQty: number;
   postPickQty: number;
@@ -85,9 +102,13 @@ export type ReplenPickPrediction = {
   autoReplen: number;
   stockout: boolean;
   executionMode: string;
+  sourceLocationId?: number | null;
   sourceLocationCode: string | null;
   sourceQty: number;
   sourceVariantName: string | null;
+  qtySourceUnits?: number;
+  qtyTargetUnits?: number;
+  availableSources?: ReplenSourceCandidateOption[];
   existingTaskId: number | null;
   existingTaskStatus: string | null;
   existingTaskExecutionMode: string | null;
@@ -102,6 +123,7 @@ export type ReplenOrderContext = {
   blocksShipment?: boolean;
   forceWhenAtOrBelowZero?: boolean;
   triggeredBy?: string;
+  preferredSourceLocationId?: number | null;
 };
 
 export type ReplenSourceEmptyReport = {
@@ -2712,6 +2734,135 @@ export class ReplenishmentUseCases {
     };
   }
 
+  async listEligibleReplenSources(
+    productVariantId: number,
+    warehouseLocationId: number,
+    qtyNeededOverride?: number,
+  ): Promise<ReplenSourceCandidateOption[]> {
+    const contextResult = await this.loadReplenEvaluationContext(productVariantId, warehouseLocationId);
+    if (contextResult.status === "skip") return [];
+    const { location, variant, evaluatedQty } = contextResult.context;
+
+    const locConfig = await this.loadLocationConfig(warehouseLocationId, productVariantId);
+    const params = await this.resolveReplenParams(
+      productVariantId,
+      variant,
+      location.warehouseId ?? undefined,
+      locConfig,
+    );
+    if (params.replenMethod === "pallet_drop") return [];
+
+    const runtime = await this.transformationAuthority.readRuntime();
+    const qtyNeeded = Math.max(
+      1,
+      qtyNeededOverride ??
+        this.calculateQtyNeeded(params.maxQty, params.triggerValue ?? 1, evaluatedQty),
+    );
+
+    const candidateVariants: ProductVariant[] = [];
+    if (params.sourceVariantId != null) {
+      const [configured] = await this.db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, params.sourceVariantId))
+        .limit(1);
+      if (configured && this.isActiveVariant(configured as ProductVariant)) {
+        if (
+          configured.id === productVariantId ||
+          runtime.authority === "legacy" ||
+          (await this.isCanonicalCaseBreakAuthorized(configured as ProductVariant, variant, runtime))
+        ) {
+          candidateVariants.push(configured as ProductVariant);
+        }
+      }
+    } else if (
+      params.sourceHierarchyLevel == null ||
+      params.sourceHierarchyLevel === variant.hierarchyLevel ||
+      !variant.productId
+    ) {
+      candidateVariants.push(variant);
+    } else {
+      const siblings = (await this.db
+        .select()
+        .from(productVariants)
+        .where(and(eq(productVariants.productId, variant.productId), eq(productVariants.isActive, true)))) as ProductVariant[];
+      for (const sib of siblings) {
+        if (sib.id === productVariantId || sib.hierarchyLevel !== params.sourceHierarchyLevel) continue;
+        if (
+          runtime.authority === "legacy"
+            ? this.isValidCaseBreakSource(sib, variant)
+            : await this.isCanonicalCaseBreakAuthorized(sib, variant, runtime)
+        ) {
+          candidateVariants.push(sib);
+        }
+      }
+      if (candidateVariants.length === 0) {
+        candidateVariants.push(variant);
+      }
+    }
+
+    const results: ReplenSourceCandidateOption[] = [];
+    const seen = new Set<string>();
+
+    for (const srcVar of candidateVariants) {
+      const demand = await this.demandForSource(variant, srcVar, qtyNeeded, runtime);
+      const rows = (await this.db
+        .select({
+          level: inventoryLevels,
+          location: warehouseLocations,
+        })
+        .from(inventoryLevels)
+        .innerJoin(
+          warehouseLocations,
+          eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
+        )
+        .where(
+          and(
+            eq(inventoryLevels.productVariantId, srcVar.id),
+            eq(warehouseLocations.locationType, params.sourceLocationType),
+            eq(warehouseLocations.isActive, 1),
+            isNull(warehouseLocations.cycleCountFreezeId),
+            sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} >= ${demand.qtySourceUnits}`,
+            ...(location.warehouseId != null
+              ? [eq(warehouseLocations.warehouseId, location.warehouseId)]
+              : []),
+          ),
+        )) as Array<{ level: InventoryLevel; location: WarehouseLocation }>;
+
+      rows.sort((a, b) => {
+        const aParent = location.parentLocationId === a.location.id ? 0 : 1;
+        const bParent = location.parentLocationId === b.location.id ? 0 : 1;
+        return aParent - bParent || a.location.id - b.location.id;
+      });
+
+      for (const row of rows) {
+        if (row.location.id === warehouseLocationId) continue;
+        const key = `${row.location.id}:${srcVar.id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const availableQty = Math.max(
+          0,
+          Number(row.level.variantQty ?? 0) - Number(row.level.reservedQty ?? 0),
+        );
+        if (availableQty < demand.qtySourceUnits) continue;
+        results.push({
+          locationId: row.location.id,
+          locationCode: row.location.code,
+          variantId: srcVar.id,
+          variantSku: srcVar.sku ?? null,
+          variantName: srcVar.name || srcVar.sku || null,
+          availableQty,
+          unitsPerVariant: this.variantUnits(srcVar),
+          qtySourceUnits: demand.qtySourceUnits,
+          qtyTargetUnits: demand.qtyTargetUnits,
+          replenMethod: srcVar.id === productVariantId ? params.replenMethod : "case_break",
+        });
+      }
+    }
+
+    return results;
+  }
+
   async predictReplenAfterPick(
     productVariantId: number,
     warehouseLocationId: number,
@@ -2725,15 +2876,17 @@ export class ReplenishmentUseCases {
         eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
       ))
       .limit(1);
-    if (!level) return null;
 
-    const systemQty = level.variantQty ?? 0;
+    const systemQty = level?.variantQty ?? 0;
     const postPickQty = Math.max(0, systemQty - Math.max(0, pickedQty));
     const guidance = await this.checkReplenNeeded(productVariantId, warehouseLocationId, {
       currentQtyOverride: postPickQty,
+      ...(systemQty < Math.max(1, pickedQty) ? { forceWhenAtOrBelowZero: true } : {}),
     });
+    if (!level && !guidance.needed && !guidance.existingTaskId) return null;
 
     let sourceQty = 0;
+    let availableSources: ReplenSourceCandidateOption[] | undefined;
     if (guidance.sourceLocationId) {
       const [sourceLevel] = await this.db
         .select()
@@ -2744,6 +2897,9 @@ export class ReplenishmentUseCases {
         ))
         .limit(1);
       sourceQty = Math.max(0, Number(sourceLevel?.variantQty ?? 0) - Number(sourceLevel?.reservedQty ?? 0));
+      if (guidance.needed && !guidance.stockout) {
+        availableSources = await this.listEligibleReplenSources(productVariantId, warehouseLocationId).catch(() => undefined);
+      }
     }
 
     return {
@@ -2755,9 +2911,13 @@ export class ReplenishmentUseCases {
       autoReplen: guidance.autoReplen,
       stockout: guidance.stockout,
       executionMode: guidance.executionMode,
+      sourceLocationId: guidance.needed ? guidance.sourceLocationId : null,
       sourceLocationCode: guidance.needed ? guidance.sourceLocationCode : null,
       sourceQty: guidance.needed ? sourceQty : 0,
       sourceVariantName: guidance.needed ? guidance.sourceVariantName : null,
+      qtySourceUnits: guidance.needed ? guidance.qtySourceUnits : 0,
+      qtyTargetUnits: guidance.needed ? guidance.qtyTargetUnits : 0,
+      ...(availableSources && availableSources.length > 0 ? { availableSources } : {}),
       existingTaskId: guidance.existingTaskId ?? null,
       existingTaskStatus: guidance.existingTaskStatus ?? null,
       existingTaskExecutionMode: guidance.existingTaskExecutionMode ?? null,
@@ -2791,11 +2951,42 @@ export class ReplenishmentUseCases {
       return { task: prior.task, moved: 0 };
     }
     const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
+    const preferredSourceLocationId = context?.preferredSourceLocationId ?? null;
     if (existingTask) {
       await this.rememberTriggeredTask(pickVariantId, toLocationId, existingTask, context);
-      const currentTask = EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
+      let currentTask = EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
         ? await this.reResolveTaskSourceBeforeExecute(existingTask, userId)
         : existingTask;
+      if (
+        preferredSourceLocationId != null &&
+        preferredSourceLocationId !== currentTask.fromLocationId &&
+        Number(currentTask.qtyCompleted ?? 0) === 0 &&
+        EXECUTABLE_REPLEN_TASK_STATUSES.includes(currentTask.status)
+      ) {
+        const candidates = await this.listEligibleReplenSources(pickVariantId, toLocationId);
+        const preferred = candidates.find((c) => c.locationId === preferredSourceLocationId);
+        if (preferred) {
+          const [replanned] = await this.db
+            .update(replenTasks)
+            .set({
+              fromLocationId: preferred.locationId,
+              sourceProductVariantId: preferred.variantId,
+              qtySourceUnits: preferred.qtySourceUnits,
+              qtyTargetUnits: preferred.qtyTargetUnits,
+              replenMethod: preferred.replenMethod,
+              notes: `${currentTask.notes || ""}\nPicker selected reserve source ${preferred.locationCode}.`.trim(),
+            })
+            .where(
+              and(
+                eq(replenTasks.id, currentTask.id),
+                eq(replenTasks.status, currentTask.status),
+                eq(replenTasks.revision, currentTask.revision),
+              ),
+            )
+            .returning();
+          if (replanned) currentTask = replanned as ReplenTask;
+        }
+      }
       logger.info("inventory.replenishment_use_cases", { message: `${_tag} reusing active task ${currentTask.id} status=${currentTask.status}` });
       if (
         currentTask.executionMode === "inline" &&
@@ -2827,15 +3018,29 @@ export class ReplenishmentUseCases {
       return null;
     }
 
+    let selectedSourceLocationId = guidance.sourceLocationId;
+    let selectedSourceVariantId = guidance.sourceVariantId ?? pickVariantId;
+    let selectedQtySourceUnits = guidance.qtySourceUnits;
+    let selectedQtyTargetUnits = guidance.qtyTargetUnits;
+    let selectedReplenMethod = guidance.replenMethod;
+
+    if (preferredSourceLocationId != null && preferredSourceLocationId !== selectedSourceLocationId) {
+      const candidates = await this.listEligibleReplenSources(pickVariantId, toLocationId);
+      const preferred = candidates.find((c) => c.locationId === preferredSourceLocationId);
+      if (preferred) {
+        selectedSourceLocationId = preferred.locationId;
+        selectedSourceVariantId = preferred.variantId;
+        selectedQtySourceUnits = preferred.qtySourceUnits;
+        selectedQtyTargetUnits = preferred.qtyTargetUnits;
+        selectedReplenMethod = preferred.replenMethod;
+      }
+    }
+
     const executionMode = guidance.executionMode;
 
     // Load required data for movement
     const [variant] = await this.db.select().from(productVariants).where(eq(productVariants.id, pickVariantId)).limit(1);
     if (!variant) return null;
-
-    const sourceVariant = guidance.sourceVariantId
-      ? (await this.db.select().from(productVariants).where(eq(productVariants.id, guidance.sourceVariantId)).limit(1))[0] ?? variant
-      : variant;
 
     const [location] = await this.db.select().from(warehouseLocations).where(eq(warehouseLocations.id, toLocationId)).limit(1);
     if (!location) return null;
@@ -2848,26 +3053,26 @@ export class ReplenishmentUseCases {
     const task = await this.insertTriggeredTask({
       operationKey: context?.operationKey ?? null,
       replenRuleId: rule?.id ?? null,
-      fromLocationId: guidance.sourceLocationId,
+      fromLocationId: selectedSourceLocationId,
       toLocationId,
       productId: rule?.productId ?? variant.productId ?? null,
-      sourceProductVariantId: guidance.sourceVariantId ?? pickVariantId,
+      sourceProductVariantId: selectedSourceVariantId,
       pickProductVariantId: pickVariantId,
-      qtySourceUnits: guidance.qtySourceUnits,
-      qtyTargetUnits: guidance.qtyTargetUnits,
+      qtySourceUnits: selectedQtySourceUnits,
+      qtyTargetUnits: selectedQtyTargetUnits,
       qtyCompleted: 0, // will be updated by executeTask
       status: "pending", // executeTask transitions to completed
       priority,
       triggeredBy,
       executionMode,
-      replenMethod: guidance.replenMethod,
+      replenMethod: selectedReplenMethod,
       autoReplen,
       ...this.replenOrderTaskFields(context),
       warehouseId: location.warehouseId ?? undefined,
       notes: this.appendOrderContextNote(
         executionMode === "inline"
           ? `${guidance.taskNotes}\nSystem auto-executed inline replen.`
-          : `${guidance.taskNotes}\nSystem queued replen; ${guidance.replenMethod} requires warehouse movement.`,
+          : `${guidance.taskNotes}\nSystem queued replen; ${selectedReplenMethod} requires warehouse movement.`,
         context,
       ),
     } satisfies InsertReplenTask, guidance.observedVariantQty!, context);
@@ -3040,15 +3245,28 @@ export class ReplenishmentUseCases {
       try { await this.executeTask(Number(task.id), String(task.created_by || "system:auto-replen")); }
       catch (error) { logger.error(JSON.stringify({ event: "replen_execution_pending", taskId: task.id, message: error instanceof Error ? error.message : String(error) })); }
     }
-    const rows = await this.db.execute(sql`SELECT task_id FROM inventory.replen_followups WHERE completed_at IS NULL ORDER BY created_at,task_id LIMIT 20`);
-    for (const row of rows.rows) await this.recoverReplenishmentFollowup(Number(row.task_id));
+    const now = this.clock();
+    const rows = await this.db.execute(sql`SELECT task_id, last_error FROM inventory.replen_followups
+      WHERE completed_at IS NULL
+        AND (last_error IS NULL OR last_error NOT LIKE '[DEAD_LETTER%')
+      ORDER BY created_at,task_id LIMIT 50`);
+    let processed = 0;
+    for (const row of rows.rows) {
+      if (processed >= 20) break;
+      const prevError = typeof (row as any).last_error === "string" ? (row as any).last_error : null;
+      if (!isFollowupReadyForRetry(prevError, now)) continue;
+      processed++;
+      await this.recoverReplenishmentFollowup(Number(row.task_id));
+    }
   }
 
   private async recoverReplenishmentFollowup(taskId: number): Promise<void> {
+    let previousLastError: string | null = null;
     try {
       const rows = await this.db.execute(sql`SELECT * FROM inventory.replen_followups WHERE task_id=${taskId} AND completed_at IS NULL`);
       const followup = rows.rows[0];
       if (!followup) return;
+      previousLastError = typeof (followup as any).last_error === "string" ? (followup as any).last_error : null;
       const task = await this.getTaskById(taskId);
       if (!task || task.status !== "completed") throw new Error("Replenishment follow-up requires completed physical work");
       // Warehouse dependencies must advance even when channel delivery is down.
@@ -3062,8 +3280,13 @@ export class ReplenishmentUseCases {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.db.execute(sql`UPDATE inventory.replen_followups SET last_error=${message.slice(0,2000)} WHERE task_id=${taskId} AND completed_at IS NULL`);
-      logger.error(JSON.stringify({ event: "replen_followup_pending", taskId, message }));
+      const retryInfo = formatFollowupRetryError(previousLastError, message, this.clock());
+      await this.db.execute(sql`UPDATE inventory.replen_followups SET last_error=${retryInfo.formattedError} WHERE task_id=${taskId} AND completed_at IS NULL`);
+      if (retryInfo.deadLettered) {
+        logger.error(JSON.stringify({ event: "replen_followup_dead_letter", taskId, attempts: retryInfo.attempts, message }));
+      } else {
+        logger.error(JSON.stringify({ event: "replen_followup_pending", taskId, attempts: retryInfo.attempts, nextRetryAt: retryInfo.nextRetryAt?.toISOString() ?? null, message }));
+      }
     }
   }
 

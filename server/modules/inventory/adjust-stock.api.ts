@@ -11,10 +11,17 @@ import type { OperationalQuantityPosting } from "./infrastructure/operational-qu
 export type AdjustOrReconcileStockParams = Parameters<InventoryUseCases["adjustInventory"]>[0];
 export type AdjustOrReconcileStockResult = Awaited<ReturnType<InventoryUseCases["adjustInventory"]>>;
 
-export async function adjustOrReconcileStock(
-  owner: Pick<InventoryUseCases, "adjustInventory">,
+export async function adjustOrReconcileStock<TResult = AdjustOrReconcileStockResult>(
+  owner: {
+    adjustInventory: (
+      params: AdjustOrReconcileStockParams,
+      sharedPosting?: OperationalQuantityPosting,
+    ) => Promise<TResult>;
+  },
   params: AdjustOrReconcileStockParams,
   sharedPosting?: OperationalQuantityPosting,
-): Promise<AdjustOrReconcileStockResult> {
-  return owner.adjustInventory(params, sharedPosting);
+): Promise<TResult> {
+  return sharedPosting !== undefined
+    ? owner.adjustInventory(params, sharedPosting)
+    : owner.adjustInventory(params);
 }

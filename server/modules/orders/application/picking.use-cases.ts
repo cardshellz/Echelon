@@ -14,18 +14,31 @@ import { canonicalAvailabilityClaimPickCommandSchema, canonicalAvailabilityClaim
 import { eq, and, sql } from "drizzle-orm";
 import { IntegrityError, NotFoundError, ValidationError } from "../../../../shared/errors";
 import { AuditLogger, persistAuditEvent } from "../../../infrastructure/auditLogger";
+import { adjustOrReconcileStock } from "../../inventory/adjust-stock.api";
 import { cancelShipmentBlockingReplenTasksForOrderInInventory } from "../../inventory/cross-module-inventory-mutations.api";
 import {
   updateAutoFixedPickProductLocationInTx,
   insertAutoFixedPickProductLocationInTx,
 } from "../../warehouse/cross-module-warehouse-mutations.api";
-import { backfillPlannedShipmentItemPickLocationInWms } from "../../wms/outbound-shipment-mutations.api";
 import {
+  amendPreLabelShipmentItemsForShipPartialInWms,
+  backfillPlannedShipmentItemPickLocationInWms,
+  cancelOpenPreLabelShipmentsForOrderInWms,
+  finalizePreLabelShipmentsForShipPartialInWms,
+} from "../../wms/outbound-shipment-mutations.api";
+import {
+  clearWmsOrderAssignedPickerInWms,
   closeOrderShipmentBlockingAllocationExceptionsInWms,
   insertWmsAllocationExceptionReturningInWms,
   supersedePriorBlockingAllocationExceptionsInWms,
+  transitionWmsOrderStatusByMatrixReturningInWms,
   updateDuplicateBlockingAllocationExceptionInWms,
 } from "../../wms/wms-order-mutations.api";
+import {
+  enqueueShipStationHoldSyncRetry,
+  enqueueShipStationShipmentCancelRetry,
+  enqueueShipStationShipmentPushRetry,
+} from "../../oms/webhook-retry.api";
 import {
   inventoryLevels,
   warehouseLocations,
@@ -52,6 +65,7 @@ import {
 } from "../../cartonization";
 import {
   persistWmsOrderItemPickProgress,
+  reopenShortWmsOrderItemsForRepick,
   setWmsOrderItemLocation,
 } from "../../wms/order-intake-and-items.api";
 import type {
@@ -123,6 +137,18 @@ type InventoryCore = {
 
 type ReplenishmentService = {
   getReplenGuidance: (productVariantId: number, warehouseLocationId: number) => Promise<{ action: "replen_inline" | "short_pick_with_replen" | "true_short_pick"; source?: { locationCode: string; availableQty: number; variantSku: string; variantName: string } }>;
+  listEligibleReplenSources?: (productVariantId: number, warehouseLocationId: number, qtyNeededOverride?: number) => Promise<Array<{
+    locationId: number;
+    locationCode: string;
+    variantId: number;
+    variantSku: string | null;
+    variantName: string | null;
+    availableQty: number;
+    unitsPerVariant: number;
+    qtySourceUnits: number;
+    qtyTargetUnits: number;
+    replenMethod: string;
+  }>>;
   resolveDedicatedReplenBin?: (productVariantId: number, warehouseLocationId: number) => Promise<{ locationId: number; locationCode: string } | null>;
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number, triggeredBy?: string, context?: ReplenOrderContext) => Promise<any>;
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number, options?: { forceWhenAtOrBelowZero?: boolean; currentQtyOverride?: number }) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
@@ -135,9 +161,24 @@ type ReplenishmentService = {
     autoReplen: number;
     stockout: boolean;
     executionMode: string;
+    sourceLocationId?: number | null;
     sourceLocationCode: string | null;
     sourceQty: number;
     sourceVariantName: string | null;
+    qtySourceUnits?: number;
+    qtyTargetUnits?: number;
+    availableSources?: Array<{
+      locationId: number;
+      locationCode: string;
+      variantId: number;
+      variantSku: string | null;
+      variantName: string | null;
+      availableQty: number;
+      unitsPerVariant: number;
+      qtySourceUnits: number;
+      qtyTargetUnits: number;
+      replenMethod: string;
+    }>;
     existingTaskId: number | null;
     existingTaskStatus: string | null;
     existingTaskExecutionMode: string | null;
@@ -165,7 +206,30 @@ type ReplenOrderContext = {
   blocksShipment?: boolean;
   forceWhenAtOrBelowZero?: boolean;
   triggeredBy?: string;
+  preferredSourceLocationId?: number | null;
 };
+
+interface PickingReservationPort {
+  reserveOrder?: (orderId: number, userId?: string) => Promise<unknown>;
+  releaseOrderReservation: (
+    orderId: number,
+    reason: string,
+    userId?: string,
+    options?: { disposition?: "release" | "cancel" },
+  ) => Promise<{
+    released: number;
+    failed: Array<{ sku: string; orderItemId: number; reason: string }>;
+  }>;
+  releaseOrderItemReservation?: (params: {
+    orderId: number;
+    orderItemId: number;
+    quantity: number;
+    sourceEventId: string;
+    reason: string;
+    userId?: string;
+    deferChannelSync?: boolean;
+  }) => Promise<unknown>;
+}
 
 /** Minimal storage interface — only the methods picking needs. */
 type Storage = {
@@ -190,6 +254,7 @@ type Storage = {
   getActiveReplenRules: () => Promise<any[]>;
   getChannelById: (id: number) => Promise<any | undefined>;
   getAllWarehouseSettings: () => Promise<WarehouseSettings[]>;
+  resolveException?: (orderId: number, resolution: string, resolvedBy: string, notes?: string) => Promise<Order | null>;
 };
 
 // ---------------------------------------------------------------------------
@@ -200,7 +265,14 @@ export type PickInventoryContext = PickingInventoryContext;
 
 export type PickItemResult =
   | { success: true; item: OrderItem; inventory: PickInventoryContext; followupPending?: boolean; message?: string }
-  | { success: false; error: string; message: string };
+  | {
+      success: false;
+      error: string;
+      message: string;
+      locationId?: number | null;
+      locationCode?: string | null;
+      systemQty?: number;
+    };
 
 export type UnpickItemResult =
   | { success: true; item: OrderItem; inventory: PickInventoryContext; followupPending?: boolean; message?: string }
@@ -533,6 +605,7 @@ export class PickingUseCases {
     private readonly runtimeClaimExecutor?: InventoryAvailabilityRuntimeClaimExecutor,
     private readonly assemblyWorkload?: { handedOffOrderIds(orders: readonly { id: number; items: OrderItem[] }[]): Promise<Set<number>> },
     private readonly clock: () => Date = () => new Date(),
+    private readonly reservation?: PickingReservationPort,
   ) {}
 
   private async logRejectedPickCommand(params: {
@@ -1272,6 +1345,8 @@ export class PickingUseCases {
       warehouseId?: number | null;
       userId?: string;
       pickMethod?: string;
+      replenSourceLocationId?: number;
+      confirmFoundOnShelf?: boolean;
       inventoryCore: InventoryCore;
       pickCorrectionId?: number;
       pickCorrectionRevision?: number;
@@ -1397,6 +1472,8 @@ export class PickingUseCases {
       userId: input.userId,
       inventoryCore: input.inventoryCore,
       pickMethod: input.pickMethod,
+      replenSourceLocationId: input.replenSourceLocationId,
+      confirmFoundOnShelf: input.confirmFoundOnShelf,
     });
 
     if (shipmentPlan.kind === "restore_picked_balance" && deductResult.success && deductResult.noVariant) {
@@ -1616,6 +1693,8 @@ export class PickingUseCases {
       deviceType?: string;
       sessionId?: string;
       pickMethod?: string;
+      replenSourceLocationId?: number;
+      confirmFoundOnShelf?: boolean;
       status: ItemStatus;
       pickCorrectionId?: number;
       pickCorrectionRevision?: number;
@@ -1650,6 +1729,89 @@ export class PickingUseCases {
       return this.persistWmsOnlyPickProgress(input);
     }
     const target = resolved.target!;
+    let prePickReplen: PrePickReplenResult | undefined;
+    let foundOnShelfResolved: InventoryAutoResolved | undefined;
+    const pickLocObj = resolved.locations.find((loc) => loc.id === target.locationId);
+    const locationIsPickerSafe =
+      pickLocObj?.isPickable === 1 &&
+      pickLocObj?.isActive === 1 &&
+      !pickLocObj?.cycleCountFreezeId;
+    const initialBinLevel = resolved.levels.find((l: any) => l.warehouseLocationId === target.locationId);
+    let currentBinQty = Number(initialBinLevel?.variantQty ?? 0);
+
+    if (currentBinQty < remainingPickQuantity && !recordsConfirmedShipment(input) && locationIsPickerSafe) {
+      const orderSnapshot =
+        typeof this.storage?.getOrderById === "function"
+          ? await this.storage.getOrderById(input.beforeItem.orderId)
+          : undefined;
+      const provisionalItem = {
+        ...input.beforeItem,
+        status: input.status,
+        pickedQuantity: input.effectivePickedQuantity,
+      } as OrderItem;
+      if (typeof this.replenishment?.checkReplenNeeded === "function") {
+        prePickReplen = await this.tryInlineReplenBeforePick({
+          productVariantId: target.productVariantId,
+          locationId: target.locationId,
+          item: provisionalItem,
+          order: orderSnapshot,
+          userId: input.userId,
+          replenSourceLocationId: input.replenSourceLocationId,
+        });
+      }
+      if (prePickReplen && typeof this.inventoryCore?.getLevel === "function") {
+        const refreshed = await this.inventoryCore.getLevel(target.productVariantId, target.locationId);
+        currentBinQty = Number(refreshed?.variantQty ?? currentBinQty);
+      }
+
+      const hasOtherBinStock = resolved.levels.some(
+        (l: any) => l.warehouseLocationId !== target.locationId && Number(l.variantQty ?? 0) > 0,
+      );
+      if (currentBinQty < remainingPickQuantity && !hasOtherBinStock) {
+        if (input.confirmFoundOnShelf === false) {
+          return {
+            item: input.beforeItem,
+            idempotentReplay: false,
+            deductResult: {
+              success: false,
+              error: "found_on_shelf_confirmation_required",
+              message: `System shows ${currentBinQty} on hand in ${target.locationCode}. Confirm found in ${target.locationCode} & Pick?`,
+              productVariantId: target.productVariantId,
+              locationId: target.locationId,
+              locationCode: target.locationCode,
+              systemQty: currentBinQty,
+              pickerBlocking: true,
+              shipmentBlocking: false,
+            },
+          };
+        }
+        if (input.confirmFoundOnShelf === true) {
+          const adjustment = remainingPickQuantity - currentBinQty;
+          const isScanVerified = input.pickMethod === "scan";
+          const resolutionCode = isScanVerified
+            ? ("picker_scan_bin_shortage" as const)
+            : ("picker_confirmed_bin_shortage" as const);
+          const message =
+            `found_at_pick: Picker confirmed ${remainingPickQuantity} ${resolved.variant.sku} physically found at ${target.locationCode}; ` +
+            `system had ${currentBinQty}. Added ${adjustment} before pick and queued discrepancy review.`;
+          await adjustOrReconcileStock(this.inventoryCore, {
+            productVariantId: target.productVariantId,
+            warehouseLocationId: target.locationId,
+            qtyDelta: adjustment,
+            reason: message,
+            userId: input.userId,
+          });
+          foundOnShelfResolved = {
+            code: resolutionCode,
+            adjustment,
+            systemQtyBefore: currentBinQty,
+            pickedQty: remainingPickQuantity,
+            message,
+          };
+          currentBinQty += adjustment;
+        }
+      }
+    }
     const loadActiveClaim = async () => {
       let latest = await context.getLatestClaim(input.beforeItem.orderId);
       // A confirmed shipment can outlive its claim (a post-ship edit or refund
@@ -1849,17 +2011,22 @@ export class PickingUseCases {
         systemQtyAfter,
         authority: "canonical",
         reviewRecorded: canonicalResult.outcome === "picked_with_observation",
-        ...(canonicalResult.outcome === "picked_with_observation" ? {
-          autoResolved: {
-            code: input.pickMethod === "scan"
-              ? "picker_scan_bin_shortage" as const
-              : "picker_confirmed_bin_shortage" as const,
-            adjustment: observedRelocated,
-            systemQtyBefore: Math.max(0, systemQtyAfter + remainingPickQuantity - observedRelocated),
-            pickedQty: remainingPickQuantity,
-            message: `Picker observation reconciled ${observedRelocated} claim-owned unit(s) into ${target.locationCode} before pick.`,
-          },
-        } : {}),
+        ...(prePickReplen ? { prePickReplen } : {}),
+        ...(foundOnShelfResolved
+          ? { autoResolved: foundOnShelfResolved }
+          : canonicalResult.outcome === "picked_with_observation"
+          ? {
+              autoResolved: {
+                code: input.pickMethod === "scan"
+                  ? "picker_scan_bin_shortage" as const
+                  : "picker_confirmed_bin_shortage" as const,
+                adjustment: observedRelocated,
+                systemQtyBefore: Math.max(0, systemQtyAfter + remainingPickQuantity - observedRelocated),
+                pickedQty: remainingPickQuantity,
+                message: `Picker observation reconciled ${observedRelocated} claim-owned unit(s) into ${target.locationCode} before pick.`,
+              },
+            }
+          : {}),
       },
     };
   }
@@ -1878,6 +2045,8 @@ export class PickingUseCases {
       deviceType?: string;
       sessionId?: string;
       pickMethod?: string;
+      replenSourceLocationId?: number;
+      confirmFoundOnShelf?: boolean;
       pickCorrectionId?: number;
       pickCorrectionRevision?: number;
     },
@@ -1938,6 +2107,8 @@ export class PickingUseCases {
     shortReason?: string;
     pickMethod?: string;
     warehouseLocationId?: number;
+    replenSourceLocationId?: number;
+    confirmFoundOnShelf?: boolean;
     userId?: string;
     deviceType?: string;
     sessionId?: string;
@@ -1951,6 +2122,8 @@ export class PickingUseCases {
       shortReason: rawShortReason,
       pickMethod,
       warehouseLocationId,
+      replenSourceLocationId,
+      confirmFoundOnShelf,
       userId,
       deviceType,
       sessionId,
@@ -2251,6 +2424,8 @@ export class PickingUseCases {
         deviceType,
         sessionId,
         pickMethod,
+        replenSourceLocationId,
+        confirmFoundOnShelf,
         pickCorrectionId: params.pickCorrectionId,
         pickCorrectionRevision: params.pickCorrectionRevision,
       });
@@ -2258,6 +2433,21 @@ export class PickingUseCases {
       if (atomicResult.idempotentReplay) {
         platformLogger.info("orders.picking_use_cases", { message: `[Pick] Item ${itemId} reached the requested progress while waiting for its lock - returning success (idempotent)` });
         return { success: true, item: atomicResult.item as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
+      }
+
+      if (
+        atomicResult.deductResult &&
+        !atomicResult.deductResult.success &&
+        atomicResult.deductResult.error === "found_on_shelf_confirmation_required"
+      ) {
+        return {
+          success: false,
+          error: atomicResult.deductResult.error,
+          message: atomicResult.deductResult.message,
+          locationId: atomicResult.deductResult.locationId,
+          locationCode: atomicResult.deductResult.locationCode,
+          systemQty: atomicResult.deductResult.systemQty,
+        };
       }
 
       item = atomicResult.item;
@@ -2435,6 +2625,19 @@ export class PickingUseCases {
     const inventoryCtx: PickInventoryContext = emptyPickInventoryContext(item.sku);
 
     if (item.inventoryTracking !== false && item.status === "short" && beforeItem.status !== "short") {
+      await this.reconcileShortPickPhantomStockAndHold({
+        item,
+        beforeItem,
+        order,
+        warehouseLocationId,
+        shortReason,
+        userId,
+        deviceType,
+        sessionId,
+        commandKey,
+        inventoryCtx,
+      });
+
       try {
         const queued = await this.queueShortPickReplen({
           item,
@@ -2483,8 +2686,7 @@ export class PickingUseCases {
           reason: failReason,
           deviceType: deviceType || "desktop",
           sessionId,
-        });
-        if (commandKey) throw replenErr;
+        }).catch(() => {});
       }
     }
 
@@ -2580,8 +2782,7 @@ export class PickingUseCases {
             platformLogger.info("orders.picking_use_cases", { message: `[Replen] No replen needed after pick for variant=${deductResult.productVariantId} loc=${deductResult.locationId}` });
           }
         } catch (replenErr: any) {
-          if (commandKey) throw replenErr;
-          // Replen failed — don't block the picker, but surface a persistent alert
+          // Replen failed — never brick committed pick follow-ups; log durably and surface alert
           const failReason = replenErr?.message || "unknown_error";
           platformLogger.warn("orders.picking_use_cases", { message: `[Replen] Auto-execute failed for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ${failReason}` });
 
@@ -2591,8 +2792,7 @@ export class PickingUseCases {
           inventoryCtx.replen.autoExecutedFailed = true;
           inventoryCtx.replen.autoExecuteFailReason = failReason.startsWith("execute_failed:") ? "execute_failed" : failReason;
 
-          // Log failure for investigation (fire-and-forget)
-          createLog({
+          await createLog({
             actionType: "replen_auto_execute_failed",
             pickerId: pickerId || undefined,
             pickerName: picker?.displayName || picker?.username || pickerId || undefined,
@@ -2978,6 +3178,8 @@ export class PickingUseCases {
       userId?: string;
       inventoryCore?: InventoryCore;
       pickMethod?: string;
+      replenSourceLocationId?: number;
+      confirmFoundOnShelf?: boolean;
     },
   ): Promise<DeductInventoryResult> {
     const pickedQty = opts.quantity ?? (item.pickedQuantity || item.quantity);
@@ -3033,6 +3235,7 @@ export class PickingUseCases {
           item,
           order: await this.storage.getOrderById(item.orderId),
           userId: opts.userId,
+          replenSourceLocationId: opts.replenSourceLocationId,
         });
 
         if (prePickReplen) {
@@ -3043,15 +3246,29 @@ export class PickingUseCases {
 
       if (systemQtyAvailableForPick < pickedQty) {
         if (canTrustLocation && locationIsPickerSafe) {
+          const locationCode = pickLocation?.code || assignedLocationCode || String(pickLocationId);
+          if (opts.confirmFoundOnShelf === false) {
+            return {
+              success: false,
+              error: "found_on_shelf_confirmation_required",
+              message: `System shows ${systemQtyAvailableForPick} on hand in ${locationCode}. Confirm found in ${locationCode} & Pick?`,
+              productVariantId: productVariant.id,
+              locationId: pickLocationId,
+              locationCode,
+              systemQty: systemQtyAvailableForPick,
+              pickerBlocking: true,
+              shipmentBlocking: false,
+            };
+          }
           const adjustment = pickedQty - systemQtyAvailableForPick;
           const resolutionCode = isScanVerified ? "picker_scan_bin_shortage" : "picker_confirmed_bin_shortage";
-          const locationCode = pickLocation?.code || assignedLocationCode || String(pickLocationId);
           const observation = isScanVerified ? "Picker scan" : "Picker confirmation";
+          const prefix = opts.confirmFoundOnShelf === true ? "found_at_pick: " : "";
           const message =
-            `${observation} found ${pickedQty} ${productVariant.sku} at ${locationCode}; ` +
+            `${prefix}${observation} found ${pickedQty} ${productVariant.sku} at ${locationCode}; ` +
             `system had ${systemQtyAvailableForPick}. Added ${adjustment} before pick and queued review.`;
 
-          await inventoryCore.adjustInventory({
+          await adjustOrReconcileStock(inventoryCore, {
             productVariantId: productVariant.id,
             warehouseLocationId: pickLocationId,
             qtyDelta: adjustment,
@@ -3134,6 +3351,7 @@ export class PickingUseCases {
     item: OrderItem;
     order: Order | undefined;
     userId?: string;
+    replenSourceLocationId?: number;
   }): Promise<PrePickReplenResult | undefined> {
     const guidance = await this.replenishment.checkReplenNeeded(params.productVariantId, params.locationId, {
       forceWhenAtOrBelowZero: true,
@@ -3162,6 +3380,9 @@ export class PickingUseCases {
         blocksShipment: false,
         forceWhenAtOrBelowZero: true,
         triggeredBy: `pick_shortage_${guidance.replenMethod}`,
+        ...(params.replenSourceLocationId != null
+          ? { preferredSourceLocationId: params.replenSourceLocationId }
+          : {}),
       },
     );
 
@@ -4137,6 +4358,158 @@ export class PickingUseCases {
       .map(item => withScanDisplay(item, scanDisplay)) });
   }
 
+  private async reconcileShortPickPhantomStockAndHold(params: {
+    item: OrderItem;
+    beforeItem: OrderItem;
+    order: Order | undefined;
+    warehouseLocationId?: number;
+    shortReason?: string;
+    userId?: string;
+    deviceType?: string;
+    sessionId?: string;
+    commandKey?: string;
+    inventoryCtx: PickInventoryContext;
+  }): Promise<void> {
+    const { item, order, warehouseLocationId, shortReason, userId, deviceType, sessionId, commandKey, inventoryCtx } = params;
+    const shortfallQty = Math.max(0, Number(item.quantity ?? 0) - Number(item.pickedQuantity ?? 0));
+
+    // 1. Release this shorted order item's remaining open reservation first so
+    //    `reserved_qty` on this order never blocks zeroing phantom pick-bin stock.
+    if (shortfallQty > 0 && this.reservation?.releaseOrderItemReservation) {
+      try {
+        await this.reservation.releaseOrderItemReservation({
+          orderId: item.orderId,
+          orderItemId: item.id,
+          quantity: shortfallQty,
+          sourceEventId: commandKey
+            ? `${commandKey}:short-release`
+            : `short-pick:${item.orderId}:${item.id}:${item.pickedQuantity}`,
+          reason: `short_pick_release:${shortReason || "out_of_stock"}`,
+          userId,
+          deferChannelSync: true,
+        });
+      } catch (releaseErr: any) {
+        platformLogger.warn("orders.picking_use_cases", {
+          message: `[ShortPick] Failed to release shorted reservation for order=${item.orderId} item=${item.id}:`,
+          error: releaseErr?.message || releaseErr,
+        });
+      }
+    }
+
+    // 2. Zero unreserved phantom stock in the pick bin when shortage indicates missing stock (`2=A`).
+    const shouldZeroBin =
+      !shortReason || !["damaged", "wrong_item"].includes(shortReason.toLowerCase());
+    if (
+      shouldZeroBin &&
+      item.sku &&
+      typeof this.inventoryCore?.getLevel === "function" &&
+      typeof this.inventoryCore?.adjustInventory === "function"
+    ) {
+      try {
+        const variant = await this.storage.getProductVariantBySku(item.sku);
+        let pickLocation: WarehouseLocation | undefined;
+        if (variant && typeof this.db?.select === "function") {
+          if (warehouseLocationId) {
+            [pickLocation] = await this.db
+              .select()
+              .from(warehouseLocations)
+              .where(eq(warehouseLocations.id, warehouseLocationId))
+              .limit(1);
+          } else {
+            const locCode = (item.location || "").trim().toUpperCase();
+            if (locCode && locCode !== "U" && locCode !== "UNASSIGNED") {
+              const locWhere = order?.warehouseId
+                ? and(
+                    sql`upper(${warehouseLocations.code}) = ${locCode}`,
+                    eq(warehouseLocations.warehouseId, order.warehouseId),
+                  )
+                : sql`upper(${warehouseLocations.code}) = ${locCode}`;
+              [pickLocation] = await this.db
+                .select()
+                .from(warehouseLocations)
+                .where(locWhere)
+                .limit(1);
+            }
+          }
+        }
+
+        if (variant && pickLocation && !pickLocation.cycleCountFreezeId) {
+          const level = await this.inventoryCore.getLevel(variant.id, pickLocation.id);
+          const systemQtyBefore = Number(level?.variantQty ?? 0);
+          const otherReservedQty = Math.max(0, Number(level?.reservedQty ?? 0));
+          const phantomQty = Math.max(0, systemQtyBefore - otherReservedQty);
+          if (phantomQty > 0) {
+            const reasonMsg =
+              `short_pick_zeroed: Picker reported short pick (${shortReason || "out_of_stock"}) ` +
+              `for order ${order?.orderNumber || item.orderId} at ${pickLocation.code}; zeroed ${phantomQty} phantom unit(s).`;
+            await adjustOrReconcileStock(this.inventoryCore, {
+              productVariantId: variant.id,
+              warehouseLocationId: pickLocation.id,
+              qtyDelta: -phantomQty,
+              reason: reasonMsg,
+              userId,
+            });
+            inventoryCtx.locationId = pickLocation.id;
+            inventoryCtx.locationCode = pickLocation.code;
+            inventoryCtx.systemQtyAfter = systemQtyBefore - phantomQty;
+            inventoryCtx.resolution = {
+              autoResolved: true,
+              code: "picker_confirmed_bin_shortage",
+              reviewRequired: true,
+              pickerBlocking: false,
+              shipmentBlocking: false,
+              message: reasonMsg,
+            };
+            await this.recordInlineInventoryReview({
+              item,
+              order,
+              commandKey: commandKey ? `${commandKey}:short-zero` : undefined,
+              productVariantId: variant.id,
+              locationId: pickLocation.id,
+              locationCode: pickLocation.code,
+              resolution: {
+                code: "picker_confirmed_bin_shortage",
+                adjustment: -phantomQty,
+                systemQtyBefore,
+                pickedQty: Math.max(1, Number(item.pickedQuantity ?? 0) || 1),
+                message: reasonMsg,
+              },
+              userId,
+              deviceType,
+              sessionId,
+            }).catch(() => {});
+
+            if (this.channelSync) {
+              await this.channelSync
+                .queueSyncAfterInventoryChange(variant.id)
+                .catch(() => {});
+            }
+          }
+        }
+      } catch (zeroErr: any) {
+        platformLogger.warn("orders.picking_use_cases", {
+          message: `[ShortPick] Failed to zero phantom stock for item=${item.id} sku=${item.sku}:`,
+          error: zeroErr?.message || zeroErr,
+        });
+      }
+    }
+
+    // 3. Place ShipStation Hold on the shorted exception order (`2=A`).
+    if (typeof this.db?.execute === "function" && typeof this.db?.insert === "function") {
+      await enqueueShipStationHoldSyncRetry(
+        this.db,
+        item.orderId,
+        "hold",
+        "ShortPickException",
+      ).catch((holdErr: any) => {
+        platformLogger.warn("orders.picking_use_cases", {
+          message: `[ShortPick] Failed to enqueue ShipStation hold sync for order=${item.orderId}:`,
+          error: holdErr?.message || holdErr,
+        });
+      });
+    }
+  }
+
   async getReplenGuidance(itemId: number) {
     z.number().int().positive().max(2_147_483_647).parse(itemId);
     const item = await this.storage.getOrderItemById(itemId);
@@ -4145,6 +4518,419 @@ export class PickingUseCases {
     if (!order) throw new NotFoundError("Picker order not found", { orderId: item.orderId });
     const { target } = await this.resolvePickTarget(item, Math.max(1, item.quantity-item.pickedQuantity), { warehouseId: order.warehouseId });
     return target ? this.replenishment.getReplenGuidance(target.productVariantId, target.locationId) : { action: "true_short_pick" as const };
+  }
+
+  async getCaseBreakSources(itemId: number) {
+    z.number().int().positive().max(2_147_483_647).parse(itemId);
+    const item = await this.storage.getOrderItemById(itemId);
+    if (!item) throw new NotFoundError("Picker item not found", { itemId });
+    const order = await this.storage.getOrderById(item.orderId);
+    if (!order) throw new NotFoundError("Picker order not found", { orderId: item.orderId });
+    const remainingNeeded = Math.max(1, item.quantity - item.pickedQuantity);
+    const { target } = await this.resolvePickTarget(item, remainingNeeded, { warehouseId: order.warehouseId });
+    if (!target || typeof this.replenishment.listEligibleReplenSources !== "function") {
+      return { pickLocationId: target?.locationId ?? null, pickLocationCode: target?.locationCode ?? null, sources: [] };
+    }
+    const sources = await this.replenishment.listEligibleReplenSources(
+      target.productVariantId,
+      target.locationId,
+      remainingNeeded,
+    );
+    return {
+      pickLocationId: target.locationId,
+      pickLocationCode: target.locationCode,
+      sources,
+    };
+  }
+
+  async resolveOrderException(
+    orderId: number,
+    params: {
+      resolution: "ship_partial" | "hold" | "resolved" | "cancelled";
+      userId: string;
+      notes?: string;
+    },
+  ): Promise<{
+    order: Order | null;
+    closedBlockers: CloseShipmentBlockersResult;
+    unpickedItems: number;
+    amendedShipments: number;
+    cancelledShipments: number;
+  }> {
+    const { resolution, userId, notes } = params;
+    const orderBefore = await this.storage.getOrderById(orderId);
+    if (!orderBefore) {
+      return {
+        order: null,
+        closedBlockers: { allocationExceptionsClosed: 0, replenTasksClosed: 0 },
+        unpickedItems: 0,
+        amendedShipments: 0,
+        cancelledShipments: 0,
+      };
+    }
+
+    const items = await this.storage.getOrderItems(orderId);
+    const activeShippable = items.filter(
+      (it) => it.requiresShipping === 1 && !it.onHold && it.status !== "cancelled",
+    );
+
+    let unpickedItems = 0;
+    let amendedShipments = 0;
+    let cancelledShipments = 0;
+
+    if (resolution === "ship_partial") {
+      const totalPicked = activeShippable.reduce(
+        (sum, it) => sum + Math.max(0, Number(it.pickedQuantity ?? 0)),
+        0,
+      );
+      if (totalPicked <= 0) {
+        throw new ValidationError(
+          "Cannot ship partial when zero units have been picked; use Cancel or Hold instead",
+          { reason: "ship_partial_requires_picked_units", orderId },
+        );
+      }
+
+      for (const line of activeShippable) {
+        if ((line.pickedQuantity ?? 0) < (line.quantity ?? 0) && line.status !== "short") {
+          await persistWmsOrderItemPickProgress(this.db as any, {
+            itemId: line.id,
+            status: "short",
+            pickedQuantity: line.pickedQuantity ?? 0,
+            shortReason: line.shortReason || "ship_partial",
+            pickedAt: line.pickedAt ?? null,
+          });
+        }
+      }
+    } else if (resolution === "cancelled") {
+      for (const line of items) {
+        const unshippedPicked = Math.max(
+          0,
+          Number(line.pickedQuantity ?? 0) - Number(line.fulfilledQuantity ?? 0),
+        );
+        if (line.requiresShipping === 1 && unshippedPicked > 0) {
+          const unpickRes = await this.unpickItem(line.id, {
+            qty: unshippedPicked,
+            userId,
+            reason: "Order cancelled during exception resolution",
+          });
+          if (unpickRes.success) unpickedItems++;
+        }
+      }
+    }
+
+    if (!this.storage.resolveException) {
+      throw new IntegrityError("Order storage resolveException is not configured", { orderId });
+    }
+    const order = await this.storage.resolveException(orderId, resolution, userId, notes);
+    if (!order) {
+      return {
+        order: null,
+        closedBlockers: { allocationExceptionsClosed: 0, replenTasksClosed: 0 },
+        unpickedItems,
+        amendedShipments,
+        cancelledShipments,
+      };
+    }
+
+    if (resolution === "ship_partial") {
+      if (this.reservation?.releaseOrderReservation) {
+        await this.reservation
+          .releaseOrderReservation(orderId, "exception_ship_partial", userId, {
+            disposition: "release",
+          })
+          .catch((err: any) =>
+            platformLogger.warn("orders.picking_use_cases", {
+              message: `[ResolveException:ship_partial] Reservation release failed for order ${orderId}:`,
+              error: err?.message || err,
+            }),
+          );
+      }
+
+      if (typeof this.db?.execute === "function") {
+        await amendPreLabelShipmentItemsForShipPartialInWms(this.db, { orderId });
+        const shipmentResult = await finalizePreLabelShipmentsForShipPartialInWms(this.db, {
+          orderId,
+          now: this.clock(),
+        });
+        amendedShipments = shipmentResult.pushShipmentIds.length;
+        cancelledShipments = shipmentResult.cancelShipmentIds.length;
+
+        if (typeof this.db?.insert === "function") {
+          for (const shipmentId of shipmentResult.pushShipmentIds) {
+            await enqueueShipStationShipmentPushRetry(
+              this.db,
+              shipmentId,
+              "ResolveExceptionShipPartialPush",
+            ).catch(() => {});
+          }
+          for (const shipmentId of shipmentResult.cancelShipmentIds) {
+            await enqueueShipStationShipmentCancelRetry(
+              this.db,
+              shipmentId,
+              "ResolveExceptionShipPartialCancelEmpty",
+            ).catch(() => {});
+          }
+          await enqueueShipStationHoldSyncRetry(
+            this.db,
+            orderId,
+            "release",
+            "ResolveExceptionShipPartialReleaseHold",
+          ).catch(() => {});
+        }
+      }
+    } else if (resolution === "cancelled") {
+      if (typeof this.db?.execute === "function") {
+        await clearWmsOrderAssignedPickerInWms(this.db, orderId).catch(() => {});
+      }
+      if (this.reservation?.releaseOrderReservation) {
+        await this.reservation
+          .releaseOrderReservation(orderId, "exception_cancelled", userId, {
+            disposition: "cancel",
+          })
+          .catch((err: any) =>
+            platformLogger.warn("orders.picking_use_cases", {
+              message: `[ResolveException:cancelled] Reservation release failed for order ${orderId}:`,
+              error: err?.message || err,
+            }),
+          );
+      }
+      if (typeof this.db?.execute === "function") {
+        const cancelledRes = await cancelOpenPreLabelShipmentsForOrderInWms(this.db, {
+          orderId,
+          reason: "order_exception_cancelled",
+          now: this.clock(),
+        });
+        cancelledShipments = cancelledRes.cancelledShipmentIds.length;
+        if (typeof this.db?.insert === "function") {
+          for (const shipmentId of cancelledRes.pushedShipmentIds) {
+            await enqueueShipStationShipmentCancelRetry(
+              this.db,
+              shipmentId,
+              "ResolveExceptionOrderCancelled",
+            ).catch(() => {});
+          }
+        }
+      }
+    } else if (resolution === "resolved") {
+      if (this.reservation?.reserveOrder) {
+        await this.reservation.reserveOrder(orderId, userId).catch(() => {});
+      }
+      if (typeof this.db?.execute === "function" && typeof this.db?.insert === "function") {
+        await enqueueShipStationHoldSyncRetry(
+          this.db,
+          orderId,
+          "release",
+          "ResolveExceptionResolved",
+        ).catch(() => {});
+      }
+    } else if (resolution === "hold") {
+      if (typeof this.db?.execute === "function" && typeof this.db?.insert === "function") {
+        await enqueueShipStationHoldSyncRetry(
+          this.db,
+          orderId,
+          "hold",
+          "ResolveExceptionHold",
+        ).catch(() => {});
+      }
+    }
+
+    const closedBlockers = await this.closeResolvedShipmentBlockers(orderId, {
+      resolution,
+      userId,
+      notes,
+    });
+
+    return {
+      order,
+      closedBlockers,
+      unpickedItems,
+      amendedShipments,
+      cancelledShipments,
+    };
+  }
+
+  /**
+   * Stock-Arrival Auto-Wakeup (`4=A`):
+   * When Putaway, Manual Transfer, Express Receive, or Replen places stock into
+   * an active unfrozen Pick / Reserve / Pallet location (excluding `receiving` dock!),
+   * automatically reopen matching shorted `exception` orders back to `ready` / `in_progress`,
+   * re-reserve available stock, and release the ShipStation Hold.
+   */
+  async wakeShortedExceptionOrdersForVariant(
+    productVariantId: number,
+    triggeredBy: string = "stock_arrival",
+  ): Promise<{ checked: number; wokenOrderIds: number[] }> {
+    if (
+      !Number.isInteger(productVariantId) ||
+      productVariantId <= 0 ||
+      typeof this.db?.execute !== "function"
+    ) {
+      return { checked: 0, wokenOrderIds: [] };
+    }
+    const triggerLower = String(triggeredBy || "").toLowerCase();
+    if (triggerLower.startsWith("pick") || triggerLower.startsWith("reserve")) {
+      return { checked: 0, wokenOrderIds: [] };
+    }
+
+    const variant = await this.storage.getProductVariantById(productVariantId);
+    if (!variant) return { checked: 0, wokenOrderIds: [] };
+
+    const familyVariants = variant.productId
+      ? await this.storage.getProductVariantsByProductId(variant.productId)
+      : [variant];
+    const activeFamily = familyVariants.filter((v: any) => v && v.isActive !== false);
+    const variantIds = activeFamily.map((v: any) => Number(v.id)).filter((id: number) => id > 0);
+    const skusUpper = activeFamily
+      .map((v: any) => String(v.sku ?? "").trim().toUpperCase())
+      .filter(Boolean);
+    if (variantIds.length === 0 || skusUpper.length === 0) {
+      return { checked: 0, wokenOrderIds: [] };
+    }
+
+    const readAvailableWarehouseBaseUnits = async (warehouseId?: number | null): Promise<number> => {
+      const stockRes = await this.db.execute(sql`
+        SELECT COALESCE(SUM(
+          GREATEST(il.variant_qty - il.reserved_qty, 0) * GREATEST(COALESCE(pv.units_per_variant, 1), 1)
+        ), 0)::int AS free_base_units
+        FROM inventory.inventory_levels il
+        JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+        JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+        WHERE il.product_variant_id IN (${sql.join(variantIds.map((id) => sql`${id}`), sql`, `)})
+          AND il.variant_qty - il.reserved_qty > 0
+          AND wl.is_active = 1
+          AND wl.cycle_count_freeze_id IS NULL
+          AND wl.location_type IN ('pick', 'reserve', 'pallet')
+          AND (${warehouseId ?? null}::int IS NULL OR wl.warehouse_id = ${warehouseId ?? null} OR wl.warehouse_id IS NULL)
+      `);
+      return Number(stockRes?.rows?.[0]?.free_base_units ?? 0);
+    };
+
+    if ((await readAvailableWarehouseBaseUnits(null)) <= 0) {
+      return { checked: 0, wokenOrderIds: [] };
+    }
+
+    const candidatesRes = await this.db.execute(sql`
+      SELECT DISTINCT wo.id, wo.warehouse_id, wo.sort_rank
+      FROM wms.orders wo
+      JOIN wms.order_items oi ON oi.order_id = wo.id
+      WHERE wo.warehouse_status = 'exception'
+        AND wo.exception_resolution IS NULL
+        AND wo.on_hold = 0
+        AND wo.order_edit_operation_id IS NULL
+        AND wo.cancelled_at IS NULL
+        AND oi.status = 'short'
+        AND oi.requires_shipping = 1
+        AND COALESCE(oi.on_hold, false) = false
+        AND UPPER(oi.sku) IN (${sql.join(skusUpper.map((s) => sql`${s}`), sql`, `)})
+      ORDER BY wo.sort_rank ASC NULLS LAST, wo.id ASC
+      LIMIT 50
+    `);
+
+    const candidates = (candidatesRes?.rows ?? []) as Array<{
+      id: unknown;
+      warehouse_id: unknown;
+    }>;
+    const wokenOrderIds: number[] = [];
+
+    for (const row of candidates) {
+      const orderId = Number(row.id);
+      const warehouseId = row.warehouse_id == null ? null : Number(row.warehouse_id);
+      if (!Number.isInteger(orderId) || orderId <= 0) continue;
+
+      const freeBaseUnits = await readAvailableWarehouseBaseUnits(warehouseId);
+      if (freeBaseUnits <= 0) break;
+
+      try {
+        const wokenOrder = await this.db.transaction(async (tx: any) => {
+          const locked = await tx.execute(sql`
+            SELECT id, assigned_picker_id, order_number
+            FROM wms.orders
+            WHERE id = ${orderId}
+              AND warehouse_status = 'exception'
+              AND exception_resolution IS NULL
+              AND on_hold = 0
+              AND order_edit_operation_id IS NULL
+              AND cancelled_at IS NULL
+            FOR UPDATE
+          `);
+          const lockedOrder = locked?.rows?.[0];
+          if (!lockedOrder) return null;
+
+          await reopenShortWmsOrderItemsForRepick(tx, { orderId });
+          const itemsAfter: OrderItem[] = typeof tx.select === "function"
+            ? await tx.select().from(orderItems).where(eq(orderItems.orderId, orderId))
+            : [];
+          const activeLines = itemsAfter.filter(
+            (it) => it.requiresShipping === 1 && !it.onHold && it.status !== "cancelled",
+          );
+          const allCompleted =
+            activeLines.length > 0 &&
+            activeLines.every(
+              (it) => it.status === "completed" && (it.pickedQuantity ?? 0) >= (it.quantity ?? 0),
+            );
+          const hasProgress =
+            Boolean(lockedOrder.assigned_picker_id) ||
+            activeLines.some((it) => (it.pickedQuantity ?? 0) > 0 || it.status === "in_progress");
+          const targetStatus: OrderStatus = allCompleted
+            ? "ready_to_ship"
+            : hasProgress
+              ? "in_progress"
+              : "ready";
+
+          const updated = await transitionWmsOrderStatusByMatrixReturningInWms(
+            tx,
+            orderId,
+            targetStatus as any,
+            {},
+          );
+          return updated[0] ?? null;
+        });
+
+        if (!wokenOrder) continue;
+        wokenOrderIds.push(orderId);
+
+        await this.closeResolvedShipmentBlockers(orderId, {
+          resolution: "resolved",
+          userId: "system:stock-arrival-wakeup",
+          notes: `Auto-woken by stock arrival (${triggeredBy})`,
+        }).catch(() => {});
+
+        if (this.reservation?.reserveOrder) {
+          await this.reservation
+            .reserveOrder(orderId, "system:stock-arrival-wakeup")
+            .catch(() => {});
+        }
+
+        if (typeof this.db?.insert === "function") {
+          await enqueueShipStationHoldSyncRetry(
+            this.db,
+            orderId,
+            "release",
+            "StockArrivalWakeup",
+          ).catch(() => {});
+        }
+
+        await this.storage
+          .createPickingLog({
+            actionType: "exception_auto_woken",
+            pickerId: "system:stock-arrival-wakeup",
+            orderId,
+            orderNumber: wokenOrder.orderNumber,
+            orderStatusBefore: "exception",
+            orderStatusAfter: wokenOrder.warehouseStatus,
+            reason: `stock_arrival:${triggeredBy}`,
+            notes: `Shorted order automatically reopened when stock arrived for variant #${productVariantId} (${variant.sku}).`,
+          })
+          .catch(() => {});
+      } catch (err: any) {
+        platformLogger.warn("orders.picking_use_cases", {
+          message: `[StockArrivalWakeup] Failed to wake order ${orderId}:`,
+          error: err?.message || err,
+        });
+      }
+    }
+
+    return { checked: candidates.length, wokenOrderIds };
   }
 
   async getDedicatedReplenBins(itemIds: readonly number[]) {
@@ -4241,9 +5027,13 @@ export class PickingUseCases {
               replenNeeded: prediction.replenNeeded,
               replenMethod: prediction.replenMethod,
               autoReplen: prediction.autoReplen,
+              sourceLocationId: prediction.replenNeeded ? prediction.sourceLocationId ?? null : null,
               sourceLocationCode: prediction.replenNeeded ? prediction.sourceLocationCode : null,
               sourceQty: prediction.replenNeeded ? prediction.sourceQty : 0,
               sourceVariantName: prediction.replenNeeded ? prediction.sourceVariantName : null,
+              qtySourceUnits: prediction.replenNeeded ? prediction.qtySourceUnits ?? 0 : 0,
+              qtyTargetUnits: prediction.replenNeeded ? prediction.qtyTargetUnits ?? 0 : 0,
+              availableSources: prediction.replenNeeded ? prediction.availableSources ?? [] : [],
               existingTaskId: prediction.existingTaskId ?? null,
               existingTaskStatus: prediction.existingTaskStatus ?? null,
               existingTaskExecutionMode: prediction.existingTaskExecutionMode ?? null,
@@ -4353,6 +5143,7 @@ export function createPickingService(
   cartonizationShadowEnabled = isWmsCartonizationShadowEnabled(),
   runtimeClaimExecutor?: InventoryAvailabilityRuntimeClaimExecutor,
   assemblyWorkload?: { handedOffOrderIds(orders: readonly { id: number; items: OrderItem[] }[]): Promise<Set<number>> },
+  reservation?: PickingReservationPort,
 ) {
   return new PickingUseCases(
     db,
@@ -4364,6 +5155,8 @@ export function createPickingService(
     cartonizationShadowEnabled,
     runtimeClaimExecutor,
     assemblyWorkload,
+    undefined,
+    reservation,
   );
 }
 

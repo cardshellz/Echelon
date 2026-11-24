@@ -66,4 +66,13 @@ export async function sendPickingCommand<T>(
   }
 }
 
-export class PickingCommandRejectedError extends Error {}
+export class PickingCommandRejectedError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "PickingCommandRejectedError";
+  }
+}
