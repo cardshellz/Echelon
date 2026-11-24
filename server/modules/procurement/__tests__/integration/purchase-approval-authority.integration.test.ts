@@ -24,13 +24,13 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, {
     return typeof value === "function" ? value.bind(connection.database) : value;
   },
 }) }));
-import { procurementMethods } from "../../procurement.storage";
-import { isPurchaseOrderHistoryConstraintViolation } from "../../purchase-order-history.repository";
-import { createPurchasingService } from "../../purchasing.service";
-import { purchaseApprovalLinesFingerprint } from "../../purchase-approval-review";
-import { synchronizeProcurementSkuReferences } from "../../procurement-sku-reference.service";
-import { createPurchaseOrderLineCommands } from "../../purchase-order-line-commands";
-import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
+import { procurementMethods } from "../../infrastructure/procurement.storage";
+import { isPurchaseOrderHistoryConstraintViolation } from "../../infrastructure/purchase-order-history.repository";
+import { createPurchasingService } from "../../application/purchasing.service";
+import { purchaseApprovalLinesFingerprint } from "../../application/purchase-approval-review";
+import { synchronizeProcurementSkuReferences } from "../../application/procurement-sku-reference.service";
+import { createPurchaseOrderLineCommands } from "../../application/purchase-order-line-commands";
+import { registerPurchaseOrderRoutes } from "../../interfaces/http/purchase-order.routes";
 import { readPurchaseApprovalActor } from "../../../identity/infrastructure/purchase-approval-access.repository";
 import { readCommandAuthorityActor } from "../../../identity/infrastructure/command-authority.repository";
 

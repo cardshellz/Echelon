@@ -5,7 +5,7 @@ import {
   resolvePackageAllocationSourceQuantity,
   PackageAllocationSourceIdentityError,
   type PackageAllocationSourceFacts,
-} from "../../package-allocation-source-identity.domain";
+} from "../../domain/package-allocation-source-identity.domain";
 
 function customerFacts(
   overrides: Partial<PackageAllocationSourceFacts> = {},

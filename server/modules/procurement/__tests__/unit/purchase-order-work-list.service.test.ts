@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ read: vi.fn() }));
-vi.mock("../../purchase-order-work-list.repository", () => ({ readPurchaseOrderWorkList: mocks.read }));
-import { getPurchaseOrderWorkList } from "../../purchase-order-work-list.service";
+vi.mock("../../infrastructure/purchase-order-work-list.repository", () => ({ readPurchaseOrderWorkList: mocks.read }));
+import { getPurchaseOrderWorkList } from "../../application/purchase-order-work-list.service";
 
 describe("purchase order selection application policy", () => {
   beforeEach(() => { mocks.read.mockReset(); mocks.read.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0, nextOffset: null }); });

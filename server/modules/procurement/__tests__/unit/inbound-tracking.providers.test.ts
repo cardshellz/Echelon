@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createInboundTrackingProviders } from "../../inbound-tracking.providers";
+import { createInboundTrackingProviders } from "../../application/inbound-tracking.providers";
 import { oceanConfig, oceanPayload, parcelConfig, parcelPayload } from "./inbound-tracking.fixtures";
 afterEach(() => vi.useRealTimers());
 const clock = () => new Date("2026-09-07T12:00:00Z");

@@ -17,7 +17,7 @@ vi.mock("../../../../platform/document-numbering/document-number.repository", ()
 
 describe("createShipment atomic duplicate shipment number rejection", () => {
   async function fixture(error: unknown) {
-    const { createShipmentTrackingService } = await import("../../shipment-tracking.service");
+    const { createShipmentTrackingService } = await import("../../application/shipment-tracking.service");
     const returning = vi.fn().mockRejectedValue(error);
     const tx = { execute: vi.fn().mockResolvedValue({ rows: [] }), insert: vi.fn(() => ({ values: vi.fn(() => ({ returning })) })) };
     const database = { transaction: vi.fn(async (work: (executor: typeof tx) => Promise<unknown>) => work(tx)) };
@@ -106,7 +106,7 @@ describe("recordPayment — 409 on duplicate payment number", () => {
 
     vi.mock("@shared/schema/procurement.schema", () => ({}));
 
-    const { recordPayment, ApLedgerError } = await import("../../ap-ledger.service");
+    const { recordPayment, ApLedgerError } = await import("../../application/ap-ledger.service");
 
     await expect(
       recordPayment({

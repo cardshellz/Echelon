@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { startCarrierTrackingReconciliationScheduler } from "../../carrier-tracking-reconciliation.scheduler";
+import { startCarrierTrackingReconciliationScheduler } from "../../application/carrier-tracking-reconciliation.scheduler";
 
 const emptyResult = {
   hydrationsClaimed: 0,

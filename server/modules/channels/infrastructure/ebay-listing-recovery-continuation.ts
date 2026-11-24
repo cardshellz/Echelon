@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { PublicationRecoveryService, PostgresPublicationRecoveryRepository } from "../../inventory-planning/quantity-publication.api";
-import type { EbayListingRecoveryContinuation } from "../ebay-listing-recovery.service";
+import type { EbayListingRecoveryContinuation } from "../application/ebay-listing-recovery.service";
 import type { PostgresEbayListingSyncRepository } from "./ebay-listing-sync.repository";
 
 /** Thin transaction adapter: Inventory retains the decision, Channels queues the

@@ -3,7 +3,7 @@ import {
   buildRfqBatchRequestHash,
   buildRfqCreationRequestHash,
   evaluateRfqAllocationOverride,
-} from "../../purchasing-rfq-allocation";
+} from "../../application/purchasing-rfq-allocation";
 
 const approvedAt = new Date("2026-07-21T12:00:00.000Z");
 

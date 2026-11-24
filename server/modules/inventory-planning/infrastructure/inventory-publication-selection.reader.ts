@@ -3,7 +3,7 @@ import {
   type StockPublicationSelection,
   type StockSelectionQueryClient,
 } from "@shared/types/stock-publication-selection";
-import { readChannelStockSelection, ChannelStockSelectionError } from "../../channels/channel-stock-selection";
+import { readChannelStockSelection, ChannelStockSelectionError } from "../../channels/channel-stock-selection.api";
 import { readDropshipListingStockSelection, DropshipError } from "../../dropship/stock-publication-selection.api";
 
 export interface StockSelectionDestination {

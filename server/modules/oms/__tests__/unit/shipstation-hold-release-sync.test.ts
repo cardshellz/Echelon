@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 const omsDir = resolve(__dirname, "../..");
 const subDir = resolve(omsDir, "shipstation");
 const SHIPSTATION_SERVICE_SRC = [
-  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"),
+  readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf8"),
   ...(existsSync(subDir)
     ? readdirSync(subDir)
         .filter((f) => f.endsWith(".ts"))
@@ -14,7 +14,7 @@ const SHIPSTATION_SERVICE_SRC = [
     : []),
 ].join("\n");
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
-  resolve(__dirname, "../../webhook-retry.worker.ts"),
+  resolve(__dirname, "../../application/webhook-retry.worker.ts"),
   "utf8",
 );
 const ORDER_STORAGE_SRC = readFileSync(

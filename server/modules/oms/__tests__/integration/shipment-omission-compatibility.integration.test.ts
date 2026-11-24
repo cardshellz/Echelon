@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createChannelFulfillmentAuthorityRepository } from "../../channel-fulfillment-authority.repository";
+import { createChannelFulfillmentAuthorityRepository } from "../../infrastructure/channel-fulfillment-authority.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
 import { PostgresCanonicalClaimDispatchRepository } from "../../../inventory-planning/infrastructure/inventory-availability-dispatch.repository";
 import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/infrastructure/canonical-claim-dispatch-source";

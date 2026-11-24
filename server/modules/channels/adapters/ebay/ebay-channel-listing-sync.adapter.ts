@@ -1,8 +1,8 @@
-import type { ChannelListingSyncAdapter } from "../../../marketplace-listings/application/channel-listing-sync.service";
-import type { ChannelListingSyncCommand, ChannelListingSyncState, ChannelListingSyncBlocker } from "../../../marketplace-listings/domain/channel-listing-sync";
+import type { ChannelListingSyncAdapter } from "../../../marketplace-listings/channel-listing-sync.service.api";
+import type { ChannelListingSyncCommand, ChannelListingSyncState, ChannelListingSyncBlocker } from "../../../marketplace-listings/channel-listing-sync.api";
 import { ebayProductSyncResultSchema, type EbayListingSyncJob, type EbayProductSyncResult } from "@shared/types/ebay-listing-sync";
-import type { StoredEbayListingSyncJob } from "../../ebay-listing-sync.domain";
-import type { EbayListingPushResult } from "../../ebay-listing-push.service";
+import type { StoredEbayListingSyncJob } from "../../domain/ebay-listing-sync.domain";
+import type { EbayListingPushResult } from "../../application/ebay-listing-push.service";
 
 export function syncResultForJob(job: EbayListingSyncJob | StoredEbayListingSyncJob): EbayProductSyncResult {
   const result = ebayProductSyncResultSchema.parse({ synced: 0, priceChanges: 0, qtyChanges: 0, policyChanges: 0, errors: 0, details: [], jobs: [job] });

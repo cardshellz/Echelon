@@ -2,9 +2,9 @@ import pg from "pg";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { purchaseInventorySnapshotQuery } from "../../purchase-inventory-snapshot.query";
-import { readPurchasePlanningSnapshot, type PurchasePlanningDatabase } from "../../purchase-planning-snapshot.repository";
-import { buildPurchaseSupplyTiming } from "../../purchase-supply-timing";
+import { purchaseInventorySnapshotQuery } from "../../infrastructure/purchase-inventory-snapshot.query";
+import { readPurchasePlanningSnapshot, type PurchasePlanningDatabase } from "../../infrastructure/purchase-planning-snapshot.repository";
+import { buildPurchaseSupplyTiming } from "../../application/purchase-supply-timing";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

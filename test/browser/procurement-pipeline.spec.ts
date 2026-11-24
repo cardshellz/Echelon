@@ -5,7 +5,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   projectPurchasePipeline,
   type PipelineEvidence,
-} from "../../server/modules/procurement/purchase-pipeline.service";
+} from "../../server/modules/procurement/application/purchase-pipeline.service";
 import {
   pipelineEvidence,
   pipelineLine,

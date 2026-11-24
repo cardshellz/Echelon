@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "../integration/shipment-line-fixture";
 
 // Deliberately outside both `unit` and `integration` selection. These passing
@@ -38,12 +38,12 @@ audit.sequential("AUDIT ONLY: current receipt/AP/freight cost defects with real 
   let defaultModulePool: pg.Pool | undefined;
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let storage: any;
-  let receiving: import("../../receiving.service").ReceivingService;
-  let purchasing: ReturnType<typeof import("../../purchasing.service").createPurchasingService>;
-  let shipment: ReturnType<typeof import("../../shipment-tracking.service").createShipmentTrackingService>;
-  let createShipment: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
+  let receiving: import("../../application/receiving.service").ReceivingService;
+  let purchasing: ReturnType<typeof import("../../application/purchasing.service").createPurchasingService>;
+  let shipment: ReturnType<typeof import("../../application/shipment-tracking.service").createShipmentTrackingService>;
+  let createShipment: typeof import("../../application/shipment-tracking.service").createShipmentTrackingService;
   let cogs: import("../../../inventory/application/cogs.service").COGSService;
-  let reconcile: typeof import("../../ap-ledger.service").reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
+  let reconcile: typeof import("../../application/ap-ledger.service").reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
 
   beforeAll(async () => {
     const parsed = new URL(url!);
@@ -84,11 +84,11 @@ audit.sequential("AUDIT ONLY: current receipt/AP/freight cost defects with real 
     try {
       const [receivingModule, purchasingModule, shipmentModule, procurementModule, catalogModule,
         inventoryModule, repositoryModule, lotModule, cogsModule, apModule, dbModule] = await Promise.all([
-        import("../../receiving.service"), import("../../purchasing.service"), import("../../shipment-tracking.service"),
-        import("../../procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
+        import("../../application/receiving.service"), import("../../application/purchasing.service"), import("../../application/shipment-tracking.service"),
+        import("../../infrastructure/procurement.storage"), import("../../../catalog/infrastructure/catalog.storage"),
         import("../../../inventory/application/inventory.use-cases"), import("../../../inventory/infrastructure/inventory.repository"),
         import("../../../inventory/application/lots.service"), import("../../../inventory/application/cogs.service"),
-        import("../../ap-ledger.service"), import("../../../../db"),
+        import("../../application/ap-ledger.service"), import("../../../../db"),
       ]);
       defaultModulePool = dbModule.pool;
       // Redirect legacy module-global database calls to the SAME disposable SQL pool. This never

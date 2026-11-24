@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { formatPipelineMills, supplierProgressCommandSchema } from "@shared/procurement/purchase-pipeline";
-import { pipelineIntervalMills, projectPurchasePipeline } from "../../purchase-pipeline.service";
+import { pipelineIntervalMills, projectPurchasePipeline } from "../../application/purchase-pipeline.service";
 import { pipelineEvidence, pipelineLine, pipelinePartialReceipt, pipelineShipment, pipelineTime } from "../../../../../test/fixtures/purchase-pipeline";
 
 describe("purchase pipeline quantity and cost evidence", () => {

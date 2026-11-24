@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { validateInheritedCommercialIntents } from "../../package-allocation-commercial-inheritance.domain";
+import { validateInheritedCommercialIntents } from "../../domain/package-allocation-commercial-inheritance.domain";
 
 function fixture() {
   const payload = {

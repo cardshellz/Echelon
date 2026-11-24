@@ -49,7 +49,7 @@ vi.mock("@shared/schema", () => ({
 vi.mock("@shared/schema/procurement.schema", () => ({}));
 
 // Mock helper functions used by recordPayment
-vi.mock("../../ap-ledger.service", async () => {
+vi.mock("../../application/ap-ledger.service", async () => {
   const actual = await vi.importActual<any>("../../ap-ledger.service");
   return {
     ...actual,

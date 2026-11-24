@@ -7,7 +7,7 @@ import { pendingQuantityPublicationRecoveryRequestSchema, pendingQuantityPublica
 import type { QuantityPublicationRecoveryCommand, QuantityPublicationRecoveryStore } from "../application/quantity-publication-recovery.service";
 import { InventoryCutoverCommitError } from "../application/inventory-cutover-commit.service";
 import { quantityPublicationDrainProofSchema } from "../domain/quantity-publication-admission";
-import { PROVIDER_REQUEST_TIMEOUT_MS } from "../../channels/provider-request-limits";
+import { PROVIDER_REQUEST_TIMEOUT_MS } from "../../channels/provider-request-limits.api";
 import { summarizeProviderAnswer, summarizeRequestTermination, type StoredProviderRequestReceipt } from "../domain/quantity-publication-provider-answer";
 import { attestQuantityPublicationAttemptInsideTransaction, captureQuantityPublicationDrainInsideTransaction } from "./quantity-publication-admission.repository";
 

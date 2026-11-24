@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { redactSensitiveUrl } from "../../shipstation.service";
+import { redactSensitiveUrl } from "../../application/shipstation.service";
 
 describe("redactSensitiveUrl", () => {
   it("redacts sensitive query parameters from valid URLs", () => {

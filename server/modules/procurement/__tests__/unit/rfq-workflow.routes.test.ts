@@ -13,18 +13,18 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../../../../modules/identity", () => ({ hasPermission: mocks.hasPermission }));
 vi.mock("../../../../db", () => ({ db: {} }));
-vi.mock("../../rfq-workflow.service", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../rfq-workflow.service")>(),
+vi.mock("../../application/rfq-workflow.service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../application/rfq-workflow.service")>(),
   createRfqWorkflowService: () => ({ getDetail: mocks.detail, getQuoteHistory: mocks.history }),
 }));
-vi.mock("../../rfq-workflow.commands", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../rfq-workflow.commands")>(),
+vi.mock("../../application/rfq-workflow.commands", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../application/rfq-workflow.commands")>(),
   createRfqWorkflowCommands: () => ({ execute: mocks.execute }),
 }));
 
-import { registerRfqWorkflowRoutes } from "../../rfq-workflow.routes";
-import { RfqEvidenceIntegrityError } from "../../rfq-workflow.repository";
-import { RfqWorkflowError } from "../../rfq-workflow.service";
+import { registerRfqWorkflowRoutes } from "../../interfaces/http/rfq-workflow.routes";
+import { RfqEvidenceIntegrityError } from "../../infrastructure/rfq-workflow.repository";
+import { RfqWorkflowError } from "../../application/rfq-workflow.service";
 
 describe("RFQ workflow HTTP authority and durable command identity", () => {
   let server: http.Server;

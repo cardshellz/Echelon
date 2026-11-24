@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { shipmentCreateSchema, shipmentCreateResultSchema } from "@shared/procurement/shipment-create-command";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor, FinancialCommandRepository } from "../../../../platform/commands/transactional-command.service";
-import { createShipmentCreateCommands, shipmentCreateCommandScope, SHIPMENT_CREATE_COMMAND_PRINCIPAL, classifyShipmentCreateFailure } from "../../shipment-create.commands";
-import { ShipmentCreateError, type CreatedShipment } from "../../shipment-create.service";
-import type { ShipmentCreateTransaction } from "../../shipment-create.repository";
+import { createShipmentCreateCommands, shipmentCreateCommandScope, SHIPMENT_CREATE_COMMAND_PRINCIPAL, classifyShipmentCreateFailure } from "../../application/shipment-create.commands";
+import { ShipmentCreateError, type CreatedShipment } from "../../application/shipment-create.service";
+import type { ShipmentCreateTransaction } from "../../infrastructure/shipment-create.repository";
 import { nextShipmentNumber, shipmentNumberPrefix, shipmentDefaultAllocation } from "../../domain/shipment-create";
 
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));

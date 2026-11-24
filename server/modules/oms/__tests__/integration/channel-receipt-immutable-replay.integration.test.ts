@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { normalizeChannelFulfillmentIngress } from "../../channel-fulfillment-ingress";
-import { createChannelFulfillmentIngressRepository, type ChannelFulfillmentIngressRepository } from "../../channel-fulfillment-ingress.repository";
+import { normalizeChannelFulfillmentIngress } from "../../application/channel-fulfillment-ingress";
+import { createChannelFulfillmentIngressRepository, type ChannelFulfillmentIngressRepository } from "../../infrastructure/channel-fulfillment-ingress.repository";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { channelShipmentRuntimeFixtureSql, channelShipmentRuntimeSeedSql } from "../fixtures/channel-shipment-runtime";
 

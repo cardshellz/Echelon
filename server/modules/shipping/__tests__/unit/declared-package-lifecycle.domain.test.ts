@@ -5,7 +5,7 @@ import {
   projectDeclaredPackageLifecycle,
   type DeclaredPackageLifecycleEvent,
   type DeclaredPackageLifecycleInput,
-} from "../../declared-package-lifecycle.domain";
+} from "../../domain/declared-package-lifecycle.domain";
 
 const labelObservedAt = "2026-08-20T14:00:00.000Z";
 const labelProviderOccurredAt = "2026-08-20T13:59:50.000Z";

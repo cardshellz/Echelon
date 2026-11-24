@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { normalizeExternalOrderId } from "../../oms.service";
+import { normalizeExternalOrderId } from "../../application/oms.service";
 
 const OMS_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../oms.service.ts"),
+  resolve(__dirname, "../../application/oms.service.ts"),
   "utf8",
 );
 const SHOPIFY_BRIDGE_SRC = readFileSync(
-  resolve(__dirname, "../../shopify-bridge.ts"),
+  resolve(__dirname, "../../application/shopify-bridge.ts"),
   "utf8",
 );
 

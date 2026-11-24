@@ -3,11 +3,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const OMS_WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
+  resolve(__dirname, "../../application/oms-webhooks.ts"),
   "utf-8",
 );
 const INGEST_AND_ROUTE_SRC = readFileSync(
-  resolve(__dirname, "../../channel-order-ingest-and-route.ts"),
+  resolve(__dirname, "../../application/channel-order-ingest-and-route.ts"),
   "utf-8",
 );
 

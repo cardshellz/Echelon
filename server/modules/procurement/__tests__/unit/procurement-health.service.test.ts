@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildStaleAutoDraftPoDiagnostics, type AutoDraftPoAgingRow } from "../../auto-draft-po-aging.service";
-import { buildProcurementHealthSummary } from "../../procurement-health.service";
+import { buildStaleAutoDraftPoDiagnostics, type AutoDraftPoAgingRow } from "../../application/auto-draft-po-aging.service";
+import { buildProcurementHealthSummary } from "../../application/procurement-health.service";
 
 function row(overrides: Partial<AutoDraftPoAgingRow>): AutoDraftPoAgingRow {
   return {

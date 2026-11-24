@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 // The zero write never reads published content; stubbing its reader keeps this unit test off the catalog image stack.
 vi.mock("../../../channels/adapters/ebay/ebay-published-content.reader", () => ({ readEbayPublishedContent: vi.fn() }));
 import { EbayDropshipListingPushProvider } from "../../infrastructure/dropship-ebay-listing-push.provider";
-import type { EbayQuantityRequestAdmission } from "../../../channels/quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "../../../channels/application/quantity-publication-request";
 import type {
   DropshipMarketplaceCredentialRepository,
   DropshipMarketplaceStoreAuthFailureInput,

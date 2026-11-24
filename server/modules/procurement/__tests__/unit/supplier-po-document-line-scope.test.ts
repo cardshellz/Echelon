@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PurchaseOrderLine } from "@shared/schema/procurement.schema";
-import { buildSupplierPoDocument } from "../../supplier-po-document";
-import { renderPoHtml } from "../../po-document";
+import { buildSupplierPoDocument } from "../../application/supplier-po-document";
+import { renderPoHtml } from "../../application/po-document";
 import { supplierDocumentSource } from "../fixtures/supplier-po-document.fixture";
 
 type FixtureLine = Pick<PurchaseOrderLine, keyof ReturnType<typeof supplierDocumentSource>["lines"][number]>;

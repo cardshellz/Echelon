@@ -13,7 +13,7 @@
 import { fileURLToPath } from "node:url";
 import { db } from "../server/db";
 import { sql } from "drizzle-orm";
-import { createShipStationService } from "../server/modules/oms/shipstation.service";
+import { createShipStationService } from "../server/modules/oms/application/shipstation.service";
 
 type Mode = "dry-run" | "execute";
 

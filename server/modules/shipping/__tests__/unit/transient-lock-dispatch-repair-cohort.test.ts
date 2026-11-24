@@ -10,7 +10,7 @@ import { parseFlags } from "../../../../../scripts/repair-historical-carrier-dis
 // The classifier now retries 55P03; this cohort lets an operator requeue the
 // already-parked commands through the guarded repair script.
 describe("parked carrier dispatches from transient lock timeouts", () => {
-  const repository = readFileSync(resolve(process.cwd(), "server/modules/shipping/carrier-tracking.repository.ts"), "utf8");
+  const repository = readFileSync(resolve(process.cwd(), "server/modules/shipping/infrastructure/carrier-tracking.repository.ts"), "utf8");
   const eligibility = repository.slice(repository.indexOf("function historicalCarrierDispatchRepairEligibilitySql"));
   const requeueable = eligibility.slice(0, eligibility.indexOf("OR ("));
   const classifier = readFileSync(resolve(process.cwd(), "server/modules/oms/shipstation/shipstation-notify-webhook-dispatch.ts"), "utf8");

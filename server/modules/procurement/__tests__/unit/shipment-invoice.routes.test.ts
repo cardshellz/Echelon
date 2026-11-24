@@ -12,11 +12,11 @@ vi.mock("../../../identity", () => ({ hasPermission:mocks.permission, readCurren
   })) }));
 vi.mock("../../../../platform/observability",()=>({logger:{error:mocks.log}}));
 vi.mock("../../../../platform/commands/command-results.repository",()=>({financialCommandRepository:{}}));
-vi.mock("../../ap-ledger.service",()=>({}));
-vi.mock("../../shipment-invoice.commands",async original=>({...await original<typeof import("../../shipment-invoice.commands")>(),createShipmentInvoiceCommands:()=>({execute:mocks.execute})}));
+vi.mock("../../application/ap-ledger.service",()=>({}));
+vi.mock("../../application/shipment-invoice.commands",async original=>({...await original<typeof import("../../application/shipment-invoice.commands")>(),createShipmentInvoiceCommands:()=>({execute:mocks.execute})}));
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
-import { hashShipmentInvoiceCommandIdentity, shipmentInvoiceCommandScope, SHIPMENT_INVOICE_COMMAND_PRINCIPAL } from "../../shipment-invoice.commands";
-import { registerShipmentInvoiceRoutes } from "../../shipment-invoice.routes";
+import { hashShipmentInvoiceCommandIdentity, shipmentInvoiceCommandScope, SHIPMENT_INVOICE_COMMAND_PRINCIPAL } from "../../application/shipment-invoice.commands";
+import { registerShipmentInvoiceRoutes } from "../../interfaces/http/shipment-invoice.routes";
 const key="freight-create-http-1", body={vendorId:6,invoiceNumber:"F-1",costRowIds:[31]};
 describe("shipment invoice HTTP recovery boundary",()=>{
   let server:Server,base:string;

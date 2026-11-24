@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EbayApiClient } from "../../adapters/ebay/ebay-api.client";
 import { publishEbayInventoryQuantity, readEbayInventoryQuantity } from "../../adapters/ebay/ebay-inventory-quantity";
-import type { EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
 import { QuantityProviderEvidenceCollector, type QuantityProviderResponseEvidence } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 
 const sku = "P5+A&B";

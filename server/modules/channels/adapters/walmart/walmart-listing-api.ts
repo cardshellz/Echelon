@@ -7,7 +7,7 @@ import { WalmartApiError } from "./walmart-client";
 import {
   assertListingSetupAdmission,
   type ListingSetupIntent,
-} from "../../../inventory-planning/application/listing-setup-intent";
+} from "../../../inventory-planning/listing-setup-intent.api";
 import { priceForWalmart } from "./walmart-listing-schema";
 import { normalizeWalmartListingTaxonomy } from "./walmart-listing-taxonomy";
 

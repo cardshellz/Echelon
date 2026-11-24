@@ -1,5 +1,5 @@
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
-vi.mock("../../purchase-planning-policy.routes", () => ({
+vi.mock("../../interfaces/http/purchase-planning-policy.routes", () => ({
   registerPurchasePlanningPolicyRoutes: vi.fn(),
 }));
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -48,15 +48,15 @@ vi.mock("../../../../modules/catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
-vi.mock("../../procurement", () => ({
+vi.mock("../../infrastructure/procurement", () => ({
   procurementStorage: { getVendorById: vi.fn() },
 }));
-vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
+vi.mock("../../application/ap-ledger.service", () => ({}));
+vi.mock("../../application/po-document", () => ({ renderPoHtml: vi.fn() }));
 vi.mock("../../../notifications/email-delivery.api", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
-import { registerPurchasingRoutes } from "../../procurement.routes";
+import { registerPurchasingRoutes } from "../../interfaces/http/procurement.routes";
 
 function guardedService<T extends object>(
   name: string,

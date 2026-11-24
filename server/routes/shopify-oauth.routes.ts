@@ -1,6 +1,6 @@
 import type { Express, Request, Response, RequestHandler } from "express";
 import { requireAuth } from "./middleware";
-import { getShopifyStaffOAuthService, ShopifyStaffOAuthError, type ShopifyStaffOAuthService } from "../modules/channels/shopify-staff-oauth";
+import { getShopifyStaffOAuthService, ShopifyStaffOAuthError, type ShopifyStaffOAuthService } from "../modules/channels/application/shopify-staff-oauth";
 
 const secureResponse: RequestHandler = (req, res, next) => {
   res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",

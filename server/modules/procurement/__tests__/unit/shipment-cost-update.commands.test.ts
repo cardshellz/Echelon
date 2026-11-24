@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { shipmentCostUpdateInputSchema } from "@shared/procurement/shipment-cost-workflow";
-import { ShipmentTrackingError } from "../../shipment-tracking.service";
+import { ShipmentTrackingError } from "../../application/shipment-tracking.service";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence.repository";
-import { createShipmentCostUpdateCommands, classifyShipmentCostUpdateFailure, shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } from "../../shipment-cost-update.commands";
+import { createShipmentCostUpdateCommands, classifyShipmentCostUpdateFailure, shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } from "../../application/shipment-cost-update.commands";
 import type { FinancialCommandDescriptor, FinancialCommandRepository, FinancialCommandResult } from "../../../../platform/commands/transactional-command.service";
 
 const descriptor: FinancialCommandDescriptor = { ...shipmentCostUpdateScope(42), actorType: "service",

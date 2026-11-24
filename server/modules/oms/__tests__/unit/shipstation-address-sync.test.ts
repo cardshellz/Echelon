@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createShipStationService, ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../shipstation.service";
+import { createShipStationService, ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../application/shipstation.service";
 
 // Order-scripted db mock (same pattern as push-shipment.test.ts): each
 // execute() shifts the next scripted response; select is unused here.
@@ -268,7 +268,7 @@ describe("syncWmsOrderShipStationShipToAddress :: guards", () => {
 describe("oms-webhooks wiring", () => {
   it("handleWmsAddressChange calls the ship-to sync for requires_review shipments", async () => {
     const { readFileSync } = await import("node:fs");
-    const src = readFileSync("server/modules/oms/oms-webhooks.ts", "utf8");
+    const src = readFileSync("server/modules/oms/application/oms-webhooks.ts", "utf8");
     const fnStart = src.indexOf("async function handleWmsAddressChange");
     expect(fnStart).toBeGreaterThan(-1);
     const fnSrc = src.slice(fnStart, fnStart + 4000);

@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
-import { createFulfillmentPushService, type ChannelFulfillmentProviderCommandInput } from "../../fulfillment-push.service";
-import { ChannelFulfillmentProviderError } from "../../../channels/channel-fulfillment-provider.error";
-import type { ChannelFulfillmentProviderClients } from "../../../channels/channel-fulfillment-provider-clients.service";
+import { createFulfillmentPushService, type ChannelFulfillmentProviderCommandInput } from "../../application/fulfillment-push.service";
+import { ChannelFulfillmentProviderError } from "../../../channels/domain/channel-fulfillment-provider.error";
+import type { ChannelFulfillmentProviderClients } from "../../../channels/application/channel-fulfillment-provider-clients.service";
 
 const dialect = new PgDialect();
 function command(id = 1): ChannelFulfillmentProviderCommandInput {

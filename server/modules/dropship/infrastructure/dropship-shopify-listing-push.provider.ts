@@ -14,7 +14,7 @@ import {
   ShopifyListingConnectorInvalidResponseError,
   ShopifyListingConnectorUserError,
   ShopifyMarketplaceListingConnector,
-} from "../../channels/listing-connectors/shopify-listing.connector";
+} from "../../channels/shopify-listing.connector.api";
 
 type FetchLike = typeof fetch;
 interface Clock {

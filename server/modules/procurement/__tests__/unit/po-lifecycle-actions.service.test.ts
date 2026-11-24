@@ -5,14 +5,14 @@ const mockDetectQtyVariance = vi.fn().mockResolvedValue(undefined);
 const mockDetectPastDue = vi.fn().mockResolvedValue(undefined);
 const mockDetectMatchMismatch = vi.fn().mockResolvedValue(undefined);
 
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectQtyVariance: (...args: any[]) => mockDetectQtyVariance(...args),
   detectPastDue: (...args: any[]) => mockDetectPastDue(...args),
   detectMatchMismatch: (...args: any[]) => mockDetectMatchMismatch(...args),
 }));
 
-import { createPurchasingService } from "../../purchasing.service";
-import { purchaseApprovalLinesFingerprint } from "../../purchase-approval-review";
+import { createPurchasingService } from "../../application/purchasing.service";
+import { purchaseApprovalLinesFingerprint } from "../../application/purchase-approval-review";
 
 function buildMockDb(txSelectResults: any[][] = []) {
   const insertedRows: any[] = [];

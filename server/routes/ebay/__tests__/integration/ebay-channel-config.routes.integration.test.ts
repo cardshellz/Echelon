@@ -12,8 +12,8 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../../../../db", () => ({ db: { select: mocks.select }, pool: { connect: mocks.connect } }));
 vi.mock("../../../../modules/identity", () => ({ hasPermission: mocks.hasPermission }));
-vi.mock("../../../../modules/channels/ebay-connection-health", () => ({ readEbayConnectionHealth: mocks.readEbayConnectionHealth }));
-vi.mock("../../../../modules/channels/ebay-listing-sync", () => ({ syncActiveListings: vi.fn(), triggerPricingRuleSync: vi.fn() }));
+vi.mock("../../../../modules/channels/application/ebay-connection-health", () => ({ readEbayConnectionHealth: mocks.readEbayConnectionHealth }));
+vi.mock("../../../../modules/channels/ebay-listing-sync.api", () => ({ syncActiveListings: vi.fn(), triggerPricingRuleSync: vi.fn() }));
 vi.mock("../../ebay-utils", () => ({ EBAY_CHANNEL_ID: 67, getAuthService: mocks.getAuthService, getChannelConnection: mocks.getChannelConnection }));
 vi.mock("../../ebay-listing-state", () => ({ markEbayVariantListingPendingForRelist: vi.fn(), setEbayVariantListingIntent: vi.fn(), zeroEbayVariantListing: vi.fn() }));
 

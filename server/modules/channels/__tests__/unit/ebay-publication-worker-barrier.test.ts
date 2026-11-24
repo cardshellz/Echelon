@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { EbayListingSyncService, type EbayListingSyncStore, type EbayListingSyncExecution } from "../../ebay-listing-sync.service";
-import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncService, type EbayListingSyncStore, type EbayListingSyncExecution } from "../../application/ebay-listing-sync.service";
+import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../domain/ebay-listing-sync.domain";
 import { syncIdentity } from "../fixtures/ebay-listing-sync.fixture";
 
 const uuid = "f52374be-d3aa-4542-a83c-127285c582db";

@@ -19,8 +19,8 @@ import {
 } from "../infrastructure/shopify-product-connection.repository";
 import { ShopifyProductMappingError, type ShopifyProductMappingService } from "./shopify-product-mapping.service";
 import { publicationSelectionBusyIssue } from "../../inventory-planning/publication-selection-work.api";
-import { createChannelPricingService } from "../../channels/channel-pricing.service";
-import { ChannelPricingError } from "../../channels/channel-pricing.domain";
+import { createChannelPricingService } from "../../channels/channel-pricing.service.api";
+import { ChannelPricingError } from "../../channels/channel-pricing.domain.api";
 import { assertLinkSkuProgress, assertLinkSkusAvailable, planLinkSkuAssignments,
   shopifyConnectionRemoteFingerprint } from "./shopify-link-sku-completion";
 

@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CostSourceRevision } from "@shared/procurement/cost-source-contracts";
-import { readShipmentCostPostingEvidence } from "../../shipment-cost-posting-read.repository";
-import { readCurrentShipmentSourceFingerprintBatch, readShipmentCostExceptions } from "../../shipment-cost-exception.repository";
+import { readShipmentCostPostingEvidence } from "../../infrastructure/shipment-cost-posting-read.repository";
+import { readCurrentShipmentSourceFingerprintBatch, readShipmentCostExceptions } from "../../infrastructure/shipment-cost-exception.repository";
 
-vi.mock("../../shipment-cost-exception.repository", () => ({
+vi.mock("../../infrastructure/shipment-cost-exception.repository", () => ({
   readCurrentShipmentSourceFingerprintBatch: vi.fn(), readShipmentCostExceptions: vi.fn(),
 }));
 const source = (shipmentId: number, lineId: number): CostSourceRevision => ({ contractVersion: 1, revision: 1,

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { procurementSettingsCommandSchema, type ProcurementSettingsSnapshot } from "@shared/procurement/procurement-settings";
-import { applyProcurementSettingsCommand, assertProcurementSettingsAuthority } from "../../procurement-settings.policy";
-import { readProcurementSettings, type ProcurementSettingsTransaction } from "../../procurement-settings.repository";
+import { applyProcurementSettingsCommand, assertProcurementSettingsAuthority } from "../../domain/procurement-settings.policy";
+import { readProcurementSettings, type ProcurementSettingsTransaction } from "../../infrastructure/procurement-settings.repository";
 
 const settings: ProcurementSettingsSnapshot = {
   requireApproval: false, autoSendOnApprove: true, requireAcknowledgeBeforeReceive: false,

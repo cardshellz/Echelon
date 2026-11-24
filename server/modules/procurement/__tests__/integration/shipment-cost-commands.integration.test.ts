@@ -10,9 +10,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { shipmentCostVersion } from "../../shipment-cost-version";
-import type { ShipmentCostCommand } from "../../shipment-cost-commands";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
+import { shipmentCostVersion } from "../../application/shipment-cost-version";
+import type { ShipmentCostCommand } from "../../application/shipment-cost-commands";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -28,9 +28,9 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
   let pool: pg.Pool;
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let service: ShipmentTrackingService;
-  let createService: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
-  let storage: typeof import("../../procurement.storage").procurementMethods;
-  let commandFactory: typeof import("../../shipment-cost-commands").createShipmentCostCommands;
+  let createService: typeof import("../../application/shipment-tracking.service").createShipmentTrackingService;
+  let storage: typeof import("../../infrastructure/procurement.storage").procurementMethods;
+  let commandFactory: typeof import("../../application/shipment-cost-commands").createShipmentCostCommands;
   let repositoryFactory: typeof import("../../../../platform/commands/command-results.repository").createDrizzleFinancialCommandRepository;
   let defaultModulePool: pg.Pool | undefined;
   let ownsProcurement = false;
@@ -183,8 +183,8 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [serviceModule, storageModule, commandModule, repositoryModule, databaseModule] = await Promise.all([
-        import("../../shipment-tracking.service"), import("../../procurement.storage"),
-        import("../../shipment-cost-commands"), import("../../../../platform/commands/command-results.repository"),
+        import("../../application/shipment-tracking.service"), import("../../infrastructure/procurement.storage"),
+        import("../../application/shipment-cost-commands"), import("../../../../platform/commands/command-results.repository"),
         import("../../../../db"),
       ]);
       createService = serviceModule.createShipmentTrackingService;

@@ -7,7 +7,7 @@ import {
   type TrackingEnrollmentDependencies,
   type TrackingEnrollmentPreview,
 } from "../enroll-shipstation-carrier-tracking";
-import type { CarrierTrackingSubscriptionSweepResult } from "../../server/modules/shipping/carrier-tracking.service";
+import type { CarrierTrackingSubscriptionSweepResult } from "../../server/modules/shipping/application/carrier-tracking.service";
 
 const preview: TrackingEnrollmentPreview = {
   activeOrUnknownLabels: 10,

@@ -4,8 +4,8 @@ import { cutoverReconstructionCommitSchema, cutoverReconstructionEvidenceSchema,
   type CutoverReconstructionReceipt } from "@shared/types/inventory-cutover-reconstruction";
 import type { InventoryCutoverReconstructionStore } from "../application/inventory-cutover-reconstruction.port";
 import type { CanonicalClaimInventoryMutationPort } from "../application/canonical-claim-inventory.port";
-import { PostgresCanonicalClaimInventoryRepository } from "../../inventory/infrastructure/canonical-claim-inventory.repository";
-import { readInventoryCutoverReconstruction } from "../../inventory/infrastructure/inventory-cutover-reconstruction.reader";
+import { PostgresCanonicalClaimInventoryRepository } from "../../inventory/canonical-claim-inventory.repository.api";
+import { readInventoryCutoverReconstruction } from "../../inventory/inventory-cutover-reconstruction.reader.api";
 import { readWmsCutoverReconstruction, readWmsCutoverShipmentReviews } from "../../wms/cutover-and-dispatch.api";
 import { readCutoverOriginalCosts } from "../../orders/assembly-order-authority.api";
 import { readOmsCutoverReconstruction } from "../../oms/channel-order-intake.api";
@@ -16,11 +16,11 @@ import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cu
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { persistReconstructedCutoverClaim } from "./inventory-availability-claim.repository";
 import type { InventoryCutoverLegacyPromisePort } from "../application/inventory-cutover-legacy-promise.port";
-import { PostgresInventoryCutoverLegacyPromiseRepository } from "../../inventory/infrastructure/inventory-cutover-legacy-promise.repository";
+import { PostgresInventoryCutoverLegacyPromiseRepository } from "../../inventory/inventory-cutover-legacy-promise.repository.api";
 import { captureInventoryCutoverStage } from "./inventory-cutover-capture-stage";
 import type { InventoryOpeningReservationPort } from "../application/inventory-opening-reservation.port";
-import { PostgresInventoryOpeningReservationRepository } from "../../inventory/infrastructure/inventory-opening-reservation.repository";
-import { PostgresInventoryQuantityLedger } from "../../inventory/infrastructure/quantity-ledger.repository";
+import { PostgresInventoryOpeningReservationRepository } from "../../inventory/inventory-opening-reservation.repository.api";
+import { PostgresInventoryQuantityLedger } from "../../inventory/quantity-ledger.repository.api";
 import { readRetiredCutoverHistory } from "./inventory-cutover-history-audit.reader";
 
 const inventoryCaptureSchema = cutoverReconstructionEvidenceSchema.pick({ levels: true, lots: true,

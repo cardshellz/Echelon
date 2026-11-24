@@ -7,7 +7,7 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PostgresOperationalShipmentDispatchRepository } from "../../infrastructure/operational-shipment-dispatch.repository";
 import { WmsOperationalShipmentSourceOwner } from "../../../wms/infrastructure/operational-shipment-source";
-import { createChannelFulfillmentAuthorityRepository } from "../../../oms/channel-fulfillment-authority.repository";
+import { createChannelFulfillmentAuthorityRepository } from "../../../oms/infrastructure/channel-fulfillment-authority.repository";
 import { shipmentQuantityEvidenceProjection } from "../../infrastructure/shipment-quantity-evidence.sql";
 import { interpretInventoryShipmentQuantity } from "@shared/inventory/shipment-quantity";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../fixtures/inventory-cutover-database";

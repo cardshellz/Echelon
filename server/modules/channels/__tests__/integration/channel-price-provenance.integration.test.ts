@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
-import { resolveChannelListingPrice } from "../../channel-pricing-resolver";
+import { resolveChannelListingPrice } from "../../application/channel-pricing-resolver";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

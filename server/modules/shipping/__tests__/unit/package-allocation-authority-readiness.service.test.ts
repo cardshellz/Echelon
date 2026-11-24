@@ -4,13 +4,13 @@ import { describe, expect, it } from "vitest";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 
-import { SHIPSTATION_LABEL_OBSERVATION_SOURCE } from "../../carrier-tracking.domain";
-import type { PersistedDeclaredPackageEvidence } from "../../declared-package-lifecycle-shadow.domain";
+import { SHIPSTATION_LABEL_OBSERVATION_SOURCE } from "../../domain/carrier-tracking.domain";
+import type { PersistedDeclaredPackageEvidence } from "../../domain/declared-package-lifecycle-shadow.domain";
 import {
   PackageAllocationAuthorityReadinessService,
   PackageAllocationAuthorityReadinessServiceError,
   type PackageAllocationAuthorityReadinessCommand,
-} from "../../package-allocation-authority-readiness.service";
+} from "../../application/package-allocation-authority-readiness.service";
 import {
   PackageAllocationLedgerRepositoryError,
   PgPackageAllocationLedgerRepository,
@@ -19,8 +19,8 @@ import {
   type PackageAllocationAuthorityPreviewTransaction,
   type PackageAllocationLedgerRepository,
   type PackageAllocationLedgerTransaction,
-} from "../../package-allocation-ledger.repository";
-import type { PackageAllocationSourceFacts } from "../../package-allocation-source-identity.domain";
+} from "../../infrastructure/package-allocation-ledger.repository";
+import type { PackageAllocationSourceFacts } from "../../domain/package-allocation-source-identity.domain";
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");

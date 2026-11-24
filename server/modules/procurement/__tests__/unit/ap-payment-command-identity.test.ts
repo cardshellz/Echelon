@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bindApPaymentCommandIdentity, resolveApPaymentCommandIdentity } from "../../ap-payment-command-identity";
+import { bindApPaymentCommandIdentity, resolveApPaymentCommandIdentity } from "../../application/ap-payment-command-identity";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 const descriptor: FinancialCommandDescriptor = { actorType: "user", actorId: "actor-a", method: "POST", routeTemplate: "/api/ap-payments", resourceKey: "vendor:1", idempotencyKey: "saved-intent-key", requestHash: "a".repeat(64), commandName: "ap.payment.record", contractVersion: 1 };
 describe("AP command request identity", () => {

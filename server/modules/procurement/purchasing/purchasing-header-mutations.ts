@@ -8,34 +8,34 @@ import {
 } from "@shared/schema";
 import type { FinancialCommandDescriptor } from "../../../platform/commands/transactional-command.service";
 import { captureDocumentNumberTime } from "../../../platform/document-numbering/document-number";
-import { hasPoInvoiceHistory, readPoInvoiceHistory } from "../po-invoice-history.repository";
+import { hasPoInvoiceHistory, readPoInvoiceHistory } from "../infrastructure/po-invoice-history.repository";
 import {
   deliveryDateIso,
   sameDeliveryDate,
   validateDeliverySchedulePatch,
   type DeliverySchedulePatch,
-} from "../purchase-order-delivery-schedule";
+} from "../application/purchase-order-delivery-schedule";
 import {
   buildPurchaseOrderDraftHeaderChange,
   purchaseOrderDraftHeaderPatchSchema,
-} from "../purchase-order-draft-header";
+} from "../application/purchase-order-draft-header";
 import {
   PURCHASE_ORDER_HISTORY_DELETE_MESSAGE,
   retainedPurchaseOrderHistoryKinds,
-} from "../purchase-order-history.policy";
+} from "../domain/purchase-order-history.policy";
 import {
   isPurchaseOrderHistoryConstraintViolation,
   readPurchaseOrderHistoryPresence,
-} from "../purchase-order-history.repository";
+} from "../infrastructure/purchase-order-history.repository";
 import {
   millisecondTransactionTimestamp,
   nextPurchaseOrderUpdatedAt,
   purchaseOrderUpdatedAtMatchesApplicationVersion,
-} from "../purchase-order-lifecycle-version";
+} from "../application/purchase-order-lifecycle-version";
 import {
   createPurchaseOrderLineCommands,
   PurchaseOrderLineCommandError,
-} from "../purchase-order-line-commands";
+} from "../application/purchase-order-line-commands";
 import type { PurchasingCatalog } from "./purchasing-catalog";
 import type { PurchasingLifecycleLocks } from "./purchasing-lifecycle-locks";
 import {

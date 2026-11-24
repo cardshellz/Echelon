@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
 import type { ChannelEbayStockLinkInput, ChannelEbayStockLinkResult } from "../../inventory-planning/quantity-publication.api";
 
 /**

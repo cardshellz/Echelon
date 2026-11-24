@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createPoFinancialExceptionService } from "../../po-financial-exceptions.service";
+import { createPoFinancialExceptionService } from "../../application/po-financial-exceptions.service";
 import {
   PoFinancialRefreshFixture,
   REFRESH_ACTOR,
@@ -150,7 +150,7 @@ databaseTests.sequential(
       async (status) => {
         await sync();
         const first = (await active())[0];
-        const lifecycle = await import("../../po-exceptions.service");
+        const lifecycle = await import("../../application/po-exceptions.service");
         if (status === "resolved")
           await lifecycle.resolveException(
             first.id,
@@ -172,7 +172,7 @@ databaseTests.sequential(
       },
     );
     it("never retires manually created financial alerts", async () => {
-      const lifecycle = await import("../../po-exceptions.service");
+      const lifecycle = await import("../../application/po-exceptions.service");
       const manual = await lifecycle.upsertException({
         poId: 10,
         kind: "past_due",
@@ -318,7 +318,7 @@ databaseTests.sequential(
       ]);
     });
     it("retires a known legacy aggregate alert only after complete current proof", async () => {
-      const lifecycle = await import("../../po-exceptions.service");
+      const lifecycle = await import("../../application/po-exceptions.service");
       const legacy = await lifecycle.upsertException({
         poId: 10,
         kind: "past_due",
@@ -370,7 +370,7 @@ databaseTests.sequential(
     it("serializes manual resolution against synchronization without reopening manual history", async () => {
       await sync();
       const first = (await active())[0],
-        lifecycle = await import("../../po-exceptions.service");
+        lifecycle = await import("../../application/po-exceptions.service");
       const blocker = await fixture.pool.connect();
       await blocker.query("BEGIN");
       await blocker.query(

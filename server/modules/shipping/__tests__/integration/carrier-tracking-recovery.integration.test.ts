@@ -6,16 +6,16 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { validatePostgresTestEnvironment } from "../../../../../scripts/ci/postgres-tests";
-import { normalizeShipStationTrackingWebhook } from "../../carrier-tracking.domain";
+import { normalizeShipStationTrackingWebhook } from "../../domain/carrier-tracking.domain";
 import {
   createDrizzleCarrierTrackingRepository,
   type CarrierTrackingRepository,
   type ClaimedCarrierTrackingLabelPoll,
   type FinalizeCarrierTrackingLabelPollAttemptInput,
-} from "../../carrier-tracking.repository";
-import { CarrierTrackingService } from "../../carrier-tracking.service";
-import { CarrierDispatchAuthorityError } from "../../carrier-dispatch-authority";
-import { ShipStationTrackingEventsError } from "../../shipstation-tracking-events.client";
+} from "../../infrastructure/carrier-tracking.repository";
+import { CarrierTrackingService } from "../../application/carrier-tracking.service";
+import { CarrierDispatchAuthorityError } from "../../application/carrier-dispatch-authority";
+import { ShipStationTrackingEventsError } from "../../infrastructure/shipstation-tracking-events.client";
 
 const databaseSuite = process.env.ECHELON_TEST_DATABASE_URL
   && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { createOmsService } from "../../oms.service";
+import { createOmsService } from "../../application/oms.service";
 
 const dialect = new PgDialect();
 

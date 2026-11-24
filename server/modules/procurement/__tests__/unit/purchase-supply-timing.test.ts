@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPurchaseSupplyTiming } from "../../purchase-supply-timing";
+import { buildPurchaseSupplyTiming } from "../../application/purchase-supply-timing";
 
 const base = { asOfDate: "2026-09-01", availablePieces: 100, dailyPieces: 10, leadTimeDays: 30, safetyStockDays: 5, onOrderPieces: 300 };
 const arrival = (id: number, remainingPieces: number, expectedDate: string | null) => ({ purchaseOrderId: id, purchaseOrderNumber: `PO-${id}`, purchaseOrderLineId: id, remainingPieces, expectedDate });

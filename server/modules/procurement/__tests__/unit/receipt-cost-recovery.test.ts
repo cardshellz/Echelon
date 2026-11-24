@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { receiptCostRecoveryOutcome, recoveryRetryOutcome, type ReceiptCostRecoveryClaim } from "../../receipt-cost-recovery.domain";
-import { runReceiptCostRecoveryBatch, startReceiptCostRecoveryWorker, type ReceiptCostRecoveryDependencies } from "../../receipt-cost-recovery.worker";
+import { receiptCostRecoveryOutcome, recoveryRetryOutcome, type ReceiptCostRecoveryClaim } from "../../domain/receipt-cost-recovery.domain";
+import { runReceiptCostRecoveryBatch, startReceiptCostRecoveryWorker, type ReceiptCostRecoveryDependencies } from "../../application/receipt-cost-recovery.worker";
 import { describeReceiptCostRecovery, receiptCostRecoverySchema } from "@shared/procurement/receipt-cost-recovery";
 
 const now = new Date("2026-09-07T12:00:00.000Z");

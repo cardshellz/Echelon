@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { EbayListingWithdrawalExecution } from "../../ebay-listing-withdrawal.service";
+import { EbayListingWithdrawalExecution } from "../../application/ebay-listing-withdrawal.service";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 import type { QuantityPublicationScope } from "../../../inventory-planning/domain/quantity-publication-admission";
-import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
-import type { EbayListingExecutionContext } from "../../ebay-listing-sync.service";
+import type { EbayListingSyncIdentity } from "../../domain/ebay-listing-sync.domain";
+import type { EbayListingExecutionContext } from "../../application/ebay-listing-sync.service";
 
 function fixture(grouped = true) {
   const source: EbayListingSyncIdentity = { channelId:67,connectionId:34,productId:3,accountId:"seller",marketplaceId:"EBAY_US",groupKey:"CATALOG-CLR",

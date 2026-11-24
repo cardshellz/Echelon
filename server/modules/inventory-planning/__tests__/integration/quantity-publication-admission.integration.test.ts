@@ -10,7 +10,7 @@ import { PostgresQuantityPublicationAdmission, suppressQuantityPublicationInside
   attestQuantityPublicationAttemptInsideTransaction } from "../../infrastructure/quantity-publication-admission.repository";
 import { QuantityPublicationCatchupService } from "../../application/quantity-publication-admission.port";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
-import { createProviderRequestDeadline } from "../../../channels/provider-request-limits";
+import { createProviderRequestDeadline } from "../../../channels/application/provider-request-limits";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;

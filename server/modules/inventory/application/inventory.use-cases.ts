@@ -1,5 +1,5 @@
 import { readIntegerMills } from "@shared/money-read";
-import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/application/reserved-inventory-transfer.port";
+import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/reserved-inventory-transfer.port.api";
 import { repointCanonicalTransferPickLines } from "../../wms/order-intake-and-items.api";
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
 import { assertShipmentNotRetired } from "../../inventory-planning/cutover-retired-work.api";

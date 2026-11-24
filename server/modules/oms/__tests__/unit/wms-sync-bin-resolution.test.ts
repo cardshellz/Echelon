@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SRC = readFileSync(resolve(__dirname, "../../wms-sync.service.ts"), "utf-8");
+const SRC = readFileSync(resolve(__dirname, "../../application/wms-sync.service.ts"), "utf-8");
 const RESOLVER = SRC.match(/async function resolveAssignedBinLocation\([\s\S]*?\r?\n}\r?\n/)?.[0] ?? "";
 
 describe("wms-sync.service :: order-line bin resolution", () => {
@@ -19,7 +19,7 @@ describe("wms-sync.service :: order-line bin resolution", () => {
     expect(RESOLVER).not.toMatch(/eq\(productLocations\.isPrimary,\s*1\)/);
     expect(RESOLVER).toContain("selectPickBinCandidate(rows)");
     expect(RESOLVER).not.toContain(".limit(1)");
-    expect(SRC).toContain('import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate.api"');
+    expect(SRC).toContain('import { selectPickBinCandidate } from "../../warehouse/pick-bin-candidate.api"');
   });
 
   it("only considers slot rows that point at a real warehouse location", () => {

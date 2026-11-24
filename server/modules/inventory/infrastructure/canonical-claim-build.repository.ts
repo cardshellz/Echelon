@@ -5,11 +5,11 @@ import type {
   CanonicalClaimBuildExecutionResult,
   CanonicalClaimBuildMutationPort,
   CanonicalClaimBuildHandoffResult,
-} from "../../inventory-planning/application/canonical-claim-build.port";
+} from "../../inventory-planning/canonical-claim-build.port.api";
 import type {
   CanonicalClaimInventoryExecutionResource,
   CanonicalClaimInventoryMutationPort,
-} from "../../inventory-planning/application/canonical-claim-inventory.port";
+} from "../../inventory-planning/canonical-claim-inventory.port.api";
 import { BuildDomainError } from "../domain/build.domain";
 import { PostgresCanonicalClaimInventoryRepository } from "./canonical-claim-inventory.repository";
 

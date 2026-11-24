@@ -6,7 +6,7 @@ const permission = vi.hoisted(() =>
 vi.mock("../../../../routes/middleware", () => ({
   requirePermission: permission,
 }));
-import { registerChannelCatalogRoutes } from "../../channel-catalog.routes";
+import { registerChannelCatalogRoutes } from "../../interfaces/http/channel-catalog.routes";
 
 function setup() {
   const routes = new Map<string, { access: unknown; handle: Function }>();

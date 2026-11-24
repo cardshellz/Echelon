@@ -1,6 +1,6 @@
 import type { CatalogPublicationMediaPlan } from "@shared/types/catalog-publication-media";
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
-import type { ListingPublicationInput, PreparedListingItem } from "../../../marketplace-listings/application/listing-publication-provider.port";
+import type { ListingPublicationInput, PreparedListingItem } from "../../../marketplace-listings/listing-publication-provider.port.api";
 import { prepareChannelIntent, assertPreparedChannelIntent, preparedChannelIntentHash,
   type ChannelIntentAccount } from "../../../marketplace-listings/prepared-channel-intent.api";
 import { jsonObject } from "./walmart-listing-schema";

@@ -4,7 +4,7 @@ import {
   deriveRefundAuthority,
   extractRefundLineAdjustments,
   RefundsCreateBadPayloadError,
-} from "../../refund-line-disposition";
+} from "../../application/refund-line-disposition";
 
 describe("Shopify refund line disposition", () => {
   describe("extractRefundLineAdjustments", () => {

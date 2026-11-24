@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInFlightPoAgingDiagnostics, type InFlightPoAgingRow } from "../../in-flight-po-aging.service";
+import { buildInFlightPoAgingDiagnostics, type InFlightPoAgingRow } from "../../application/in-flight-po-aging.service";
 
 function row(overrides: Partial<InFlightPoAgingRow>): InFlightPoAgingRow {
   return {

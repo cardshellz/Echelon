@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { InboundTrackingService } from "../../inbound-tracking.service";
+import type { InboundTrackingService } from "../../application/inbound-tracking.service";
 vi.mock("../../../../db",()=>({pool:{}}));
-import { inboundTrackingPollingEnabled, startInboundTrackingScheduler } from "../../inbound-tracking.runtime";
+import { inboundTrackingPollingEnabled, startInboundTrackingScheduler } from "../../application/inbound-tracking.runtime";
 afterEach(()=>vi.useRealTimers());
 describe("inbound tracking scheduler",()=>{
   it.each([

@@ -4,11 +4,11 @@ import { z } from "zod";
 import { createShipmentInvoiceCommandSchema } from "@shared/procurement/shipment-invoice-command";
 import type { FinancialCommandDescriptor, FinancialCommandRepository, FinancialCommandResult } from "../../../../platform/commands/transactional-command.service";
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
-vi.mock("../../ap-ledger.service", () => ({ ApLedgerError: class ApLedgerError extends Error {
+vi.mock("../../application/ap-ledger.service", () => ({ ApLedgerError: class ApLedgerError extends Error {
   constructor(message: string, public statusCode=400, public details?: Record<string, unknown>) { super(message); }
 } }));
-import { ApLedgerError, type ApLedgerDbClient } from "../../ap-ledger.service";
-import { createShipmentInvoiceCommands, hashShipmentInvoiceCommandIdentity, shipmentInvoiceCommandScope, SHIPMENT_INVOICE_COMMAND_PRINCIPAL } from "../../shipment-invoice.commands";
+import { ApLedgerError, type ApLedgerDbClient } from "../../application/ap-ledger.service";
+import { createShipmentInvoiceCommands, hashShipmentInvoiceCommandIdentity, shipmentInvoiceCommandScope, SHIPMENT_INVOICE_COMMAND_PRINCIPAL } from "../../application/shipment-invoice.commands";
 
 const actorId="operator-one", key="shipment-invoice-123", now=new Date("2026-09-10T12:00:00Z");
 const body={vendorId:6,invoiceNumber:" F-1 ",costRowIds:[31],invoiceDate:"2026-09-10"};

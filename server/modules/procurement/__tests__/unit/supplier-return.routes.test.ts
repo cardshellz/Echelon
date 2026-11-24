@@ -3,12 +3,12 @@ import express, { type Request } from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ permission: vi.fn() }));
 vi.mock("../../../identity", () => ({ hasPermission: mocks.permission }));
-vi.mock("../../supplier-return.service", () => ({ supplierReturnReader: {} }));
-vi.mock("../../supplier-return.commands", () => ({ supplierReturnCommands: {}, SUPPLIER_RETURN_COMMAND_SCOPE: { method: "POST", routeTemplate: "/api/supplier-returns", resourceKey: "supplier-return:new", commandName: "supplier_return.record" } }));
-vi.mock("../../supplier-return-difference.service", () => ({ supplierReturnDifferenceReader: {} }));
-vi.mock("../../supplier-return-difference.commands", () => ({ supplierReturnReviewCommands: {}, SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE: { method: "POST", routeTemplate: "/api/supplier-return-entitlements/:id/review", resourceKey: "supplier-return-credit-review", commandName: "supplier_return.review_credit_difference" } }));
-import { registerSupplierReturnRoutes } from "../../supplier-return.routes";
-import { SupplierReturnError } from "../../supplier-return.errors";
+vi.mock("../../application/supplier-return.service", () => ({ supplierReturnReader: {} }));
+vi.mock("../../application/supplier-return.commands", () => ({ supplierReturnCommands: {}, SUPPLIER_RETURN_COMMAND_SCOPE: { method: "POST", routeTemplate: "/api/supplier-returns", resourceKey: "supplier-return:new", commandName: "supplier_return.record" } }));
+vi.mock("../../application/supplier-return-difference.service", () => ({ supplierReturnDifferenceReader: {} }));
+vi.mock("../../application/supplier-return-difference.commands", () => ({ supplierReturnReviewCommands: {}, SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE: { method: "POST", routeTemplate: "/api/supplier-return-entitlements/:id/review", resourceKey: "supplier-return-credit-review", commandName: "supplier_return.review_credit_difference" } }));
+import { registerSupplierReturnRoutes } from "../../interfaces/http/supplier-return.routes";
+import { SupplierReturnError } from "../../domain/supplier-return.errors";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 import { returnPreview, returnRequest, returnResult } from "../../../../../test/fixtures/supplier-return";
 

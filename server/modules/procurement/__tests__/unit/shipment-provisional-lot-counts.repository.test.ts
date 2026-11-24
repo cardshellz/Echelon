@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { readShipmentProvisionalLotCounts } from "../../shipment-health-evidence.repository";
+import { readShipmentProvisionalLotCounts } from "../../infrastructure/shipment-health-evidence.repository";
 
 function fixture(rows: Record<string, unknown>[] = []) {
   const execute = vi.fn().mockResolvedValue({ rows });

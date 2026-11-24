@@ -17,7 +17,7 @@ import { ShopifyListingMemberAdapter } from "./modules/marketplace-listings/infr
 import { PostgresListingMemberLifecycleRepository } from "./modules/marketplace-listings/infrastructure/pg-listing-member-lifecycle.repository";
 import type { ListingMemberLifecycleDependencies, ListingMemberLifecycleAdapter } from "./modules/marketplace-listings/application/listing-member-lifecycle.port";
 import type { ListingLifecycleStore } from "./modules/marketplace-listings/application/listing-lifecycle-ports";
-import type { EbayQuantityRequestAdmission } from "./modules/channels/quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "./modules/channels/application/quantity-publication-request";
 
 const directConnectionSchema = z.object({
   provider: z.string(),

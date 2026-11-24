@@ -16,7 +16,7 @@ import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructu
 import { dispatchRuntimeFixtureSql, dispatchRuntimeSeedSql } from "../fixtures/inventory-availability-dispatch-runtime-fixture";
 import { shipmentPublicationFixtureSql, shipmentPublicationIntent } from "../fixtures/shipment-publication.fixture";
 import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
-import { readChannelStockSelection } from "../../../channels/channel-stock-selection";
+import { readChannelStockSelection } from "../../../channels/channel-stock-selection.api";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

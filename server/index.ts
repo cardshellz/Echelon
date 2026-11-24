@@ -11,7 +11,7 @@ import { createChannelSyncBatchService } from "./channel-sync-batch.composition"
 import { registerChannelSyncBatchRoutes } from "./modules/marketplace-listings/infrastructure/channel-sync-batch.routes";
 import { createListingIntentPropagationService } from "./listing-intent-propagation.composition";
 import { registerListingIntentPropagationRoutes } from "./modules/marketplace-listings/infrastructure/listing-intent-propagation.routes";
-import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
+import { ebayListingSyncService } from './modules/channels/ebay-listing-sync.api';
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
 import { startShopifyProductConnectionWorker } from "./modules/catalog/application/shopify-product-connection.worker";
@@ -100,7 +100,7 @@ import {
   startPoEmailOutboxWorker,
   startReceiptCostRecoveryWorker,
 } from "./modules/procurement/runtime-workers.api";
-import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
+import { startVariantAvailabilitySyncWorker } from "./modules/channels/application/variant-availability-sync.worker";
 import {
   startEchelonSyncScheduler,
   startEbayListingReconciliationScheduler,

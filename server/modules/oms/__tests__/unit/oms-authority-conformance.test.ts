@@ -4,8 +4,8 @@ import {
   deriveOmsLineAuthority,
   getOmsLineMaterializableQuantity,
   getOmsLineRemainingMaterializableQuantity,
-} from "../../oms-line-authority";
-import { buildOmsLineAuthorityEvent } from "../../oms-line-authority-ledger";
+} from "../../application/oms-line-authority";
+import { buildOmsLineAuthorityEvent } from "../../application/oms-line-authority-ledger";
 
 const NOW = new Date("2026-06-26T14:00:00.000Z");
 

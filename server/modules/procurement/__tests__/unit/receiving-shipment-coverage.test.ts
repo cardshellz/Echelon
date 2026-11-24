@@ -8,8 +8,8 @@ import {
   type ShipmentReceiptCoverageEvidence,
   type ShipmentReceiptCoverageReversal,
   type ShipmentReceiptCoverageSourceLine,
-} from "../../receiving-shipment-coverage";
-import { ReceivingUnitSnapshotError, type PostedReceiptUnitEvidence } from "../../receiving-unit-snapshot";
+} from "../../application/receiving-shipment-coverage";
+import { ReceivingUnitSnapshotError, type PostedReceiptUnitEvidence } from "../../application/receiving-unit-snapshot";
 
 const source = (overrides: Partial<ShipmentReceiptCoverageSourceLine> = {}): ShipmentReceiptCoverageSourceLine => ({
   id: 30, purchaseOrderId: 10, purchaseOrderLineId: 20, qtyShipped: 501, ...overrides,

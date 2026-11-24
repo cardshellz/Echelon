@@ -8,9 +8,9 @@ import { afterAll,afterEach,beforeAll,beforeEach,describe,expect,it } from "vite
 import * as schema from "@shared/schema";
 import type { CostInventoryEffect } from "@shared/procurement/cost-source-contracts";
 import { costReportAcknowledgementSchema, costReportDeliveryListSchema } from "@shared/procurement/cost-report-delivery";
-import { CostReportingRepository,type ClaimedCostReport } from "../../cost-reporting.repository";
-import { CostReportingError,reportHash,type ReportDestination } from "../../cost-reporting.domain";
-import { recordCostRevision } from "../../cost-source-revision.repository";
+import { CostReportingRepository,type ClaimedCostReport } from "../../infrastructure/cost-reporting.repository";
+import { CostReportingError,reportHash,type ReportDestination } from "../../domain/cost-reporting.domain";
+import { recordCostRevision } from "../../infrastructure/cost-source-revision.repository";
 import { recordReceiptCostOrigin } from "../../../inventory/infrastructure/cost-evidence.repository";
 import { applyCostRevision } from "../../../inventory/application/apply-cost-revision";
 import { fixtureTable,fixtureForeignKeys } from "./shipment-line-fixture";

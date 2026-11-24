@@ -10,8 +10,8 @@ import type {
   IntentDelivery,
   IntentHandoff,
 } from "../domain/listing-intent-propagation";
-import type { EbayListingSyncService } from "../../channels/ebay-listing-sync.service";
-import type { syncActiveListings } from "../../channels/ebay-listing-sync";
+import type { EbayListingSyncService } from "../../channels/ebay-listing-sync.service.api";
+import type { syncActiveListings } from "../../channels/ebay-listing-sync.api";
 import {
   PgDropshipListingPreviewRepository,
   type DropshipListingPreviewService,

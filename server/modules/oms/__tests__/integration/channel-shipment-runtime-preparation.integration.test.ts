@@ -1,8 +1,8 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { normalizeChannelFulfillmentIngress } from "../../channel-fulfillment-ingress";
-import type { ChannelFulfillmentIngressRepository } from "../../channel-fulfillment-ingress.repository";
+import { normalizeChannelFulfillmentIngress } from "../../application/channel-fulfillment-ingress";
+import type { ChannelFulfillmentIngressRepository } from "../../infrastructure/channel-fulfillment-ingress.repository";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { InventoryCutoverPreflightService } from "../../../inventory-planning/application/inventory-cutover-preflight.service";
 import { PostgresInventoryCutoverPreflightRepository } from "../../../inventory-planning/infrastructure/inventory-cutover-preflight.repository";
@@ -132,7 +132,7 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, fixtureSql);
     pool = database.pool;
-    const { createChannelFulfillmentIngressRepository } = await import("../../channel-fulfillment-ingress.repository");
+    const { createChannelFulfillmentIngressRepository } = await import("../../infrastructure/channel-fulfillment-ingress.repository");
     repository = createChannelFulfillmentIngressRepository(drizzle(pool, {
       logger: { logQuery(query) { statements.push(query); statementListener?.(query); } },
     }));
@@ -415,7 +415,7 @@ describeDatabase.sequential("provider non-inventory fulfillment cutover acceptan
       providerNonInventoryCutoverFixtureSql,
     );
     pool = database.pool;
-    const { createChannelFulfillmentIngressRepository } = await import("../../channel-fulfillment-ingress.repository");
+    const { createChannelFulfillmentIngressRepository } = await import("../../infrastructure/channel-fulfillment-ingress.repository");
     repository = createChannelFulfillmentIngressRepository(drizzle(pool));
   });
 

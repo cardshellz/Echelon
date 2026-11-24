@@ -14,7 +14,7 @@ import {
 import {
   createPurchasingService,
   type UpdateDraftPurchaseOrderWithLinesInput,
-} from "../../purchasing.service";
+} from "../../application/purchasing.service";
 
 const FIXED_NOW = new Date("2026-07-11T01:00:00.000Z");
 const CURRENT_VERSION = new Date("2026-07-11T00:30:00.000Z");

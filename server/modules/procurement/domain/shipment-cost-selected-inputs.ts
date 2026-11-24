@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { shipmentAllocationEvidenceSchema, SHIPMENT_ALLOCATION_MAX_SOURCE_QUANTITY } from "@shared/procurement/shipment-allocation";
-import { costFingerprint } from "../../inventory/domain/cost-fingerprint";
+import { costFingerprint } from "../../inventory/cost-fingerprint.api";
 import type { CostSourceProposal } from "./cost-source-compatibility";
 
 const id = z.number().int().positive().max(SHIPMENT_ALLOCATION_MAX_SOURCE_QUANTITY);

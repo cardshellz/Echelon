@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import type { DeclaredPackageLifecycleEvent } from "../../declared-package-lifecycle.domain";
+import type { DeclaredPackageLifecycleEvent } from "../../domain/declared-package-lifecycle.domain";
 import {
   PackageAllocationAuthorityResolutionError,
   packageAllocationPackageKey,
   resolvePackageAllocationAuthority,
   type PackageAllocationAuthorityResolutionInput,
-} from "../../package-allocation-authority-resolution.domain";
+} from "../../domain/package-allocation-authority-resolution.domain";
 import type {
   PackageAllocationGroupAction,
   PackageAllocationGroupPlannerResultV1,
-} from "../../package-allocation-group.domain";
+} from "../../domain/package-allocation-group.domain";
 
 const groupKey = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const sourceId = 7001;

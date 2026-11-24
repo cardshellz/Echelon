@@ -6,7 +6,7 @@
  */
 
 import { CountryCodeValidationError, requireCountryCode } from "@shared/country-code";
-import type { ShipmentPushPayload } from "../../types";
+import type { ShipmentPushPayload } from "../../domain/types";
 
 export const EBAY_CHANNEL_ID = 67;
 

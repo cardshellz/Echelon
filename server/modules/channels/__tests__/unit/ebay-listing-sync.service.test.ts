@@ -1,17 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { EbayExistingListingSyncExecution } from "../../ebay-listing-sync.service";
+import { EbayExistingListingSyncExecution } from "../../application/ebay-listing-sync.service";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import {
   EbayListingSyncError,
   syncFailure,
   ebayListingSyncIdentitySchema,
-} from "../../ebay-listing-sync.domain";
+} from "../../domain/ebay-listing-sync.domain";
 import {
   syncIdentity,
   syncProviderFixture,
 } from "../fixtures/ebay-listing-sync.fixture";
 import { safeEbayErrorMessage } from "../../adapters/ebay/ebay-quantity-http";
-import { syncContentIntentHash } from "../../ebay-listing-sync-content";
+import { syncContentIntentHash } from "../../application/ebay-listing-sync-content";
 import { ChannelProviderReadError } from "@shared/channel-provider-read";
 describe("existing eBay listing sync execution", () => {
   it.each(["EBAY_SYNC_READBACK_PENDING", "EBAY_PUBLICATION_READBACK_PENDING"])("uses a separate, bounded readback mismatch budget for %s", code => {

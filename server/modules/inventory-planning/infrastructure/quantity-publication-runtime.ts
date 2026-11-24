@@ -6,7 +6,7 @@ import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, type
 import { PostgresInventoryAvailabilityRuntimePublicationExecutor } from "./inventory-availability-runtime-publication.repository";
 import { AuthorityAwareInventoryPublicationService, type InventoryAvailabilityRuntimePublicationContext } from "../application/inventory-availability-runtime-publication.service";
 import { QuantityPublicationCatchupService } from "../application/quantity-publication-admission.port";
-import type { EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
+import type { EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request.api";
 import { PostgresQuantityProviderResponseRecovery } from "./quantity-provider-response-recovery.repository";
 import { EbayAutomaticPublicationRecoveryService } from "../application/ebay-automatic-publication-recovery.service";
 import { PostgresEbayAutomaticPublicationRecoveryRepository } from "./ebay-automatic-publication-recovery.repository";

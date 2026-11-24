@@ -5,14 +5,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES,
-} from "../../package-allocation-authority-discovery.query";
+} from "../../infrastructure/package-allocation-authority-discovery.query";
 import {
   type AppendPackageAllocationPlanInput,
   PackageAllocationLedgerRepositoryError,
   PgPackageAllocationLedgerRepository,
-} from "../../package-allocation-ledger.repository";
-import { PackageAllocationPersistenceError } from "../../package-allocation-planning.service";
-import { derivePackageAllocationSourceRegistration } from "../../package-allocation-source-identity.domain";
+} from "../../infrastructure/package-allocation-ledger.repository";
+import { PackageAllocationPersistenceError } from "../../application/package-allocation-planning.service";
+import { derivePackageAllocationSourceRegistration } from "../../domain/package-allocation-source-identity.domain";
 
 const groupKey = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 
@@ -781,7 +781,7 @@ describe("PgPackageAllocationLedgerRepository", () => {
 });
 
 const repositorySource = readFileSync(
-  join(process.cwd(), "server", "modules", "shipping", "package-allocation-ledger.repository.ts"),
+  join(process.cwd(), "server", "modules", "shipping", "infrastructure/package-allocation-ledger.repository.ts"),
   "utf8",
 ).replace(/\r\n/g, "\n");
 

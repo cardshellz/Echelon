@@ -11,8 +11,8 @@ import {
 import {
   CostEvidenceError,
   costInteger,
-} from "../../inventory/infrastructure/cost-evidence-values";
-import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
+} from "../../inventory/cost-evidence-values.api";
+import type { CostRevisionInput } from "../../inventory/cost-evidence.repository.api";
 import { resolveSupplierCreditReductions, supplierCreditSourceEvidenceSchema, type SupplierCreditCostRow } from "./supplier-credit-source";
 import { supplierCreditDispositionSchema } from "@shared/procurement/supplier-credit";
 import { validateQuarantineInvoiceCreditIntervals } from "./quarantine-invoice-credit";

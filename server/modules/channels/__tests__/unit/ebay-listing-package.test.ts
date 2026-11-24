@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolveEbayListingPackage, prepareEbayListingPackages, assertEbayPackagePreservation } from "../../adapters/ebay/ebay-listing-package";
 import type { EbayInventoryItem } from "../../adapters/ebay/ebay-types";
-import { findEbaySyncContentMismatch } from "../../ebay-listing-sync-content";
+import { findEbaySyncContentMismatch } from "../../application/ebay-listing-sync-content";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 

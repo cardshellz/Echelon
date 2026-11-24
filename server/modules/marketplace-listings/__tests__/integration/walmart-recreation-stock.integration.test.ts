@@ -28,10 +28,10 @@ import { PostgresInventoryPublicationOutboxRepository } from "../../../inventory
 import { InventoryPublicationOutboxService } from "../../../inventory-planning/application/inventory-publication-outbox.service";
 import { InventoryPublicationNotSentError } from "../../../inventory-planning/application/inventory-publication-transport";
 import { PostgresInventoryPublicationSupplyReader } from "../../../inventory-planning/infrastructure/inventory-publication-supply-read.repository";
-import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/channel-inventory-publication-transport.adapter";
-import { ChannelListingCatalogRepository } from "../../../channels/channel-listing-catalog.repository";
-import { PostgresChannelCatalogRepository } from "../../../channels/channel-catalog.repository";
-import { ChannelCatalogService } from "../../../channels/channel-catalog.service";
+import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/infrastructure/channel-inventory-publication-transport.adapter";
+import { ChannelListingCatalogRepository } from "../../../channels/infrastructure/channel-listing-catalog.repository";
+import { PostgresChannelCatalogRepository } from "../../../channels/infrastructure/channel-catalog.repository";
+import { ChannelCatalogService } from "../../../channels/application/channel-catalog.service";
 import { WalmartListingProvider } from "../../../channels/adapters/walmart/walmart-listing.provider";
 import { WalmartListingApi } from "../../../channels/adapters/walmart/walmart-listing-api";
 import { WalmartClient } from "../../../channels/adapters/walmart/walmart-client";

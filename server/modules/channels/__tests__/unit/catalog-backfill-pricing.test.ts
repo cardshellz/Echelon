@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { channelFeeds, channelListings, productVariants } from "@shared/schema";
-import { createCatalogBackfillService, type BackfillResult } from "../../catalog-backfill.service";
+import { createCatalogBackfillService, type BackfillResult } from "../../application/catalog-backfill.service";
 
 const owners = vi.hoisted(() => ({
   savePrice: vi.fn(),
@@ -8,7 +8,7 @@ const owners = vi.hoisted(() => ({
   updateVariant: vi.fn(),
   createVariant: vi.fn(),
 }));
-vi.mock("../../channel-pricing.service", () => ({
+vi.mock("../../application/channel-pricing.service", () => ({
   createChannelPricingService: owners.createPricingService,
 }));
 vi.mock("../../../catalog/infrastructure/catalog.storage", () => ({

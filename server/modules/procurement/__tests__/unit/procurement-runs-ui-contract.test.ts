@@ -16,7 +16,7 @@ const page = readFileSync(
 );
 const app = readFileSync(resolve(process.cwd(), "client/src/App.tsx"), "utf8");
 const routes = readFileSync(
-  resolve(process.cwd(), "server/modules/procurement/purchasing-recommendation.routes.ts"),
+  resolve(process.cwd(), "server/modules/procurement/interfaces/http/purchasing-recommendation.routes.ts"),
   "utf8",
 );
 const reorderEnginePage = readFileSync(

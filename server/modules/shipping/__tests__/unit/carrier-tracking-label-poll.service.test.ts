@@ -3,12 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   CarrierTrackingRepository,
   CarrierTrackingTransaction,
-} from "../../carrier-tracking.repository";
+} from "../../infrastructure/carrier-tracking.repository";
 import {
   CarrierTrackingService,
   type CarrierTrackingLogger,
-} from "../../carrier-tracking.service";
-import { ShipStationTrackingEventsError } from "../../shipstation-tracking-events.client";
+} from "../../application/carrier-tracking.service";
+import { ShipStationTrackingEventsError } from "../../infrastructure/shipstation-tracking-events.client";
 
 const now = new Date("2026-07-29T12:00:00.000Z");
 

@@ -34,23 +34,23 @@ vi.mock("../../../../routes/middleware", () => {
 vi.mock("../..", () => ({ procurementStorage: mocks.procurement }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.inventory }));
 vi.mock("../../../../db", () => ({ db: mocks.db }));
-vi.mock("../../auto-draft-po-aging.repository", () => ({
+vi.mock("../../infrastructure/auto-draft-po-aging.repository", () => ({
   fetchAutoDraftPoAgingRows: mocks.fetchAutoDraftPoAgingRows,
 }));
-vi.mock("../../in-flight-po-aging.repository", () => ({
+vi.mock("../../infrastructure/in-flight-po-aging.repository", () => ({
   fetchInFlightPoAgingRows: mocks.fetchInFlightPoAgingRows,
 }));
-vi.mock("../../purchasing-recommendation-context.service", () => ({
+vi.mock("../../application/purchasing-recommendation-context.service", () => ({
   loadPurchasingRecommendationContext: mocks.loadPurchasingRecommendationContext,
 }));
-vi.mock("../../purchase-recommendation-pipeline-health.service", () => ({
+vi.mock("../../application/purchase-recommendation-pipeline-health.service", () => ({
   loadPurchaseRecommendationPipelineHealth: mocks.loadPurchaseRecommendationPipelineHealth,
 }));
-vi.mock("../../procurement-health-escalation.service", () => ({
+vi.mock("../../application/procurement-health-escalation.service", () => ({
   sendProcurementHealthCriticalEscalation: mocks.sendProcurementHealthCriticalEscalation,
 }));
 
-import { registerProcurementHealthRoutes } from "../../procurement-health.routes";
+import { registerProcurementHealthRoutes } from "../../interfaces/http/procurement-health.routes";
 
 function buildApp(): Express {
   const app = express();

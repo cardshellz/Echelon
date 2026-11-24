@@ -5,7 +5,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   readChannelStockSelection,
   readOutstandingEbayListingWork,
-} from "../../channels/channel-stock-selection";
+} from "../../channels/channel-stock-selection.api";
 import { readDropshipListingStockSelection } from "../../dropship/stock-publication-selection.api";
 import {
   readStockClearingEvidence,

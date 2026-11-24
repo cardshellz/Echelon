@@ -16,14 +16,14 @@ vi.mock("../../../../routes/middleware", () => ({
 vi.mock("../../application/historical-order-line-identity-repair.service", () => ({
   createHistoricalOrderLineIdentityRepairService: mocks.createService,
 }));
-vi.mock("../../oms-flow-reconciliation.service", () => ({ remediateOmsFlowIssue: vi.fn() }));
-vi.mock("../../ops-health.service", () => ({ getOmsOpsHealth: vi.fn() }));
-vi.mock("../../flow-waterfall.service", () => ({ getFlowWaterfall: vi.fn(), getFlowBucketSamples: vi.fn() }));
-vi.mock("../../flow-trace.service", () => ({ getFlowTrace: vi.fn() }));
-vi.mock("../../webhook-inbox.service", () => ({ enqueueWebhookInboxReplay: vi.fn() }));
-vi.mock("../../webhook-retry.worker", () => ({ requeueDeadWebhookRetry: vi.fn() }));
+vi.mock("../../application/oms-flow-reconciliation.service", () => ({ remediateOmsFlowIssue: vi.fn() }));
+vi.mock("../../application/ops-health.service", () => ({ getOmsOpsHealth: vi.fn() }));
+vi.mock("../../application/flow-waterfall.service", () => ({ getFlowWaterfall: vi.fn(), getFlowBucketSamples: vi.fn() }));
+vi.mock("../../application/flow-trace.service", () => ({ getFlowTrace: vi.fn() }));
+vi.mock("../../application/webhook-inbox.service", () => ({ enqueueWebhookInboxReplay: vi.fn() }));
+vi.mock("../../application/webhook-retry.worker", () => ({ requeueDeadWebhookRetry: vi.fn() }));
 vi.mock("../../../identity", () => ({ hasPermission: vi.fn() }));
-vi.mock("../../shipstation-unmapped-remediation.service", () => ({
+vi.mock("../../application/shipstation-unmapped-remediation.service", () => ({
   adoptShipStationUnmappedPhysicalAsReship: vi.fn(),
   getShipStationUnmappedPhysicalPreview: vi.fn(),
   resolveShipStationUnmappedPhysicalAsProviderEcho: vi.fn(),

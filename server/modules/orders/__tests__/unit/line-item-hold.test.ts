@@ -13,7 +13,7 @@ const SPLIT_SRC = readFileSync(resolve(__dirname, "../../../wms/application/line
 const omsDir = resolve(__dirname, "../../../oms");
 const shipStationSubDir = resolve(omsDir, "shipstation");
 const SHIPSTATION_SRC = [
-  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"),
+  readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf8"),
   ...(existsSync(shipStationSubDir)
     ? readdirSync(shipStationSubDir)
         .filter((f) => f.endsWith(".ts"))
@@ -22,10 +22,10 @@ const SHIPSTATION_SRC = [
     : []),
 ].join("\n");
 const PICKING_SRC = readFileSync(resolve(__dirname, "../../application/picking.use-cases.ts"), "utf8");
-const FLOW_WATERFALL_SRC = readFileSync(resolve(__dirname, "../../../oms/flow-waterfall.service.ts"), "utf8");
-const OPS_HEALTH_SRC = readFileSync(resolve(__dirname, "../../../oms/ops-health.service.ts"), "utf8");
-const HOLD_MONITORING_SRC = readFileSync(resolve(__dirname, "../../../oms/line-item-hold-monitoring.ts"), "utf8");
-const RECON_SRC = readFileSync(resolve(__dirname, "../../../oms/oms-flow-reconciliation.service.ts"), "utf8");
+const FLOW_WATERFALL_SRC = readFileSync(resolve(__dirname, "../../../oms/application/flow-waterfall.service.ts"), "utf8");
+const OPS_HEALTH_SRC = readFileSync(resolve(__dirname, "../../../oms/application/ops-health.service.ts"), "utf8");
+const HOLD_MONITORING_SRC = readFileSync(resolve(__dirname, "../../../oms/application/line-item-hold-monitoring.ts"), "utf8");
+const RECON_SRC = readFileSync(resolve(__dirname, "../../../oms/application/oms-flow-reconciliation.service.ts"), "utf8");
 
 // Line-item hold, Phase 1 (LINE-ITEM-HOLD-DESIGN.md): a lead/admin can hold a
 // single pre-order line so the rest of the order ships. P1 records the hold +

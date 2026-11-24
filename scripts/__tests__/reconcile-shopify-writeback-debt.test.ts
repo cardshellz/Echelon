@@ -7,7 +7,7 @@ import {
   runReconciliation,
   type Flags,
 } from "../reconcile-shopify-writeback-debt";
-import type { ShopifyFulfillmentSnapshot } from "../../server/modules/oms/shopify-fulfillment-snapshot";
+import type { ShopifyFulfillmentSnapshot } from "../../server/modules/oms/application/shopify-fulfillment-snapshot";
 
 function flags(overrides: Partial<Flags> = {}): Flags {
   return {

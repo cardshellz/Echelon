@@ -3,14 +3,14 @@ import { z } from "zod";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 
 const readers = vi.hoisted(() => ({ channel: vi.fn(), dropship: vi.fn() }));
-vi.mock("../../../channels/channel-stock-selection", async importOriginal => ({
-  ...await importOriginal<typeof import("../../../channels/channel-stock-selection")>(), readChannelStockSelection: readers.channel,
+vi.mock("../../../channels/channel-stock-selection.api", async importOriginal => ({
+  ...await importOriginal<typeof import("../../../channels/channel-stock-selection.api")>(), readChannelStockSelection: readers.channel,
 }));
 vi.mock("../../../dropship/stock-publication-selection.api", async importOriginal => ({
   ...await importOriginal<typeof import("../../../dropship/stock-publication-selection.api")>(), readDropshipListingStockSelection: readers.dropship,
 }));
 
-import { ChannelStockSelectionError } from "../../../channels/channel-stock-selection";
+import { ChannelStockSelectionError } from "../../../channels/channel-stock-selection.api";
 import { DropshipError } from "../../../dropship/stock-publication-selection.api";
 import { InventoryPublicationSelectionError, readPublicationStockSelection, type StockSelectionDestination } from "../../infrastructure/inventory-publication-selection.reader";
 

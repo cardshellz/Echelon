@@ -55,7 +55,7 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
       paid_amount_cents: String(paid), balance_cents: String(balance), status: invoiceStatus });
     // Cached invoice/PO balances alone cannot prove agreement with PO screens.
     const { db } = await import("../../../../db");
-    const { createPoFinancialEvidenceService } = await import("../../po-financial-evidence.service");
+    const { createPoFinancialEvidenceService } = await import("../../application/po-financial-evidence.service");
     expect(await createPoFinancialEvidenceService(db).readWorkflow(PAYMENT_FLOW.poA)).toMatchObject({
       state: balance === 0 ? "settled" : "payment_due",
       evidence: { state: "complete", invoicedAmountCents: PAYMENT_FLOW.invoiceCents,
@@ -402,8 +402,8 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
     expect(graph.purchaseOrders[0].first_paid_at).toEqual(original.purchaseOrders[0].first_paid_at);
     expect(graph.purchaseOrders[0].fully_paid_at).toBeInstanceOf(Date);
     const { db } = await import("../../../../db");
-    const { createPurchaseOrderListRepository } = await import("../../purchase-order-list.repository");
-    const { createPurchaseOrderListService } = await import("../../purchase-order-list.service");
+    const { createPurchaseOrderListRepository } = await import("../../infrastructure/purchase-order-list.repository");
+    const { createPurchaseOrderListService } = await import("../../application/purchase-order-list.service");
     const readList = createPurchaseOrderListService(createPurchaseOrderListRepository(db));
     expect((await readList({ financialWorkflow: "settled" })).purchaseOrders.map(row => row.id)).toEqual([PAYMENT_FLOW.poA]);
     expect((await readList({ financialWorkflow: "review_required" })).total).toBe(0);
@@ -609,7 +609,7 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
   it("replays an exact legacy cash command and rejects adoption by a new operator without adding cash", async () => {
     const { financialCommandRepository } = await import("../../../../platform/commands/command-results.repository");
     const { runTransactionalFinancialCommand } = await import("../../../../platform/commands/transactional-command.service");
-    const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
+    const { executeApPaymentCommandInTransaction } = await import("../../application/ap-ledger.service");
     const key = randomUUID(), body = flowPayment(100_000);
     const descriptor: FinancialCommandDescriptor = { actorType: "user", actorId: PAYMENT_ACTORS.owner, method: "POST",
       routeTemplate: "/api/ap-payments", resourceKey: "vendor:5", commandName: "ap.payment.record", contractVersion: 1,
@@ -631,7 +631,7 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
 
   it("prevents concurrent legacy/new namespace reservation while allowing unrelated command families", async () => {
     const { financialCommandRepository } = await import("../../../../platform/commands/command-results.repository");
-    const { bindApPaymentCommandIdentity } = await import("../../ap-payment-command-identity");
+    const { bindApPaymentCommandIdentity } = await import("../../application/ap-payment-command-identity");
     const key = randomUUID();
     const legacy: FinancialCommandDescriptor = { actorType: "user", actorId: PAYMENT_ACTORS.owner, method: "POST", routeTemplate: "/api/ap-payments",
       resourceKey: "vendor:5", commandName: "ap.payment.record", contractVersion: 1, idempotencyKey: key, requestHash: "a".repeat(64) };

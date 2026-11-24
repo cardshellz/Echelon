@@ -6,15 +6,15 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   dropshipTrackingNotSentCountSql,
   dropshipTrackingNotSentSampleSql,
-} from "../../channel-writeback.service";
-import { getOmsOpsHealth } from "../../ops-health.service";
+} from "../../application/channel-writeback.service";
+import { getOmsOpsHealth } from "../../application/ops-health.service";
 
 const OPS_HEALTH_SRC = readFileSync(
-  resolve(__dirname, "../../ops-health.service.ts"),
+  resolve(__dirname, "../../application/ops-health.service.ts"),
   "utf-8",
 );
 const OMS_FLOW_RECONCILIATION_SRC = readFileSync(
-  resolve(__dirname, "../../oms-flow-reconciliation.service.ts"),
+  resolve(__dirname, "../../application/oms-flow-reconciliation.service.ts"),
   "utf-8",
 );
 const OMS_SCHEMA_SRC = readFileSync(

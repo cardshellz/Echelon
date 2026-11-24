@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { ReceivingService, ReceivingError } from "../../../../modules/procurement/receiving.service";
+import { ReceivingService, ReceivingError } from "../../application/receiving.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // discardDraftReceivingOrder — unit tests

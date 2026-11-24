@@ -3,7 +3,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { inboundShipmentLines, inboundFreightCosts, inboundFreightAllocations,
   landedCostSnapshots, purchaseOrderLines, purchaseOrders } from "@shared/schema";
-import { readShipmentHealthEvidence } from "../../shipment-health-evidence.repository";
+import { readShipmentHealthEvidence } from "../../infrastructure/shipment-health-evidence.repository";
 
 type Row = Record<string, unknown>;
 function fixture() {

@@ -6,7 +6,7 @@ import {
   NO_PICK_PRIORITY_PLAN,
   readDropshipVendorPlanId,
   toPickPriorityPlan,
-} from "../../dropship-order-priority";
+} from "../../application/dropship-order-priority";
 
 // Production values from order 22039 (OMS order 1013417): the Dropship OMS
 // channel and vendor 1's `.ops` plan.

@@ -1,7 +1,7 @@
 import type pg from "pg";
 import * as schema from "@shared/schema";
 import { rfqCommandReceiptSchema } from "@shared/procurement/rfq-command";
-import type { createRfqWorkflowCommands } from "../../rfq-workflow.commands";
+import type { createRfqWorkflowCommands } from "../../application/rfq-workflow.commands";
 
 export const RFQ_AUTHORITY_TABLES = [schema.users, schema.authRoles, schema.authPermissions,
   schema.authUserRoles, schema.authRolePermissions];

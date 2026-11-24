@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Express } from "express";
-import { registerPurchasePipelineRoutes } from "../../purchase-pipeline.routes";
-import { createSupplierProgressService } from "../../supplier-progress.service";
-import type { PipelineDatabase } from "../../purchase-pipeline.repository";
+import { registerPurchasePipelineRoutes } from "../../interfaces/http/purchase-pipeline.routes";
+import { createSupplierProgressService } from "../../application/supplier-progress.service";
+import type { PipelineDatabase } from "../../infrastructure/purchase-pipeline.repository";
 
 vi.mock("../../../../db", () => ({db:{}}));
 vi.mock("../../../../routes/middleware", () => ({requirePermission:vi.fn((resource:string,action:string) => ({resource,action}))}));

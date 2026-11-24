@@ -11,7 +11,7 @@ import { parseDecimalCents, sumCents, readIntegerCents } from "@shared/money-rea
 
 import { and, eq } from "drizzle-orm";
 import { resolveProviderCountryCode } from "@shared/country-code";
-import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../provider-request-limits";
+import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../application/provider-request-limits";
 import {
   channelConnections,
   warehouses,
@@ -36,17 +36,17 @@ import type {
   FulfillmentPushResult,
   CancellationPayload,
   CancellationPushResult,
-} from "../channel-adapter.interface";
-import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
+} from "../domain/channel-adapter.interface";
+import { InventoryPublicationConfigurationError } from "../domain/channel-adapter.interface";
 import {
   SHOPIFY_INVENTORY_WRITE_PATH,
   ShopifyInventoryWriteRejectedError,
   isShopifyInventoryWrite,
   shopifyInventoryWriteRejectionCode,
 } from "./shopify-inventory-write.error";
-import { providerRestIdentitySchema } from "../channel-identity.domain";
+import { providerRestIdentitySchema } from "../domain/channel-identity.domain";
 import { ShopifyMarketplaceListingConnector } from "../listing-connectors/shopify-listing.connector";
-import type { QuantityPublicationAdmission } from "../../inventory-planning/application/quantity-publication-admission.port";
+import type { QuantityPublicationAdmission } from "../../inventory-planning/quantity-publication-admission.port.api";
 
 import crypto from "crypto";
 

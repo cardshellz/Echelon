@@ -24,7 +24,7 @@ import type {
   ListingUpdateStore,
   StoredListingUpdate,
 } from "./listing-update-ports";
-import { ChannelProviderError } from "../../channels/channel-provider.error";
+import { ChannelProviderError } from "../../channels/channel-provider.error.api";
 
 const REVIEW_LIFETIME_MS = 15 * 60_000;
 const actorSchema = z.string().trim().min(1).max(200);

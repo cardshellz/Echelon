@@ -3,7 +3,7 @@ import { z } from "zod";
 import {
   readCatalogStockProductVariantIds,
   readCatalogStockSelectionFactsForVariants,
-} from "../../catalog/infrastructure/catalog-stock-selection.reader";
+} from "../../catalog/catalog-stock-selection.reader.api";
 import {
   isArchivedCatalogMember,
   readProviderAccountDestinations,

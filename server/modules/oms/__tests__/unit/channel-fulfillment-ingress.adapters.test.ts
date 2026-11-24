@@ -3,13 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EbayFulfillmentIngressPayloadError,
   mapEbayFulfillmentIngress,
-} from "../../ebay-fulfillment-ingress.adapter";
+} from "../../infrastructure/ebay-fulfillment-ingress.adapter";
 import {
   mapShopifyFulfillmentCarrier,
   mapShopifyFulfillmentIngress,
   processShopifyFulfillmentIngress,
   ShopifyFulfillmentIngressPayloadError,
-} from "../../shopify-fulfillment-ingress.adapter";
+} from "../../infrastructure/shopify-fulfillment-ingress.adapter";
 
 const shopifyMetadata = {
   sourceChannelId: 36,

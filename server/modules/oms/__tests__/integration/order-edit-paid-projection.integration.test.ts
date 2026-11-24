@@ -7,7 +7,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { OrderEditPaidProjection } from "../../order-edit-paid-projection";
+import { OrderEditPaidProjection } from "../../application/order-edit-paid-projection";
 import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,

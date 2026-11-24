@@ -1,6 +1,6 @@
 import { custodyQuantities } from "./receiving-quarantine";
 import { computeClosedShipmentReceivedBaseQtyByLine, ShipmentReceiptCoverageError,
-  type ShipmentReceiptCoverageEvidence } from "../receiving-shipment-coverage";
+  type ShipmentReceiptCoverageEvidence } from "../application/receiving-shipment-coverage";
 
 export interface ShipmentCustodyObservationEvidence {
   id: number; receivingOrderId: number; receivingLineId: number | null;

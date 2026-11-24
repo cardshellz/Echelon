@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   inspectShipStationProviderPackageEcho,
   reconcileShipStationProviderPackageEcho,
-} from "../../provider-package-echo.service";
+} from "../../application/provider-package-echo.service";
 
 function queryText(query: any): string {
   return (query?.queryChunks ?? [])

@@ -12,7 +12,7 @@ import {
   type ShopifyStaffOAuthCreate,
   type ShopifyStaffOAuthResult,
   type ShopifyStaffOAuthToken,
-} from "../../shopify-staff-oauth.types";
+} from "../../domain/shopify-staff-oauth.types";
 
 const NOW = new Date("2026-11-03T12:00:00.000Z");
 const OPERATION_ID = "11111111-1111-4111-8111-111111111111";

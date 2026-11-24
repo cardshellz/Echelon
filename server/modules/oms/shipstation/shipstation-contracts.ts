@@ -14,9 +14,9 @@ import type {
   ShippingProviderLabelObserver,
 } from "../../shipping/carrier-tracking-and-dispatch.api";
 import type { PackageAllocationLabelCommercialFulfillmentService } from "../../shipping/package-allocation-authority.api";
-import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
+import type { ChannelFulfillmentAuthorityService } from "../application/channel-fulfillment-authority.service";
 import type { InventoryUseCases } from "../../inventory/shipment-evidence.api";
-import type { InventoryShipmentRuntimeInput } from "../../inventory-planning/application/inventory-availability-runtime-shipment.service";
+import type { InventoryShipmentRuntimeInput } from "../../inventory-planning/inventory-availability-runtime-shipment.service.api";
 import {
   ShipStationRateLimitError,
   ShipStationRequestTimeoutError,
@@ -24,7 +24,7 @@ import {
   SS_RATE_LIMITED,
   SS_REQUEST_TIMEOUT,
   type ShipStationApiRequester,
-} from "../shipstation-api-request";
+} from "../application/shipstation-api-request";
 import type { SessionAdvisoryLockRunner } from "../../../infrastructure/session-advisory-lock";
 
 export {

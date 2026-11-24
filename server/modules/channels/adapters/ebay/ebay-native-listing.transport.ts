@@ -4,7 +4,7 @@ import {
   providerHttpReadFailureKind,
   type ChannelProviderReadDiagnostic,
 } from "@shared/channel-provider-read";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
 
 const MAX_NATIVE_RESPONSE_BYTES = 256_000;
 export interface EbayNativeListingRead {

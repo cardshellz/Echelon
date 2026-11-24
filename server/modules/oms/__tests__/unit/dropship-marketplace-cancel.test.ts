@@ -5,7 +5,7 @@ import {
   DropshipMarketplaceCancelStopError,
   stopOrderForMarketplaceCancel,
   type DropshipMarketplaceCancelStopDeps,
-} from "../../dropship-marketplace-cancel";
+} from "../../application/dropship-marketplace-cancel";
 
 /**
  * OMS's stop for an accepted dropship order eBay cancelled (eBay sync-back

@@ -1,15 +1,15 @@
 import { EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies";
 import { eq } from "drizzle-orm";
 import { EbayApiRequestError } from "../adapters/ebay/ebay-api-error";
-import { ChannelEbayListingPhotoResolver } from "../ebay-listing-photos.service";
-import { createCatalogPublicImageUrl } from "../../catalog/domain/catalog-public-image";
+import { ChannelEbayListingPhotoResolver } from "../application/ebay-listing-photos.service";
+import { createCatalogPublicImageUrl } from "../../catalog/catalog-public-image.api";
 import https from "https";
 import {
   createProviderRequestDeadline,
   boundedProviderRetryAfterSeconds,
-} from "../provider-request-limits";
+} from "../application/provider-request-limits";
 import { executeEbayQuantityHttp } from "../adapters/ebay/ebay-quantity-http";
-import { ebayQuantityMutationIdentity } from "../quantity-publication-request";
+import { ebayQuantityMutationIdentity } from "../application/quantity-publication-request";
 import { db, pool } from "../../../db";
 import { createEbayChannelQuantityReader } from "../adapters/ebay/ebay-channel-quantity.reader";
 import { channelConnections } from "@shared/schema";

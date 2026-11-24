@@ -1,6 +1,6 @@
 import type { SupplierReturnStockPreviewLine } from "@shared/procurement/supplier-return";
-import { sliceCostQuantityIntervals } from "../../inventory/domain/cost-quantity-intervals";
-import { costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { sliceCostQuantityIntervals } from "../../inventory/cost-quantity-intervals.api";
+import { costInteger, CostEvidenceError } from "../../inventory/cost-evidence-values.api";
 const exactQuantity = (value: bigint, label: string) => costInteger(value.toString(), label);
 
 type Interval = { start: number; quantity: number };

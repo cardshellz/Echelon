@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { FinancialCommandDescriptor, FinancialCommandRepository, FinancialCommandResult } from "../../../../platform/commands/transactional-command.service";
-import type { ReceivingEntryTransaction } from "../../receiving-entry.repository";
-import { ReceivingError } from "../../receiving.service";
+import type { ReceivingEntryTransaction } from "../../infrastructure/receiving-entry.repository";
+import { ReceivingError } from "../../application/receiving.service";
 import { ReceivingEntryError, assertReceivingEntryAuthority } from "../../domain/receiving-entry";
 import { receivingEntryCommandSchema, receivingEntryLineFields } from "@shared/procurement/receiving-entry-command";
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
-import { createReceivingEntryCommands, hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../receiving-entry.commands";
+import { createReceivingEntryCommands, hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../application/receiving-entry.commands";
 
 const actorId = "receiver";
 const key = "receiving-entry-1234";

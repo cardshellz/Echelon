@@ -16,7 +16,7 @@ function shipStationSource(): string {
         .map((f) => source("server", "modules", "oms", "shipstation", f))
     : [];
   return [
-    source("server", "modules", "oms", "shipstation.service.ts"),
+    source("server", "modules", "oms", "application/shipstation.service.ts"),
     ...subFiles,
   ].join("\n");
 }
@@ -30,13 +30,13 @@ const carrierDomain = source(
   "server",
   "modules",
   "shipping",
-  "carrier-tracking.domain.ts",
+  "domain/carrier-tracking.domain.ts",
 );
 const carrierRepository = source(
   "server",
   "modules",
   "shipping",
-  "carrier-tracking.repository.ts",
+  "infrastructure/carrier-tracking.repository.ts",
 );
 const shipStationService = shipStationSource();
 const integrationSetup = source("test", "setup-integration.ts");

@@ -9,7 +9,7 @@ import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_SQL,
-} from "../../package-allocation-authority-discovery.query";
+} from "../../infrastructure/package-allocation-authority-discovery.query";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../..");
 

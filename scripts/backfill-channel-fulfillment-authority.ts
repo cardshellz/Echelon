@@ -21,7 +21,7 @@ import type {
   ChannelFulfillmentAuthorityRepository,
   MaterializePhysicalPackageResult,
   MaterializePhysicalPackageInput,
-} from "../server/modules/oms/channel-fulfillment-authority.repository";
+} from "../server/modules/oms/infrastructure/channel-fulfillment-authority.repository";
 
 type Mode = "dry-run" | "execute";
 
@@ -411,7 +411,7 @@ async function main(): Promise<void> {
 
   const [{ db, pool }, { createChannelFulfillmentAuthorityRepository }] = await Promise.all([
     import("../server/db"),
-    import("../server/modules/oms/channel-fulfillment-authority.repository"),
+    import("../server/modules/oms/infrastructure/channel-fulfillment-authority.repository"),
   ]);
   try {
     const summary = await runBackfill(flags, {

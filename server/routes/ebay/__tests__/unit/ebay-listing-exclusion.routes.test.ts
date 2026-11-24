@@ -2,8 +2,8 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import { afterEach,beforeEach,describe,expect,it,vi } from "vitest";
 import { registerEbayListingExclusionRoutes } from "../../ebay-listing-exclusion.routes";
-import type { EbayListingExclusionService } from "../../../../modules/channels/ebay-listing-exclusion";
-import { EbayListingSyncError } from "../../../../modules/channels/ebay-listing-sync.domain";
+import type { EbayListingExclusionService } from "../../../../modules/channels/ebay-listing-exclusion.api";
+import { EbayListingSyncError } from "../../../../modules/channels/domain/ebay-listing-sync.domain";
 import type { EbayProductExclusionResult } from "@shared/types/ebay-listing-exclusion";
 const {hasPermission}=vi.hoisted(()=>({hasPermission:vi.fn(async(_user:string,_resource:string,_action:string)=>true)}));
 // Keep real admission middleware and the independently controlled capability mock.

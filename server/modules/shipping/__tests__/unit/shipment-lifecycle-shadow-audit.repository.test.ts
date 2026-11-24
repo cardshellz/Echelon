@@ -12,7 +12,7 @@ import {
   ShipmentLifecycleShadowAuditRepositoryError,
   loadShipmentLifecycleShadowAuditBatch,
   normalizeShipmentLifecycleShadowAuditRepositoryOptions,
-} from "../../shipment-lifecycle-shadow-audit.repository";
+} from "../../infrastructure/shipment-lifecycle-shadow-audit.repository";
 
 function readNormalizedSource(...segments: string[]): string {
   return readFileSync(join(process.cwd(), ...segments), "utf8").replace(/\r\n/g, "\n");

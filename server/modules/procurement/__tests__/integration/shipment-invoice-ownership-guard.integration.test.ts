@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import { createShipmentInvoiceCommands, hashShipmentInvoiceCommandIdentity, shipmentInvoiceCommandScope, SHIPMENT_INVOICE_COMMAND_PRINCIPAL } from "../../shipment-invoice.commands";
+import { createShipmentInvoiceCommands, hashShipmentInvoiceCommandIdentity, shipmentInvoiceCommandScope, SHIPMENT_INVOICE_COMMAND_PRINCIPAL } from "../../application/shipment-invoice.commands";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_ACTOR, FLOW_AT, type FlowCostHarness } from "./procurement-flow-cost.fixture";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRecommendationPoCost } from "../../recommendation-po-cost";
+import { resolveRecommendationPoCost } from "../../application/recommendation-po-cost";
 
 describe("resolveRecommendationPoCost", () => {
   it("keeps sub-cent unit cost in mills and rounds only the complete PO line", () => {

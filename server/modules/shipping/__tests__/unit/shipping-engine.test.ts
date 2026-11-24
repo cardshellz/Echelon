@@ -4,10 +4,10 @@ import {
   toEngineRef,
   fromEngineRef,
 } from "../../adapters/shipstation.adapter";
-import { normalizeCarrier, parseProviderAmountCents } from "../../types";
-import type { ShippingEngine } from "../../engine";
+import { normalizeCarrier, parseProviderAmountCents } from "../../domain/types";
+import type { ShippingEngine } from "../../domain/engine";
 import type { ShipStationServiceHandle } from "../../adapters/shipstation.adapter";
-import type { EngineRef } from "../../types";
+import type { EngineRef } from "../../domain/types";
 
 function mockSsService(overrides: Partial<ShipStationServiceHandle> = {}): ShipStationServiceHandle {
   return {

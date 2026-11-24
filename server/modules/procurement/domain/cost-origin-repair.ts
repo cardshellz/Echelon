@@ -2,7 +2,7 @@ import {
   type OriginRepairChoices,
   type OriginRepairContext,
 } from "@shared/procurement/cost-origin-repair";
-import { costInteger } from "../../inventory/infrastructure/cost-evidence-values";
+import { costInteger } from "../../inventory/cost-evidence-values.api";
 export interface OriginRepairFacts {
   lot: Record<string, unknown>;
   source: {

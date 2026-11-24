@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   deriveOmsLineAuthority,
   type OmsLineAuthorityInput,
-} from "../../oms-line-authority";
+} from "../../application/oms-line-authority";
 
 const AUTHORIZED_AT = new Date("2026-09-24T10:00:00.000Z");
 const OBSERVED_AT = new Date("2026-09-25T21:00:00.000Z");

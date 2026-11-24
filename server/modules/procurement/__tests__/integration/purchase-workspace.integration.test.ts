@@ -1,7 +1,7 @@
 import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { resetFixtureCostHistory } from "./cost-history-fixture";
 import { readFile } from "node:fs/promises";
-import { recordCostRevision } from "../../cost-source-revision.repository";
+import { recordCostRevision } from "../../infrastructure/cost-source-revision.repository";
 import { resolve } from "node:path";
 import { config } from "dotenv";
 import { getTableColumns, sql, type Table } from "drizzle-orm";
@@ -10,8 +10,8 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { createPurchaseWorkspaceRepository, PURCHASE_WORKSPACE_RECORD_LIMIT } from "../../purchase-workspace.repository";
-import { createPurchaseWorkspaceService } from "../../purchase-workspace.service";
+import { createPurchaseWorkspaceRepository, PURCHASE_WORKSPACE_RECORD_LIMIT } from "../../infrastructure/purchase-workspace.repository";
+import { createPurchaseWorkspaceService } from "../../application/purchase-workspace.service";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;

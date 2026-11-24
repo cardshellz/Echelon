@@ -18,7 +18,7 @@ import {
   mapCarrierToEbay,
   EBAY_CATEGORIES,
 } from "../../adapters/ebay/ebay-category-map";
-import type { ChannelListingPayload } from "../../channel-adapter.interface";
+import type { ChannelListingPayload } from "../../domain/channel-adapter.interface";
 import { QuantityPublicationAdmissionError } from "../../../inventory-planning/domain/quantity-publication-admission";
 import type { EbayPublishedListingIdentityResolver } from "../../listing-connectors/ebay-listing.connector";
 

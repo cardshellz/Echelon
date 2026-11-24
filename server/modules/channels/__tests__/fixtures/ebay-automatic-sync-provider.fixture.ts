@@ -7,7 +7,7 @@ import type {
 import { executeEbayQuantityHttp } from "../../adapters/ebay/ebay-quantity-http";
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 import type { EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
-import type { EbayQuantityHttpRequest } from "../../quantity-publication-request";
+import type { EbayQuantityHttpRequest } from "../../application/quantity-publication-request";
 import type { ChannelPublishedContent } from "../../../marketplace-listings/domain/channel-publication-content";
 
 export const automaticSyncPhotos = [

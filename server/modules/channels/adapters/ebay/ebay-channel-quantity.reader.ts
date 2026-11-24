@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 
 import { pool as defaultPool } from "../../../../db";
-import type { InventoryAtpServiceContract } from "../../../inventory/application/atp.service";
+import type { InventoryAtpServiceContract } from "../../../inventory/atp.service.api";
 import {
   createAuthorityAwareInventoryAtpService,
   createInventoryChannelQuantityRuntimeService,

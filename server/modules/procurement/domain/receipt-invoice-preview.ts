@@ -1,7 +1,7 @@
 import { receiptSegmentCost } from "@shared/procurement/receipt-cost-segments";
 import { allocateIntegerCostInterval } from "@shared/utils/integer-cost-interval";
 import type { ReceiptCostingReceipt } from "@shared/procurement/receipt-invoice-costs";
-import { costInteger } from "../../inventory/infrastructure/cost-evidence-values";
+import { costInteger } from "../../inventory/cost-evidence-values.api";
 import type { ReceiptInvoiceSource as PurchaseCostSource } from "./receipt-invoice-costs";
 import { resolvePurchaseCostSource } from "./purchase-cost-source";
 

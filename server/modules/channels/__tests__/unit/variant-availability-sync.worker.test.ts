@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   getVariantAvailabilityWorkerHeartbeat,
   runVariantAvailabilityWorkerTick,
-} from "../../variant-availability-sync.worker";
+} from "../../application/variant-availability-sync.worker";
 
 const EMPTY_RESULT = {
   claimed: 0,

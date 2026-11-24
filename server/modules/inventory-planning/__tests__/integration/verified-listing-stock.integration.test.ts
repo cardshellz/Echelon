@@ -11,7 +11,7 @@ import { installCutoverAdmissionFixturePrerequisites } from "../fixtures/invento
 import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
 import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
-import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/channel-inventory-publication-transport.adapter";
+import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/infrastructure/channel-inventory-publication-transport.adapter";
 import { WalmartAdapter } from "../../../channels/adapters/walmart/walmart.adapter";
 import { WalmartUsApi } from "../../../channels/adapters/walmart/walmart-us-api";
 import { WalmartClient } from "../../../channels/adapters/walmart/walmart-client";

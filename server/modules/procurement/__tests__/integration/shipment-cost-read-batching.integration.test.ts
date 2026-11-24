@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_AT, FLOW_ACTOR, type FlowCostHarness } from "./procurement-flow-cost.fixture";
-import { prepareShipmentCostRevisions, prepareShipmentCostRevisionBatch } from "../../shipment-cost-application.service";
-import { readCurrentShipmentSourceFingerprintBatch } from "../../shipment-cost-exception.repository";
-import { readShipmentCostReviewsInTransaction, readShipmentCostReviewInTransaction } from "../../shipment-cost-review.repository";
-import { readSupplierCreditCostRows, readShipmentSupplierCreditCostRows } from "../../supplier-credit-source.repository";
-import { readShipmentProvisionalLotCounts } from "../../shipment-health-evidence.repository";
+import { prepareShipmentCostRevisions, prepareShipmentCostRevisionBatch } from "../../application/shipment-cost-application.service";
+import { readCurrentShipmentSourceFingerprintBatch } from "../../infrastructure/shipment-cost-exception.repository";
+import { readShipmentCostReviewsInTransaction, readShipmentCostReviewInTransaction } from "../../infrastructure/shipment-cost-review.repository";
+import { readSupplierCreditCostRows, readShipmentSupplierCreditCostRows } from "../../infrastructure/supplier-credit-source.repository";
+import { readShipmentProvisionalLotCounts } from "../../infrastructure/shipment-health-evidence.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const enabled = Boolean(url) && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

@@ -14,7 +14,7 @@ import { createChannelEbayStockLinkAdapter } from "../../../channels/adapters/eb
 import { createChannelEbayStockLinkSource } from "../../../channels/infrastructure/ebay-stock-link-source";
 import { STOCK_LINK_CONTROLLED_DESTINATIONS } from "../../infrastructure/stock-link-controls.repository";
 import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
-import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source";
+import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source.api";
 import { createDropshipEbayStockLinkAdapter } from "../../../dropship/infrastructure/dropship-ebay-stock-link.adapter";
 import { createDropshipEbayStockLinkSource } from "../../../dropship/infrastructure/dropship-ebay-stock-link-source";
 import type { StockLinkSupportedStatus } from "@shared/types/stock-link";

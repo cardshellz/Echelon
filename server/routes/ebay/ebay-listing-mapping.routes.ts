@@ -5,7 +5,7 @@ import {
   ebayListingMappingResultSchema,
   ebayListingMappingReviewSchema,
 } from "@shared/types/ebay-listing-mapping";
-import type { EbayListingMappingService } from "../../modules/channels/ebay-listing-mapping.service";
+import type { EbayListingMappingService } from "../../modules/channels/application/ebay-listing-mapping.service";
 import { hasPermission } from "../../modules/identity";
 import { requireAuth, requirePermission } from "../middleware";
 import { listingFailure, listingFailureStatus } from "./ebay-listing-errors";

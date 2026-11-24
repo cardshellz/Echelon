@@ -251,7 +251,7 @@ test("saving an original succeeds with an actionable publication warning", async
   const state = await setup(page);
   state.publicationWarning = {code:"CATALOG_IMAGE_RENDITION_FAILED",message:"A larger copy could not be prepared safely. Some sales channels may require a larger photo."};
   await page.locator('input[type="file"]').setInputFiles({name:"photo.png",mimeType:"image/png",buffer:photoBytes});
-  await expect(page.getByRole("status").filter({hasText:"Image uploaded"})).toContainText(state.publicationWarning.message);
+  await expect(page.getByRole("status").filter({hasText:"Image uploaded"}).first()).toContainText(state.publicationWarning.message);
   await expect(page.getByRole("combobox",{name:"Applies to image 5",exact:true})).toBeVisible();
   expect(state.errors).toEqual([]);
 });

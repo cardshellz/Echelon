@@ -9,7 +9,7 @@ import {
   normalizeShipStationTrackingWebhook,
   resolveCarrierTrackingMatch,
   type CarrierTrackingMatchCandidate,
-} from "../../carrier-tracking.domain";
+} from "../../domain/carrier-tracking.domain";
 
 const receivedAt = new Date("2026-07-20T12:00:00.000Z");
 

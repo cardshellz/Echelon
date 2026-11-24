@@ -20,13 +20,13 @@ vi.mock("../../../../routes/middleware", () => ({
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: mocks.repository, createDrizzleFinancialCommandRepository: () => mocks.repository }));
-vi.mock("../../ap-ledger.service", () => ({}));
+vi.mock("../../application/ap-ledger.service", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
-import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
+import { registerInboundShipmentRoutes } from "../../interfaces/http/inbound-shipment.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
-import { shipmentCreateCommandScope } from "../../shipment-create.commands";
+import { shipmentCreateCommandScope } from "../../application/shipment-create.commands";
 
 const NOW = new Date("2026-10-18T12:00:00.000Z");
 const CREATED = { id: 7, shipmentNumber: "SHP-20261018-001", status: "draft", lineCount: 0, createdBy: "operator", createdAt: NOW, updatedAt: NOW };

@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   PgHistoricalShipStationContentsCorrectionRepository,
-} from "../../historical-shipstation-contents-correction.repository";
-import { planHistoricalShipStationContentsCorrection } from "../../historical-shipstation-contents-correction.domain";
+} from "../../infrastructure/historical-shipstation-contents-correction.repository";
+import { planHistoricalShipStationContentsCorrection } from "../../domain/historical-shipstation-contents-correction.domain";
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);

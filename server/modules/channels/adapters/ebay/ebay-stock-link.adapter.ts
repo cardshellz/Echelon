@@ -1,9 +1,9 @@
 import {
   stockLinkDestinationSchema, stockLinkOfferLookupSchema, type StockLinkDestination, type StockLinkOfferLookup,
 } from "@shared/types/stock-link";
-import type { StockLinkOfferAdapter, StockLinkProviderCallOptions } from "../../../inventory-planning/application/stock-link.ports";
-import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../../inventory-planning/domain/stock-link-errors";
-import { InventoryPublicationConfigurationError } from "../../channel-adapter.interface";
+import type { StockLinkOfferAdapter, StockLinkProviderCallOptions } from "../../../inventory-planning/stock-link.ports.api";
+import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../../inventory-planning/stock-link-errors.api";
+import { InventoryPublicationConfigurationError } from "../../domain/channel-adapter.interface";
 import { EbayApiRequestError } from "./ebay-api-error";
 import { EbayInventoryQuantityError, type EbayDiscoveredOffer } from "./ebay-inventory-quantity";
 

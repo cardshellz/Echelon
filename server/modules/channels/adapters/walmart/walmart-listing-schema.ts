@@ -1,7 +1,7 @@
 import Ajv, { type ErrorObject, type ValidateFunction } from "ajv";
 import addFormats from "ajv-formats";
 import Decimal from "decimal.js";
-import { prepareChannelPublicationWeight } from "../../../marketplace-listings/domain/channel-package-weight";
+import { prepareChannelPublicationWeight } from "../../../marketplace-listings/channel-package-weight.api";
 import type { ListingIssue } from "@shared/types/channel-listing-publication";
 import { WalmartApiError } from "./walmart-client";
 import type {

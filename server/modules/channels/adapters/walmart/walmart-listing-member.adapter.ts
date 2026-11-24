@@ -1,6 +1,6 @@
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
-import type { ListingMemberLifecycleAdapter } from "../../../marketplace-listings/application/listing-member-lifecycle.port";
-import { ListingMemberLifecycleError } from "../../../marketplace-listings/domain/listing-member-lifecycle";
+import type { ListingMemberLifecycleAdapter } from "../../../marketplace-listings/listing-member-lifecycle.port.api";
+import { ListingMemberLifecycleError } from "../../../marketplace-listings/listing-member-lifecycle-domain.api";
 import type { WalmartListingLifecycleProvider } from "./walmart-listing-lifecycle.provider";
 import { WalmartApiError } from "./walmart-client";
 

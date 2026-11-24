@@ -4,12 +4,12 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type pg from "pg";
 import { expect, it } from "vitest";
 import type * as schema from "@shared/schema";
-import { ReceiveValidationService } from "../../receive-validation.service";
-import { RETIRED_RECEIVE_EXCEPTION_KINDS } from "../../receive-warning-policy";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
-import type { ReceivingService, ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
-import type { PurchasingService } from "../../purchasing.service";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
+import { ReceiveValidationService } from "../../application/receive-validation.service";
+import { RETIRED_RECEIVE_EXCEPTION_KINDS } from "../../application/receive-warning-policy";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
+import type { ReceivingService, ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../application/receiving.service";
+import type { PurchasingService } from "../../application/purchasing.service";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
 
 const migration = readFileSync(resolve(process.cwd(),
   "migrations/900000035000019280001_retire_obsolete_receive_pack_warnings.sql"), "utf8");
@@ -27,7 +27,7 @@ export function registerReceiptConfigurationAuthorityCases(fixture: {
 }) {
   async function owners() {
     const warnings = new ReceiveValidationService(fixture.database());
-    const { recordReceiveValidationWarnings } = await import("../../po-exceptions.service");
+    const { recordReceiveValidationWarnings } = await import("../../application/po-exceptions.service");
     return { warnings, receiving: fixture.receivingWithWarnings(warnings, recordReceiveValidationWarnings) };
   }
 

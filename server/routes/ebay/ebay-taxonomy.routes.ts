@@ -1,4 +1,4 @@
-import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
+import { syncActiveListings } from "../../modules/channels/ebay-listing-sync.api";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";
@@ -353,7 +353,7 @@ export const router = express.Router();
       const result = await db.select()
         .from(ebayTypeAspectDefaults)
         .where(eq(ebayTypeAspectDefaults.productTypeSlug, productTypeSlug));
-      
+
       const defaults: Record<string, string> = {};
       for (const r of result) {
         defaults[r.aspectName] = r.aspectValue;
@@ -409,7 +409,7 @@ export const router = express.Router();
       const result = await db.select()
         .from(ebayProductAspectOverrides)
         .where(eq(ebayProductAspectOverrides.productId, productId));
-      
+
       const overrides: Record<string, string> = {};
       for (const r of result) {
         overrides[r.aspectName] = r.aspectValue;

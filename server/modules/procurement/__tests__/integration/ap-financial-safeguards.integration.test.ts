@@ -19,7 +19,7 @@ const tables = [schema.users, schema.authRoles, schema.authPermissions, schema.a
   schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.vendorInvoiceAttachments];
 databaseTests.sequential("AP financial safeguards with actual0620 and status constraint (real PostgreSQL)", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let db: any;
-  let service: typeof import("../../ap-ledger.service");
+  let service: typeof import("../../application/ap-ledger.service");
   let ownsSchema = false; let ownsIdentitySchema = false; let ownsAuditTable = false;
   const actor = "review-ap-unhappy-path";
   let ownsSupplierReturnInventory = false;
@@ -52,7 +52,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
     modulePool = dbModule.pool; db = dbModule.db;
     modulePool.query = pool.query.bind(pool) as any;
     modulePool.connect = pool.connect.bind(pool) as any;
-    service = await import("../../ap-ledger.service");
+    service = await import("../../application/ap-ledger.service");
   });
   beforeEach(async () => {
     await pool.query(`TRUNCATE ${tables.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);

@@ -4,7 +4,7 @@ import type { ListingPresence } from "@shared/types/channel-listing-presence";
 import {
   assertListingSetupAdmission,
   type ListingSetupIntent,
-} from "../../inventory-planning/application/listing-setup-intent";
+} from "../../inventory-planning/listing-setup-intent.api";
 import {
   readListingPresence,
   recordListingPresence,

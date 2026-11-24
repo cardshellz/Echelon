@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeShipmentLinePhysicalTotals, validateShipmentPhysicalTotals } from "../../shipment-line-physical-values";
+import { computeShipmentLinePhysicalTotals, validateShipmentPhysicalTotals } from "../../application/shipment-line-physical-values";
 
 const physical = { qtyShipped: 501, cartonCount: 11, weightKg: "2", lengthCm: "10", widthCm: "20", heightCm: "30" };
 

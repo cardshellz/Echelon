@@ -8,8 +8,8 @@ vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: 
   if (req.headers["x-test-permission"] !== `${resource}:${action}`) return res.status(403).json({ error: "Permission denied" });
   next();
 } }));
-import { registerShipmentMeasurementRoutes } from "../../shipment-measurement-correction.routes";
-import { ShipmentMeasurementCorrectionError } from "../../shipment-measurement-correction.repository";
+import { registerShipmentMeasurementRoutes } from "../../interfaces/http/shipment-measurement-correction.routes";
+import { ShipmentMeasurementCorrectionError } from "../../infrastructure/shipment-measurement-correction.repository";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
 
 describe("shipment measurement review HTTP boundary", () => {

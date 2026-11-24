@@ -22,18 +22,18 @@ import type { QuantityPublicationScope } from "../../../inventory-planning/domai
 import { preflightEvidenceHash } from "../../../inventory-planning/domain/ebay-publication-preflight";
 import { PostgresEbayListingSyncRepository } from "../../infrastructure/ebay-listing-sync.repository";
 import { PostgresEbayPublicationRejectionReader } from "../../../inventory-planning/infrastructure/ebay-publication-rejection.reader";
-import { EbayPublicationCompletionExecution, inspectEbayPublicationPreparation, type PreparedEbayPublication } from "../../ebay-publication-completion.service";
+import { EbayPublicationCompletionExecution, inspectEbayPublicationPreparation, type PreparedEbayPublication } from "../../application/ebay-publication-completion.service";
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
-import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.domain";
+import { resolveEbayPublicationTarget } from "../../domain/ebay-publication-completion.domain";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 import { PgMarketplaceListingRegistrationRepository } from "../../../marketplace-listings/infrastructure/pg-listing-registration.repository";
 import { buildListingRegistrationPlan } from "../../../marketplace-listings/domain/listing-registration-plan";
 import { createEbayRouteListingLifecycleClient } from "../../infrastructure/ebay-listing-client";
-import { EbayExistingListingSyncExecution, EbayListingSyncService, type PreparedEbayListingSync } from "../../ebay-listing-sync.service";
+import { EbayExistingListingSyncExecution, EbayListingSyncService, type PreparedEbayListingSync } from "../../application/ebay-listing-sync.service";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
-import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
-import { syncContentIntentHash } from "../../ebay-listing-sync-content";
-import type { EbayQuantityHttpRequest, EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import type { EbayListingSyncIdentity } from "../../domain/ebay-listing-sync.domain";
+import { syncContentIntentHash } from "../../application/ebay-listing-sync-content";
+import type { EbayQuantityHttpRequest, EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
 import { ebayInventoryOffersPath, publishEbayInventoryQuantity, readEbayInventoryQuantity,
   type EbayInventoryQuantityClient } from "../../adapters/ebay/ebay-inventory-quantity";
 import { AutomaticSyncEbayProvider, automaticSyncOldPhotos, automaticSyncPhotos } from "../fixtures/ebay-automatic-sync-provider.fixture";
@@ -41,7 +41,7 @@ import { PostgresEbayLegacyMaintenanceEvidenceReader } from "../../infrastructur
 import { ChannelRecoverySyncService } from "../../../marketplace-listings/application/channel-recovery-sync.service";
 import { releaseListingWorkPermit, tryAcquireListingWorkPermit, withListingWorkPermit } from "../../../marketplace-listings/listing-work-permits.api";
 import { proveEbayStockOnlyEffects } from "../../adapters/ebay/ebay-recovery-effects";
-import { ebayListingPublicationScopes } from "../../ebay-listing-request-recovery";
+import { ebayListingPublicationScopes } from "../../application/ebay-listing-request-recovery";
 import type { RetainedPublicationEffectEvidence } from "../../../inventory-planning/application/ebay-publication-reconciliation.service";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, api: vi.fn() }));

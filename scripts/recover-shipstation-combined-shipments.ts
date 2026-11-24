@@ -11,7 +11,7 @@
 import { fileURLToPath } from "node:url";
 import { db } from "../server/db";
 import { createServices } from "../server/services";
-import { createShipStationPhysicalRecoveryService } from "../server/modules/oms/shipstation-physical-recovery.service";
+import { createShipStationPhysicalRecoveryService } from "../server/modules/oms/application/shipstation-physical-recovery.service";
 import { createShipStationPhysicalRecoveryClient } from "../server/modules/shipping/shipstation-provider-reconciliation.api";
 
 interface Flags {

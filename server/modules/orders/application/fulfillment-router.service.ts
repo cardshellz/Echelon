@@ -4,7 +4,7 @@ import {
   warehouses,
   orders,
 } from "@shared/schema";
-import { getDefaultFulfillmentWarehouse } from "../../warehouse/infrastructure/warehouse.repository";
+import { getDefaultFulfillmentWarehouse } from "../../warehouse/warehouse.repository.api";
 import { assignWmsOrderToWarehouseInWms } from "../../wms/wms-order-mutations.api";
 
 type DrizzleDb = {

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import * as schema from "@shared/schema";
 import { COGSService } from "../../application/cogs.service";
 import { fixtureTable } from "../../../procurement/__tests__/integration/shipment-line-fixture";
-import { getFinanceSummary, getFinanceOrders, getFinanceOrderDetail } from "../../../oms/finance-analytics.service";
+import { getFinanceSummary, getFinanceOrders, getFinanceOrderDetail } from "../../../oms/application/finance-analytics.service";
 
 // Redirect only the legacy module-level transport. Every statement still runs
 // against the explicitly owned PostgreSQL fixture below.

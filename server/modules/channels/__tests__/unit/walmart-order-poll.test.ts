@@ -3,7 +3,7 @@ import { WalmartOrderPollService } from "../../adapters/walmart/walmart-order-po
 import { WalmartChannelService } from "../../adapters/walmart/walmart-channel.service";
 import { parseWalmartOrder } from "../../adapters/walmart/walmart-us-api";
 import { walmartOrderFixture } from "./walmart-fixture";
-import { ChannelOrderObservationError } from "../../../oms/channel-order-observation";
+import { ChannelOrderObservationError } from "../../../oms/application/channel-order-observation";
 
 function setup(resolveSkuMappings?: (channelId: number, skus: readonly string[]) => Promise<void>) {
   const receipts = new Map<string, { source_hash: string; status: string; oms_order_id: number | null }>();

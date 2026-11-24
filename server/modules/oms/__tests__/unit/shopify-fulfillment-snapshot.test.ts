@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ShopifyFulfillmentSnapshotReader } from "../../shopify-fulfillment-snapshot";
+import { ShopifyFulfillmentSnapshotReader } from "../../application/shopify-fulfillment-snapshot";
 
 function successfulFulfillment(overrides: Record<string, unknown> = {}) {
   return {

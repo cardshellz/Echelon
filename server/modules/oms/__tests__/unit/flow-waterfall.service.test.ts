@@ -6,11 +6,11 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   dropshipTrackingNotSentCountSql,
   dropshipTrackingNotSentSampleSql,
-} from "../../channel-writeback.service";
-import { FLOW_ISSUES, getFlowBucketSamples, getFlowWaterfall } from "../../flow-waterfall.service";
+} from "../../application/channel-writeback.service";
+import { FLOW_ISSUES, getFlowBucketSamples, getFlowWaterfall } from "../../application/flow-waterfall.service";
 
 const FLOW_WATERFALL_SRC = readFileSync(
-  resolve(__dirname, "../../flow-waterfall.service.ts"),
+  resolve(__dirname, "../../application/flow-waterfall.service.ts"),
   "utf-8",
 );
 

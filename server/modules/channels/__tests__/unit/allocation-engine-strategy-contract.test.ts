@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 describe("allocation engine inventory strategy contract", () => {
   const source = readFileSync(
-    resolve(process.cwd(), "server/modules/channels/allocation-engine.service.ts"),
+    resolve(process.cwd(), "server/modules/channels/application/allocation-engine.service.ts"),
     "utf8",
   );
 

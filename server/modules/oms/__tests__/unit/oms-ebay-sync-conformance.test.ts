@@ -21,13 +21,13 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
   return source.slice(start, end);
 }
 
-const EBAY_INGESTION_SRC = readSource("../../ebay-order-ingestion.ts");
+const EBAY_INGESTION_SRC = readSource("../../application/ebay-order-ingestion.ts");
 const EBAY_ADAPTER_SRC = readSource("../../adapters/ebay-order-intake.adapter.ts");
-const INGEST_AND_ROUTE_SRC = readSource("../../channel-order-ingest-and-route.ts");
+const INGEST_AND_ROUTE_SRC = readSource("../../application/channel-order-ingest-and-route.ts");
 const EBAY_RECONCILER_SRC = readSource("../../reconcilers/ebay.reconciler.ts");
-const FULFILLMENT_PUSH_SRC = readSource("../../fulfillment-push.service.ts");
-const WEBHOOK_RETRY_SRC = readSource("../../webhook-retry.worker.ts");
-const WMS_SYNC_SRC = readSource("../../wms-sync.service.ts");
+const FULFILLMENT_PUSH_SRC = readSource("../../application/fulfillment-push.service.ts");
+const WEBHOOK_RETRY_SRC = readSource("../../application/webhook-retry.worker.ts");
+const WMS_SYNC_SRC = readSource("../../application/wms-sync.service.ts");
 
 const EBAY_ROUTING_TEST_SRC = readSource("ebay-routing.test.ts");
 const EBAY_FULFILLMENT_RECONCILER_TEST_SRC = readSource(

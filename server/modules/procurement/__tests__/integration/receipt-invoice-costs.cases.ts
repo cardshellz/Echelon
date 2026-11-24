@@ -1,4 +1,4 @@
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
 import type { ReceivingLine } from "@shared/schema/procurement.schema";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -12,22 +12,22 @@ import {
   receiptInvoicePreviewSchema,
   type ReceiptInvoiceAllocation,
 } from "@shared/procurement/receipt-invoice-costs";
-import { registerReceiptInvoiceCostRoutes } from "../../receipt-invoice-costs.routes";
-import { createReceiptInvoiceCostService } from "../../receipt-invoice-costs.service";
-import { receivingUnitVersion } from "../../receiving-unit-contract";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
-import type { ReceivingService } from "../../receiving.service";
-import type { createPurchasingService } from "../../purchasing.service";
-import { createSupplierCreditCommands } from "../../supplier-credit.commands";
-import { createSupplierCreditCostPreview } from "../../supplier-credit.service";
-import { loadSupplierCreditSource, readSupplierCreditDetail } from "../../supplier-credit.repository";
+import { registerReceiptInvoiceCostRoutes } from "../../interfaces/http/receipt-invoice-costs.routes";
+import { createReceiptInvoiceCostService } from "../../application/receipt-invoice-costs.service";
+import { receivingUnitVersion } from "../../application/receiving-unit-contract";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
+import type { ReceivingService } from "../../application/receiving.service";
+import type { createPurchasingService } from "../../application/purchasing.service";
+import { createSupplierCreditCommands } from "../../application/supplier-credit.commands";
+import { createSupplierCreditCostPreview } from "../../application/supplier-credit.service";
+import { loadSupplierCreditSource, readSupplierCreditDetail } from "../../infrastructure/supplier-credit.repository";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { SupplierCreditCommand, SupplierCreditDetail } from "@shared/procurement/supplier-credit";
-import { createInvoiceCostReviewPreviewService } from "../../invoice-cost-review-preview.service";
-import { createInvoiceCostReviewCommands } from "../../invoice-cost-review.service";
-import { invoiceCostReviewVersion } from "../../ap-ledger.service";
+import { createInvoiceCostReviewPreviewService } from "../../application/invoice-cost-review-preview.service";
+import { createInvoiceCostReviewCommands } from "../../application/invoice-cost-review.service";
+import { invoiceCostReviewVersion } from "../../application/ap-ledger.service";
 
 export function registerReceiptInvoiceCostCases(fixture: {
   shipments: () => ShipmentTrackingService;
@@ -420,7 +420,7 @@ export function registerReceiptInvoiceCostCases(fixture: {
       ).rows;
       expect(before.map((row) => row.cost_provisional)).toEqual([0, 0]);
       const approvals = (await context()).approvals;
-      const { voidInvoice } = await import("../../ap-ledger.service");
+      const { voidInvoice } = await import("../../application/ap-ledger.service");
       await voidInvoice(
         71,
         "Supplier withdrew this invoice; replace its original receipt coverage",
@@ -487,7 +487,7 @@ export function registerReceiptInvoiceCostCases(fixture: {
           "SELECT order_qty,total_product_cost_cents,packaging_cost_cents FROM procurement.purchase_order_lines WHERE id=21",
         )
       ).rows;
-      const { approveInvoice } = await import("../../ap-ledger.service");
+      const { approveInvoice } = await import("../../application/ap-ledger.service");
       await approveInvoice(71, fixture.actorId);
       const first = await review([rows[0]]);
       expect((await post("", first.body, randomUUID())).status).toBe(200);

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
 import { ChannelProviderReadError, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 
 import { readEbayNativeListing } from "./ebay-native-listing.transport";

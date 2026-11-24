@@ -2,11 +2,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ReservationResult } from "../../../channels/reservation.service";
+import type { ReservationResult } from "../../../channels/application/reservation.service";
 import {
   WmsRequiredInventoryClaimError,
   WmsSyncService,
-} from "../../wms-sync.service";
+} from "../../application/wms-sync.service";
 
 interface RequiredReservationHarness {
   reserveRequired(wmsOrderId: number, omsOrderId: number, context: string): Promise<void>;
@@ -215,5 +215,5 @@ function reservationPort(
 }
 
 function readWmsSyncSource(): string {
-  return readFileSync(resolve(__dirname, "../../wms-sync.service.ts"), "utf8");
+  return readFileSync(resolve(__dirname, "../../application/wms-sync.service.ts"), "utf8");
 }

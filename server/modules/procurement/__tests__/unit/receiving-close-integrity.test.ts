@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertReceivingLocations, resolveReceivingSources, type ReceiptPurchaseSource } from "../../receiving-close-integrity.domain";
+import { assertReceivingLocations, resolveReceivingSources, type ReceiptPurchaseSource } from "../../domain/receiving-close-integrity.domain";
 
 const purchaseLine: ReceiptPurchaseSource = { id: 21, purchaseOrderId: 10, productId: 100, lineType: "product",
   status: "open", orderQty: 100, receivedQty: 0, cancelledQty: 0 };

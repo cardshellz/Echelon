@@ -5,11 +5,11 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { mappingRepairFailureDisposition, ebayListingMappingResultSchema, type EbayListingMappingResult } from "@shared/types/ebay-listing-mapping";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { marketplaceObservedListingPublicationSchema, type PgMarketplaceListingRegistrationRepository, type UnpublishedMappingCompatibilityInput } from "../../marketplace-listings";
-import { resolveEbayPublicationTarget } from "../ebay-publication-completion.domain";
-import { assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listing-identity";
-import { ebayListingSyncIdentitySchema, EbayListingSyncError, syncStageHash } from "../ebay-listing-sync.domain";
-import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../ebay-listing-workflow-lock";
-import type { EbayListingMappingRepairPlan, EbayListingMappingRepairStore, EbayListingMappingSource, EbayListingMappingRejectedCommand } from "../ebay-listing-mapping.service";
+import { resolveEbayPublicationTarget } from "../domain/ebay-publication-completion.domain";
+import { assertEbayListingSourceIdentityUnchanged } from "../application/ebay-existing-listing-identity";
+import { ebayListingSyncIdentitySchema, EbayListingSyncError, syncStageHash } from "../domain/ebay-listing-sync.domain";
+import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../application/ebay-listing-workflow-lock";
+import type { EbayListingMappingRepairPlan, EbayListingMappingRepairStore, EbayListingMappingSource, EbayListingMappingRejectedCommand } from "../application/ebay-listing-mapping.service";
 import { assertEbayMappingOwnership } from "./ebay-listing-mapping-ownership";
 import { PostgresEbayListingSyncRepository } from "./ebay-listing-sync.repository";
 

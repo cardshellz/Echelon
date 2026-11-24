@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
-import { createShipStationLabelReconciliationClient } from "../shipstation-label-reconciliation.client";
-import type { ShipStationLabelSnapshot } from "../shipstation-label-reconciliation.service";
-import { createShipStationReplacementLabelRefresh } from "../shipstation-replacement-label-refresh.service";
-import { resolveRecoveredShipNotifyNoMatchExceptions } from "../ship-notify-reconciliation.service";
-import { resolveShipStationUnmappedPhysicalExceptionForReturnLabel } from "../shipstation-unmapped-physical";
+import { createShipStationLabelReconciliationClient } from "../infrastructure/shipstation-label-reconciliation.client";
+import type { ShipStationLabelSnapshot } from "../application/shipstation-label-reconciliation.service";
+import { createShipStationReplacementLabelRefresh } from "../application/shipstation-replacement-label-refresh.service";
+import { resolveRecoveredShipNotifyNoMatchExceptions } from "../application/ship-notify-reconciliation.service";
+import { resolveShipStationUnmappedPhysicalExceptionForReturnLabel } from "../application/shipstation-unmapped-physical";
 import {
   CarrierDispatchAuthorityError,
   normalizeTrackingNumber,

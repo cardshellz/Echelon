@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 
-import { dollarsToCents } from "../../ebay-order-ingestion";
+import { dollarsToCents } from "../../application/ebay-order-ingestion";
 
 // 7493a0b96 (2026-10-25) parsed eBay amounts unsigned. eBay reports
 // pricingSummary.priceDiscount as a negative amount, so every eBay order with a

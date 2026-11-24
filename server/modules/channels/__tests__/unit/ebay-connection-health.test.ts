@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { readEbayConnectionHealth } from "../../ebay-connection-health";
-import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
+import { readEbayConnectionHealth } from "../../application/ebay-connection-health";
+import { ChannelFulfillmentProviderError } from "../../domain/channel-fulfillment-provider.error";
 const account = { externalAccountId: "account-1",externalAccountDisplayName: "seller",externalAccountIdentityScheme: "provider_user_id" as const,
   externalAccountVerifiedAt: new Date("2026-10-09T12:00:00Z") };
 function fixture() { return { getAccessToken: vi.fn(async () => "private-token"),observeProviderAccount: vi.fn(async () => account),getVerifiedProviderAccount: vi.fn(async () => account) }; }

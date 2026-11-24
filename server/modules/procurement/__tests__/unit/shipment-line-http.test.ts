@@ -21,22 +21,22 @@ vi.mock("../../../../routes/middleware", () => ({
 }));
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
 vi.mock("../../../../db", () => ({ db: {} }));
-vi.mock("../../shipment-unit-options.service", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../shipment-unit-options.service")>(),
+vi.mock("../../application/shipment-unit-options.service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../application/shipment-unit-options.service")>(),
   readShipmentPackingUnitOptions: mocks.unitOptions,
 }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({
   financialCommandRepository: mocks.repository,
   createDrizzleFinancialCommandRepository: () => mocks.repository,
 }));
-vi.mock("../../ap-ledger.service", () => ({}));
+vi.mock("../../application/ap-ledger.service", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
-import { ShipmentTrackingError } from "../../shipment-tracking.service";
-import { ShipmentUnitOptionsError } from "../../shipment-unit-options.service";
+import { ShipmentTrackingError } from "../../application/shipment-tracking.service";
+import { ShipmentUnitOptionsError } from "../../application/shipment-unit-options.service";
 import { shipmentUnitOptionsRequestSchema } from "@shared/procurement/shipment-unit-options";
 import { shipmentLinePatchSchema } from "@shared/procurement/shipment-line-command";
-import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
+import { registerInboundShipmentRoutes } from "../../interfaces/http/inbound-shipment.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 
 let server: Server | undefined;

@@ -1,5 +1,5 @@
 import { costSourceRevisionSchema, type CostSourceRevision } from "@shared/procurement/cost-source-contracts";
-import { costFingerprint } from "../../inventory/domain/cost-fingerprint";
+import { costFingerprint } from "../../inventory/cost-fingerprint.api";
 
 export interface CostSourceProposal {
   input: Omit<CostSourceRevision, "revision" | "fingerprint">;

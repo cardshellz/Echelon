@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   applyHistoricalPoSupplierEvidence,
   previewHistoricalPoSupplierEvidence,
-} from "../../historical-po-supplier-evidence-backfill.service";
+} from "../../application/historical-po-supplier-evidence-backfill.service";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 

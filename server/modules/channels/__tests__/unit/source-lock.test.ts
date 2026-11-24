@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createSourceLockService, type SourceLockService } from "../../source-lock.service";
+import { createSourceLockService, type SourceLockService } from "../../application/source-lock.service";
 
 // ---------------------------------------------------------------------------
 // Mock DB

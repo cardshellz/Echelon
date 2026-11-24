@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { getFlowTrace } from "../../flow-trace.service";
+import { getFlowTrace } from "../../application/flow-trace.service";
 
 const dialect = new PgDialect();
 

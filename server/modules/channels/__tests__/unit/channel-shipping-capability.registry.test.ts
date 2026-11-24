@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ChannelShippingCapabilityRegistry,
   MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
-} from "../../channel-shipping-capability.registry";
+} from "../../application/channel-shipping-capability.registry";
 
 describe("ChannelShippingCapabilityRegistry", () => {
   it("normalizes provider keys and returns immutable declarations", () => {

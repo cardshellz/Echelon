@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEbayOAuthAuthorization, verifyEbayOAuthAuthorization, resolveEbayOAuthChannel } from "../../ebay-oauth-authorization";
+import { createEbayOAuthAuthorization, verifyEbayOAuthAuthorization, resolveEbayOAuthChannel } from "../../application/ebay-oauth-authorization";
 
 const now = Date.parse("2026-10-10T00:00:00Z");
 const challenge = createEbayOAuthAuthorization({ nonce: "a".repeat(64), actorId: "user-1", channelId: 67, environment: "production", now });

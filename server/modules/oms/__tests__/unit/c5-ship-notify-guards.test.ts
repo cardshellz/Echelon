@@ -22,7 +22,7 @@ function readShipStationSource(): string {
         .sort()
         .map((f) => readFileSync(resolve(subDir, f), "utf8"))
     : [];
-  return [readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"), ...subFiles].join("\n");
+  return [readFileSync(resolve(omsDir, "application/shipstation.service.ts"), "utf8"), ...subFiles].join("\n");
 }
 
 const SHIPSTATION_SRC = readShipStationSource();

@@ -21,7 +21,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { parseEchelonOrderKey } from "../../shipstation.service";
+import { parseEchelonOrderKey } from "../../application/shipstation.service";
 
 describe("parseEchelonOrderKey", () => {
   // ------------------------------------------------------------------

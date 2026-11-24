@@ -1,16 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { PackageAllocationBootstrapPersistenceError } from "../../package-allocation-bootstrap.service";
-import { PackageAllocationPersistenceError } from "../../package-allocation-planning.service";
-import { PackageAllocationLedgerRepositoryError } from "../../package-allocation-ledger.repository";
-import { PackageAllocationAuthorityResolutionError } from "../../package-allocation-authority-resolution.domain";
-import { PackageAllocationSourceIdentityError } from "../../package-allocation-source-identity.domain";
-import { PackageAllocationGroupError } from "../../package-allocation-group.domain";
-import { FulfillmentAuthorityError } from "../../../oms/channel-fulfillment-authority.repository";
+import { PackageAllocationBootstrapPersistenceError } from "../../application/package-allocation-bootstrap.service";
+import { PackageAllocationPersistenceError } from "../../application/package-allocation-planning.service";
+import { PackageAllocationLedgerRepositoryError } from "../../infrastructure/package-allocation-ledger.repository";
+import { PackageAllocationAuthorityResolutionError } from "../../domain/package-allocation-authority-resolution.domain";
+import { PackageAllocationSourceIdentityError } from "../../domain/package-allocation-source-identity.domain";
+import { PackageAllocationGroupError } from "../../domain/package-allocation-group.domain";
+import { FulfillmentAuthorityError } from "../../../oms/infrastructure/channel-fulfillment-authority.repository";
 import {
   PackageAllocationLabelCommercialFulfillmentService,
   type PackageAllocationLabelCommercialWorkflow,
-} from "../../package-allocation-label-commercial-fulfillment.service";
+} from "../../application/package-allocation-label-commercial-fulfillment.service";
 
 function fixture(enabled = true) {
   const labelLinker = {

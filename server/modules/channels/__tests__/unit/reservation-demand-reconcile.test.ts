@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 
-import { createReservationService } from "../../reservation.service";
+import { createReservationService } from "../../application/reservation.service";
 
 describe("legacy reservation demand reconciliation", () => {
   it("does not mutate reservations when a retry observed no new WMS demand change", async () => {

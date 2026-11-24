@@ -23,7 +23,7 @@ const appShell = readFileSync(
 );
 const settingsPage = readFileSync(resolve(process.cwd(), "client/src/pages/ProcurementSettings.tsx"), "utf8");
 const service = readFileSync(
-  resolve(process.cwd(), "server/modules/procurement/purchasing.service.ts"),
+  resolve(process.cwd(), "server/modules/procurement/application/purchasing.service.ts"),
   "utf8",
 );
 
@@ -115,7 +115,7 @@ describe("reorder engine UI contract", () => {
     // oversized vendor group BEFORE recording any accepted_for_po decision,
     // or the acceptances land and the guaranteed-400 handoff strands them.
     const handoffService = readFileSync(
-      resolve(process.cwd(), "server/modules/procurement/recommendation-po-handoff.service.ts"),
+      resolve(process.cwd(), "server/modules/procurement/application/recommendation-po-handoff.service.ts"),
       "utf8",
     );
     expect(handoffService).toContain("items: z.array(handoffItemSchema).min(1).max(25)");

@@ -1,6 +1,6 @@
 import { PgMarketplaceListingRegistrationRepository, type EbayListingInspection } from "../../marketplace-listings";
-import type { EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
+import type { EbayListingSyncIdentity } from "../domain/ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
 import { pool } from "../../../db";
 
 const registration = new PgMarketplaceListingRegistrationRepository(pool);

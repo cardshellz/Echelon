@@ -6,7 +6,7 @@ import {
   isRetryableTrackingEventsError,
   parseShipStationTrackingResourceUrl,
   ShipStationTrackingEventsError,
-} from "../../shipstation-tracking-events.client";
+} from "../../infrastructure/shipstation-tracking-events.client";
 
 const resourceUrl = "https://api.shipstation.com/v2/tracking"
   + "?carrier_code=ups&tracking_number=1Z999AA10123456784";

@@ -5,7 +5,7 @@ import type pg from "pg";
 import * as schema from "../../../shared/schema";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_AT, FLOW_ACTOR, FLOW_IDS, type FlowCostHarness } from "../../../server/modules/procurement/__tests__/integration/procurement-flow-cost.fixture";
 import { fixtureTable, identifier, qualifiedTable } from "../../../server/modules/procurement/__tests__/integration/shipment-line-fixture";
-import { receivingUnitVersion } from "../../../server/modules/procurement/receiving-unit-contract";
+import { receivingUnitVersion } from "../../../server/modules/procurement/application/receiving-unit-contract";
 import { isShipmentCostLinePosted } from "../../../shared/procurement/shipment-cost-workflow";
 
 export const PERFORMANCE_AS_OF = new Date("2026-10-25T12:00:00.000Z");

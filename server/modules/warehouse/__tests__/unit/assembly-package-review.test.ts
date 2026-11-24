@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { normalizeShipStationLabelObservation } from "../../../shipping/carrier-tracking.domain";
-import type { LockedPackageAllocationAuthorityEvidence } from "../../../shipping/package-allocation-ledger.repository";
+import { normalizeShipStationLabelObservation } from "../../../shipping/domain/carrier-tracking.domain";
+import type { LockedPackageAllocationAuthorityEvidence } from "../../../shipping/infrastructure/package-allocation-ledger.repository";
 import { buildAssemblyPackageReview } from "../../work/domain/assembly-package-review";
-import { readObservedPackagesForSources } from "../../../shipping/package-allocation-ledger.repository";
+import { readObservedPackagesForSources } from "../../../shipping/infrastructure/package-allocation-ledger.repository";
 import { readOrderPackingSources } from "../../../wms/infrastructure/packing-source-reader";
 import type { PoolClient } from "pg";
 

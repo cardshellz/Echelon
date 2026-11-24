@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import type { StockSelectionQueryClient, StockPublicationSelection } from "@shared/types/stock-publication-selection";
-import { readCatalogStockSelectionFacts } from "../../catalog/infrastructure/catalog-stock-selection.reader";
-import { resolveChannelStockSelection, type ChannelStockSelectionFacts } from "../channel-stock-selection.domain";
+import { readCatalogStockSelectionFacts } from "../../catalog/catalog-stock-selection.reader.api";
+import { resolveChannelStockSelection, type ChannelStockSelectionFacts } from "../domain/channel-stock-selection.domain";
 
 export type { StockSelectionQueryClient, StockPublicationSelection } from "@shared/types/stock-publication-selection";
 const id = z.number().int().positive().max(2_147_483_647);
@@ -85,7 +85,7 @@ export async function readChannelStockSelectionFacts(client: StockSelectionQuery
   return facts;
 }
 
-import { hasListingWorkObligation, type ListingWorkPhase } from "../../marketplace-listings/domain/listing-work-obligation";
+import { hasListingWorkObligation, type ListingWorkPhase } from "../../marketplace-listings/listing-work-obligation.api";
 
 /** The sync owner explicitly supersedes only idle jobs without a publication
  * barrier. Those retained historical refusals carry no remaining execution duty. */

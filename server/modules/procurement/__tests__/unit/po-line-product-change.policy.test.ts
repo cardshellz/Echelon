@@ -3,7 +3,7 @@ import { poQuantityPreviewRequestSchema, type PoLineProductIdentity } from "@sha
 import {
   buildQuantityAmendmentContext, lineProductChangeBlockedReason, planQuantityAmendment,
   type AmendmentFacts, type PreparedPoProductChange, type ProductIdentityPatch,
-} from "../../po-quantity-amendment.policy";
+} from "../../domain/po-quantity-amendment.policy";
 import type { PurchaseApprovalActor } from "../../../identity/domain/purchase-approval-authority";
 
 const admin: PurchaseApprovalActor = { userId: "admin", active: true, roles: [{ id: 1, name: "Administrator", isSystem: true }], approvalGrantIds: [1], hasScopedApprovalGrant: false };

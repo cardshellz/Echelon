@@ -7,8 +7,8 @@ import { describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { receivingEntryCommandResultSchema } from "@shared/procurement/receiving-entry-command";
 import type { QuantityLedgerTestContext } from "../../../inventory/__tests__/fixtures/quantity-ledger-database";
-import { RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../receiving-entry.commands";
-import type { ReceivingService } from "../../receiving.service";
+import { RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../application/receiving-entry.commands";
+import type { ReceivingService } from "../../application/receiving.service";
 import { fixtureForeignKeys, fixtureTable } from "./shipment-line-fixture";
 
 interface HttpResult { status: number; body: unknown; replayed: string | undefined }
@@ -46,7 +46,7 @@ export function registerReceivingEntryHttpRecoveryCases(harness: {
     // service registry and optional replenishment callback are not installed.
     const services = { receiving: harness.service() } satisfies Pick<typeof app.locals.services, "receiving">;
     app.locals.services = services as typeof app.locals.services;
-    const { registerReceivingRoutes } = await import("../../receiving.routes");
+    const { registerReceivingRoutes } = await import("../../interfaces/http/receiving.routes");
     registerReceivingRoutes(app);
     const server = createServer(app);
     await new Promise<void>((resolveStarted, reject) => {

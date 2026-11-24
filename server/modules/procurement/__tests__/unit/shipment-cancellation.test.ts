@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
-import { createShipmentTrackingService } from "../../shipment-tracking.service";
-import { readShipmentCancellationEvidence } from "../../shipment-cancellation.repository";
+import { createShipmentTrackingService } from "../../application/shipment-tracking.service";
+import { readShipmentCancellationEvidence } from "../../infrastructure/shipment-cancellation.repository";
 import { shipmentCancellationBlockers, type ShipmentCancellationEvidence } from "../../domain/shipment-cancellation";
 
 const now = new Date("2026-10-16T12:00:00Z");

@@ -6,7 +6,7 @@ import { prepareEbayListingPackages } from "../../../channels/adapters/ebay/ebay
 import { EbayMarketplaceListingConnector } from "../../../channels/listing-connectors/ebay-listing.connector";
 import { ShopifyMarketplaceListingConnector } from "../../../channels/listing-connectors/shopify-listing.connector";
 import { syncProviderFixture } from "../../../channels/__tests__/fixtures/ebay-listing-sync.fixture";
-import type { ChannelListingPayload } from "../../../channels/channel-adapter.interface";
+import type { ChannelListingPayload } from "../../../channels/domain/channel-adapter.interface";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

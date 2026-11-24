@@ -3,7 +3,7 @@ import {
   buildPoReconciliationLines,
   ReceivingOrchestrationError,
   reconcileLinkedPurchaseOrder,
-} from "../../receiving-orchestration.service";
+} from "../../application/receiving-orchestration.service";
 
 function successfulReconciliation(overrides: Record<string, unknown> = {}) {
   return {

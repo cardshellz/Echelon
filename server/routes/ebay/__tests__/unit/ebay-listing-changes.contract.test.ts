@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ebayListingPushRequestSchema } from "../../../../modules/channels/ebay-listing-push.service";
+import { ebayListingPushRequestSchema } from "../../../../modules/channels/application/ebay-listing-push.service";
 import { normalizeEbayObservedOffers } from "../../ebay-listing-connector-client";
 
 const preview = {

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const WMS_SYNC_SRC = readFileSync(
-  resolve(__dirname, "../../wms-sync.service.ts"),
+  resolve(__dirname, "../../application/wms-sync.service.ts"),
   "utf8",
 );
 const ORDER_ITEM_COMMANDS_SRC = readFileSync(

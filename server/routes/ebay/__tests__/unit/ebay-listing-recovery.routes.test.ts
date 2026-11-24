@@ -2,7 +2,7 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerEbayListingRecoveryRoutes } from "../../ebay-listing-recovery.routes";
-import type { EbayListingRecoveryService } from "../../../../modules/channels/ebay-listing-recovery.service";
+import type { EbayListingRecoveryService } from "../../../../modules/channels/application/ebay-listing-recovery.service";
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async (_user: string, _resource: string, _action: string) => true) }));
 // Resolve a current assigned identity through the real requireAuth middleware;
 // capability outcomes remain controlled by this suite's separate permission mock.

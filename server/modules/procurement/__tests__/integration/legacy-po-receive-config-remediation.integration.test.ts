@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   applyLegacyPoReceiveConfigRemediation,
   previewLegacyPoReceiveConfigRemediation,
-} from "../../legacy-po-receive-config-remediation.service";
+} from "../../application/legacy-po-receive-config-remediation.service";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 

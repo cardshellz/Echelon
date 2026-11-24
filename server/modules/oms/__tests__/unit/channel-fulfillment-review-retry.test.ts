@@ -5,12 +5,12 @@ import {
   previewChannelFulfillmentReviewRetry,
   reviewRetryIdempotencyKey,
   type ChannelFulfillmentReviewRetrySnapshot,
-} from "../../channel-fulfillment-review-retry.domain";
+} from "../../domain/channel-fulfillment-review-retry.domain";
 import {
   createChannelFulfillmentReviewRetryRepository,
   type ChannelFulfillmentReviewRetryDatabase,
-} from "../../channel-fulfillment-review-retry.repository";
-import { createChannelFulfillmentReviewRetryService } from "../../channel-fulfillment-review-retry.service";
+} from "../../infrastructure/channel-fulfillment-review-retry.repository";
+import { createChannelFulfillmentReviewRetryService } from "../../application/channel-fulfillment-review-retry.service";
 
 const NOW = new Date("2026-09-08T17:00:00.000Z");
 function snapshot(overrides: Partial<ChannelFulfillmentReviewRetrySnapshot> = {}): ChannelFulfillmentReviewRetrySnapshot {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { poAmendmentImpactSchema } from "@shared/procurement/po-amendment-impact";
 import { supplierReturnRecordInputSchema, supplierReturnDetailSchema, supplierReturnPreviewInputSchema, supplierReturnOptionsQuerySchema, supplierReturnListQuerySchema, supplierReturnCostAdjustmentSchema } from "@shared/procurement/supplier-return";
-import { projectPoAmendmentReturnedCosts } from "../../po-amendment-return-impact";
+import { projectPoAmendmentReturnedCosts } from "../../application/po-amendment-return-impact";
 import { returnRequest, returnResult } from "../../../../../test/fixtures/supplier-return";
 
 const adjustment = {

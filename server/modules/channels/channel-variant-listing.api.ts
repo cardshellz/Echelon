@@ -5,4 +5,4 @@
  * through this facade rather than writing `channels.channel_variant_overrides`.
  */
 
-export { markChannelVariantNotListed } from "./channel-variant-listing.repository";
+export { markChannelVariantNotListed } from "./infrastructure/channel-variant-listing.repository";

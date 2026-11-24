@@ -23,7 +23,7 @@ describe("purchase pipeline job run writer topology", () => {
 
   it("keeps writes in the procurement lifecycle repository", () => {
     const repository = source(
-      "server/modules/procurement/purchase-pipeline-job-run-lifecycle.repository.ts",
+      "server/modules/procurement/infrastructure/purchase-pipeline-job-run-lifecycle.repository.ts",
     );
     expect(repository).toContain("pg_advisory_xact_lock");
     expect(repository).toContain('.for("update")');

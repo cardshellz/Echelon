@@ -6,7 +6,7 @@ import {
   DemandEventError,
   validateDemandEventWriteInput,
   type DemandEventWriteInput,
-} from "../../demand-events.service";
+} from "../../application/demand-events.service";
 
 function validInput(): DemandEventWriteInput {
   return {
@@ -71,7 +71,7 @@ describe("demand event domain contract", () => {
   });
 
   it("uses bound Drizzle updates and the same active-date rule as recommendation storage", () => {
-    const source = readFileSync(resolve(__dirname, "../../demand-events.service.ts"), "utf8");
+    const source = readFileSync(resolve(__dirname, "../../application/demand-events.service.ts"), "utf8");
     expect(source).not.toContain("sql.raw(");
     expect(source).toContain("tx.update(demandEvents)");
     expect(source).toContain("de.end_date IS NULL OR de.end_date >= CURRENT_DATE");

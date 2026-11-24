@@ -1,12 +1,12 @@
 import { z } from "zod";
-import { CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { CostEvidenceError } from "../../inventory/cost-evidence-values.api";
 import { resolveReceiptInvoiceSources, type ReceiptInvoiceSource } from "./receipt-invoice-costs";
 import { invoiceCostComponentEvidenceSchema, invoiceGoodsAmounts } from "@shared/procurement/invoice-cost-evidence";
 import {
   costFingerprint,
   costInteger,
-} from "../../inventory/infrastructure/cost-evidence-values";
-import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
+} from "../../inventory/cost-evidence-values.api";
+import type { CostRevisionInput } from "../../inventory/cost-evidence.repository.api";
 import { resolveSupplierCreditReductions, type SupplierCreditCostRow } from "./supplier-credit-source";
 import { supplierCostReviewFactsSchema } from "@shared/procurement/cost-review-facts";
 import { purchaseTaxEvidence, purchaseTaxAmounts, taxTreatmentIssue } from "./purchase-tax";

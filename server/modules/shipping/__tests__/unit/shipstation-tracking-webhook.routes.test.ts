@@ -7,8 +7,8 @@ import {
   SHIPSTATION_TRACKING_WEBHOOK_PATH,
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,
-} from "../../shipstation-tracking-webhook.routes";
-import { ShipStationWebhookAuthError } from "../../shipstation-webhook-auth";
+} from "../../interfaces/http/shipstation-tracking-webhook.routes";
+import { ShipStationWebhookAuthError } from "../../interfaces/http/shipstation-webhook-auth";
 
 const openServers: http.Server[] = [];
 const receipt = {

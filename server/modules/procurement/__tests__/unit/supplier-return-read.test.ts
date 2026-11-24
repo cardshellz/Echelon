@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sumSupplierReturnCosts, supplierReturnCreditState, projectSupplierReturnList } from "../../supplier-return-read.domain";
+import { sumSupplierReturnCosts, supplierReturnCreditState, projectSupplierReturnList } from "../../domain/supplier-return-read.domain";
 import { returnResult } from "../../../../../test/fixtures/supplier-return";
 
 describe("supplier return exact read projections", () => {

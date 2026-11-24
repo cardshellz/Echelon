@@ -1,18 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-vi.mock("../../supplier-credit.service", () => ({
+vi.mock("../../application/supplier-credit.service", () => ({
   executeSupplierCreditCommand: vi.fn()
 }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({
   financialCommandRepository: {}
 }));
-vi.mock("../../supplier-credit.repository", () => ({
+vi.mock("../../infrastructure/supplier-credit.repository", () => ({
   SupplierCreditError: class SupplierCreditError extends Error {
     constructor(readonly code: string, message: string, readonly statusCode = 409) {
       super(message);
     }
   }
 }));
-vi.mock("../../supplier-credit-settlement.repository", () => ({
+vi.mock("../../infrastructure/supplier-credit-settlement.repository", () => ({
   SupplierCreditEvidenceError: class SupplierCreditEvidenceError extends Error {
     readonly statusCode = 409;
     readonly details = {
@@ -20,11 +20,11 @@ vi.mock("../../supplier-credit-settlement.repository", () => ({
     };
   }
 }));
-import { bindSupplierCreditCommand, classifySupplierCreditFailure, createSupplierCreditCommands, validateSupplierCreditReceipt } from "../../supplier-credit.commands";
+import { bindSupplierCreditCommand, classifySupplierCreditFailure, createSupplierCreditCommands, validateSupplierCreditReceipt } from "../../application/supplier-credit.commands";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor, FinancialCommandRepository } from "../../../../platform/commands/transactional-command.service";
-import type { CreditTransaction } from "../../supplier-credit.repository";
+import type { CreditTransaction } from "../../infrastructure/supplier-credit.repository";
 import type { SupplierCreditCommandResult } from "@shared/procurement/supplier-credit";
 const request = {
   sourceInvoiceId: 1,

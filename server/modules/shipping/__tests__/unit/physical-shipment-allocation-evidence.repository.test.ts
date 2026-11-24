@@ -1,6 +1,6 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
-import { readPhysicalShipmentAllocationEvidence, readShipmentItemAllocationSource } from "../../physical-shipment-allocation-evidence.repository";
+import { readPhysicalShipmentAllocationEvidence, readShipmentItemAllocationSource } from "../../infrastructure/physical-shipment-allocation-evidence.repository";
 
 const rootInput = { legacyWmsShipmentItemId: 502, wmsOrderItemId: 601, wmsOrderId: 701 };
 const physicalInput = { legacyWmsShipmentItemId: 502, wmsOrderItemId: 601, fulfillmentPlanLineId: 801 };

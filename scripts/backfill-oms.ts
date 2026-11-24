@@ -3,8 +3,8 @@ import { createRequire } from "module";
 global.require = createRequire(import.meta.url);
 import { db } from "../server/db.js";
 import { sql } from "drizzle-orm";
-import { createOmsService } from "../server/modules/oms/oms.service.js";
-import { bridgeShopifyOrderToOms } from "../server/modules/oms/shopify-bridge.js";
+import { createOmsService } from "../server/modules/oms/application/oms.service.js";
+import { bridgeShopifyOrderToOms } from "../server/modules/oms/application/shopify-bridge.js";
 
 async function run() {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";

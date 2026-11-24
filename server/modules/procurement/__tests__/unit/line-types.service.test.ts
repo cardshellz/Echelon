@@ -1,7 +1,7 @@
 import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, it, expect, vi } from "vitest";
 import { productVariants, products, vendorProducts, vendors } from "@shared/schema";
-import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+import { createPurchasingService, PurchasingError } from "../../application/purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Typed PO lines — validation, parent resolution, totals breakdown.

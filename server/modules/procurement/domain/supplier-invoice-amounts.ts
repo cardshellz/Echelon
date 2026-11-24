@@ -1,7 +1,7 @@
 import { invoiceCostComponentEvidenceSchema, invoiceGoodsAmounts } from "@shared/procurement/invoice-cost-evidence";
 import { purchaseTaxEvidence, purchaseTaxAmounts, taxTreatmentIssue } from "./purchase-tax";
 import { supplierHeaderAmounts } from "./supplier-header-costs";
-import { costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { costInteger, CostEvidenceError } from "../../inventory/cost-evidence-values.api";
 import { readIntegerMills, readIntegerCents } from "@shared/money-read";
 
 /** One selector for supplier amount ownership. Original line components conserve

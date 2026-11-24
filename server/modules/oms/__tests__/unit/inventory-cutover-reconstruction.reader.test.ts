@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { readOmsCutoverReconstruction } from "../../inventory-cutover-reconstruction.reader";
+import { readOmsCutoverReconstruction } from "../../infrastructure/inventory-cutover-reconstruction.reader";
 import { CUTOVER_RECEIPT_EVIDENCE_FORMAT } from "../../domain/inventory-cutover-receipt-evidence";
 
 function receipt(id = "1") {

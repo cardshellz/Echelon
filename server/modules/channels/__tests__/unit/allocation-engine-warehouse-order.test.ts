@@ -6,8 +6,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { createAllocationEngine, orderWarehouseAssignments } from "../../allocation-engine.service";
-import { ALLOCATION_ERROR_CODES } from "../../allocation-engine.errors";
+import { createAllocationEngine, orderWarehouseAssignments } from "../../application/allocation-engine.service";
+import { ALLOCATION_ERROR_CODES } from "../../domain/allocation-engine.errors";
 
 function thenableChain(data: any[]) {
   const chain: any = {};

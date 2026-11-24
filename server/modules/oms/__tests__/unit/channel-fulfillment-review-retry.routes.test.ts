@@ -9,22 +9,22 @@ vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({
   requireAuth: vi.fn(), requirePermission: mocks.permission,
 }));
-vi.mock("../../oms-flow-reconciliation.service", () => ({ remediateOmsFlowIssue: mocks.remediate }));
-vi.mock("../../ops-health.service", () => ({ getOmsOpsHealth: vi.fn() }));
-vi.mock("../../flow-waterfall.service", () => ({ getFlowWaterfall: vi.fn(), getFlowBucketSamples: vi.fn() }));
-vi.mock("../../flow-trace.service", () => ({ getFlowTrace: vi.fn() }));
-vi.mock("../../webhook-inbox.service", () => ({ enqueueWebhookInboxReplay: vi.fn() }));
-vi.mock("../../webhook-retry.worker", () => ({ requeueDeadWebhookRetry: vi.fn() }));
+vi.mock("../../application/oms-flow-reconciliation.service", () => ({ remediateOmsFlowIssue: mocks.remediate }));
+vi.mock("../../application/ops-health.service", () => ({ getOmsOpsHealth: vi.fn() }));
+vi.mock("../../application/flow-waterfall.service", () => ({ getFlowWaterfall: vi.fn(), getFlowBucketSamples: vi.fn() }));
+vi.mock("../../application/flow-trace.service", () => ({ getFlowTrace: vi.fn() }));
+vi.mock("../../application/webhook-inbox.service", () => ({ enqueueWebhookInboxReplay: vi.fn() }));
+vi.mock("../../application/webhook-retry.worker", () => ({ requeueDeadWebhookRetry: vi.fn() }));
 vi.mock("../../../identity", () => ({ hasPermission: vi.fn() }));
-vi.mock("../../shipstation-unmapped-remediation.service", () => ({
+vi.mock("../../application/shipstation-unmapped-remediation.service", () => ({
   adoptShipStationUnmappedPhysicalAsReship: vi.fn(), getShipStationUnmappedPhysicalPreview: vi.fn(),
   resolveShipStationUnmappedPhysicalAsProviderEcho: vi.fn(), resolveShipStationUnmappedPhysicalAsReturnLabel: vi.fn(),
   resolveShipStationUnmappedPhysicalAsVoidedLabel: vi.fn(),
 }));
 
 import { registerOmsRoutes } from "../../../../routes/oms.routes";
-import { CHANNEL_FULFILLMENT_REVIEW_RETRY, ChannelFulfillmentReviewRetryError } from "../../channel-fulfillment-review-retry.domain";
-import { CHANNEL_FULFILLMENT_RECEIPT_RETRY, ChannelFulfillmentReceiptRetryError } from "../../channel-fulfillment-receipt-retry.domain";
+import { CHANNEL_FULFILLMENT_REVIEW_RETRY, ChannelFulfillmentReviewRetryError } from "../../domain/channel-fulfillment-review-retry.domain";
+import { CHANNEL_FULFILLMENT_RECEIPT_RETRY, ChannelFulfillmentReceiptRetryError } from "../../domain/channel-fulfillment-receipt-retry.domain";
 
 type Handler = (request: Request, response: Response) => Promise<void>;
 const USER_ID = "2f6e5308-dc3b-4c41-80e5-6f35bca2a731";

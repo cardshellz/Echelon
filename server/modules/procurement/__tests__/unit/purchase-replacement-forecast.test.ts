@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { projectReplacementForecast, purchaseReplacementForecastsSchema } from "@shared/procurement/purchase-replacement-forecast";
-import { buildPurchaseSupplyTiming } from "../../purchase-supply-timing";
+import { buildPurchaseSupplyTiming } from "../../application/purchase-supply-timing";
 
 const range = { productId: 10, startDate: "2026-09-01", endDate: "2026-09-30", totalPieces: 600, reference: "September plan" };
 const project = (fromDate: string, days: number, ranges = [range]) => projectReplacementForecast({ productId: 10, fromDate, days, ranges, baselineDailyMicros: 10_000_000 });

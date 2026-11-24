@@ -2,8 +2,8 @@ import { channelCatalogItemSchema } from "@shared/types/channel-catalog";
 import {
   stockLinkDestinationSchema, stockLinkOfferLookupSchema, type StockLinkDestination, type StockLinkOfferLookup,
 } from "@shared/types/stock-link";
-import type { StockLinkOfferAdapter, StockLinkProviderCallOptions } from "../../../inventory-planning/application/stock-link.ports";
-import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../../inventory-planning/domain/stock-link-errors";
+import type { StockLinkOfferAdapter, StockLinkProviderCallOptions } from "../../../inventory-planning/stock-link.ports.api";
+import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../../inventory-planning/stock-link-errors.api";
 import { isActiveSellerShipNode, type WalmartChannelService } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";
 import type { WalmartConnectionRecord } from "./walmart-connection.repository";

@@ -5,7 +5,7 @@ import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase }
 import { cutoverReceiptSchemaFixtureSql } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-receipt-schema.fixture";
 import { reconstructionEvidence } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-reconstruction.fixture";
 import { planCutoverReconstruction } from "../../../inventory-planning/domain/inventory-cutover-reconstruction";
-import { readOmsCutoverReconstruction } from "../../inventory-cutover-reconstruction.reader";
+import { readOmsCutoverReconstruction } from "../../infrastructure/inventory-cutover-reconstruction.reader";
 import { CUTOVER_RECEIPT_EVIDENCE_FORMAT } from "../../domain/inventory-cutover-receipt-evidence";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;

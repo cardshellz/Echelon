@@ -19,7 +19,7 @@ import {
   closeTestDb,
   describeWithDisposableDb,
 } from "../../../../../test/setup-integration";
-import { createSourceLockService } from "../../source-lock.service";
+import { createSourceLockService } from "../../application/source-lock.service";
 import { channels, sourceLockConfig } from "@shared/schema";
 
 describeWithDisposableDb("Source Lock System (Integration)", () => {

@@ -35,7 +35,7 @@ vi.mock("../../../../db", () => ({
 }));
 
 // Pull in the cascade helper after the db mock is registered.
-import { __test__ } from "../../oms-webhooks";
+import { __test__ } from "../../application/oms-webhooks";
 
 const { cascadeShopifyCancelToShipments, deriveOmsUpdateFinality } = __test__;
 

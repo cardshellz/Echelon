@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SUPPLIER_SOURCING_POLICY, selectSupplierPriceTier, supplierPriceListSchema, supplierSourcingUpdateSchema, type SupplierPriceList } from "@shared/procurement/supplier-sourcing";
-import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
-import type { SupplierCandidate } from "../../supplier-sourcing-selection";
+import { generatePurchasingRecommendations } from "../../application/purchasing-recommendation.engine";
+import type { SupplierCandidate } from "../../application/supplier-sourcing-selection";
 
 export const priceList: SupplierPriceList = { currency: "USD", basis: "per_purchase_uom", purchaseUom: "case", piecesPerPurchaseUom: 50, quoteReference: "SUPPLIER-Q-001", quotedAt: "2026-09-01T12:00:00Z", validFrom: "2026-09-01", validUntil: "2026-10-31", tiers: [{ minimumQuantity: 1, unitCostMills: 100001 }, { minimumQuantity: 10, unitCostMills: 90001 }] };
 const select = (pieces: number, patch: Partial<Parameters<typeof selectSupplierPriceTier>[0]> = {}) => selectSupplierPriceTier({ vendorProductId: 1, revision: 1, priceList, pieces, asOfDate: "2026-09-07", currency: "USD", ...patch });

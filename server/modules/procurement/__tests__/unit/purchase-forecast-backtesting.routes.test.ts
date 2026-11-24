@@ -17,7 +17,7 @@ vi.mock("../../../../routes/middleware", () => {
 
 vi.mock("../../../../db", () => ({ db: {} }));
 
-import { registerPurchaseForecastBacktestingRoutes } from "../../purchase-forecast-backtesting.routes";
+import { registerPurchaseForecastBacktestingRoutes } from "../../interfaces/http/purchase-forecast-backtesting.routes";
 
 function buildApp(): Express {
   const app = express();

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
 
 import {
   EbayMarketplaceListingConnector,
@@ -23,7 +23,7 @@ import {
   executeAdmittedEbayQuantityRequest,
   type EbayQuantityHttpRequest,
   type EbayQuantityRequestAdmission,
-} from "../quantity-publication-request";
+} from "../application/quantity-publication-request";
 
 import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "../adapters/ebay/ebay-api-error";
 import { readExistingEbayListingPhotos } from "../adapters/ebay/ebay-listing-photos.reader";
@@ -34,7 +34,7 @@ export { normalizeEbayObservedOffers } from "../adapters/ebay/ebay-offer-observa
 import type {
   EbayListingPhotoPlan,
   EbayPhotoVariant,
-} from "../ebay-listing-photos.domain";
+} from "../domain/ebay-listing-photos.domain";
 
 const ebayListingConnector = new EbayMarketplaceListingConnector();
 

@@ -15,14 +15,14 @@ vi.mock("../../../../routes/middleware", () => ({
   },
 }));
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
-vi.mock("../../ap-ledger.service", () => ({}));
+vi.mock("../../application/ap-ledger.service", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
-vi.mock("../../shipment-cost-update.commands", async importOriginal => ({
-  ...await importOriginal<typeof import("../../shipment-cost-update.commands")>(),
+vi.mock("../../application/shipment-cost-update.commands", async importOriginal => ({
+  ...await importOriginal<typeof import("../../application/shipment-cost-update.commands")>(),
   createShipmentCostUpdateCommands: () => ({ execute: mocks.execute }),
 }));
-import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
-import { ShipmentTrackingError } from "../../shipment-tracking.service";
+import { registerInboundShipmentRoutes } from "../../interfaces/http/inbound-shipment.routes";
+import { ShipmentTrackingError } from "../../application/shipment-tracking.service";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 
 describe("shipment cost workflow HTTP boundaries", () => {

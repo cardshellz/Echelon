@@ -1,5 +1,5 @@
 import { describe,expect,it,vi } from "vitest";
-import { EbayPublicationStockService } from "../../ebay-publication-stock.service";
+import { EbayPublicationStockService } from "../../application/ebay-publication-stock.service";
 describe("historical eBay stock receipt service",()=>{
   it("validates the exact command scope before reading",async()=>{
     const findApplied=vi.fn(async()=>null),service=new EbayPublicationStockService({findApplied});

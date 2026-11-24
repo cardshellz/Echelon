@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { resolveShipStationIds } from "../../shipstation.service";
+import { resolveShipStationIds } from "../../application/shipstation.service";
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 

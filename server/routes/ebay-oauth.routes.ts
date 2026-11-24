@@ -1,7 +1,7 @@
 import { requireAuth, requirePermission } from "./middleware";
 /**
  * eBay OAuth2 Routes
- * 
+ *
  * GET  /api/ebay/oauth/consent   — Redirects seller to eBay consent page
  * GET  /api/ebay/oauth/callback  — Handles eBay redirect after consent
  * GET  /api/ebay/oauth/declined  — Handles declined consent
@@ -20,7 +20,7 @@ import { buildDropshipPortalOAuthRedirect } from "../modules/dropship/interfaces
 
 import { randomBytes } from "node:crypto";
 import { channelMethods } from "../modules/channels";
-import { createEbayOAuthAuthorization, verifyEbayOAuthAuthorization, resolveEbayOAuthChannel, type EbayOAuthAuthorization } from "../modules/channels/ebay-oauth-authorization";
+import { createEbayOAuthAuthorization, verifyEbayOAuthAuthorization, resolveEbayOAuthChannel, type EbayOAuthAuthorization } from "../modules/channels/application/ebay-oauth-authorization";
 import { safeListingDiagnostic } from "@shared/ebay-listing-issue";
 
 declare module "express-session" {
@@ -119,7 +119,7 @@ export function registerEbayOAuthRoutes(app: Express): void {
     try {
       const { ebayOauthTokens } = await import("@shared/schema");
       const tokens = await (db as any).select().from(ebayOauthTokens);
-      
+
       res.json({
         configured: true,
         environment: config.environment,

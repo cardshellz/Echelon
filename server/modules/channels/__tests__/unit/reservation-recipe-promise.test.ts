@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createReservationService } from "../../reservation.service";
+import { createReservationService } from "../../application/reservation.service";
 
 describe("ReservationService recipe-managed promise routing", () => {
   it("delegates recipe-managed lines without reading physical ATP", async () => {

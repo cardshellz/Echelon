@@ -6,11 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCarrierTrackingProjectionReader,
   type CarrierTrackingPackageProjection,
-} from "../../carrier-tracking-projection.repository";
+} from "../../infrastructure/carrier-tracking-projection.repository";
 import {
   CARRIER_TRACKING_PROJECTION_PATH,
   registerCarrierTrackingProjectionRoutes,
-} from "../../carrier-tracking-projection.routes";
+} from "../../interfaces/http/carrier-tracking-projection.routes";
 
 const openServers: http.Server[] = [];
 const originalInternalApiKey = process.env.INTERNAL_API_KEY;

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parseWalmartOrder, WalmartUsApi } from "../../adapters/walmart/walmart-us-api";
 import { mapWalmartOrder, walmartCents, validateWalmartOrderScope } from "../../adapters/walmart/walmart-order.domain";
 import { prepareWalmartShipment } from "../../adapters/walmart/walmart-fulfillment";
-import { deriveOmsLineAuthority } from "../../../oms/oms-line-authority";
+import { deriveOmsLineAuthority } from "../../../oms/application/oms-line-authority";
 import { walmartOrderFixture } from "./walmart-fixture";
 
 describe("Walmart order financial and quantity contracts", () => {

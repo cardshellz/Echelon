@@ -8,7 +8,7 @@ function source(path: string): string {
 
 describe("auto-draft run writer topology", () => {
   it("keeps generic procurement storage read-only for run history", () => {
-    const storage = source("server/modules/procurement/procurement.storage.ts");
+    const storage = source("server/modules/procurement/infrastructure/procurement.storage.ts");
     expect(storage).not.toContain("createAutoDraftRun(");
     expect(storage).not.toContain("updateAutoDraftRun(");
   });
@@ -24,14 +24,14 @@ describe("auto-draft run writer topology", () => {
   });
 
   it("serializes claims and locks run rows before state transitions", () => {
-    const repository = source("server/modules/procurement/auto-draft-run-lifecycle.repository.ts");
+    const repository = source("server/modules/procurement/infrastructure/auto-draft-run-lifecycle.repository.ts");
     expect(repository).toContain("pg_advisory_xact_lock");
     expect(repository).toContain('.for("update")');
     expect(repository).toContain('eq(autoDraftRuns.status, "running")');
   });
 
   it("finishes mutating runs inside the automatic handoff transaction", () => {
-    const handoff = source("server/modules/procurement/recommendation-po-handoff.service.ts");
+    const handoff = source("server/modules/procurement/application/recommendation-po-handoff.service.ts");
     expect(handoff).toContain("await completeAutomaticRun(unitOfWork, parsed, persisted, skipped, now)");
   });
 });

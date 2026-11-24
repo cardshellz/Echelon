@@ -13,12 +13,12 @@ import type {
   EbayPolicyTransaction,
   EbayPolicyTarget,
   EbayCategoryMappingPatch,
-} from "../ebay-business-policies.service";
+} from "../application/ebay-business-policies.service";
 import {
   readCatalogEbayPolicyFields,
   readCatalogEbayPolicySelection,
   writeCatalogEbayPolicyFields,
-} from "../../catalog/domain/catalog-ebay-policy-fields";
+} from "../../catalog/catalog-ebay-policy-fields.api";
 
 const categoryColumns =
   'fulfillment_policy_override AS "fulfillmentPolicyId", return_policy_override AS "returnPolicyId", payment_policy_override AS "paymentPolicyId"';

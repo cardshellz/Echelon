@@ -1,0 +1,2126 @@
+import { queueOmsPaidEventReplay } from "./shopify-paid-event-replay";
+import { sql } from "drizzle-orm";
+import { omsWarehouseCancellationSql } from "../infrastructure/order-merchandise-state.sql";
+import { channelMerchandiseCapabilitySql } from "../infrastructure/channel-merchandise-policy";
+import { cancelOrder } from "../../orders/order-lifecycle-and-cancellation.api";
+import { clearWmsOrderAssignedPickerInWms } from "../../wms/wms-order-mutations.api";
+import { flagShippedOutboundShipmentOmsTerminalReviewInWms } from "../../wms/outbound-shipment-mutations.api";
+import type { OmsOpsIssue } from "./ops-health.service";
+import {
+  enqueueShipStationShipmentPushRetry,
+  enqueueWmsShipmentCreateRetry,
+} from "./webhook-retry.worker";
+import {
+  findChannelWritebackCandidates,
+  getChannelWritebackHealth,
+} from "./channel-writeback.service";
+import {
+  handoffLegacyShipmentToChannelFulfillment,
+  handoffOmsOrderShipmentsToChannelFulfillment,
+} from "./channel-fulfillment-authority.handoff";
+import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
+import {
+  CHANNEL_FULFILLMENT_OPERATOR_REPAIR_PREFIX,
+  CHANNEL_FULFILLMENT_REPAIR_SOURCES,
+} from "../domain/channel-fulfillment-notification.policy";
+import {
+  CHANNEL_FULFILLMENT_REVIEW_RETRY,
+  ChannelFulfillmentReviewRetryError,
+  type ChannelFulfillmentReviewRetryResult,
+} from "../domain/channel-fulfillment-review-retry.domain";
+import type { ChannelFulfillmentReviewRetryService } from "./channel-fulfillment-review-retry.service";
+import {
+  CHANNEL_FULFILLMENT_RECEIPT_RETRY,
+  ChannelFulfillmentReceiptRetryError,
+  type ChannelFulfillmentReceiptRetryResult,
+} from "../domain/channel-fulfillment-receipt-retry.domain";
+import type { ChannelFulfillmentReceiptRetryService } from "./channel-fulfillment-receipt-retry.service";
+import {
+  recordRunCompleted,
+  runBootCatchUpIfBehind,
+} from "../../../infrastructure/scheduler-run-registry";
+
+const LOG_PREFIX = "[OMS Flow Reconciliation]";
+const LOCK_ID = 918405;
+const RECONCILIATION_INTERVAL_MS = 15 * 60 * 1000;
+const RECONCILIATION_JOB_KEY = "oms_flow_reconciliation";
+const REMEDIABLE_CODES = new Set([
+  "OMS_PAID_WITHOUT_WMS",
+  "WMS_READY_WITHOUT_SHIPMENT",
+  "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
+  "OMS_FINAL_WMS_ACTIVE",
+  "WMS_FINAL_OMS_OPEN",
+  "SHIPMENT_SHIPPED_OMS_OPEN",
+  "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
+  "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+  "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+  CHANNEL_FULFILLMENT_REVIEW_RETRY,
+  CHANNEL_FULFILLMENT_RECEIPT_RETRY,
+]);
+const AUTO_TRACKING_RETRY_LIMIT = 10;
+const AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT = 100;
+const AUTO_FLOW_REMEDIATION_LIMIT = 10;
+const AUTO_RESERVATION_REPAIR_LIMIT = 25;
+/** Short claims re-planned per run; each attempt is one serializable transaction. */
+export const SHORT_CLAIM_REFRESH_LIMIT = 25;
+/** Candidate window scanned per sweep so declined oldest prefixes do not starve improvable later orders. */
+export const SHORT_CLAIM_CANDIDATE_WINDOW = 250;
+
+export interface ShortClaimDeclineEntry {
+  orderId: number;
+  seq: number;
+  code: string;
+  attempts: number;
+  lastDeclinedAt: string;
+}
+
+let shortClaimDeclineSequence = 0;
+const declinedShortClaimState = new Map<number, ShortClaimDeclineEntry>();
+
+export function getShortClaimRefreshDiagnostics(): {
+  declinedOrderCount: number;
+  declineCodeCounts: Record<string, number>;
+  declinedOrders: ShortClaimDeclineEntry[];
+} {
+  const declineCodeCounts: Record<string, number> = {};
+  const declinedOrders = Array.from(declinedShortClaimState.values()).sort(
+    (a, b) => a.seq - b.seq,
+  );
+  for (const entry of declinedOrders) {
+    declineCodeCounts[entry.code] = (declineCodeCounts[entry.code] ?? 0) + 1;
+  }
+  return {
+    declinedOrderCount: declinedOrders.length,
+    declineCodeCounts,
+    declinedOrders,
+  };
+}
+
+export function resetShortClaimRefreshStateForTests(): void {
+  shortClaimDeclineSequence = 0;
+  declinedShortClaimState.clear();
+}
+/** Confirmed pick corrections retried per run; each is a few short transactions. */
+const CONFIRMED_PICK_RETRY_LIMIT = 50;
+/** Exception orders re-checked per run; each is a few reads, one write if released. */
+const PICK_EXCEPTION_RECHECK_LIMIT = 100;
+
+/**
+ * Reservation service handle for release-on-cancel and the
+ * ready-but-unreserved detector (P0.1c). Injected from the composition root
+ * via setOmsFlowReconciliationServices() — same idiom as the eBay ingestion
+ * setters. When unwired (tests, partial boots), the reconciler falls back to
+ * status-only behavior and logs that release was skipped.
+ */
+export interface FlowReconciliationReservation {
+  reserveOrder(orderId: number): Promise<{
+    reserved: number;
+    failed: Array<{ sku: string; orderItemId: number; reason: string }>;
+  }>;
+  releaseOrderReservation(
+    orderId: number,
+    reason: string,
+    userId?: string,
+    options?: { disposition?: "release" | "cancel" },
+  ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }>;
+  /** Canonical only: re-reserve a claim planned short once stock arrives. */
+  refreshShortClaimSupply?(orderId: number): Promise<
+    | { outcome: "refreshed"; claimId: string; idempotentReplay: boolean }
+    | { outcome: "declined"; code: string; message: string }
+  >;
+}
+/** Retries the inventory record of picks a picker already confirmed shipped. */
+export interface FlowReconciliationPickCorrections {
+  retryConfirmedPicks(limit: number): Promise<{ resolved: number; waiting: number }>;
+}
+/** Moves exception orders whose ready-to-ship blockers all cleared. */
+export interface FlowReconciliationPickExceptions {
+  releaseClearedPickExceptions(limit: number): Promise<PickExceptionRecheckTotals>;
+}
+export interface PickExceptionRecheckTotals {
+  checked: number;
+  released: number;
+  stillBlocked: number;
+  failed: number;
+}
+
+export interface OmsFlowReconciliationDependencies {
+  reservation: FlowReconciliationReservation | null;
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService;
+  reviewRetry?: ChannelFulfillmentReviewRetryService;
+  receiptRetry?: ChannelFulfillmentReceiptRetryService;
+  pickCorrections?: FlowReconciliationPickCorrections;
+  pickExceptions?: FlowReconciliationPickExceptions;
+}
+
+function requireFlowFulfillmentAuthority(
+  dependencies: OmsFlowReconciliationDependencies,
+): ChannelFulfillmentAuthorityService {
+  if (!dependencies.fulfillmentAuthority) {
+    throw new Error("Canonical fulfillment authority is not configured for OMS flow reconciliation");
+  }
+  return dependencies.fulfillmentAuthority;
+}
+
+let reconciliationSchedulerStartedAt: Date | null = null;
+let reconciliationSchedulerLastRunAt: Date | null = null;
+let reconciliationSchedulerLastSuccessAt: Date | null = null;
+let reconciliationSchedulerLastError: string | null = null;
+
+export interface OmsFlowReconciliationSchedulerHeartbeat {
+  startedAt: string | null;
+  lastRunAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+}
+
+export function getOmsFlowReconciliationSchedulerHeartbeat(): OmsFlowReconciliationSchedulerHeartbeat {
+  return {
+    startedAt: reconciliationSchedulerStartedAt?.toISOString() ?? null,
+    lastRunAt: reconciliationSchedulerLastRunAt?.toISOString() ?? null,
+    lastSuccessAt: reconciliationSchedulerLastSuccessAt?.toISOString() ?? null,
+    lastError: reconciliationSchedulerLastError,
+  };
+}
+
+export function resetOmsFlowReconciliationSchedulerHeartbeatForTests(): void {
+  reconciliationSchedulerStartedAt = null;
+  reconciliationSchedulerLastRunAt = null;
+  reconciliationSchedulerLastSuccessAt = null;
+  reconciliationSchedulerLastError = null;
+}
+
+export interface OmsFlowRemediationInput {
+  code: string;
+  omsOrderId?: number;
+  wmsOrderId?: number;
+  shipmentId?: number;
+  operator: string;
+  commandId?: unknown;
+  receiptId?: unknown;
+  previewOnly?: unknown;
+  expectedStateFingerprint?: unknown;
+  notifyCustomer?: unknown;
+  reason?: unknown;
+}
+
+export interface OmsFlowRemediationResult {
+  code: string;
+  action: string;
+  changed: boolean;
+  omsOrderId: number | null;
+  wmsOrderId: number | null;
+  shipmentId: number | null;
+  retryQueueId?: number | null;
+  sourceInboxId?: number | null;
+  provider?: string | null;
+  topic?: string | null;
+  reviewRetry?: ChannelFulfillmentReviewRetryResult;
+  receiptRetry?: ChannelFulfillmentReceiptRetryResult;
+}
+
+function getDefaultDb(): any {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require("../../../db").db;
+}
+
+function getWithAdvisoryLock(): <T>(lockId: number, fn: () => Promise<T>) => Promise<T | null> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require("../../../infrastructure/scheduler-lock").withAdvisoryLock;
+}
+
+function rows(result: any): any[] {
+  return Array.isArray(result?.rows) ? result.rows : [];
+}
+
+function countFrom(result: any): number {
+  return Number(rows(result)[0]?.count ?? 0) || 0;
+}
+
+function firstRow<T>(result: any): T | undefined {
+  return rows(result)[0] as T | undefined;
+}
+
+function positiveInt(value: unknown, field: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${field} must be a positive integer`);
+  }
+  return parsed;
+}
+
+async function withOptionalTransaction<T>(db: any, fn: (tx: any) => Promise<T>): Promise<T> {
+  if (typeof db.transaction === "function") {
+    return db.transaction(fn);
+  }
+  return fn(db);
+}
+
+async function countAndSample(
+  db: any,
+  countQuery: any,
+  sampleQuery: any,
+): Promise<{ count: number; sample: unknown[] }> {
+  const [countResult, sampleResult] = await Promise.all([
+    db.execute(countQuery),
+    db.execute(sampleQuery),
+  ]);
+  return {
+    count: countFrom(countResult),
+    sample: rows(sampleResult),
+  };
+}
+
+type FlowCheckCode =
+  | "OMS_FINAL_WMS_ACTIVE"
+  | "WMS_FINAL_OMS_OPEN"
+  | "SHIPMENT_SHIPPED_OMS_OPEN"
+  | "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"
+  | "OMS_PAID_WITHOUT_WMS"
+  | "WMS_READY_WITHOUT_SHIPMENT"
+  | "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION"
+  | "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED"
+  | "WMS_PARTITION_DUPLICATE_LINE_COVERAGE"
+  | "OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT"
+  | "CHANNEL_FULFILLMENT_RECEIPT_STALLED";
+
+type FlowCheckOutcome =
+  | { code: FlowCheckCode; ok: true; count: number; sample: unknown[] }
+  | { code: FlowCheckCode; ok: false; error: string };
+
+/** Reported when a check's query fails, so what it looks for is visibly unchecked. */
+export const FLOW_CHECK_FAILED_CODE = "OMS_FLOW_CHECK_FAILED";
+
+/**
+ * Tags a check's result with its own code, and turns a failed query into a
+ * reported outcome instead of a rejection.
+ *
+ * Results used to be matched to codes by array position. 0142f220
+ * (2026-05-08) added two checks with their names in one place and their
+ * queries in another, so five checks reported, and were auto-repaired as,
+ * each other's rows for five months. Ready orders with no shipment (#63772,
+ * #63775) were filed as shipped packages, and the repair skipped them. One
+ * failing query also rejected the whole batch, so no check reached repair.
+ */
+function flowCheck(
+  code: FlowCheckCode,
+  run: Promise<{ count: number; sample: unknown[] }>,
+): Promise<FlowCheckOutcome> {
+  return run.then(
+    (found) => ({ code, ok: true as const, count: found.count, sample: found.sample }),
+    (error: unknown) => ({
+      code,
+      ok: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
+}
+
+export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOpsIssue[]> {
+  const outcomes = await Promise.all([
+    flowCheck("OMS_FINAL_WMS_ACTIVE", countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM oms.oms_orders oo
+        JOIN wms.orders wo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        WHERE (
+            ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
+          )
+          AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
+          AND oo.updated_at < NOW() - INTERVAL '10 minutes'
+      `,
+      sql`
+        SELECT oo.id AS oms_order_id, oo.external_order_number, oo.status AS oms_status,
+               oo.financial_status, wo.id AS wms_order_id, wo.order_number,
+               wo.warehouse_status, oo.updated_at
+        FROM oms.oms_orders oo
+        JOIN wms.orders wo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        WHERE (
+            ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
+          )
+          AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
+          AND oo.updated_at < NOW() - INTERVAL '10 minutes'
+        ORDER BY oo.updated_at ASC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("OMS_PAID_WITHOUT_WMS", countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM oms.oms_orders oo
+        WHERE oo.status NOT IN ('cancelled', 'shipped')
+          AND oo.financial_status IN ('paid', 'partially_paid')
+          AND oo.created_at > NOW() - INTERVAL '14 days'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.orders wo
+            WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+               OR (wo.source_table_id = oo.id::text)
+          )
+      `,
+      sql`
+        SELECT oo.id AS oms_order_id, oo.external_order_number, oo.external_order_id,
+               oo.status, oo.financial_status, oo.created_at
+        FROM oms.oms_orders oo
+        WHERE oo.status NOT IN ('cancelled', 'shipped')
+          AND oo.financial_status IN ('paid', 'partially_paid')
+          AND oo.created_at > NOW() - INTERVAL '14 days'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.orders wo
+            WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+               OR (wo.source_table_id = oo.id::text)
+          )
+        ORDER BY oo.created_at DESC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("WMS_READY_WITHOUT_SHIPMENT", countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.orders wo
+        WHERE wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
+          AND wo.created_at > NOW() - INTERVAL '14 days'
+          AND EXISTS (
+            SELECT 1
+            FROM wms.order_items oi
+            WHERE oi.order_id = wo.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipments os
+            WHERE os.order_id = wo.id
+              AND os.status <> 'voided'
+          )
+      `,
+      sql`
+        SELECT wo.id AS wms_order_id, wo.order_number, wo.warehouse_status,
+               wo.created_at, NULLIF(wo.oms_fulfillment_order_id, '') AS oms_order_id
+        FROM wms.orders wo
+        WHERE wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
+          AND wo.created_at > NOW() - INTERVAL '14 days'
+          AND EXISTS (
+            SELECT 1
+            FROM wms.order_items oi
+            WHERE oi.order_id = wo.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipments os
+            WHERE os.order_id = wo.id
+              AND os.status <> 'voided'
+          )
+        ORDER BY wo.created_at DESC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("WMS_FINAL_OMS_OPEN", countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.orders wo
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        WHERE wo.warehouse_status IN ('cancelled', 'shipped')
+          AND oo.status NOT IN ('cancelled', 'shipped', 'partially_shipped', 'refunded')
+          AND wo.updated_at < NOW() - INTERVAL '10 minutes'
+      `,
+      sql`
+        SELECT wo.id AS wms_order_id, wo.order_number, wo.warehouse_status,
+               oo.id AS oms_order_id, oo.external_order_number, oo.status AS oms_status,
+               wo.updated_at
+        FROM wms.orders wo
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        WHERE wo.warehouse_status IN ('cancelled', 'shipped')
+          AND oo.status NOT IN ('cancelled', 'shipped', 'partially_shipped', 'refunded')
+          AND wo.updated_at < NOW() - INTERVAL '10 minutes'
+        ORDER BY wo.updated_at ASC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("SHIPMENT_SHIPPED_OMS_OPEN", countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        WHERE os.status = 'shipped'
+          -- P0.3: cancelled/refunded are money-final — a shipped shipment on
+          -- such an order is a REVIEW case, never an auto-flip candidate.
+          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
+          AND os.updated_at < NOW() - INTERVAL '10 minutes'
+      `,
+      sql`
+        SELECT os.id AS shipment_id, os.order_id AS wms_order_id, os.tracking_number,
+               os.carrier, os.shipped_at, oo.id AS oms_order_id,
+               oo.external_order_number, oo.status AS oms_status
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        WHERE os.status = 'shipped'
+          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
+          AND os.updated_at < NOW() - INTERVAL '10 minutes'
+        ORDER BY os.updated_at ASC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED", countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        JOIN channels.channels c ON c.id = oo.channel_id
+        WHERE os.status = 'shipped'
+          AND os.shipped_at < NOW() - INTERVAL '1 hour'
+          AND os.shipped_at > NOW() - INTERVAL '14 days'
+          AND c.provider IN ('ebay', 'shopify')
+          AND NOT (
+            (
+              c.provider = 'shopify'
+              AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM oms.oms_order_events e
+              WHERE e.order_id = oo.id
+                AND e.details->>'wmsShipmentId' = os.id::text
+                AND (
+                  (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
+                  OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                )
+            )
+          )
+      `,
+      sql`
+        SELECT os.id AS shipment_id, os.order_id AS wms_order_id, os.shipped_at,
+               os.tracking_number, os.carrier, oo.id AS oms_order_id,
+               oo.external_order_number, c.provider
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        JOIN channels.channels c ON c.id = oo.channel_id
+        WHERE os.status = 'shipped'
+          AND os.shipped_at < NOW() - INTERVAL '1 hour'
+          AND os.shipped_at > NOW() - INTERVAL '14 days'
+          AND c.provider IN ('ebay', 'shopify')
+          AND NOT (
+            (
+              c.provider = 'shopify'
+              AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM oms.oms_order_events e
+              WHERE e.order_id = oo.id
+                AND e.details->>'wmsShipmentId' = os.id::text
+                AND (
+                  (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
+                  OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                )
+            )
+          )
+        ORDER BY os.shipped_at ASC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("SHIPMENT_NOT_PUSHED_TO_SHIPSTATION", countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        WHERE os.status IN ('planned', 'queued')
+          AND os.created_at < NOW() - INTERVAL '15 minutes'
+          AND os.engine_order_ref IS NULL
+          -- A held shipment (line-item hold) is intentionally unpushed.
+          AND COALESCE(os.held, false) = false
+          AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+          AND EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
+              )
+          )
+      `,
+      sql`
+        SELECT os.id AS shipment_id, os.order_id AS wms_order_id,
+               wo.order_number, os.status, os.created_at,
+               NULLIF(wo.oms_fulfillment_order_id, '') AS oms_order_id
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        WHERE os.status IN ('planned', 'queued')
+          AND os.created_at < NOW() - INTERVAL '15 minutes'
+          AND os.engine_order_ref IS NULL
+          -- A held shipment (line-item hold) is intentionally unpushed.
+          AND COALESCE(os.held, false) = false
+          AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+          AND EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_orders oo
+            WHERE (
+                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+                OR (wo.source_table_id = oo.id::text)
+              )
+              AND (
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
+              )
+          )
+        ORDER BY os.created_at ASC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED", (async () => {
+      const health = await getChannelWritebackHealth(
+        db,
+        { windowDays: 14, sampleLimit: 500 },
+      );
+      const shopify = health.byProvider.find((entry) => entry.provider === "shopify");
+      return {
+        count: shopify?.missing ?? 0,
+        sample: health.exceptions
+          .filter((entry) => entry.provider === "shopify")
+          .slice(0, 10),
+      };
+    })()),
+    flowCheck("WMS_PARTITION_DUPLICATE_LINE_COVERAGE", countAndSample(
+      db,
+      sql`
+        WITH duplicate_line_coverage AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oi.oms_order_line_id,
+            COUNT(DISTINCT wo.id)::int AS wms_order_count
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+            AND COALESCE(oi.quantity, 0) > 0
+          GROUP BY ol.order_id, oi.oms_order_line_id
+          HAVING COUNT(DISTINCT wo.id) > 1
+        )
+        SELECT COUNT(*)::int AS count
+        FROM duplicate_line_coverage
+      `,
+      sql`
+        WITH duplicate_line_coverage AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oi.oms_order_line_id,
+            ol.sku,
+            ol.authority_fulfillable_quantity,
+            SUM(COALESCE(oi.quantity, 0))::int AS materialized_quantity,
+            COUNT(DISTINCT wo.id)::int AS wms_order_count,
+            ARRAY_AGG(DISTINCT wo.id) AS wms_order_ids,
+            ARRAY_AGG(DISTINCT COALESCE(wo.warehouse_id, 0)) AS warehouse_ids,
+            ARRAY_AGG(DISTINCT COALESCE(NULLIF(wo.fulfillment_partition_key, ''), 'default')) AS fulfillment_partition_keys,
+            ARRAY_AGG(DISTINCT oi.id) AS wms_order_item_ids
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+            AND COALESCE(oi.quantity, 0) > 0
+          GROUP BY ol.order_id, oi.oms_order_line_id, ol.sku, ol.authority_fulfillable_quantity
+          HAVING COUNT(DISTINCT wo.id) > 1
+        )
+        SELECT *
+        FROM duplicate_line_coverage
+        ORDER BY wms_order_count DESC, oms_order_line_id DESC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT", countAndSample(
+      db,
+      sql`
+        WITH provider_reference_rows AS (
+          SELECT
+            ol.id,
+            LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')) AS normalized_fulfillment_provider,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_id), '') AS provider_fulfillment_order_id,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_line_item_id), '') AS provider_fulfillment_order_line_item_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_id), '') AS shopify_fulfillment_order_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_line_item_id), '') AS shopify_fulfillment_order_line_item_id
+          FROM oms.oms_order_lines ol
+        ),
+        provider_reference_drift AS (
+          SELECT id
+          FROM provider_reference_rows
+          WHERE (
+              normalized_fulfillment_provider = 'shopify'
+              OR shopify_fulfillment_order_id IS NOT NULL
+              OR shopify_fulfillment_order_line_item_id IS NOT NULL
+            )
+            AND (
+              normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+              OR provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+              OR provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+            )
+        )
+        SELECT COUNT(*)::int AS count
+        FROM provider_reference_drift
+      `,
+      sql`
+        WITH provider_reference_rows AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oo.external_order_number,
+            ol.id AS oms_order_line_id,
+            ol.sku,
+            ol.fulfillment_provider,
+            LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')) AS normalized_fulfillment_provider,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_id), '') AS provider_fulfillment_order_id,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_line_item_id), '') AS provider_fulfillment_order_line_item_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_id), '') AS shopify_fulfillment_order_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_line_item_id), '') AS shopify_fulfillment_order_line_item_id
+          FROM oms.oms_order_lines ol
+          JOIN oms.oms_orders oo ON oo.id = ol.order_id
+        ),
+        provider_reference_drift AS (
+          SELECT
+            oms_order_id,
+            external_order_number,
+            oms_order_line_id,
+            sku,
+            fulfillment_provider,
+            normalized_fulfillment_provider,
+            provider_fulfillment_order_id,
+            provider_fulfillment_order_line_item_id,
+            shopify_fulfillment_order_id,
+            shopify_fulfillment_order_line_item_id,
+            CASE
+              WHEN normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+                THEN 'provider_context_missing_or_mismatched'
+              WHEN provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+                THEN 'fulfillment_order_id_mismatch'
+              WHEN provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+                THEN 'fulfillment_order_line_item_id_mismatch'
+              ELSE 'unknown'
+            END AS drift_reason
+          -- The missing FROM here (commit 9dec90c4) made this CTE throw
+          -- 'column "oms_order_id" does not exist' on EVERY collect, which killed
+          -- the entire 15-min reconciliation (no per-step isolation then) from
+          -- ~2026-06-28 to 2026-07-07. Guarded by a static SQL test now.
+          FROM provider_reference_rows
+          WHERE (
+              normalized_fulfillment_provider = 'shopify'
+              OR shopify_fulfillment_order_id IS NOT NULL
+              OR shopify_fulfillment_order_line_item_id IS NOT NULL
+            )
+            AND (
+              normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+              OR provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+              OR provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+            )
+        )
+        SELECT *
+        FROM provider_reference_drift
+        ORDER BY oms_order_id DESC, oms_order_line_id DESC
+        LIMIT 10
+      `,
+    )),
+    flowCheck("CHANNEL_FULFILLMENT_RECEIPT_STALLED", countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM oms.channel_fulfillment_receipts receipt
+        WHERE (
+            receipt.processing_status = 'pending'
+            AND receipt.created_at < NOW() - INTERVAL '2 hours'
+          )
+          OR (
+            receipt.processing_status = 'processing'
+            AND receipt.lease_expires_at IS NOT NULL
+            AND receipt.lease_expires_at < NOW() - INTERVAL '1 hour'
+          )
+          OR (
+            receipt.processing_status = 'processing'
+            AND receipt.attempt_count >= 10
+            AND receipt.lease_expires_at IS NOT NULL
+            AND receipt.lease_expires_at <= NOW()
+          )
+      `,
+      sql`
+        SELECT
+          receipt.id AS receipt_id,
+          receipt.source_provider,
+          receipt.source_order_id,
+          receipt.source_fulfillment_id,
+          receipt.processing_status,
+          receipt.attempt_count,
+          receipt.error_code,
+          receipt.error_message,
+          receipt.last_attempt_at,
+          receipt.lease_expires_at,
+          receipt.created_at,
+          order_row.id AS oms_order_id,
+          order_row.external_order_number
+        FROM oms.channel_fulfillment_receipts receipt
+        LEFT JOIN oms.oms_orders order_row ON order_row.id = receipt.oms_order_id
+        WHERE (
+            receipt.processing_status = 'pending'
+            AND receipt.created_at < NOW() - INTERVAL '2 hours'
+          )
+          OR (
+            receipt.processing_status = 'processing'
+            AND receipt.lease_expires_at IS NOT NULL
+            AND receipt.lease_expires_at < NOW() - INTERVAL '1 hour'
+          )
+          OR (
+            receipt.processing_status = 'processing'
+            AND receipt.attempt_count >= 10
+            AND receipt.lease_expires_at IS NOT NULL
+            AND receipt.lease_expires_at <= NOW()
+          )
+        ORDER BY COALESCE(receipt.last_attempt_at, receipt.created_at) ASC
+        LIMIT 10
+      `,
+    )),
+  ]);
+
+  const byCode = new Map(outcomes.map((outcome) => [outcome.code, outcome]));
+  const result = (code: FlowCheckCode): { count: number; sample: unknown[] } => {
+    const outcome = byCode.get(code);
+    if (!outcome) throw new Error(`OMS flow check ${code} has no query`);
+    return outcome.ok ? outcome : { count: 0, sample: [] };
+  };
+  const failedChecks = outcomes.filter(
+    (outcome): outcome is Extract<FlowCheckOutcome, { ok: false }> => !outcome.ok,
+  );
+  for (const failure of failedChecks) {
+    console.error(JSON.stringify({
+      level: "error", action: "oms_flow_check", outcome: "failed",
+      error_code: failure.code, error: failure.error,
+    }));
+  }
+
+  const issues: OmsOpsIssue[] = [
+    {
+      code: "OMS_FINAL_WMS_ACTIVE",
+      severity: "critical" as const,
+      count: result("OMS_FINAL_WMS_ACTIVE").count,
+      message: "OMS orders are final but linked WMS orders are still active.",
+      sample: result("OMS_FINAL_WMS_ACTIVE").sample,
+    },
+    {
+      code: "WMS_FINAL_OMS_OPEN",
+      severity: "critical" as const,
+      count: result("WMS_FINAL_OMS_OPEN").count,
+      message: "WMS orders are final but linked OMS orders are still open.",
+      sample: result("WMS_FINAL_OMS_OPEN").sample,
+    },
+    {
+      code: "SHIPMENT_SHIPPED_OMS_OPEN",
+      severity: "critical" as const,
+      count: result("SHIPMENT_SHIPPED_OMS_OPEN").count,
+      message: "WMS shipments are shipped but linked OMS orders are not shipped.",
+      sample: result("SHIPMENT_SHIPPED_OMS_OPEN").sample,
+    },
+    {
+      code: "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+      severity: "critical" as const,
+      count: result("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED").count,
+      message: "Shipped WMS shipments do not have a channel tracking push success event.",
+      sample: result("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED").sample,
+    },
+    {
+      code: "OMS_PAID_WITHOUT_WMS",
+      severity: "critical" as const,
+      count: result("OMS_PAID_WITHOUT_WMS").count,
+      message: "Paid OMS orders have not reached WMS.",
+      sample: result("OMS_PAID_WITHOUT_WMS").sample,
+    },
+    {
+      code: "WMS_READY_WITHOUT_SHIPMENT",
+      severity: "critical" as const,
+      count: result("WMS_READY_WITHOUT_SHIPMENT").count,
+      message: "Ready WMS orders have no outbound shipment row.",
+      sample: result("WMS_READY_WITHOUT_SHIPMENT").sample,
+    },
+    {
+      code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
+      severity: "critical" as const,
+      count: result("SHIPMENT_NOT_PUSHED_TO_SHIPSTATION").count,
+      message: "Outbound shipments are old enough to have been pushed but have no ShipStation id.",
+      sample: result("SHIPMENT_NOT_PUSHED_TO_SHIPSTATION").sample,
+    },
+    {
+      code: "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
+      severity: "critical" as const,
+      count: result("SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED").count,
+      message: "Shipped Shopify packages have no exact terminal channel-writeback evidence.",
+      sample: result("SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED").sample,
+    },
+    {
+      code: "WMS_PARTITION_DUPLICATE_LINE_COVERAGE",
+      severity: "critical" as const,
+      count: result("WMS_PARTITION_DUPLICATE_LINE_COVERAGE").count,
+      message: "Active WMS fulfillment partitions cover the same OMS order line.",
+      sample: result("WMS_PARTITION_DUPLICATE_LINE_COVERAGE").sample,
+    },
+    {
+      code: "OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT",
+      severity: "warning" as const,
+      count: result("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT").count,
+      message: "Shopify OMS line fulfillment references differ from provider-neutral references.",
+      sample: result("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT").sample,
+    },
+    {
+      code: "CHANNEL_FULFILLMENT_RECEIPT_STALLED",
+      severity: "critical" as const,
+      count: result("CHANNEL_FULFILLMENT_RECEIPT_STALLED").count,
+      message: "Inbound channel fulfillment receipts exceeded the automatic recovery window.",
+      sample: result("CHANNEL_FULFILLMENT_RECEIPT_STALLED").sample,
+    },
+  ];
+
+  if (failedChecks.length > 0) {
+    issues.push({
+      code: FLOW_CHECK_FAILED_CODE,
+      severity: "critical" as const,
+      count: failedChecks.length,
+      message: "Flow checks failed to run, so the problems they look for are neither detected nor repaired.",
+      sample: failedChecks.map((failure) => ({ check: failure.code, error: failure.error })),
+    });
+  }
+
+  return issues.filter((entry) => entry.count > 0);
+}
+
+export async function runOmsFlowReconciliation(
+  dbArg: any,
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<OmsOpsIssue[]> {
+  // Per-step isolation. Before 2026-07-07 these were bare sequential awaits, so
+  // ONE failing step aborted every step after it — a single broken detector query
+  // (the missing-FROM bug in the drift sample) silently killed ALL
+  // auto-remediation for 9+ days. Each step now fails alone: the error is logged
+  // with a stable step name (grep '[OMS Flow Reconciliation] step') and the rest
+  // still run. The scheduler heartbeat also records per-step errors so a broken
+  // step is visible in ops-health instead of only killing work quietly.
+  const stepErrors: string[] = [];
+  const step = async <T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err);
+      stepErrors.push(`${name}: ${message}`);
+      console.error(`${LOG_PREFIX} step '${name}' failed (continuing): ${message}`);
+      return fallback;
+    }
+  };
+
+  // Before detection, so an order released here gets its missing shipment
+  // (WMS_READY_WITHOUT_SHIPMENT) in this same run.
+  await step("releaseClearedPickExceptions", () => releaseClearedPickExceptions(dependencies), undefined);
+  const issues = await step("collect", () => collectOmsFlowReconciliationIssues(dbArg), [] as OmsOpsIssue[]);
+  const failedChecks = issues.find((issue) => issue.code === FLOW_CHECK_FAILED_CODE);
+  if (failedChecks) {
+    // The other checks still ran and still repair; surface the gap on the heartbeat.
+    stepErrors.push(`collect: ${(failedChecks.sample as Array<{ check: string; error: string }>)
+      .map((failure) => `${failure.check}: ${failure.error}`).join(" | ")}`);
+  }
+  if (issues.length > 0) {
+    const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
+    console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
+  }
+  await step("autoCloseResolvedDeadFulfillmentRetries", () => autoCloseResolvedDeadFulfillmentRetries(dbArg), 0);
+  await step("autoRemediateCriticalFlowIssues", () => autoRemediateCriticalFlowIssues(dbArg, issues, dependencies), undefined);
+  await step("autoQueueStaleTrackingPushRetries", () => autoQueueStaleTrackingPushRetries(dbArg, issues, dependencies), undefined);
+  await step("autoQueueStaleShipStationPushRetries", () => autoQueueStaleShipStationPushRetries(dbArg, issues), undefined);
+  await step("autoQueueMissingShopifyFulfillmentRetries", () => autoQueueMissingShopifyFulfillmentRetries(dbArg, issues, dependencies), undefined);
+  await step("remediateMissingReservations", () => remediateMissingReservations(dbArg, dependencies), undefined);
+  await step("refreshShortClaims", () => refreshShortClaims(dbArg, dependencies), undefined);
+  // After short claims are re-planned, so newly reserved stock can post.
+  await step("retryConfirmedPickCorrections", () => retryConfirmedPickCorrections(dependencies), undefined);
+
+  // Surface partial failures on the heartbeat (ops-health) without failing the
+  // run — completed steps' work is real and must count as progress.
+  if (stepErrors.length > 0) {
+    reconciliationSchedulerLastError = `partial: ${stepErrors.join(" | ")}`;
+  }
+  return issues;
+}
+
+/**
+ * Ready-but-unreserved detector (P0.1c).
+ *
+ * With reservation reduced to a single writer at WMS sync, a post-commit
+ * reservation failure would otherwise leave a ready order with zero
+ * reservations and nothing retrying. This sweep finds ready, unheld orders
+ * older than 15 minutes whose ledger shows NO reserve rows and re-runs the
+ * idempotent reserveOrder. Shortfalls are logged only (2026-07-06: the
+ * order-level auto-hold was removed — it froze whole orders over one
+ * unreservable line with no auto-release; unreservable lines surface as
+ * pick shorts instead).
+ *
+ * Scoped to 'ready' only: 'pending' orders are unpaid (reservation happens on
+ * promotion), and 'in_progress' orders may be partially picked — reserveOrder
+ * is not pick-aware, so re-reserving them would over-reserve.
+ */
+async function remediateMissingReservations(
+  db: any,
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<void> {
+  const svc = dependencies.reservation;
+  if (!svc?.reserveOrder) return;
+
+  let rows: any;
+  try {
+    rows = await db.execute(sql`
+      SELECT w.id, w.oms_fulfillment_order_id, w.source, w.source_table_id
+      FROM wms.orders w
+      WHERE w.warehouse_status = 'ready'
+        AND COALESCE(w.on_hold, 0) = 0
+        AND w.created_at < NOW() - INTERVAL '15 minutes'
+        AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = w.id)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM inventory.inventory_transactions it
+          WHERE it.order_id = w.id
+            AND it.transaction_type = 'reserve'
+            AND it.voided_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM wms.order_items oi2
+              WHERE oi2.id = it.order_item_id AND oi2.order_id = w.id
+            )
+        )
+      ORDER BY w.id
+      LIMIT ${AUTO_RESERVATION_REPAIR_LIMIT}
+    `);
+  } catch (err: any) {
+    console.error(`${LOG_PREFIX} missing-reservation sweep query failed: ${err?.message}`);
+    return;
+  }
+
+  for (const row of rows?.rows ?? []) {
+    const wmsOrderId = Number(row.id);
+    try {
+      const result = await svc.reserveOrder(wmsOrderId);
+      if (result.failed.length > 0) {
+        console.warn(
+          `${LOG_PREFIX} re-reservation shortfall for WMS order ${wmsOrderId}: ` +
+            result.failed.map((f) => `${f.sku}: ${f.reason}`).join(", ") +
+            " — proceeding without hold; unreservable lines surface as pick shorts",
+        );
+      } else if (result.reserved > 0) {
+        console.warn(
+          `${LOG_PREFIX} re-reserved WMS order ${wmsOrderId} (${result.reserved} item(s)) — ` +
+            `original reservation was missing`,
+        );
+      }
+    } catch (err: any) {
+      console.error(
+        `${LOG_PREFIX} re-reservation failed for WMS order ${wmsOrderId}: ${err?.message} — will retry next sweep`,
+      );
+    }
+  }
+}
+
+/**
+ * Short-claim refresher.
+ *
+ * An order claimed while stock was missing keeps a 0 (or partial) reservation
+ * forever: nothing re-plans an unchanged order, so every pick on the short line
+ * fails with "The pick exceeds the claim line's remaining planned target
+ * quantity" even after the stock is received. This sweep re-plans active short
+ * claims, oldest order first, but only where an unreserved unit of the same
+ * product exists in a usable bin of the order's warehouse. The repository
+ * commits a refresh only when it strictly reduces shortfall and takes nothing
+ * from any line, so a declined attempt changes nothing and is retried next run.
+ */
+export async function refreshShortClaims(
+  db: any,
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<{ refreshed: number; declined: number; failed: number }> {
+  const totals = { refreshed: 0, declined: 0, failed: 0 };
+  const svc = dependencies.reservation;
+  if (!svc?.refreshShortClaimSupply) return totals;
+
+  const candidates = await db.execute(sql`
+    SELECT c.order_id
+    FROM inventory.availability_claims c
+    JOIN wms.orders o ON o.id = c.order_id
+    WHERE c.status = 'active'
+      AND c.plan_status = 'partial'
+      AND o.warehouse_status IN ('ready', 'in_progress')
+      AND COALESCE(o.on_hold, 0) = 0
+      AND EXISTS (
+        SELECT 1
+        FROM inventory.availability_claim_lines l
+        JOIN catalog.product_variants tv ON tv.id = l.target_variant_id
+        WHERE l.claim_id = c.id
+          AND l.shortfall_qty > 0
+          AND EXISTS (
+            SELECT 1
+            FROM inventory.inventory_levels il
+            JOIN catalog.product_variants sv ON sv.id = il.product_variant_id
+            JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+            WHERE sv.product_id = tv.product_id
+              AND il.variant_qty - il.reserved_qty > 0
+              AND wl.warehouse_id IS NOT NULL
+              AND COALESCE(wl.location_type, 'pick') NOT IN ('receiving', 'staging', 'quarantine')
+              AND wl.is_active = true
+              AND wl.cycle_count_freeze_id IS NULL
+              AND (o.warehouse_id IS NULL OR wl.warehouse_id = o.warehouse_id)
+          )
+      )
+    ORDER BY o.created_at, o.id
+    LIMIT ${SHORT_CLAIM_CANDIDATE_WINDOW}
+  `);
+
+  const rawRows = (candidates?.rows ?? []) as Array<{ order_id: number | string }>;
+  const candidateIndexById = new Map<number, number>();
+  for (let i = 0; i < rawRows.length; i++) {
+    const orderId = Number(rawRows[i].order_id);
+    if (Number.isFinite(orderId) && orderId > 0 && !candidateIndexById.has(orderId)) {
+      candidateIndexById.set(orderId, i);
+    }
+  }
+  const orderedIds = Array.from(candidateIndexById.keys());
+  // Fair rotation: fresh/non-declined orders (seq = 0) are attempted first in SQL order,
+  // followed by previously declined orders ordered by oldest decline sequence (LRU).
+  // This guarantees a persistently declining prefix of >= 25 orders never starves
+  // later improvable orders in the candidate window.
+  orderedIds.sort((a, b) => {
+    const seqA = declinedShortClaimState.get(a)?.seq ?? 0;
+    const seqB = declinedShortClaimState.get(b)?.seq ?? 0;
+    if (seqA !== seqB) return seqA - seqB;
+    return (candidateIndexById.get(a) ?? 0) - (candidateIndexById.get(b) ?? 0);
+  });
+
+  const sweepDeclineCodes: Record<string, number> = {};
+  for (const wmsOrderId of orderedIds.slice(0, SHORT_CLAIM_REFRESH_LIMIT)) {
+    try {
+      const result:
+        | { outcome: "refreshed"; claimId: string; idempotentReplay: boolean }
+        | { outcome: "declined"; code: string; message: string } =
+        await svc.refreshShortClaimSupply(wmsOrderId);
+      if (result.outcome === "refreshed") {
+        totals.refreshed += 1;
+        declinedShortClaimState.delete(wmsOrderId);
+        console.log(JSON.stringify({ level: "info", action: "refresh_short_claim", outcome: "refreshed",
+          wms_order_id: wmsOrderId, after: { claimId: result.claimId }, idempotent_replay: result.idempotentReplay }));
+      } else {
+        // Expected while stock is still missing, reserved elsewhere, or only case-break / unverified supply exists.
+        totals.declined += 1;
+        const code = result.code || "CLAIM_SUPPLY_REFRESH_DECLINED";
+        sweepDeclineCodes[code] = (sweepDeclineCodes[code] ?? 0) + 1;
+        const prev = declinedShortClaimState.get(wmsOrderId);
+        declinedShortClaimState.set(wmsOrderId, {
+          orderId: wmsOrderId,
+          seq: ++shortClaimDeclineSequence,
+          code,
+          attempts: (prev?.attempts ?? 0) + 1,
+          lastDeclinedAt: new Date().toISOString(),
+        });
+      }
+    } catch (err: any) {
+      totals.failed += 1;
+      console.error(JSON.stringify({ level: "error", action: "refresh_short_claim", outcome: "failed",
+        wms_order_id: wmsOrderId, error_code: err?.code ?? null, error: err?.message ?? String(err) }));
+    }
+  }
+  if (totals.refreshed + totals.declined + totals.failed > 0) {
+    const declineBreakdown = Object.entries(sweepDeclineCodes)
+      .map(([code, count]) => `${code}:${count}`)
+      .join(",");
+    console.log(
+      `${LOG_PREFIX} short-claim refresh: refreshed=${totals.refreshed} declined=${totals.declined} failed=${totals.failed}${declineBreakdown ? ` decline_codes=${declineBreakdown}` : ""}`,
+    );
+  }
+  if (totals.failed > 0) {
+    // Surface on the scheduler heartbeat via the step wrapper.
+    throw new Error(`short-claim refresh failed for ${totals.failed} order(s)`);
+  }
+  return totals;
+}
+
+/**
+ * A picker's "Yes, it shipped" is final; recording it in inventory is system work.
+ * When that record failed (stock not received, reserved elsewhere, a bad lot),
+ * it waits here instead of on the gun, and posts as soon as the books allow.
+ */
+export async function retryConfirmedPickCorrections(
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<{ resolved: number; waiting: number }> {
+  if (!dependencies.pickCorrections) return { resolved: 0, waiting: 0 };
+  const totals = await dependencies.pickCorrections.retryConfirmedPicks(CONFIRMED_PICK_RETRY_LIMIT);
+  if (totals.resolved > 0) {
+    console.log(`${LOG_PREFIX} confirmed pick corrections posted: resolved=${totals.resolved} waiting=${totals.waiting}`);
+  }
+  return totals;
+}
+
+/**
+ * Only a pick re-evaluates an exception order, so one whose blockers cleared
+ * some other way sat in exception with no shipment, out of ShipStation's
+ * reach. It moves on here exactly as its next pick would have moved it.
+ */
+export async function releaseClearedPickExceptions(
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<PickExceptionRecheckTotals> {
+  if (!dependencies.pickExceptions) return { checked: 0, released: 0, stillBlocked: 0, failed: 0 };
+  const totals = await dependencies.pickExceptions.releaseClearedPickExceptions(PICK_EXCEPTION_RECHECK_LIMIT);
+  if (totals.released > 0) {
+    console.log(`${LOG_PREFIX} exception orders with no blocker left moved to ready_to_ship: released=${totals.released} stillBlocked=${totals.stillBlocked}`);
+  }
+  if (totals.failed > 0) {
+    // Surfaces on the scheduler heartbeat; the other orders were still processed.
+    throw new Error(`exception re-check failed for ${totals.failed} order(s)`);
+  }
+  return totals;
+}
+
+export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<number> {
+  const result = await db.execute(sql`
+    WITH candidates AS (
+      SELECT
+        q.id,
+        q.topic,
+        q.created_at,
+        q.updated_at AS dead_at,
+        CASE
+          WHEN q.payload->>'shipmentId' ~ '^[0-9]+$'
+            THEN (q.payload->>'shipmentId')::bigint
+          ELSE NULL
+        END AS payload_shipment_id,
+        CASE
+          WHEN q.payload->>'orderId' ~ '^[0-9]+$'
+            THEN (q.payload->>'orderId')::bigint
+          ELSE NULL
+        END AS payload_order_id,
+        CASE
+          WHEN q.payload->>'omsOrderId' ~ '^[0-9]+$'
+            THEN (q.payload->>'omsOrderId')::bigint
+          ELSE NULL
+        END AS payload_oms_order_id,
+        NULLIF(q.payload->>'trackingNumber', '') AS payload_tracking_number,
+        COALESCE(
+          NULLIF(q.payload->>'shopifyFulfillmentId', ''),
+          NULLIF(q.payload->>'fulfillmentId', '')
+        ) AS payload_fulfillment_id
+      FROM oms.webhook_retry_queue q
+      WHERE q.provider = 'internal'
+        AND q.status = 'dead'
+        AND q.topic = 'delayed_tracking_push'
+        -- Bound the scan: unbounded, this statement measured 68.8s against the
+        -- all-time dead backlog (796+ rows joined to the events table) — far too
+        -- heavy for a 15-min cadence on the tiny shared pool. Rows older than 30
+        -- days belong to the one-time backlog triage, not the steady-state
+        -- auto-closer.
+        AND q.updated_at > NOW() - INTERVAL '30 days'
+    ),
+    scoped_candidates AS (
+      SELECT
+        c.*,
+        os.id AS shipment_id,
+        NULLIF(os.tracking_number, '') AS shipment_tracking_number,
+        NULLIF(os.shopify_fulfillment_id, '') AS shipment_shopify_fulfillment_id,
+        COALESCE(payload_oo.id, shipment_oo.id) AS oms_order_id,
+        (
+             c.payload_shipment_id IS NOT NULL
+          OR c.payload_tracking_number IS NOT NULL
+          OR c.payload_fulfillment_id IS NOT NULL
+          OR NULLIF(os.tracking_number, '') IS NOT NULL
+          OR NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+        ) AS has_specific_scope
+      FROM candidates c
+      LEFT JOIN wms.outbound_shipments os ON os.id = c.payload_shipment_id
+      LEFT JOIN wms.orders wo ON wo.id = os.order_id
+      LEFT JOIN oms.oms_orders shipment_oo ON (
+           (wo.source = 'oms' AND wo.oms_fulfillment_order_id = shipment_oo.id::text)
+        OR (wo.source_table_id = shipment_oo.id::text)
+      )
+      LEFT JOIN oms.oms_orders payload_oo
+        ON payload_oo.id = COALESCE(c.payload_order_id, c.payload_oms_order_id)
+    ),
+    resolved AS (
+      SELECT DISTINCT c.id
+      FROM scoped_candidates c
+      JOIN oms.oms_order_events e
+        ON e.created_at >= COALESCE(c.dead_at, c.created_at)
+       AND e.event_type IN (
+         'tracking_pushed',
+         'shopify_fulfillment_pushed',
+         'shopify_fulfillment_reconciled'
+       )
+      WHERE (c.oms_order_id IS NULL OR e.order_id = c.oms_order_id)
+        AND (
+             (c.shipment_id IS NOT NULL
+               AND e.details->>'wmsShipmentId' = c.shipment_id::text)
+          OR (c.payload_shipment_id IS NOT NULL
+               AND e.details->>'wmsShipmentId' = c.payload_shipment_id::text)
+          OR (c.shipment_tracking_number IS NOT NULL
+               AND e.details->>'trackingNumber' = c.shipment_tracking_number)
+          OR (c.payload_tracking_number IS NOT NULL
+               AND e.details->>'trackingNumber' = c.payload_tracking_number)
+          OR (c.shipment_shopify_fulfillment_id IS NOT NULL
+               AND e.details->>'shopifyFulfillmentId' = c.shipment_shopify_fulfillment_id)
+          OR (c.shipment_shopify_fulfillment_id IS NOT NULL
+               AND e.details->>'fulfillmentId' = c.shipment_shopify_fulfillment_id)
+          OR (c.payload_fulfillment_id IS NOT NULL
+               AND e.details->>'shopifyFulfillmentId' = c.payload_fulfillment_id)
+          OR (c.payload_fulfillment_id IS NOT NULL
+               AND e.details->>'fulfillmentId' = c.payload_fulfillment_id)
+          OR (c.has_specific_scope = false AND c.oms_order_id IS NOT NULL)
+        )
+    )
+    UPDATE oms.webhook_retry_queue q
+    SET status = 'success',
+        last_error = 'auto-closed: later OMS fulfillment/tracking event confirmed success',
+        updated_at = NOW()
+    FROM resolved
+    WHERE q.id = resolved.id
+      AND q.status = 'dead'
+    RETURNING q.id
+  `);
+
+  const closed = rows(result).filter((row) => row?.id != null).length;
+  if (closed > 0) {
+    console.warn(`${LOG_PREFIX} auto-closed ${closed} resolved fulfillment/tracking retry row(s)`);
+  }
+  return closed;
+}
+
+async function autoRemediateCriticalFlowIssues(
+  db: any,
+  issues: OmsOpsIssue[],
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<void> {
+  const mappings: Array<{
+    code: string;
+    inputFromSample: (sample: any) => Omit<OmsFlowRemediationInput, "operator"> | null;
+  }> = [
+    {
+      code: "OMS_FINAL_WMS_ACTIVE",
+      inputFromSample: (sample) => {
+        const omsOrderId = Number(sample.oms_order_id);
+        const wmsOrderId = Number(sample.wms_order_id);
+        return Number.isInteger(omsOrderId) && omsOrderId > 0 &&
+          Number.isInteger(wmsOrderId) && wmsOrderId > 0
+          ? { code: "OMS_FINAL_WMS_ACTIVE", omsOrderId, wmsOrderId }
+          : null;
+      },
+    },
+    {
+      code: "WMS_READY_WITHOUT_SHIPMENT",
+      inputFromSample: (sample) => {
+        const wmsOrderId = Number(sample.wms_order_id ?? sample.id);
+        return Number.isInteger(wmsOrderId) && wmsOrderId > 0
+          ? { code: "WMS_READY_WITHOUT_SHIPMENT", wmsOrderId }
+          : null;
+      },
+    },
+    // WMS_FINAL_OMS_OPEN and SHIPMENT_SHIPPED_OMS_OPEN stay manual (Control
+    // Tower). Their checks were mislabelled from 0142f220 until 2026-10-05, so
+    // they never once ran automatically. Both push fulfillments to the channel
+    // immediately, oldest first with no age limit, so switching them on would
+    // send months-old shipping notices: an operator decision, not a side effect.
+  ];
+
+  for (const mapping of mappings) {
+    const issue = issues.find((entry) => entry.code === mapping.code);
+    if (!issue) continue;
+
+    let changed = 0;
+    for (const sample of issue.sample.slice(0, AUTO_FLOW_REMEDIATION_LIMIT)) {
+      const remediationInput = mapping.inputFromSample(sample);
+      if (!remediationInput) continue;
+
+      try {
+        const result = await remediateOmsFlowIssue(db, {
+          ...remediationInput,
+          operator: "scheduled_reconciliation",
+        }, dependencies);
+        if (result.changed) changed++;
+      } catch (error: any) {
+        console.warn(
+          `${LOG_PREFIX} auto-remediation failed for ${mapping.code}: ${error?.message || error}`,
+        );
+      }
+    }
+
+    if (changed > 0) {
+      console.warn(`${LOG_PREFIX} auto-remediated ${changed} ${mapping.code} row(s)`);
+    }
+  }
+}
+
+async function autoQueueStaleTrackingPushRetries(
+  db: any,
+  issues: OmsOpsIssue[],
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<void> {
+  const issue = issues.find((entry) => entry.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED");
+  if (!issue) return;
+
+  const candidates = await findChannelWritebackCandidates(db, {
+    minAgeMinutes: 10,
+    maxAgeDays: 14,
+    limit: AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT,
+    excludeRetryStates: true,
+  });
+  let handedOff = 0;
+  for (const row of candidates) {
+    if (row.provider !== "ebay" || row.pending_retry || row.dead_retry) {
+      continue;
+    }
+
+    const shipmentId = Number(row.shipment_id);
+    if (
+      !Number.isInteger(shipmentId) ||
+      shipmentId <= 0
+    ) {
+      continue;
+    }
+
+    await handoffLegacyShipmentToChannelFulfillment(requireFlowFulfillmentAuthority(dependencies), shipmentId, {
+      executeImmediately: false,
+      source: "oms_flow_stale_ebay_writeback",
+    });
+    handedOff++;
+  }
+
+  if (handedOff > 0) {
+    console.warn(`${LOG_PREFIX} handed off ${handedOff} stale eBay writeback(s) to canonical authority`);
+  }
+}
+
+async function autoQueueStaleShipStationPushRetries(
+  db: any,
+  issues: OmsOpsIssue[],
+): Promise<void> {
+  const issue = issues.find((entry) => entry.code === "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION");
+  if (!issue) return;
+
+  let queued = 0;
+  for (const sample of issue.sample.slice(0, AUTO_TRACKING_RETRY_LIMIT)) {
+    const shipmentId = Number((sample as any).shipment_id);
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      continue;
+    }
+
+    await enqueueShipStationShipmentPushRetry(
+      db,
+      shipmentId,
+      new Error("scheduled reconciliation: shipment missing ShipStation order id"),
+    );
+    queued++;
+  }
+
+  if (queued > 0) {
+    console.warn(`${LOG_PREFIX} auto-queued ${queued} ShipStation shipment push retry row(s)`);
+  }
+}
+
+async function autoQueueMissingShopifyFulfillmentRetries(
+  db: any,
+  issues: OmsOpsIssue[],
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<void> {
+  const issue = issues.find((entry) => entry.code === "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED");
+  if (!issue) return;
+
+  const candidates = await findChannelWritebackCandidates(db, {
+    minAgeMinutes: 10,
+    maxAgeDays: 14,
+    limit: AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT,
+    excludeRetryStates: true,
+  });
+  let handedOff = 0;
+  for (const row of candidates) {
+    if (row.provider !== "shopify" || row.pending_retry || row.dead_retry) {
+      continue;
+    }
+
+    const shipmentId = Number(row.shipment_id);
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      continue;
+    }
+
+    await handoffLegacyShipmentToChannelFulfillment(requireFlowFulfillmentAuthority(dependencies), shipmentId, {
+      executeImmediately: false,
+      source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.missingShopifyWriteback,
+    });
+    handedOff++;
+  }
+
+  if (handedOff > 0) {
+    console.warn(`${LOG_PREFIX} handed off ${handedOff} missing Shopify writeback(s) to canonical authority`);
+  }
+}
+
+export async function remediateOmsFlowIssue(
+  db: any,
+  input: OmsFlowRemediationInput,
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<OmsFlowRemediationResult> {
+  if (!REMEDIABLE_CODES.has(input.code)) {
+    throw new Error(`Unsupported OMS flow remediation code: ${input.code}`);
+  }
+
+  if (input.code === CHANNEL_FULFILLMENT_RECEIPT_RETRY) {
+    if (!dependencies.receiptRetry) {
+      throw new ChannelFulfillmentReceiptRetryError(
+        "RECEIPT_RETRY_UNAVAILABLE", "Reviewed receipt recovery is unavailable", 503,
+      );
+    }
+    const receiptRetry = await dependencies.receiptRetry.review({
+      receiptId: input.receiptId,
+      previewOnly: input.previewOnly,
+      expectedStateFingerprint: input.expectedStateFingerprint,
+      reason: input.reason,
+    }, input.operator);
+    return {
+      code: input.code,
+      action: receiptRetry.mode === "preview"
+        ? "previewed_channel_receipt_retry"
+        : "reviewed_channel_receipt_retry",
+      changed: receiptRetry.requeued,
+      omsOrderId: receiptRetry.snapshot.omsOrderId,
+      wmsOrderId: null,
+      shipmentId: null,
+      receiptRetry,
+    };
+  }
+
+  if (input.code === CHANNEL_FULFILLMENT_REVIEW_RETRY) {
+    if (!dependencies.reviewRetry) {
+      throw new ChannelFulfillmentReviewRetryError(
+        "REVIEW_RETRY_UNAVAILABLE", "Reviewed fulfillment recovery is unavailable", 503,
+      );
+    }
+    const reviewRetry = await dependencies.reviewRetry.review({
+      commandId: input.commandId,
+      omsOrderId: input.omsOrderId,
+      previewOnly: input.previewOnly,
+      expectedStateFingerprint: input.expectedStateFingerprint,
+      reason: input.reason,
+      notifyCustomer: input.notifyCustomer,
+    }, input.operator);
+    return {
+      code: input.code,
+      action: reviewRetry.mode === "preview" ? "previewed_channel_command_recheck" : "reviewed_channel_command_recheck",
+      changed: reviewRetry.requeued,
+      omsOrderId: reviewRetry.omsOrderId,
+      wmsOrderId: null,
+      shipmentId: null,
+      reviewRetry,
+    };
+  }
+
+  if (input.code === "OMS_PAID_WITHOUT_WMS") {
+    return queueOmsPaidEventReplay(db, {
+      omsOrderId: positiveInt(input.omsOrderId, "omsOrderId"),
+      operator: input.operator,
+    });
+  }
+
+  if (input.code === "WMS_READY_WITHOUT_SHIPMENT") {
+    const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    const result = await db.execute(sql`
+      SELECT wo.id,
+             NULLIF(wo.oms_fulfillment_order_id, '') AS oms_order_id
+      FROM wms.orders wo
+      WHERE wo.id = ${wmsOrderId}
+        AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship')
+        AND EXISTS (
+          SELECT 1
+          FROM wms.order_items oi
+          WHERE oi.order_id = wo.id
+            AND COALESCE(oi.requires_shipping, 1) <> 0
+            AND COALESCE(oi.quantity, 0) > COALESCE(oi.fulfilled_quantity, 0)
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM oms.oms_orders oo
+          WHERE (
+              (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+              OR (wo.source_table_id = oo.id::text)
+            )
+            AND (
+              ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
+            )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipments os
+          WHERE os.order_id = wo.id
+            AND os.status <> 'voided'
+        )
+      LIMIT 1
+    `);
+
+    const row = firstRow<{ id: number; oms_order_id: string | null }>(result);
+    if (!row) {
+      return {
+        code: input.code,
+        action: "shipment_create_not_queued",
+        changed: false,
+        omsOrderId: null,
+        wmsOrderId,
+        shipmentId: null,
+        retryQueueId: null,
+      };
+    }
+
+    await enqueueWmsShipmentCreateRetry(
+      db,
+      wmsOrderId,
+      new Error(`manual remediation by ${input.operator || "unknown"}`),
+    );
+
+    const omsOrderId = Number(row.oms_order_id);
+    if (Number.isInteger(omsOrderId) && omsOrderId > 0) {
+      await db.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        VALUES (
+          ${omsOrderId},
+          'flow_reconciliation_remediated',
+          ${JSON.stringify({ code: input.code, wmsOrderId, operator: input.operator })}::jsonb,
+          NOW()
+        )
+      `);
+    }
+
+    return {
+      code: input.code,
+      action: "queued_wms_shipment_create",
+      changed: true,
+      omsOrderId: Number.isInteger(omsOrderId) && omsOrderId > 0 ? omsOrderId : null,
+      wmsOrderId,
+      shipmentId: null,
+      retryQueueId: null,
+    };
+  }
+
+  if (input.code === "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION") {
+    const shipmentId = positiveInt(input.shipmentId, "shipmentId");
+    const result = await db.execute(sql`
+      SELECT os.id, os.order_id AS wms_order_id,
+             NULLIF(wo.oms_fulfillment_order_id, '') AS oms_order_id
+      FROM wms.outbound_shipments os
+      JOIN wms.orders wo ON wo.id = os.order_id
+      WHERE os.id = ${shipmentId}
+        AND os.status IN ('planned', 'queued')
+        AND os.engine_order_ref IS NULL
+        -- Skip shipments already flagged for review: a permanent push failure
+        -- (bad address/total/country) won't succeed on re-push, so don't queue
+        -- a guaranteed-dead retry. The operator must fix the data + clear the
+        -- flag first. (Mirrors the SHIPMENT_NOT_PUSHED_TO_SHIPSTATION bucket.)
+        AND COALESCE(os.requires_review, false) = false
+        -- A held shipment (line-item hold) is intentionally unpushed; never
+        -- auto-remediate it onto ShipStation.
+        AND COALESCE(os.held, false) = false
+        AND os.created_at < NOW() - INTERVAL '15 minutes'
+        AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+        AND EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipment_items osi
+          JOIN wms.order_items oi ON oi.id = osi.order_item_id
+          WHERE osi.shipment_id = os.id
+            AND COALESCE(oi.requires_shipping, 1) <> 0
+            AND COALESCE(osi.qty, 0) > 0
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM oms.oms_orders oo
+          WHERE (
+              (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+              OR (wo.source_table_id = oo.id::text)
+            )
+            AND (
+              ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
+            )
+        )
+      LIMIT 1
+    `);
+
+    const row = firstRow<{ wms_order_id: number; oms_order_id: string | null }>(result);
+    if (!row) {
+      return {
+        code: input.code,
+        action: "shipstation_push_not_queued",
+        changed: false,
+        omsOrderId: null,
+        wmsOrderId: input.wmsOrderId ? Number(input.wmsOrderId) : null,
+        shipmentId,
+        retryQueueId: null,
+      };
+    }
+
+    await enqueueShipStationShipmentPushRetry(
+      db,
+      shipmentId,
+      new Error(`manual remediation by ${input.operator || "unknown"}`),
+    );
+
+    const omsOrderId = Number(row.oms_order_id);
+    if (Number.isInteger(omsOrderId) && omsOrderId > 0) {
+      await db.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        VALUES (
+          ${omsOrderId},
+          'flow_reconciliation_remediated',
+          ${JSON.stringify({ code: input.code, shipmentId, operator: input.operator })}::jsonb,
+          NOW()
+        )
+      `);
+    }
+
+    return {
+      code: input.code,
+      action: "queued_shipstation_shipment_push",
+      changed: true,
+      omsOrderId: Number.isInteger(omsOrderId) && omsOrderId > 0 ? omsOrderId : null,
+      wmsOrderId: Number(row.wms_order_id),
+      shipmentId,
+      retryQueueId: null,
+    };
+  }
+
+  if (input.code === "OMS_FINAL_WMS_ACTIVE") {
+    const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+    const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    let cancelledByThisRemediation = false;
+    const updated = await withOptionalTransaction(db, async (tx) => {
+      const omsResult: any = await tx.execute(sql`
+        SELECT oo.status, oo.financial_status, oo.channel_id,
+          ${channelMerchandiseCapabilitySql(sql`oo.channel_id`)} AS uses_channel_quantities
+        FROM oms.oms_orders oo
+        JOIN wms.orders wo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
+        WHERE oo.id = ${omsOrderId}
+          AND wo.id = ${wmsOrderId}
+          AND (${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: false })})
+        LIMIT 1
+      `);
+      const omsRow = omsResult?.rows?.[0];
+      if (!omsRow) return false;
+
+      const isCancelled = omsRow.status === "cancelled"
+        || (!omsRow.uses_channel_quantities
+          && (omsRow.status === "refunded" || omsRow.financial_status === "refunded"));
+      if (!isCancelled) {
+        return false;
+      }
+      const transResult = await cancelOrder(
+        tx,
+        wmsOrderId,
+        `oms_flow_reconcile_${omsRow.status}`,
+      );
+
+      if (transResult.transitioned) {
+        if (isCancelled) {
+          await clearWmsOrderAssignedPickerInWms(tx, wmsOrderId);
+          cancelledByThisRemediation = true;
+        }
+        await tx.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'flow_reconciliation_remediated',
+            ${JSON.stringify({ code: input.code, wmsOrderId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return transResult.transitioned;
+    });
+
+    // P0.1c: a reconciler cancel must release the order's reservations —
+    // these are exactly the missed-webhook cases where no other path ever
+    // released, leaking reserved stock permanently. Order-scoped and
+    // idempotent (P0.1b), run after the status commit; failures are logged
+    // and cleaned by the drift check.
+    if (updated && cancelledByThisRemediation) {
+      if (dependencies.reservation) {
+        try {
+          await dependencies.reservation.releaseOrderReservation(
+            wmsOrderId,
+            "oms_flow_reconcile_cancel_release",
+            undefined,
+            { disposition: "cancel" },
+          );
+        } catch (err: any) {
+          console.error(
+            `${LOG_PREFIX} reservation release failed for WMS order ${wmsOrderId} after reconcile-cancel: ${err?.message}`,
+          );
+        }
+      } else {
+        console.error(
+          `${LOG_PREFIX} reservation service not wired — reconcile-cancel of WMS order ${wmsOrderId} did NOT release reservations`,
+        );
+      }
+    }
+
+    return {
+      code: input.code,
+      action: "aligned_wms_from_oms",
+      changed: updated,
+      omsOrderId,
+      wmsOrderId,
+      shipmentId: null,
+    };
+  }
+
+  if (input.code === "WMS_FINAL_OMS_OPEN") {
+    const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+    const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    const finalStatusResult: any = await db.execute(sql`
+      SELECT wo.warehouse_status
+      FROM wms.orders wo
+      JOIN oms.oms_orders oo ON (
+           (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+        OR (wo.source_table_id = oo.id::text)
+      )
+      WHERE wo.id = ${wmsOrderId}
+        AND oo.id = ${omsOrderId}
+      LIMIT 1
+    `);
+    const finalWarehouseStatus = String(
+      finalStatusResult?.rows?.[0]?.warehouse_status ?? "",
+    );
+    if (finalWarehouseStatus === "shipped") {
+      const handoff = await handoffOmsOrderShipmentsToChannelFulfillment(
+        db,
+        requireFlowFulfillmentAuthority(dependencies),
+        omsOrderId,
+        {
+          executeImmediately: true,
+          source: "oms_flow_reconcile_wms_final",
+        },
+      );
+      const changed = handoff.results.length > 0;
+      if (changed) {
+        await db.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'flow_reconciliation_remediated',
+            ${JSON.stringify({ code: input.code, wmsOrderId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return {
+        code: input.code,
+        action: "aligned_oms_from_canonical_shipments",
+        changed,
+        omsOrderId,
+        wmsOrderId,
+        shipmentId: null,
+      };
+    }
+    const updated = await withOptionalTransaction(db, async (tx) => {
+      const result = await tx.execute(sql`
+        UPDATE oms.oms_orders oo
+        SET status = 'cancelled',
+            cancelled_at = COALESCE(oo.cancelled_at, NOW()),
+            updated_at = NOW()
+        FROM wms.orders wo
+        WHERE oo.id = ${omsOrderId}
+          AND wo.id = ${wmsOrderId}
+          AND (
+               (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+            OR (wo.source_table_id = oo.id::text)
+          )
+          AND wo.warehouse_status = 'cancelled'
+          AND oo.status NOT IN ('cancelled', 'shipped', 'partially_shipped', 'delivered', 'refunded')
+          AND oo.shipped_at IS NULL
+        RETURNING oo.id
+      `);
+
+      if (rows(result).length > 0) {
+        await tx.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'flow_reconciliation_remediated',
+            ${JSON.stringify({ code: input.code, wmsOrderId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return rows(result).length > 0;
+    });
+
+    return {
+      code: input.code,
+      action: "aligned_oms_cancellation_from_wms",
+      changed: updated,
+      omsOrderId,
+      wmsOrderId,
+      shipmentId: null,
+    };
+  }
+
+  if (input.code === "SHIPMENT_SHIPPED_OMS_OPEN") {
+    const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+    const shipmentId = positiveInt(input.shipmentId, "shipmentId");
+    const linked = firstRow<{ wms_order_id: number; oms_status: string }>(
+      await db.execute(sql`
+        SELECT shipment.order_id AS wms_order_id, oms_order.status AS oms_status
+        FROM wms.outbound_shipments shipment
+        JOIN wms.orders wms_order ON wms_order.id = shipment.order_id
+        JOIN oms.oms_orders oms_order ON (
+             (wms_order.source = 'oms' AND wms_order.oms_fulfillment_order_id = oms_order.id::text)
+          OR (wms_order.source_table_id = oms_order.id::text)
+        )
+        WHERE shipment.id = ${shipmentId}
+          AND shipment.status = 'shipped'
+          AND oms_order.id = ${omsOrderId}
+        LIMIT 1
+      `),
+    );
+    if (!linked) {
+      return {
+        code: input.code,
+        action: "canonical_shipment_not_eligible",
+        changed: false,
+        omsOrderId,
+        wmsOrderId: null,
+        shipmentId,
+      };
+    }
+
+    if (linked.oms_status !== "cancelled" && linked.oms_status !== "refunded") {
+      const handoff = await handoffLegacyShipmentToChannelFulfillment(
+        requireFlowFulfillmentAuthority(dependencies),
+        shipmentId,
+        {
+        executeImmediately: true,
+        source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.shippedPackageRepair,
+        },
+      );
+      await db.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        VALUES (
+          ${omsOrderId},
+          'flow_reconciliation_remediated',
+          ${JSON.stringify({
+            code: input.code,
+            shipmentId,
+            physicalShipmentId: handoff.materialized.physicalShipmentId,
+            operator: input.operator,
+          })}::jsonb,
+          NOW()
+        )
+      `);
+      return {
+        code: input.code,
+        action: "handed_off_canonical_shipment",
+        changed: handoff.materialized.customerFulfillmentItemCount > 0,
+        omsOrderId,
+        wmsOrderId: Number(linked.wms_order_id),
+        shipmentId,
+      };
+    }
+
+    const updated = await withOptionalTransaction(db, async (tx) => {
+      // P0.3 review bucket: the UPDATE was refused. If that's because the OMS
+      // order is money-final (cancelled/refunded) while a physical package
+      // shipped, a human must decide (refund vs recall vs re-open) — flag the
+      // shipment once instead of silently skipping forever.
+      const terminal = await tx.execute(sql`
+        SELECT status FROM oms.oms_orders
+        WHERE id = ${omsOrderId} AND status IN ('cancelled', 'refunded')
+        LIMIT 1
+      `);
+      if (firstRow<{ status: string }>(terminal)) {
+        await flagShippedOutboundShipmentOmsTerminalReviewInWms(
+          tx,
+          shipmentId,
+          "shipped_but_oms_terminal: physical shipment shipped while OMS order is money-final",
+        );
+        await tx.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'shipment_shipped_oms_terminal_review',
+            ${JSON.stringify({ code: input.code, shipmentId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return true;
+    });
+
+    return {
+      code: input.code,
+      action: "flagged_terminal_order_shipment_review",
+      changed: updated,
+      omsOrderId,
+      wmsOrderId: Number(linked.wms_order_id),
+      shipmentId,
+    };
+  }
+
+  const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
+  const shipmentId = input.shipmentId == null
+    ? undefined
+    : positiveInt(input.shipmentId, "shipmentId");
+  if (shipmentId !== undefined) {
+    await handoffLegacyShipmentToChannelFulfillment(requireFlowFulfillmentAuthority(dependencies), shipmentId, {
+      executeImmediately: false,
+      source: `${CHANNEL_FULFILLMENT_OPERATOR_REPAIR_PREFIX}${input.code}`,
+    });
+  } else {
+    await handoffOmsOrderShipmentsToChannelFulfillment(
+      db,
+      requireFlowFulfillmentAuthority(dependencies),
+      omsOrderId,
+      {
+      executeImmediately: false,
+      source: `${CHANNEL_FULFILLMENT_OPERATOR_REPAIR_PREFIX}${input.code}`,
+      },
+    );
+  }
+
+  return {
+    code: input.code,
+    action: "handed_off_channel_fulfillment",
+    changed: true,
+    omsOrderId,
+    wmsOrderId: input.wmsOrderId ? Number(input.wmsOrderId) : null,
+    shipmentId: shipmentId ?? null,
+    retryQueueId: null,
+  };
+}
+
+export function startOmsFlowReconciliationScheduler(
+  dbArg: any,
+  dependencies: OmsFlowReconciliationDependencies,
+): void {
+  if (process.env.DISABLE_SCHEDULERS === "true") return;
+  const withAdvisoryLock = getWithAdvisoryLock();
+  reconciliationSchedulerStartedAt = new Date();
+
+  const runLocked = () => {
+    reconciliationSchedulerLastRunAt = new Date();
+    return withAdvisoryLock(LOCK_ID, async () => {
+      // Clear BEFORE the run — runOmsFlowReconciliation records per-step partial
+      // failures on the heartbeat during the run, so nulling it afterwards (the
+      // pre-2026-07-07 order) would hide them from ops-health.
+      reconciliationSchedulerLastError = null;
+      await runOmsFlowReconciliation(dbArg, dependencies);
+      await recordRunCompleted(dbArg, RECONCILIATION_JOB_KEY);
+      reconciliationSchedulerLastSuccessAt = new Date();
+    }).catch((err) => {
+      reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);
+      console.error(`${LOG_PREFIX} scheduled run error: ${reconciliationSchedulerLastError}`);
+    });
+  };
+
+  // The boot pass only runs when a scheduled run was genuinely missed. After an
+  // ordinary deploy the last run is minutes old, so it is skipped and the
+  // interval picks the work up on time.
+  const bootLocked = () => {
+    reconciliationSchedulerLastRunAt = new Date();
+    return withAdvisoryLock(LOCK_ID, async () => {
+      reconciliationSchedulerLastError = null;
+      const ran = await runBootCatchUpIfBehind({
+        db: dbArg,
+        jobKey: RECONCILIATION_JOB_KEY,
+        intervalMs: RECONCILIATION_INTERVAL_MS,
+        logPrefix: LOG_PREFIX,
+        run: () => runOmsFlowReconciliation(dbArg, dependencies),
+      });
+      if (ran) reconciliationSchedulerLastSuccessAt = new Date();
+    }).catch((err) => {
+      reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);
+      console.error(`${LOG_PREFIX} boot run error: ${reconciliationSchedulerLastError}`);
+    });
+  };
+
+  console.log(`${LOG_PREFIX} Scheduler started (every 15 minutes, dyno-safe lock)`);
+  setTimeout(bootLocked, 20_000);
+  setInterval(runLocked, RECONCILIATION_INTERVAL_MS);
+}

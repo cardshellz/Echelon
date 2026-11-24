@@ -2,7 +2,7 @@ import type { CostLinkOperation } from "@shared/procurement/cost-link-repair";
 import {
   CostEvidenceError,
   costInteger,
-} from "../../inventory/infrastructure/cost-evidence-values";
+} from "../../inventory/cost-evidence-values.api";
 
 export interface CostLinkLot {
   id: number;

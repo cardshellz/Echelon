@@ -11,10 +11,10 @@ vi.mock("../../../../db", () => ({
   },
 }));
 
-import { __test__ } from "../../oms-webhooks";
+import { __test__ } from "../../application/oms-webhooks";
 
 const OMS_WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
+  resolve(__dirname, "../../application/oms-webhooks.ts"),
   "utf-8",
 );
 

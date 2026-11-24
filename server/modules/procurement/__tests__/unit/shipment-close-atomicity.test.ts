@@ -1,9 +1,9 @@
 // Packing/transaction tests isolate the source reader; real header/tax effects are covered by PostgreSQL flow tests.
-vi.mock("../../shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
-import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
-vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
+vi.mock("../../infrastructure/shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
+import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../application/shipment-cost-application.service";
+vi.mock("../../application/shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { describe, expect, it, vi } from "vitest";
-import { createShipmentTrackingService } from "../../shipment-tracking.service";
+import { createShipmentTrackingService } from "../../application/shipment-tracking.service";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 const commandTime = new Date("2026-09-06T12:00:00.000Z");

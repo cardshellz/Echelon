@@ -10,9 +10,9 @@ import { EBAY_CHANNEL_ID, getAuthService } from "./ebay-api-runtime";
 import { readExistingEbayListingMappingIdentity } from "./ebay-active-listing-sync";
 import { createEbayRouteListingLifecycleClient } from "./ebay-listing-client";
 import { PostgresEbayListingExclusionRepository } from "./ebay-listing-exclusion.repository";
-import { assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listing-identity";
-import { EbayListingSyncError, type EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
-import type { PreparedEbayWithdrawal } from "../ebay-listing-withdrawal.service";
+import { assertEbayListingSourceIdentityUnchanged } from "../application/ebay-existing-listing-identity";
+import { EbayListingSyncError, type EbayListingSyncIdentity } from "../domain/ebay-listing-sync.domain";
+import type { PreparedEbayWithdrawal } from "../application/ebay-listing-withdrawal.service";
 
 export const ebayListingExclusionService = new PostgresEbayListingExclusionRepository(pool, EBAY_CHANNEL_ID, async (client, productId) => {
   const database = drizzle(client, { schema });

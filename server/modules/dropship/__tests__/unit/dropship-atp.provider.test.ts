@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { AllocationEngineError } from "../../../channels/allocation-engine.errors";
+import { AllocationEngineError } from "../../../channels/domain/allocation-engine.errors";
 import {
   ChannelAllocationDropshipAtpProvider,
   type DropshipChannelAllocationRow,

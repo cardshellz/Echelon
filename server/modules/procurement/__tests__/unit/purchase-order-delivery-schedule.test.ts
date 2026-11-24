@@ -3,7 +3,7 @@ import {
   isConfirmedDeliveryDateInvalid,
   resolveEffectiveDeliveryDate,
   validateDeliverySchedulePatch,
-} from "../../purchase-order-delivery-schedule";
+} from "../../application/purchase-order-delivery-schedule";
 
 const sentPo = {
   status: "acknowledged",

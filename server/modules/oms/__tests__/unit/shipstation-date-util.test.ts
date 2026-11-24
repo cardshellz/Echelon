@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveShipStationShipmentTimestamp } from "../../shipstation-date.util";
+import { resolveShipStationShipmentTimestamp } from "../../domain/shipstation-date.util";
 
 describe("resolveShipStationShipmentTimestamp", () => {
   it("uses Pacific time for a timezone-less V1 instant instead of appending Z", () => {

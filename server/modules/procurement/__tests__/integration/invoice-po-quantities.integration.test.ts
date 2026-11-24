@@ -13,7 +13,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target, property) {
   const value = Reflect.get(connection.database, property);
   return typeof value === "function" ? value.bind(connection.database) : value;
 } }) }));
-import { getInvoiceById } from "../../ap-ledger.service";
+import { getInvoiceById } from "../../application/ap-ledger.service";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

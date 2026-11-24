@@ -3,7 +3,7 @@ import {
   buildSupplierEvidenceImportPreview,
   type SupplierEvidenceImportDependencies,
   type SupplierEvidenceImportRow,
-} from "../../supplier-evidence-import.service";
+} from "../../application/supplier-evidence-import.service";
 
 function dependencies(overrides: Partial<SupplierEvidenceImportDependencies> = {}): SupplierEvidenceImportDependencies {
   return {

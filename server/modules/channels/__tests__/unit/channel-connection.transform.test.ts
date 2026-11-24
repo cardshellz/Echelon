@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChannelConnection } from "@shared/schema";
 import {
   toPublicChannelConnection,
-} from "../../channel-connection.transform";
+} from "../../domain/channel-connection.transform";
 
 function channelConnection(
   overrides: Partial<ChannelConnection> = {},

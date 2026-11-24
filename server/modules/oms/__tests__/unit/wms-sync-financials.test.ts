@@ -32,7 +32,7 @@ import {
   buildWmsItemFinancialSnapshot,
   buildResidualWmsItemFinancialSnapshot,
   buildResidualWmsOrderFinancialSnapshot,
-} from "../../wms-sync-financials";
+} from "../../application/wms-sync-financials";
 import { WmsSyncValidationError } from "@shared/errors/wms-sync-errors";
 
 // ─── Fixtures ────────────────────────────────────────────────────────

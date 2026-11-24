@@ -1,23 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
 import type pg from "pg";
-import { createPoQuantityAmendmentService } from "../../po-quantity-amendment.service";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
+import { createPoQuantityAmendmentService } from "../../application/po-quantity-amendment.service";
+import type { AmendmentDatabase } from "../../infrastructure/po-quantity-amendment.repository";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
 import {
   poQuantityAmendmentResultSchema,
   type PoQuantityPreviewRequest,
 } from "@shared/procurement/po-quantity-amendment";
-import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
-import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
+import { readPoShipmentCosts } from "../../infrastructure/po-shipment-cost-summary.repository";
+import { readPurchaseCostStatus } from "../../infrastructure/purchase-cost-status.repository";
 import {
   createShipmentCostReconciliationService,
   shipmentReconciliationScope,
-} from "../../shipment-cost-reconciliation.service";
-import { createPurchasePipelineRepository } from "../../purchase-pipeline.repository";
-import { projectPurchasePipeline } from "../../purchase-pipeline.service";
-import { computePayloadHash } from "../../po-exceptions.service";
+} from "../../application/shipment-cost-reconciliation.service";
+import { createPurchasePipelineRepository } from "../../infrastructure/purchase-pipeline.repository";
+import { projectPurchasePipeline } from "../../application/purchase-pipeline.service";
+import { computePayloadHash } from "../../application/po-exceptions.service";
 
 export function registerPoAmendmentDependencyCases(fixture: {
   pool: () => pg.Pool;

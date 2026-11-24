@@ -32,7 +32,7 @@ describe("digital inventory exclusion contract", () => {
   });
 
   it("guards reservation and picking even when callers bypass ATP readers", () => {
-    const reservation = read("../../../channels/reservation.service.ts");
+    const reservation = read("../../../channels/application/reservation.service.ts");
     const picking = read("../../../orders/application/picking.use-cases.ts");
     const inventoryRoutes = read("../../interfaces/http/inventory.routes.ts");
     expect(reservation).toContain(
@@ -51,10 +51,10 @@ describe("digital inventory exclusion contract", () => {
   });
 
   it("keeps digital variants out of channel inventory publication", () => {
-    const sync = read("../../../channels/sync.service.ts");
-    const orchestrator = read("../../../channels/echelon-sync-orchestrator.service.ts");
-    const availability = read("../../../channels/variant-availability-sync.service.ts");
-    const productPush = read("../../../channels/product-push.service.ts");
+    const sync = read("../../../channels/application/sync.service.ts");
+    const orchestrator = read("../../../channels/application/echelon-sync-orchestrator.service.ts");
+    const availability = read("../../../channels/application/variant-availability-sync.service.ts");
+    const productPush = read("../../../channels/application/product-push.service.ts");
     expect(sync).toContain("isInventoryManagedVariant(variantRow)");
     expect(orchestrator).toContain("isInventoryManagedVariant(variant)");
     expect(availability).toContain("markVariantAvailabilityNotApplicable");
@@ -64,7 +64,7 @@ describe("digital inventory exclusion contract", () => {
   });
 
   it("keeps digital variants out of allocation and new-listing inventory surfaces", () => {
-    const channelStorage = read("../../../channels/channels.storage.ts");
+    const channelStorage = read("../../../channels/infrastructure/channels.storage.ts");
     const channelRegistration = read(
       "../../../channels/adapters/ebay/ebay-marketplace-registration-owner.pg-repository.ts",
     );

@@ -9,7 +9,7 @@ export {
   type DropshipOmsOrderCommandErrorCode,
   type DropshipOmsOrderLineInput,
   type DropshipOmsOrderShipToInput,
-} from "./dropship-order-command";
+} from "./application/dropship-order-command";
 export {
   dropshipAcceptanceAuthorityEventId,
   grantDropshipAcceptanceLineAuthorityWithClient,
@@ -18,5 +18,5 @@ export {
   type GrantDropshipAcceptanceLineAuthorityInput,
   type OmsLineAuthorityGrantClient,
   type OmsLineAuthorityGrantErrorCode,
-} from "./oms-line-authority-grant.repository";
-export { createDropshipMarketplaceCancelStop } from "./dropship-marketplace-cancel";
+} from "./infrastructure/oms-line-authority-grant.repository";
+export { createDropshipMarketplaceCancelStop } from "./application/dropship-marketplace-cancel";

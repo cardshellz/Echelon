@@ -1,6 +1,6 @@
 import { requireAuth, requirePermission } from "./middleware";
 import { assertEbayStorePolicyMetadataWriteOwned, EbayBusinessPolicyError, EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies";
-import { ebayBusinessPolicies } from "../modules/channels/ebay-business-policies";
+import { ebayBusinessPolicies } from "../modules/channels/application/ebay-business-policies";
 import { sendEbayPolicyError } from "./ebay/ebay-business-policy-http";
 
 /** Historical listing-rule policy columns are no longer a policy authority. */
@@ -98,15 +98,15 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   app.get("/api/products/with-types", requireAuth, async (req: Request, res: Response) => {
     try {
       const { filter, search } = req.query;
-      
+
       let conditions: any[] = [eq(products.isActive, true)];
-      
+
       if (filter === "assigned") {
         conditions.push(sql`${products.productType} IS NOT NULL`);
       } else if (filter === "unassigned") {
         conditions.push(isNull(products.productType));
       }
-      
+
       if (search && typeof search === "string" && search.trim()) {
         const term = `%${search.trim()}%`;
         conditions.push(

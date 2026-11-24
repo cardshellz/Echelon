@@ -46,7 +46,7 @@
 import { db } from "../server/db";
 import { sql } from "drizzle-orm";
 import { ordersStorage } from "../server/modules/orders";
-import { createShipStationService } from "../server/modules/oms/shipstation.service";
+import { createShipStationService } from "../server/modules/oms/application/shipstation.service";
 import { reserveAndPushAfterHoldRelease } from "../server/modules/orders/application/release-hold-push";
 
 interface CliOptions {

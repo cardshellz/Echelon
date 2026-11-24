@@ -41,14 +41,14 @@ import {
   recordRetryFailure,
   WEBHOOK_RETRY_CLAIM_LEASE_MS,
   WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS,
-} from "../../webhook-retry.worker";
+} from "../../application/webhook-retry.worker";
 import {
   buildShopifyFulfillmentRetryEnvelope,
   enqueueShopifyFulfillmentWebhookRetry,
   receiptRecoveryOwnedStatus,
   sourceChannelIdFromRetryPayload,
   sourceEventIdFromRetryPayload,
-} from "../../shopify-fulfillment-webhook-retry";
+} from "../../application/shopify-fulfillment-webhook-retry";
 
 // ─── DB mock helpers ─────────────────────────────────────────────────
 
@@ -79,7 +79,7 @@ function makeDb(opts: { updateThrows?: Error } = {}) {
 // ─── Source files for regression checks ──────────────────────────────
 
 const WORKER_SRC = readFileSync(
-  resolve(__dirname, "../../webhook-retry.worker.ts"),
+  resolve(__dirname, "../../application/webhook-retry.worker.ts"),
   "utf-8",
 );
 const SHOPIFY_ROUTES_SRC = readFileSync(
@@ -87,11 +87,11 @@ const SHOPIFY_ROUTES_SRC = readFileSync(
   "utf-8",
 );
 const OMS_WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
+  resolve(__dirname, "../../application/oms-webhooks.ts"),
   "utf-8",
 );
 const FULFILLMENT_RETRY_SRC = readFileSync(
-  resolve(__dirname, "../../shopify-fulfillment-webhook-retry.ts"),
+  resolve(__dirname, "../../application/shopify-fulfillment-webhook-retry.ts"),
   "utf-8",
 );
 

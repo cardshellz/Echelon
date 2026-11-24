@@ -26,8 +26,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { deriveReconcileEvent } from "../../../shipping/reconcile-derive";
-import type { EngineOrderState, CanonicalShipmentEvent } from "../../../shipping/types";
+import { deriveReconcileEvent } from "../../../shipping/domain/reconcile-derive";
+import type { EngineOrderState, CanonicalShipmentEvent } from "../../../shipping/domain/types";
 
 // ─── Helpers under test (replicated from server/index.ts reconcile) ─────
 

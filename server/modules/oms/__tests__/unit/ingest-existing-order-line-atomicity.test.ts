@@ -8,8 +8,8 @@ import { omsOrderLines, omsOrders } from "@shared/schema";
 
 const ports = vi.hoisted(() => ({ recordAuthority: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {} }));
-vi.mock("../../oms-line-authority-ledger", () => ({ recordOmsLineAuthorityEvent: ports.recordAuthority }));
-vi.mock("../../order-line-catalog-identity.service", () => ({
+vi.mock("../../application/oms-line-authority-ledger", () => ({ recordOmsLineAuthorityEvent: ports.recordAuthority }));
+vi.mock("../../application/order-line-catalog-identity.service", () => ({
   resolveOrderLineCatalogIdentity: async () => null,
   orderLineInventoryIdentitySnapshot: () => ({}),
   recordOrderLineCatalogIdentity: async () => undefined,
@@ -17,7 +17,7 @@ vi.mock("../../order-line-catalog-identity.service", () => ({
 vi.mock("../../../order-edits/infrastructure/order-edit-ingress-guard", () => ({
   guardOrderEditShopifyIngress: async () => ({ skipOrder: false, skipLines: false }),
 }));
-import { createOmsService } from "../../oms.service";
+import { createOmsService } from "../../application/oms.service";
 
 const EXISTING_ORDER = { id: 55, channelId: 36, externalOrderId: "12292006838431", channelShipByDate: null };
 const EXISTING_LINES = [121028, 121029, 121030, 121031].map((id, index) => ({

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ClaimPlanDto } from "@shared/types/inventory-availability-planner";
-import type { ReservationServiceContract } from "../../../channels/reservation.service";
+import type { ReservationServiceContract } from "../../../channels/application/reservation.service";
 import {
   AuthorityAwareReservationService,
   type InventoryAvailabilityRuntimeClaimContext,

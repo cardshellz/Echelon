@@ -16,16 +16,16 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../db", () => ({ db: mocks.db }));
-vi.mock("../../../modules/procurement/procurement.storage", () => ({
+vi.mock("../../../modules/procurement/infrastructure/procurement.storage", () => ({
   procurementMethods: mocks.procurement,
 }));
 vi.mock("../../../modules/inventory", () => ({
   inventoryStorage: mocks.inventory,
 }));
-vi.mock("../../../modules/procurement/purchase-recommendation-analysis.service", () => ({
+vi.mock("../../../modules/procurement/application/purchase-recommendation-analysis.service", () => ({
   loadPurchaseRecommendationSnapshotAnalysis: mocks.analysis,
 }));
-vi.mock("../../../modules/procurement/purchase-recommendation-snapshot.service", () => ({
+vi.mock("../../../modules/procurement/application/purchase-recommendation-snapshot.service", () => ({
   buildPurchaseRecommendationRunInput: mocks.buildRunInput,
   createPurchaseRecommendationSnapshotService: () => ({ createRun: mocks.createRun }),
 }));

@@ -6,7 +6,7 @@ import {
 } from "@shared/procurement/supplier-header-costs";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { allocateCentsFromNumericBasis } from "./shipment-allocation-basis";
-import { costFingerprint, costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { costFingerprint, costInteger, CostEvidenceError } from "../../inventory/cost-evidence-values.api";
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { z } from "zod";
 

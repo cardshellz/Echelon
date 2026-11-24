@@ -11,7 +11,7 @@ import {
   resolveShipStationUnmappedPhysicalExceptionForReturnLabel,
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
-} from "../../shipstation-unmapped-physical";
+} from "../../application/shipstation-unmapped-physical";
 
 function sqlText(query: any): string {
   return (query?.queryChunks ?? [])

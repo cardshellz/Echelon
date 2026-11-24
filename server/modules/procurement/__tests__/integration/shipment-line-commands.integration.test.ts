@@ -9,12 +9,12 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { createShipmentEditorService, shipmentEditorScope } from "../../shipment-editor.service";
+import { createShipmentEditorService, shipmentEditorScope } from "../../application/shipment-editor.service";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { ShipmentEditorRequest } from "@shared/procurement/shipment-editor";
-import { shipmentLineVersion } from "../../shipment-line-version";
-import type { ShipmentLineCommand } from "../../shipment-line-commands";
-import type { ShipmentTrackingService } from "../../shipment-tracking.service";
+import { shipmentLineVersion } from "../../application/shipment-line-version";
+import type { ShipmentLineCommand } from "../../application/shipment-line-commands";
+import type { ShipmentTrackingService } from "../../application/shipment-tracking.service";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 
@@ -47,9 +47,9 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   let pool: pg.Pool;
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let service: ShipmentTrackingService;
-  let createService: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
-  let storage: typeof import("../../procurement.storage").procurementMethods & Pick<typeof import("../../../catalog/infrastructure/catalog.storage").productMethods, "getProductVariantById">;
-  let commandModule: typeof import("../../shipment-line-commands");
+  let createService: typeof import("../../application/shipment-tracking.service").createShipmentTrackingService;
+  let storage: typeof import("../../infrastructure/procurement.storage").procurementMethods & Pick<typeof import("../../../catalog/infrastructure/catalog.storage").productMethods, "getProductVariantById">;
+  let commandModule: typeof import("../../application/shipment-line-commands");
   let repositoryFactory: typeof import("../../../../platform/commands/command-results.repository").createDrizzleFinancialCommandRepository;
   let defaultModulePool: pg.Pool | undefined;
   const ownedSchemas: string[] = [];
@@ -192,7 +192,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [serviceModule, storageModule, commands, repositoryModule, databaseModule, catalogModule] = await Promise.all([
-        import("../../shipment-tracking.service"), import("../../procurement.storage"), import("../../shipment-line-commands"),
+        import("../../application/shipment-tracking.service"), import("../../infrastructure/procurement.storage"), import("../../application/shipment-line-commands"),
         import("../../../../platform/commands/command-results.repository"), import("../../../../db"), import("../../../catalog/infrastructure/catalog.storage"),
       ]);
       createService = serviceModule.createShipmentTrackingService;
@@ -418,7 +418,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   it("returns only active same-product units to the PO chooser and reports catalog drift without changing its recorded factor", async () => {
-    const { getShippablePurchaseOrderLines } = await import("../../shipment-source-capacity");
+    const { getShippablePurchaseOrderLines } = await import("../../application/shipment-source-capacity");
     await pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,is_active)
       VALUES(202,100,'TEST-RETIRED','Retired pack',25,false)`);
     const choices = await getShippablePurchaseOrderLines(database, 10);
@@ -437,7 +437,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   it("resolves CSV unit options from each exact PO, variant or SKU identity without writing or crossing products", async () => {
-    const { readShipmentPackingUnitOptions } = await import("../../shipment-unit-options.service");
+    const { readShipmentPackingUnitOptions } = await import("../../application/shipment-unit-options.service");
     await pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,is_active)
       VALUES(202,100,'TEST-RETIRED','Retired pack',25,false)`);
     const before = await state();
@@ -459,7 +459,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   it("retains CSV identity conflicts and malformed rows as explicit per-row review evidence", async () => {
-    const { readShipmentPackingUnitOptions } = await import("../../shipment-unit-options.service");
+    const { readShipmentPackingUnitOptions } = await import("../../application/shipment-unit-options.service");
     const before = await state();
     const result = await readShipmentPackingUnitOptions(database, 1, { rows: [
       { purchaseOrderLineId: 21, productVariantId: 300 },
@@ -482,7 +482,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   it("refuses CSV options for missing products, charge-only PO lines and ambiguous SKU ownership", async () => {
-    const { readShipmentPackingUnitOptions } = await import("../../shipment-unit-options.service");
+    const { readShipmentPackingUnitOptions } = await import("../../application/shipment-unit-options.service");
     await pool.query(`UPDATE procurement.purchase_order_lines SET product_id=NULL WHERE id=21;
       UPDATE procurement.purchase_order_lines SET line_type='charge' WHERE id=22;
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant)
@@ -501,7 +501,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   it("enforces bounded CSV option requests and a real shipment before returning catalog evidence", async () => {
-    const { readShipmentPackingUnitOptions } = await import("../../shipment-unit-options.service");
+    const { readShipmentPackingUnitOptions } = await import("../../application/shipment-unit-options.service");
     const before = await state();
     await expect(readShipmentPackingUnitOptions(database, 1, { rows: Array.from({ length: 501 }, () => ({ productVariantId: 201 })) }))
       .rejects.toMatchObject({ name: "ZodError" });
@@ -1167,7 +1167,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   it("projects trusted source availability and explicit receipt-review warnings without changing database state", async () => {
-    const { getShippablePurchaseOrderLines } = await import("../../shipment-source-capacity");
+    const { getShippablePurchaseOrderLines } = await import("../../application/shipment-source-capacity");
     await pool.query(`
       INSERT INTO procurement.receiving_orders(id,receipt_number,purchase_order_id,status) VALUES(51,'TEST-READ-PROJECTION',10,'open');
       INSERT INTO procurement.receiving_lines(id,receiving_order_id,purchase_order_line_id,product_variant_id,received_qty) VALUES(61,51,21,200,0);

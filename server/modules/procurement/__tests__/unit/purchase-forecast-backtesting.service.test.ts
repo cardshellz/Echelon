@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPurchaseForecastBacktestingService } from "../../purchase-forecast-backtesting.service";
-import { buildPurchasingForecastPolicyCohort } from "../../purchasing-forecast-policy";
+import { createPurchaseForecastBacktestingService } from "../../application/purchase-forecast-backtesting.service";
+import { buildPurchasingForecastPolicyCohort } from "../../application/purchasing-forecast-policy";
 
 const policyCohort = buildPurchasingForecastPolicyCohort();
 

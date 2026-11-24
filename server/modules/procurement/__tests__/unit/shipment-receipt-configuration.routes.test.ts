@@ -16,14 +16,14 @@ vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../inventory", () => ({ inventoryStorage: {} }));
-vi.mock("../../procurement", () => ({ procurementStorage: {} }));
-vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
+vi.mock("../../infrastructure/procurement", () => ({ procurementStorage: {} }));
+vi.mock("../../application/ap-ledger.service", () => ({}));
+vi.mock("../../application/po-document", () => ({ renderPoHtml: vi.fn() }));
 vi.mock("../../../notifications/email-delivery.api", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
-import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
-import { ReceivingUnitError } from "../../receiving-unit-contract";
+import { registerPurchaseOrderRoutes } from "../../interfaces/http/purchase-order.routes";
+import { ReceivingUnitError } from "../../application/receiving-unit-contract";
 
 function serviceMock<T extends object>(methods: Partial<T>): T {
   return new Proxy(methods, { get(target, key) {

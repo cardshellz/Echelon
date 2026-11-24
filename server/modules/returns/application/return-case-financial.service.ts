@@ -7,7 +7,7 @@ import {
 import type {
   DropshipReturnEngineFaultCategory,
   DropshipReturnSettlement,
-} from "../../dropship/domain/return-fee-engine";
+} from "../../dropship/return-fee-engine.api";
 
 const MAX_IDEMPOTENCY_KEY_LENGTH = 160;
 const MAX_NOTES_LENGTH = 2_000;

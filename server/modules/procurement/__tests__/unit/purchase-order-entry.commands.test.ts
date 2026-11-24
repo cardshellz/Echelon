@@ -2,11 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { purchaseOrderEntryCommandSchema, purchaseOrderEntryCommandResultSchema, purchaseOrderEntryResultMatchesRequest } from "@shared/procurement/purchase-order-entry-command";
 import type { FinancialCommandDescriptor, FinancialCommandRepository } from "../../../../platform/commands/transactional-command.service";
-import type { PurchaseOrderEntryTransaction } from "../../purchase-order-entry.repository";
-import { PurchasingError } from "../../purchasing.service";
+import type { PurchaseOrderEntryTransaction } from "../../infrastructure/purchase-order-entry.repository";
+import { PurchasingError } from "../../application/purchasing.service";
 import { PurchaseOrderEntryError, assertPurchaseOrderEntryAuthority, purchaseOrderEntryPermission } from "../../domain/purchase-order-entry";
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
-import { createPurchaseOrderEntryCommands, hashPurchaseOrderEntryCommandIdentity, purchaseOrderEntryCommandScope, PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL } from "../../purchase-order-entry.commands";
+import { createPurchaseOrderEntryCommands, hashPurchaseOrderEntryCommandIdentity, purchaseOrderEntryCommandScope, PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL } from "../../application/purchase-order-entry.commands";
 
 const actor = "buyer";
 const key = "purchase-order-entry:test";

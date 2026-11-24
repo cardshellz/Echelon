@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { StockLinkDestination } from "@shared/types/stock-link";
 import { isStockLinkItemEligible, isStockLinkItemOnSale } from "../../../inventory-planning/domain/stock-link";
 import { classifyStockLinkFailure } from "../../../inventory-planning/domain/stock-link-errors";
-import { ChannelIdentityError } from "../../channel-identity.domain";
+import { ChannelIdentityError } from "../../domain/channel-identity.domain";
 import type { ShopifyIdentityConnection } from "../../adapters/shopify-identity.reader";
 import {
   SHOPIFY_STOCK_LINK_API_VERSION, SHOPIFY_STOCK_LINK_LOOKUP_PAGES_MAX, ShopifyStockLinkProviderError,

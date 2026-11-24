@@ -960,7 +960,7 @@ export async function runParityCheck(
     db = dbMod.db;
     const drizzleMod = await import("drizzle-orm");
     sqlFn = drizzleMod.sql;
-    const ssMod = await import("../server/modules/oms/shipstation.service");
+    const ssMod = await import("../server/modules/oms/application/shipstation.service");
     const ssService = ssMod.createShipStationService(db);
     getOrderById = (id: number) => ssService.getOrderById(id);
     // getShipments is available on the service; cast to our local type

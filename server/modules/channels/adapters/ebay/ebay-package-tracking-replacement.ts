@@ -1,6 +1,6 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { z } from "zod";
-import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
+import { ChannelFulfillmentProviderError } from "../../domain/channel-fulfillment-provider.error";
 import type { EbayShippingFulfillmentRequest, EbayShippingFulfillmentResponse } from "./ebay-types";
 
 const text = z.string().trim().min(1).max(200);

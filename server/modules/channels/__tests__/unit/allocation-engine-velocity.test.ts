@@ -7,8 +7,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { createAllocationEngine, VELOCITY_LOOKBACK_DAYS } from "../../allocation-engine.service";
-import { ALLOCATION_ERROR_CODES, AllocationEngineError } from "../../allocation-engine.errors";
+import { createAllocationEngine, VELOCITY_LOOKBACK_DAYS } from "../../application/allocation-engine.service";
+import { ALLOCATION_ERROR_CODES, AllocationEngineError } from "../../domain/allocation-engine.errors";
 
 function thenableChain(data: any[]) {
   const chain: any = {};

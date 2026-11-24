@@ -2,17 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import type {
   HistoricalShipStationContentsCorrectionFacts,
-} from "../../historical-shipstation-contents-correction.domain";
+} from "../../domain/historical-shipstation-contents-correction.domain";
 import type {
   HistoricalShipStationContentsCorrectionRepository,
-} from "../../historical-shipstation-contents-correction.repository";
+} from "../../infrastructure/historical-shipstation-contents-correction.repository";
 import {
   HistoricalShipStationContentsCorrectionService,
   HistoricalShipStationContentsCorrectionServiceError,
-} from "../../historical-shipstation-contents-correction.service";
+} from "../../application/historical-shipstation-contents-correction.service";
 import type {
   HistoricalShipStationContentsResolutionPreview,
-} from "../../historical-shipstation-contents-review.service";
+} from "../../application/historical-shipstation-contents-review.service";
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);

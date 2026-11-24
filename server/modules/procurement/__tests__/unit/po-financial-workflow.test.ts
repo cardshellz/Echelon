@@ -12,8 +12,8 @@ import {
   readPoFinancialEvidenceSourcesWithClient,
   type PoFinancialEvidenceDatabase,
   type PoFinancialEvidenceReadClient,
-} from "../../po-financial-evidence.repository";
-import { createPoFinancialEvidenceService } from "../../po-financial-evidence.service";
+} from "../../infrastructure/po-financial-evidence.repository";
+import { createPoFinancialEvidenceService } from "../../application/po-financial-evidence.service";
 
 function invoice(
   overrides: Partial<PoFinancialInvoiceEvidence> = {},

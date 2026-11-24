@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installFixtures, receipt } from "./procurement-fixtures";
 import { openReceivingLineOptions, openReceivingMoreActions, openReceivingPackSelector, openReceivingSetup } from "./procurement-receiving-helpers";
-import { evaluateReceiveWarnings } from "../../server/modules/procurement/receive-validation.service";
+import { evaluateReceiveWarnings } from "../../server/modules/procurement/application/receive-validation.service";
 
 const initialVersion = "a".repeat(64);
 const savedVersion = "b".repeat(64);

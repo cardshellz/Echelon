@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { recordPaymentResultSchema, paymentApplicationResultSchema } from "@shared/procurement/ap-payment-contract";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import type { ApPaymentFinancialCommand, RecordApPaymentInput } from "../../ap-ledger.service";
+import type { ApPaymentFinancialCommand, RecordApPaymentInput } from "../../application/ap-ledger.service";
 import { PAYMENT_ACTORS, PAYMENT_FLOW, type PaymentAcceptanceFixture } from "./payment-controlled-acceptance.fixture";
 
 const RECORDED_AT = new Date("2031-10-25T12:34:56.789Z");
@@ -29,7 +29,7 @@ function descriptor(command: ApPaymentFinancialCommand, body: unknown, id?: numb
 
 export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceFixture): void {
   it("uses the command instant for payment, allocations, invoice/PO projections, milestones and audit; replay preserves it", async () => {
-    const { createApPaymentCommands } = await import("../../ap-payment-commands");
+    const { createApPaymentCommands } = await import("../../application/ap-payment-commands");
     const input = { payment: payment() }, request = descriptor("record_payment", input);
     let clockCalls = 0;
     const commands = createApPaymentCommands(undefined, () => { clockCalls++; return RECORDED_AT; });
@@ -51,7 +51,7 @@ export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceF
   });
 
   it("applies and voids recorded cash with one timestamp per command while retaining the original cash and calendar date", async () => {
-    const { createApPaymentCommands } = await import("../../ap-payment-commands");
+    const { createApPaymentCommands } = await import("../../application/ap-payment-commands");
     const input = { payment: { ...payment(25_000), totalAmountCents: PAYMENT_FLOW.invoiceCents } };
     const saved = recordPaymentResultSchema.parse((await createApPaymentCommands(undefined, () => RECORDED_AT)
       .recordPayment(input, descriptor("record_payment", input))).body);
@@ -87,7 +87,7 @@ export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceF
   });
 
   it.each(["record_payment", "apply_payment", "void_payment"] as const)("rejects an invalid %s clock with no financial or audit write", async command => {
-    const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
+    const { executeApPaymentCommandInTransaction } = await import("../../application/ap-ledger.service");
     const { db } = await import("../../../../db");
     const before = await fixture.graph();
     await expect(db.transaction(tx => executeApPaymentCommandInTransaction(command,
@@ -97,7 +97,7 @@ export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceF
   });
 
   it("owns its clock snapshot before waiting for the inventory graph lock", async () => {
-    const { createApPaymentCommands } = await import("../../ap-payment-commands");
+    const { createApPaymentCommands } = await import("../../application/ap-payment-commands");
     const blocker = await fixture.pool.connect();
     const mutableClock = new Date(RECORDED_AT.getTime());
     let pending: Promise<unknown> | undefined;
@@ -124,7 +124,7 @@ export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceF
   });
 
   it("allocates numerically after 999 and historical voids, ignoring nonnumeric supplier references", async () => {
-    const { createApPaymentCommands } = await import("../../ap-payment-commands");
+    const { createApPaymentCommands } = await import("../../application/ap-payment-commands");
     await fixture.pool.query(`INSERT INTO procurement.ap_payments(payment_number,vendor_id,payment_date,payment_method,total_amount_cents,status,voided_at,void_reason)
       VALUES('PAY-20311025-999',5,'2026-10-01','wire',1,'completed',NULL,NULL),
         ('PAY-20311025-1000',5,'2026-10-01','wire',1,'completed',NULL,NULL),
@@ -138,7 +138,7 @@ export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceF
   });
 
   it("durably rejects exhausted payment numbers without mutating cash or balances", async () => {
-    const { createApPaymentCommands } = await import("../../ap-payment-commands");
+    const { createApPaymentCommands } = await import("../../application/ap-payment-commands");
     await fixture.pool.query("INSERT INTO procurement.ap_payments(payment_number,vendor_id,payment_date,payment_method,total_amount_cents,status) VALUES($1,5,'2026-10-01','wire',1,'completed')", ["PAY-20311025-" + "9".repeat(17)]);
     const before = await fixture.graph(), input = { payment: payment(0) }, request = descriptor("record_payment", input);
     const commands = createApPaymentCommands(undefined, () => RECORDED_AT);
@@ -151,7 +151,7 @@ export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceF
   });
 
   it("serializes concurrent same-day payment allocation without duplicates", async () => {
-    const { createApPaymentCommands } = await import("../../ap-payment-commands");
+    const { createApPaymentCommands } = await import("../../application/ap-payment-commands");
     const commands = createApPaymentCommands(undefined, () => RECORDED_AT);
     const input = { payment: payment(0) };
     const results = await Promise.all(Array.from({ length: 4 }, () => commands.recordPayment(input, descriptor("record_payment", input))));
@@ -165,7 +165,7 @@ export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceF
   });
 
   it("rolls back number and timestamp effects with a failed audit, then retries with one new command instant", async () => {
-    const { createApPaymentCommands } = await import("../../ap-payment-commands");
+    const { createApPaymentCommands } = await import("../../application/ap-payment-commands");
     const input = { payment: payment() }, request = descriptor("record_payment", input);
     const before = await fixture.graph();
     await fixture.pool.query(`CREATE FUNCTION procurement.payment_clock_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -192,7 +192,7 @@ export function registerApPaymentClockAndNumberCases(fixture: PaymentAcceptanceF
   });
 
   it("reads numeric invoice suggestions without reserving numbers or replacing a reviewed supplier identifier", async () => {
-    const service = await import("../../ap-ledger.service");
+    const service = await import("../../application/ap-ledger.service");
     await fixture.pool.query(`INSERT INTO procurement.vendor_invoices(invoice_number,vendor_id,status,invoiced_amount_cents,balance_cents)
       VALUES('INV-20311025-999',5,'received',1,1),('INV-20311025-1000',6,'received',1,1),
         ('INV-20311025-0001001',5,'voided',1,1),('INV-20311025-99999-note',5,'received',1,1)`);

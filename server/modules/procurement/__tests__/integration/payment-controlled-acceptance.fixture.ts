@@ -9,7 +9,7 @@ import session from "express-session";
 import bcrypt from "bcrypt";
 import pg from "pg";
 import * as schema from "@shared/schema";
-import type { RecordApPaymentInput } from "../../ap-ledger.service";
+import type { RecordApPaymentInput } from "../../application/ap-ledger.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 
 export const PAYMENT_ACTORS = {
@@ -180,7 +180,7 @@ export class PaymentAcceptanceFixture {
       // every acquired connection is redirected to this disposable pool only.
       this.modulePool.query = this.pool.query.bind(this.pool) as typeof this.modulePool.query;
       this.modulePool.connect = this.pool.connect.bind(this.pool) as typeof this.modulePool.connect;
-      const { registerApLedgerRoutes } = await import("../../ap-ledger.routes");
+      const { registerApLedgerRoutes } = await import("../../interfaces/http/ap-ledger.routes");
       const { registerAuthRoutes } = await import("../../../identity/routes.api");
       const app = express();
       app.use(express.json());

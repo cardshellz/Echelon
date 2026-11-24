@@ -11,13 +11,13 @@ const schema = readFileSync(
 const repository = readFileSync(
   resolve(
     process.cwd(),
-    "server/modules/shipping/package-allocation-ledger.repository.ts",
+    "server/modules/shipping/infrastructure/package-allocation-ledger.repository.ts",
   ),
   "utf8",
 );
 const shipStationSubDir = resolve(process.cwd(), "server/modules/oms/shipstation");
 const shipStationService = [
-  readFileSync(resolve(process.cwd(), "server/modules/oms/shipstation.service.ts"), "utf8"),
+  readFileSync(resolve(process.cwd(), "server/modules/oms/application/shipstation.service.ts"), "utf8"),
   ...(existsSync(shipStationSubDir)
     ? readdirSync(shipStationSubDir)
         .filter((f) => f.endsWith(".ts"))

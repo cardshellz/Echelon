@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
-import type { ChannelQuantityPublicationTarget } from "../channel-quantity-publication-target";
-import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, type QuantityPublicationScope } from "../../inventory-planning/domain/quantity-publication-admission";
+import type { ChannelQuantityPublicationTarget } from "../application/channel-quantity-publication-target";
+import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, type QuantityPublicationScope } from "../../inventory-planning/quantity-publication-admission-domain.api";
 
 const databaseId = z.number().int().positive().max(2147483647);
 const connectionRow = z.object({ channel_id: databaseId, provider: z.string(), status: z.string(),

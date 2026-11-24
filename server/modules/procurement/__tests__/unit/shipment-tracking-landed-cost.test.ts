@@ -1,19 +1,19 @@
 // Packing/transaction tests isolate the source reader; real header/tax effects are covered by PostgreSQL flow tests.
-vi.mock("../../shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
-import type { ShipmentExceptionReader } from "../../shipment-cost-exception.repository";
-import type { PurchaseCostStatusSnapshotReader } from "../../purchase-cost-status-snapshot.repository";
-import { readShipmentCostReviewInTransaction, readShipmentCostReviewProjectionsInTransaction } from "../../shipment-cost-review.repository";
-import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts, type ShipmentHealthReadEvidence } from "../../shipment-health-evidence.repository";
-vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn(), readShipmentProvisionalLotCounts: vi.fn() }));
+vi.mock("../../infrastructure/shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
+import type { ShipmentExceptionReader } from "../../infrastructure/shipment-cost-exception.repository";
+import type { PurchaseCostStatusSnapshotReader } from "../../infrastructure/purchase-cost-status-snapshot.repository";
+import { readShipmentCostReviewInTransaction, readShipmentCostReviewProjectionsInTransaction } from "../../infrastructure/shipment-cost-review.repository";
+import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts, type ShipmentHealthReadEvidence } from "../../infrastructure/shipment-health-evidence.repository";
+vi.mock("../../infrastructure/shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn(), readShipmentProvisionalLotCounts: vi.fn() }));
 import { shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import { landedCostHealthSchema } from "@shared/procurement/landed-cost-health";
-vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewProjectionsInTransaction: vi.fn() }));
-import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
-vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
-import { shipmentLineVersion } from "../../shipment-line-version";
+vi.mock("../../infrastructure/shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewProjectionsInTransaction: vi.fn() }));
+import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../application/shipment-cost-application.service";
+vi.mock("../../application/shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
+import { shipmentLineVersion } from "../../application/shipment-line-version";
 // These tests isolate packing/allocation and malformed input behavior. The tax
 // source reader has real receipt/AP/landed PostgreSQL acceptance separately.
-vi.mock("../../purchase-tax-costs.repository", () => ({ readTaxedShipmentSupplierCosts: vi.fn(async () => new Map()) }));
+vi.mock("../../infrastructure/purchase-tax-costs.repository", () => ({ readTaxedShipmentSupplierCosts: vi.fn(async () => new Map()) }));
 import { buildShipmentAllocationBasis, buildShipmentAllocationEvidence } from "../../domain/shipment-allocation-basis";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -21,7 +21,7 @@ import {
   allocateCentsByBasis,
   computeLotLandedMills,
   createShipmentTrackingService,
-} from "../../shipment-tracking.service";
+} from "../../application/shipment-tracking.service";
 
 const oneCbmAcrossFivePieces = { dimensionBasis: "piece", lengthCm: "2000", widthCm: "10", heightCm: "10" };
 

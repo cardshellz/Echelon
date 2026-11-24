@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type {
   PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1,
-} from "../../../modules/shipping/package-allocation-authority-resolution.service";
+} from "../../../modules/shipping/application/package-allocation-authority-resolution.service";
 import type {
   PackageAllocationDiscoveryPlanAuditReport,
-} from "../../../modules/shipping/package-allocation-authority-discovery-plan-audit.repository";
+} from "../../../modules/shipping/infrastructure/package-allocation-authority-discovery-plan-audit.repository";
 import {
   PackageAllocationAuthorityResolutionAuditJobError,
   assertPackageAllocationAuthorityResolutionAuditEnabled,

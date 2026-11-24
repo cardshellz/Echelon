@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ChannelCatalogService, matchChannelCatalog, type ChannelCatalogRepository, type ChannelCatalogProvider } from "../../channel-catalog.service";
+import { ChannelCatalogService, matchChannelCatalog, type ChannelCatalogRepository, type ChannelCatalogProvider } from "../../application/channel-catalog.service";
 import { WalmartUsApi } from "../../adapters/walmart/walmart-us-api";
 import type { ChannelCatalogItem, ChannelCatalogVariant } from "@shared/types/channel-catalog";
 

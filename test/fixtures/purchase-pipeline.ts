@@ -1,5 +1,5 @@
 import { emptySupplierProgress } from "../../shared/procurement/purchase-pipeline";
-import type { PipelineEvidence } from "../../server/modules/procurement/purchase-pipeline.service";
+import type { PipelineEvidence } from "../../server/modules/procurement/application/purchase-pipeline.service";
 export const pipelineTime = new Date("2026-09-07T12:00:00.000Z");
 export function pipelineLine(overrides: Partial<PipelineEvidence["lines"][number]> = {}): PipelineEvidence["lines"][number] {
   return { id: 11, purchaseOrderId: 1, poNumber: "TEST-PO-1", vendorName: "Test supplier", poStatus: "acknowledged", status: "open", sku: "TEST-ITEM", productName: "Test item", currency: "USD",

@@ -13,14 +13,14 @@ vi.mock("../../../identity", () => ({ hasPermission: mocks.permission, readCurre
 })) }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.log } }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
-vi.mock("../../receipt-reversal.commands", async (original) => ({
-  ...await original<typeof import("../../receipt-reversal.commands")>(),
+vi.mock("../../application/receipt-reversal.commands", async (original) => ({
+  ...await original<typeof import("../../application/receipt-reversal.commands")>(),
   createReceiptReversalCommands: () => ({ execute: mocks.execute }),
 }));
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
-import { hashReceiptReversalCommandIdentity, receiptReversalCommandScope, RECEIPT_REVERSAL_COMMAND_PRINCIPAL } from "../../receipt-reversal.commands";
-import { registerReceiptReversalRoutes } from "../../receipt-reversal.routes";
-import { ReceiptReversalService } from "../../receipt-reversal.service";
+import { hashReceiptReversalCommandIdentity, receiptReversalCommandScope, RECEIPT_REVERSAL_COMMAND_PRINCIPAL } from "../../application/receipt-reversal.commands";
+import { registerReceiptReversalRoutes } from "../../interfaces/http/receipt-reversal.routes";
+import { ReceiptReversalService } from "../../application/receipt-reversal.service";
 import type { ServiceRegistry } from "../../../../services";
 
 const key = "receipt-reversal-http-001";

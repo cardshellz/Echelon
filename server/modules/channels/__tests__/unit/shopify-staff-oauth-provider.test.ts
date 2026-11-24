@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { exchangeShopifyStaffOAuthCode } from "../../adapters/shopify/shopify-staff-oauth.provider";
-import { ShopifyStaffOAuthError, type ShopifyStaffOAuthConfig } from "../../shopify-staff-oauth.types";
+import { ShopifyStaffOAuthError, type ShopifyStaffOAuthConfig } from "../../domain/shopify-staff-oauth.types";
 
 const config: ShopifyStaffOAuthConfig = {
   shopDomain: "test-store.myshopify.com",

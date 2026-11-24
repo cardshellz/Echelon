@@ -1,5 +1,5 @@
 import { EbayBusinessPolicyError, ebayPolicyWriteSchema } from "@shared/ebay-business-policies";
-import { ebayBusinessPolicies } from "../modules/channels/ebay-business-policies";
+import { ebayBusinessPolicies } from "../modules/channels/application/ebay-business-policies";
 import { ebayPolicyActor, sendEbayPolicyError } from "./ebay/ebay-business-policy-http";
 import { z } from "zod";
 
@@ -461,7 +461,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
       };
 
       // Build channel listing payload
-      const channelPayload: import("../modules/channels/channel-adapter.interface").ChannelListingPayload = {
+      const channelPayload: import("../modules/channels/domain/channel-adapter.interface").ChannelListingPayload = {
         productId: product.id,
         title: product.title || product.name,
         description: product.description || "",

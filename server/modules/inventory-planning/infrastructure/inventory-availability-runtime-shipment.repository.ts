@@ -1,8 +1,8 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool, PoolClient } from "pg";
 import * as schema from "@shared/schema";
-import type { InventoryUseCases } from "../../inventory/application/inventory.use-cases";
-import type { OperationalShipmentDispatcher } from "../../inventory/application/operational-shipment-dispatch.port";
+import type { InventoryUseCases } from "../../inventory/inventory.use-cases.api";
+import type { OperationalShipmentDispatcher } from "../../inventory/operational-shipment-dispatch.port.api";
 import type { CanonicalClaimDispatchSourceCommandResolver } from "../application/inventory-availability-dispatch-source-command.port";
 import {
   AuthorityAwareInventoryShipmentRecorder,

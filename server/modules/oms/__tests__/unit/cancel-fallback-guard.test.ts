@@ -11,7 +11,7 @@ import { isTransitionAllowed } from "../../../orders/application/order-status-co
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 
 const WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
+  resolve(__dirname, "../../application/oms-webhooks.ts"),
   "utf-8",
 );
 

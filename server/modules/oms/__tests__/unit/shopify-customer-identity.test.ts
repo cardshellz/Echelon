@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createOmsService } from "../../oms.service";
-import { __test__ as webhook } from "../../oms-webhooks";
-import { normalizeShopifyCustomerId, validateShopifyCustomerIdentityCopy } from "../../shopify-customer-identity";
+import { createOmsService } from "../../application/oms.service";
+import { __test__ as webhook } from "../../application/oms-webhooks";
+import { normalizeShopifyCustomerId, validateShopifyCustomerIdentityCopy } from "../../application/shopify-customer-identity";
 
 vi.mock("../../../../db", () => ({ db: {} }));
 

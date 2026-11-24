@@ -29,8 +29,8 @@ import {
   toEngineRef,
   fromEngineRef,
 } from "../../../shipping/adapters/shipstation.adapter";
-import { normalizeCarrier } from "../../../shipping/types";
-import type { ShippingEngine } from "../../../shipping/engine";
+import { normalizeCarrier } from "../../../shipping/domain/types";
+import type { ShippingEngine } from "../../../shipping/domain/engine";
 import type { ShipStationServiceHandle } from "../../../shipping/adapters/shipstation.adapter";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 import {
@@ -469,7 +469,7 @@ describe("Migrated writers use C4 functions", () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(
-      resolve(__dirname, "../../../oms/oms-flow-reconciliation.service.ts"),
+      resolve(__dirname, "../../../oms/application/oms-flow-reconciliation.service.ts"),
       "utf-8",
     );
     const blockStart = src.indexOf('input.code === "OMS_FINAL_WMS_ACTIVE"');

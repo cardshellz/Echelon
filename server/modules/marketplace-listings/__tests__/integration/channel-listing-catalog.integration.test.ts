@@ -12,7 +12,7 @@ import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { ChannelListingCatalogRepository } from "../../../channels/channel-listing-catalog.repository";
+import { ChannelListingCatalogRepository } from "../../../channels/infrastructure/channel-listing-catalog.repository";
 import { createHash } from "node:crypto";
 import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
 import { readPublicCatalogImage } from "../../../catalog/infrastructure/catalog-publication-images.reader";

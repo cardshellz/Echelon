@@ -5,7 +5,7 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 const root = join(dirname(fileURLToPath(import.meta.url)),"../../../../..");
 const participant = "server/modules/orders/infrastructure/shipment-order-context.query.ts";
-const owner = "server/modules/shipping/outbound-shipment-access.query.ts";
+const owner = "server/modules/shipping/infrastructure/outbound-shipment-access.query.ts";
 /** A same-transaction projection is private, not an arbitrary-order API.
  * Parsed literal edges cover aliases/re-exports and require/import expressions.
  * Reflection/computed names and SQL/business semantics still require review.
@@ -63,7 +63,7 @@ describe("private shipment order-context participant", () => {
     expect(forbiddenEdges(file,`import "${specifier}";`)).toEqual([participant]);
   });
   it("allows the verified caller, unrelated code and comments", () => {
-    expect(forbiddenEdges(owner,'import { readShipmentLinkedOrderSummary } from "../orders/infrastructure/shipment-order-context.query";')).toEqual([]);
+    expect(forbiddenEdges(owner,'import { readShipmentLinkedOrderSummary } from "../../orders/infrastructure/shipment-order-context.query";')).toEqual([]);
     expect(forbiddenEdges("server/jobs/other.ts",'// import "../modules/orders/infrastructure/shipment-order-context.query";')).toEqual([]);
   });
 });

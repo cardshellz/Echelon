@@ -16,13 +16,13 @@ vi.mock("../../../../storage/base", async () => ({
   ...(await import("@shared/schema")), ...(await import("drizzle-orm")), db: {},
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
-vi.mock("../../../oms/oms.service", () => ({ createOmsService: () => ({}) }));
+vi.mock("../../../oms/application/oms.service", () => ({ createOmsService: () => ({}) }));
 vi.mock("../../../../routes/middleware", () => ({ requireAuth: vi.fn(), requirePermission: () => vi.fn() }));
 vi.mock("../../../inventory-planning/infrastructure/inventory-legacy-admin-control.repository",
   () => ({ createInventoryLegacyAdminControlService: () => ({}) }));
 vi.mock("../../../../websocket", () => ({ broadcastOrdersUpdated: vi.fn() }));
 
-import { registerChannelRoutes } from "../../channels.routes";
+import { registerChannelRoutes } from "../../interfaces/http/channels.routes";
 
 const writes = [
   ["put /api/channels/:channelId/products/:productId/overrides", ports.productPut],

@@ -1,15 +1,15 @@
 import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
-import { assertEbayPreparedIntent } from "../ebay-prepared-intent";
+import { assertEbayPreparedIntent } from "../application/ebay-prepared-intent";
 import { prepareEbayListingPackages, assertEbayPackagePreservation, readEbayPackageVerificationView } from "../adapters/ebay/ebay-listing-package";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication.api";
-import { ebayPublicationRequestJournalContract } from "../ebay-publication-preflight-evidence";
+import { ebayPublicationRequestJournalContract } from "../application/ebay-publication-preflight-evidence";
 import {
   EbayListingSyncError,
   syncStageHash,
   type EbayListingSyncIdentity,
-} from "../ebay-listing-sync.domain";
+} from "../domain/ebay-listing-sync.domain";
 import { marketplaceObservedListingPublicationSchema, type MarketplaceObservedListingPublication } from "../../marketplace-listings";
 import {
   findEbaySyncContentMismatch,
@@ -17,7 +17,7 @@ import {
   itemGroupSyncContent,
   offerSyncContent,
   syncContentIntentHash,
-} from "../ebay-listing-sync-content";
+} from "../application/ebay-listing-sync-content";
 import type {
   BuiltInventoryItem,
   BuiltItemGroup,
@@ -25,7 +25,7 @@ import type {
 } from "../adapters/ebay/ebay-listing-builder";
 import type { ChannelListingWarning } from "@shared/channel-listing-validation";
 import type { EbayNativePackageReader } from "../adapters/ebay/ebay-native-package.reader";
-import { findChannelPublishedContentMismatch, type ChannelPublishedContent } from "../../marketplace-listings/domain/channel-publication-content";
+import { findChannelPublishedContentMismatch, type ChannelPublishedContent } from "../../marketplace-listings/channel-publication-content.api";
 import { EBAY_MINIMUM_PHOTO_LONGEST_SIDE, ebayOriginalPhotoUrl } from "../adapters/ebay/ebay-photo-requirements";
 import type {
   EbayBulkPriceQuantityRequest,

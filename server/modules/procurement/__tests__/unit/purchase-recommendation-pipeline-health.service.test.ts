@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import type {
   PurchasePipelineJobRunEvidence,
   PurchaseRecommendationPipelineEvidence,
-} from "../../purchase-recommendation-pipeline-health.repository";
+} from "../../infrastructure/purchase-recommendation-pipeline-health.repository";
 import {
   buildPurchaseRecommendationPipelineHealth,
   SCHEDULED_RECOMMENDATION_CRITICAL_AGE_HOURS,
   SCHEDULED_RECOMMENDATION_WARNING_AGE_HOURS,
-} from "../../purchase-recommendation-pipeline-health.service";
+} from "../../application/purchase-recommendation-pipeline-health.service";
 
 const asOf = new Date("2026-07-26T12:00:00.000Z");
 

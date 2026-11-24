@@ -4,19 +4,19 @@ import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_INDEX_CONTRACTS,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_SQL,
-} from "../../package-allocation-authority-discovery.query";
+} from "../../infrastructure/package-allocation-authority-discovery.query";
 import {
   PACKAGE_ALLOCATION_DISCOVERY_EXPLAIN_SQL,
   PACKAGE_ALLOCATION_DISCOVERY_INDEX_CATALOG_SQL,
   PACKAGE_ALLOCATION_DISCOVERY_RELATION_ASSERTION_SQL,
-} from "../../package-allocation-authority-discovery-plan-audit.repository";
+} from "../../infrastructure/package-allocation-authority-discovery-plan-audit.repository";
 import {
   PACKAGE_ALLOCATION_DISCOVERY_EXECUTION_SOURCE_ASSERTION_SQL,
   PACKAGE_ALLOCATION_DISCOVERY_EXPLAIN_ANALYZE_SQL,
   PackageAllocationDiscoveryExecutionAuditRepositoryError,
   auditPackageAllocationAuthorityDiscoveryExecution,
   summarizePackageAllocationDiscoveryExecutionPlan,
-} from "../../package-allocation-authority-discovery-execution-audit.repository";
+} from "../../infrastructure/package-allocation-authority-discovery-execution-audit.repository";
 
 interface RecordedQuery {
   readonly text: string;

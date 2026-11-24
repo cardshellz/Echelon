@@ -4,7 +4,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { InventoryCutoverPreflightError, InventoryCutoverPreflightService } from "../../application/inventory-cutover-preflight.service";
 import { PostgresInventoryCutoverPreflightRepository } from "../../infrastructure/inventory-cutover-preflight.repository";
 import { WmsCutoverDemandCaptureError } from "../../../wms/cutover-and-dispatch.api";
-import { InventoryCutoverEncumbranceCaptureError } from "../../../inventory/infrastructure/inventory-cutover-encumbrance.repository";
+import { InventoryCutoverEncumbranceCaptureError } from "../../../inventory/inventory-cutover-encumbrance.repository.api";
 
 export function registerInventoryCutoverPreflightRoutes(
   app: Express,

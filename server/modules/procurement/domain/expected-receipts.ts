@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { costInteger } from "../../inventory/infrastructure/cost-evidence-values";
-import { moneyToSafeNumber } from "../../inventory/domain/lot-cost";
+import { costInteger } from "../../inventory/cost-evidence-values.api";
+import { moneyToSafeNumber } from "../../inventory/lot-cost.api";
 
 const lineSchema = z
   .object({

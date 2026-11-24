@@ -1,15 +1,15 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import pg from "pg";
-import { purchaseInventorySnapshotQuery } from "../../purchase-inventory-snapshot.query";
+import { purchaseInventorySnapshotQuery } from "../../infrastructure/purchase-inventory-snapshot.query";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPurchaseForecastBacktestingRepository } from "../../purchase-forecast-backtesting.repository";
-import { buildPurchaseForecastEvaluation } from "../../purchase-forecast-backtesting.domain";
-import { buildPurchasingForecastPolicyCohort } from "../../purchasing-forecast-policy";
+import { createPurchaseForecastBacktestingRepository } from "../../infrastructure/purchase-forecast-backtesting.repository";
+import { buildPurchaseForecastEvaluation } from "../../domain/purchase-forecast-backtesting.domain";
+import { buildPurchasingForecastPolicyCohort } from "../../application/purchasing-forecast-policy";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { defaultPurchasePlanningPolicy } from "@shared/procurement/purchase-planning-policy";
-import { PurchasePlanningPolicyRepository } from "../../purchase-planning-policy.repository";
-import { PurchasePlanningPolicyService } from "../../purchase-planning-policy.service";
+import { PurchasePlanningPolicyRepository } from "../../infrastructure/purchase-planning-policy.repository";
+import { PurchasePlanningPolicyService } from "../../application/purchase-planning-policy.service";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;

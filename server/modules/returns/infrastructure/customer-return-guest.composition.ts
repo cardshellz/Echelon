@@ -24,7 +24,7 @@ export async function createCustomerReturnGuestService(config: ReturnCustomerAut
   const secret = z.string().min(32).max(1024).safeParse(process.env.CUSTOMER_RETURN_GUEST_SECRET);
   if (!secret.success || secret.data === config.storageSecret || Object.values(config.shops).some(shop => shop.shopifySecret === secret.data))
     throw new CustomerReturnCustomerAccessError("RETURN_GUEST_CONFIGURATION_REQUIRED", "Guest returns are not available yet. Please sign in or contact us.", 503);
-  const [{ pool, db }, { ChannelIdentityService }] = await Promise.all([import("../../../db"), import("../../channels/channel-identity.service")]);
+  const [{ pool, db }, { ChannelIdentityService }] = await Promise.all([import("../../../db"), import("../../channels/channel-identity.service.api")]);
   const identity = new ChannelIdentityService(db);
   return new CustomerReturnGuestService({ secret: secret.data, store: new PostgresCustomerReturnGuestStore(pool, secret.data), now: () => new Date(), randomId: randomUUID,
     purchases: new ShopifyGuestReturnPurchaseGateway({ database: pool, connection: channel => identity.shopifyConnection(channel), request: fetch,

@@ -8,7 +8,7 @@ import {
   historicalShipStationProviderObservationHash,
   HistoricalShipStationContentsRecoveryError,
   type HistoricalShipStationExpectedContentsEvidence,
-} from "../../historical-shipstation-contents-recovery.domain";
+} from "../../domain/historical-shipstation-contents-recovery.domain";
 
 const expected: HistoricalShipStationExpectedContentsEvidence = Object.freeze({
   kind: "available",

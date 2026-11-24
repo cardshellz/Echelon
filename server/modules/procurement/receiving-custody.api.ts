@@ -4,4 +4,4 @@
 export {
   lockReceivingCustodyFence,
   readUnresolvedReceivingCustody,
-} from "./receiving-custody-public";
+} from "./application/receiving-custody-public";

@@ -1,0 +1,353 @@
+import { lockInventoryCostGraph } from "../../inventory/cost-evidence.repository.api";
+import { isActiveRfqReservation, rfqPendingSourcingPieces } from "../domain/rfq-sourcing-reservation";
+import { z } from "zod";
+import { loadPendingPurchaseSourcingReservations } from "./rfq-sourcing-reservation.repository";
+import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { allocateDocumentNumber } from "../../../platform/document-numbering/document-number.repository";
+import { documentNumberPrefix } from "../../../platform/document-numbering/document-number";
+import {
+  autoDraftRuns,
+  poEvents,
+  poStatusHistory,
+  productVariants,
+  products,
+  purchaseOrderLines,
+  purchaseOrders,
+  purchasingRecommendationDecisions,
+  purchasingRecommendationPoHandoffs,
+  vendorProducts,
+  vendors,
+} from "@shared/schema";
+import { db as defaultDatabase } from "../../../db";
+import type {
+  CreatedRecommendationPurchaseOrder,
+  CreatedRecommendationPurchaseOrderLine,
+  NewRecommendationDecisionRecord,
+  NewRecommendationPoHandoffRecord,
+  NewRecommendationPurchaseOrder,
+  NewRecommendationPurchaseOrderLine,
+  PendingSourcingReservation,
+  RecommendationDecisionRecord,
+  RecommendationAutoDraftRunRecord,
+  RecommendationKind,
+  RecommendationPoHandoffRecord,
+  RecommendationPoHandoffRepository,
+  RecommendationPoHandoffUnitOfWork,
+  RecommendationProductRecord,
+  RecommendationProductVariantRecord,
+  RecommendationVendorProductRecord,
+  RecommendationVendorRecord,
+} from "../application/recommendation-po-handoff.service";
+
+type Database = Pick<typeof defaultDatabase, "transaction">;
+type Transaction = Parameters<Parameters<typeof defaultDatabase.transaction>[0]>[0];
+
+const RECOMMENDATION_LOCK_PREFIX = "procurement:purchasing-recommendation:";
+
+function uniquePositiveIds(ids: readonly number[]): number[] {
+  return [...new Set(ids)]
+    .filter((id) => Number.isSafeInteger(id) && id > 0)
+    .sort((left, right) => left - right);
+}
+
+function uniqueNonEmptyStrings(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
+  return {
+    async lockRecommendationKeys(keys) {
+      for (const key of [...new Set(keys)].sort()) {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${`${RECOMMENDATION_LOCK_PREFIX}${key}`}, 0::bigint)
+          )
+        `);
+      }
+    },
+
+    async getTransactionClock() {
+      const result = await tx.execute(sql`
+        SELECT transaction_timestamp() AS now, current_date::text AS current_date
+      `);
+      const row = result.rows[0] as { now?: Date | string; current_date?: string } | undefined;
+      const value = row?.now;
+      const timestamp = value instanceof Date ? value : new Date(String(value ?? ""));
+      if (Number.isNaN(timestamp.getTime())) {
+        throw new Error("Database transaction timestamp is unavailable");
+      }
+      const date = String(row?.current_date ?? "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new Error("Database transaction date is unavailable");
+      }
+      return { timestamp, date };
+    },
+
+    async getAutoDraftRunForUpdate(id) {
+      const [run] = await tx
+        .select({
+          id: autoDraftRuns.id,
+          runAt: autoDraftRuns.runAt,
+          status: autoDraftRuns.status,
+          triggeredBy: autoDraftRuns.triggeredBy,
+          triggeredByUser: autoDraftRuns.triggeredByUser,
+        })
+        .from(autoDraftRuns)
+        .where(eq(autoDraftRuns.id, id))
+        .for("update")
+        .limit(1);
+      return (run ?? null) as RecommendationAutoDraftRunRecord | null;
+    },
+
+    async completeAutoDraftRun(id, values) {
+      const [updated] = await tx
+        .update(autoDraftRuns)
+        .set(values)
+        .where(and(eq(autoDraftRuns.id, id), eq(autoDraftRuns.status, "running")))
+        .returning({ id: autoDraftRuns.id });
+      return Boolean(updated);
+    },
+
+    async getDecisionsForUpdate(ids) {
+      const safeIds = uniquePositiveIds(ids);
+      if (safeIds.length === 0) return [];
+      return await tx
+        .select()
+        .from(purchasingRecommendationDecisions)
+        .where(inArray(purchasingRecommendationDecisions.id, safeIds))
+        .for("update") as RecommendationDecisionRecord[];
+    },
+
+    async getLatestActiveDecisions(keys) {
+      if (keys.length === 0) return [];
+      const keyConditions = keys.map((key) => and(
+        eq(purchasingRecommendationDecisions.recommendationId, key.recommendationId),
+        eq(purchasingRecommendationDecisions.kind, key.kind),
+      ));
+      const matchingKeys = or(...keyConditions);
+      if (!matchingKeys) return [];
+      return await tx
+        .select()
+        .from(purchasingRecommendationDecisions)
+        .where(and(
+          eq(purchasingRecommendationDecisions.status, "active"),
+          matchingKeys,
+        ))
+        .orderBy(
+          desc(purchasingRecommendationDecisions.decidedAt),
+          desc(purchasingRecommendationDecisions.id),
+        ) as RecommendationDecisionRecord[];
+    },
+
+    async getLatestActiveDecisionsByRecommendationIds(recommendationIds) {
+      const safeIds = uniqueNonEmptyStrings(recommendationIds);
+      if (safeIds.length === 0) return [];
+      return await tx
+        .select()
+        .from(purchasingRecommendationDecisions)
+        .where(and(
+          eq(purchasingRecommendationDecisions.status, "active"),
+          inArray(purchasingRecommendationDecisions.recommendationId, safeIds),
+        ))
+        .orderBy(
+          desc(purchasingRecommendationDecisions.decidedAt),
+          desc(purchasingRecommendationDecisions.id),
+        ) as RecommendationDecisionRecord[];
+    },
+
+    async lockAndLoadPendingSourcingReservations(productIds) {
+      const ids = uniquePositiveIds(productIds);
+      if (ids.length === 0) return [];
+      // Product base demand is shared by receive configurations and lookback
+      // windows. Use the same product lock as RFQ allocation, after graph lock.
+      await tx.select({ id: products.id }).from(products).where(inArray(products.id, ids)).orderBy(products.id).for("update");
+      const pending = await loadPendingPurchaseSourcingReservations(tx, ids);
+      const result: PendingSourcingReservation[] = pending.map(({ productId, pieces, purchaseOrderId }) => ({ productId, pieces, purchaseOrderId, rfqId: null }));
+      // Converted lines are already represented by their PO above, or by the
+      // planning engine's committed supply. Never reserve both the RFQ and PO.
+      const requests = await tx.execute(sql`SELECT q.id AS rfq_id, q.status AS rfq_status, line.status, line.requested_pieces, recommendation.product_id
+        FROM procurement.request_for_quote_lines line
+        JOIN procurement.request_for_quotes q ON q.id = line.rfq_id
+        JOIN procurement.purchase_recommendation_lines recommendation ON recommendation.id = line.recommendation_line_id
+        WHERE recommendation.product_id = ANY(${sql.param(ids)}::integer[])
+          AND NOT EXISTS (SELECT 1 FROM procurement.rfq_purchase_order_line_links link WHERE link.rfq_line_id = line.id)`);
+      for (const row of requests.rows) {
+        const productId = z.number().int().positive().safe().parse(Number(row.product_id));
+        const rfqId = z.number().int().positive().safe().parse(Number(row.rfq_id));
+        const pieces = rfqPendingSourcingPieces(Number(row.requested_pieces), null, isActiveRfqReservation(String(row.rfq_status), String(row.status)));
+        if (pieces > 0) result.push({ productId, pieces, purchaseOrderId: null, rfqId });
+      }
+      return result;
+    },
+
+    async getHandoffsByAcceptedDecisionIds(ids) {
+      const safeIds = uniquePositiveIds(ids);
+      if (safeIds.length === 0) return [];
+      return await tx
+        .select()
+        .from(purchasingRecommendationPoHandoffs)
+        .where(inArray(purchasingRecommendationPoHandoffs.acceptedDecisionId, safeIds)) as RecommendationPoHandoffRecord[];
+    },
+
+    async getVendorProducts(ids) {
+      const safeIds = uniquePositiveIds(ids);
+      if (safeIds.length === 0) return [];
+      const rows = await tx
+        .select({
+          id: vendorProducts.id,
+          vendorId: vendorProducts.vendorId,
+          productId: vendorProducts.productId,
+          productVariantId: vendorProducts.productVariantId,
+          vendorSku: vendorProducts.vendorSku,
+          unitCostCents: vendorProducts.unitCostCents,
+          unitCostMills: vendorProducts.unitCostMills,
+          pricingBasis: vendorProducts.pricingBasis,
+          purchaseUom: vendorProducts.purchaseUom,
+          quotedUnitCostMills: vendorProducts.quotedUnitCostMills,
+          piecesPerPurchaseUom: vendorProducts.piecesPerPurchaseUom,
+          moq: vendorProducts.moq,
+          quoteReference: vendorProducts.quoteReference,
+          quotedAt: vendorProducts.quotedAt,
+          quotedAtDate: sql<string | null>`${vendorProducts.quotedAt}::date::text`,
+          quoteValidUntil: vendorProducts.quoteValidUntil,
+          updatedAt: vendorProducts.updatedAt,
+          isPreferred: vendorProducts.isPreferred,
+          isActive: vendorProducts.isActive,
+        })
+        .from(vendorProducts)
+        .where(inArray(vendorProducts.id, safeIds))
+        .orderBy(vendorProducts.id)
+        .for("share") as RecommendationVendorProductRecord[];
+      const sourcing = await loadSupplierSourcingRecords(tx, safeIds);
+      return rows.map((row) => ({ ...row, sourcing: sourcing.get(row.id) ?? null }));
+    },
+
+    async getVendors(ids) {
+      const safeIds = uniquePositiveIds(ids);
+      if (safeIds.length === 0) return [];
+      return await tx
+        .select({
+          id: vendors.id,
+          active: vendors.active,
+          currency: vendors.currency,
+          minimumOrderCents: vendors.minimumOrderCents,
+          freeFreightThresholdCents: vendors.freeFreightThresholdCents,
+          paymentTermsDays: vendors.paymentTermsDays,
+          paymentTermsType: vendors.paymentTermsType,
+          shipFromAddress: vendors.shipFromAddress,
+          defaultIncoterms: vendors.defaultIncoterms,
+        })
+        .from(vendors)
+        .where(inArray(vendors.id, safeIds))
+        .orderBy(vendors.id)
+        .for("share") as RecommendationVendorRecord[];
+    },
+
+    async getProducts(ids) {
+      const safeIds = uniquePositiveIds(ids);
+      if (safeIds.length === 0) return [];
+      return await tx
+        .select({
+          id: products.id,
+          sku: products.sku,
+          name: products.name,
+          status: products.status,
+          isActive: products.isActive,
+        })
+        .from(products)
+        .where(inArray(products.id, safeIds))
+        .orderBy(products.id)
+        .for("share") as RecommendationProductRecord[];
+    },
+
+    async getProductVariants(ids) {
+      const safeIds = uniquePositiveIds(ids);
+      if (safeIds.length === 0) return [];
+      return await tx
+        .select({
+          id: productVariants.id,
+          productId: productVariants.productId,
+          sku: productVariants.sku,
+          name: productVariants.name,
+          unitsPerVariant: productVariants.unitsPerVariant,
+          isActive: productVariants.isActive,
+        })
+        .from(productVariants)
+        .where(inArray(productVariants.id, safeIds))
+        .orderBy(productVariants.id)
+        .for("share") as RecommendationProductVariantRecord[];
+    },
+
+    async createPurchaseOrder(values, numberDate) {
+      // The repository transaction already holds the cost graph lock. Allocate
+      // through the same authority as manual/RFQ POs and retain its lock until
+      // this header and the rest of the handoff commit together.
+      const poNumber = await allocateDocumentNumber(tx, {
+        kind: "purchase_order",
+        prefix: documentNumberPrefix("PO", numberDate, "utc"),
+      });
+      const [created] = await tx.insert(purchaseOrders).values({ ...values, poNumber }).returning();
+      if (!created) throw new Error("Purchase order insert returned no row");
+      return created as CreatedRecommendationPurchaseOrder;
+    },
+
+    async createPurchaseOrderLine(values) {
+      const [created] = await tx
+        .insert(purchaseOrderLines)
+        .values({ ...values, receiptCostingEnabled: 1 })
+        .returning();
+      if (!created) throw new Error("Purchase order line insert returned no row");
+      return created as CreatedRecommendationPurchaseOrderLine;
+    },
+
+    async createStatusHistory(values) {
+      await tx.insert(poStatusHistory).values(values);
+    },
+
+    async createPoEvent(values) {
+      await tx.insert(poEvents).values(values);
+    },
+
+    async createDecision(values) {
+      const [created] = await tx
+        .insert(purchasingRecommendationDecisions)
+        .values(values)
+        .returning();
+      if (!created) throw new Error("Purchasing recommendation decision insert returned no row");
+      return created as RecommendationDecisionRecord;
+    },
+
+    async createHandoff(values) {
+      const [created] = await tx
+        .insert(purchasingRecommendationPoHandoffs)
+        .values(values)
+        .returning();
+      if (!created) throw new Error("Purchasing recommendation PO handoff insert returned no row");
+      return created as RecommendationPoHandoffRecord;
+    },
+  };
+}
+
+export function createDrizzleRecommendationPoHandoffRepository(
+  database: Database = defaultDatabase,
+): RecommendationPoHandoffRepository {
+  return {
+    transaction<T>(work: (unitOfWork: RecommendationPoHandoffUnitOfWork) => Promise<T>): Promise<T> {
+      return database.transaction(async (tx) => {
+        await lockInventoryCostGraph(tx);
+        return work(createUnitOfWork(tx as Transaction));
+      });
+    },
+  };
+}
+
+export const recommendationPoHandoffRepository = createDrizzleRecommendationPoHandoffRepository();
+
+export type {
+  NewRecommendationDecisionRecord,
+  NewRecommendationPoHandoffRecord,
+  NewRecommendationPurchaseOrder,
+  NewRecommendationPurchaseOrderLine,
+  RecommendationKind,
+};

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { admitEbayPublication } from "../../ebay-publication-admission.service";
-import { storedEbayListingSyncJobSchema, EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { admitEbayPublication } from "../../application/ebay-publication-admission.service";
+import { storedEbayListingSyncJobSchema, EbayListingSyncError } from "../../domain/ebay-listing-sync.domain";
 
 const input = {productId:232,actor:"operator",commandKey:"18000000-0000-4000-8000-000000000001"};
 function fixture() {

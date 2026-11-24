@@ -22,12 +22,12 @@ import {
   type ValidatedChannelCancelEvent,
   type ValidatedChannelOrder,
   type ValidatedChannelRefundEvent,
-} from "../../channels/channel-adapter.interface";
+} from "../../channels/channel-adapter.interface.api";
 import { deriveShopifyRefundFinancialStatus } from "../domain/shopify-refund-financial-status";
-import type { LineItemData, ShopifyOrderData } from "../oms.service";
-import { normalizeShopifyCustomerId } from "../shopify-customer-identity";
-import { normalizeShopifyLineItems } from "../shopify-line-item-normalizer";
-import { extractRefundLineAdjustments } from "../shopify-refund-cascade.service";
+import type { LineItemData, ShopifyOrderData } from "../application/oms.service";
+import { normalizeShopifyCustomerId } from "../application/shopify-customer-identity";
+import { normalizeShopifyLineItems } from "../application/shopify-line-item-normalizer";
+import { extractRefundLineAdjustments } from "../application/shopify-refund-cascade.service";
 
 const RISK_LEVEL_SEVERITY: Record<string, number> = {
   low: 0,

@@ -6,9 +6,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
 import { PgCatalogVariantPublicationPhotoReader, readPublicCatalogImage } from "../../../catalog/infrastructure/catalog-publication-images.reader";
-import { ChannelEbayListingPhotoResolver } from "../../ebay-listing-photos.service";
-import { buildEbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
-import { readEbayListingPhotoReadiness } from "../../ebay-listing-photo-readiness";
+import { ChannelEbayListingPhotoResolver } from "../../application/ebay-listing-photos.service";
+import { buildEbayListingPhotoPlan } from "../../domain/ebay-listing-photos.domain";
+import { readEbayListingPhotoReadiness } from "../../application/ebay-listing-photo-readiness";
 import { EbayMarketplaceListingConnector, type EbayListingConnectorDraft, type EbayListingLifecycleClient } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayInventoryItem, EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
 

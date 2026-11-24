@@ -1,6 +1,6 @@
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
 import type { ListingPresence } from "@shared/types/channel-listing-presence";
-import type { ListingSetupIntent } from "../../inventory-planning/application/listing-setup-intent";
+import type { ListingSetupIntent } from "../../inventory-planning/listing-setup-intent.api";
 import type {
   ListingLifecycleView,
   ListingLifecycleCommand,

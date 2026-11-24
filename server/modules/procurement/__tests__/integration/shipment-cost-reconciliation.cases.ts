@@ -3,26 +3,26 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type pg from "pg";
 import { it, expect } from "vitest";
-import type { AmendmentDatabase, AmendmentTransaction } from "../../po-quantity-amendment.repository";
+import type { AmendmentDatabase, AmendmentTransaction } from "../../infrastructure/po-quantity-amendment.repository";
 import {
   createShipmentCostReconciliationService,
   shipmentReconciliationScope,
-} from "../../shipment-cost-reconciliation.service";
+} from "../../application/shipment-cost-reconciliation.service";
 import { costFingerprint, recordReceiptCostOrigin } from "../../../inventory/infrastructure/cost-evidence.repository";
-import { readPurchaseCostApplications } from "../../purchase-cost-application-read.repository";
-import { projectPurchaseCostApplications } from "../../purchase-cost-application-read.service";
-import type { Transaction } from "../../purchase-workspace-read";
-import { readShipmentCostReview } from "../../shipment-cost-review.repository";
+import { readPurchaseCostApplications } from "../../infrastructure/purchase-cost-application-read.repository";
+import { projectPurchaseCostApplications } from "../../application/purchase-cost-application-read.service";
+import type { Transaction } from "../../application/purchase-workspace-read";
+import { readShipmentCostReview } from "../../infrastructure/shipment-cost-review.repository";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
-import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
+import { readPoShipmentCosts } from "../../infrastructure/po-shipment-cost-summary.repository";
 import { inventoryCostReportEventSchema } from "@shared/procurement/cost-report-delivery";
 import { reconciliationPreview, reconciliationResultSchema, type ReconciliationRequest } from "@shared/procurement/cost-reconciliation";
 import { readUnallocatedLotCosts } from "../../../inventory/infrastructure/cost-quantity.repository";
-import { prepareShipmentCostRevisions, recordShipmentCostRevisions } from "../../shipment-cost-application.service";
-import { recordCostRevision } from "../../cost-source-revision.repository";
+import { prepareShipmentCostRevisions, recordShipmentCostRevisions } from "../../application/shipment-cost-application.service";
+import { recordCostRevision } from "../../infrastructure/cost-source-revision.repository";
 import { readReconciliationLedger, readReconciliationRecords, visitShipmentReconciliationEvidence,
   type ShipmentReconciliationReadRequest } from "../../../inventory/infrastructure/cost-reconciliation.repository";
-import { readShipmentExceptionFacts } from "../../shipment-cost-exception.repository";
+import { readShipmentExceptionFacts } from "../../infrastructure/shipment-cost-exception.repository";
 import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 
 /** Runs inside the real receiving/AP/freight fixture with synthetic records. */

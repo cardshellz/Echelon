@@ -75,7 +75,7 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
       expect(wmsOrderMutationsSrc).toContain("inArray(orders.warehouseStatus, legalStates)");
       expect(wmsOrderMutationsSrc).toContain('notInArray(orders.warehouseStatus, ["shipped", "cancelled"])');
 
-      const channelsRoutesSrc = readRepoFile("server/modules/channels/channels.routes.ts");
+      const channelsRoutesSrc = readRepoFile("server/modules/channels/interfaces/http/channels.routes.ts");
       const putStart = channelsRoutesSrc.indexOf('app.put("/api/wms/orders/:id"');
       const putBlock = channelsRoutesSrc.slice(putStart, putStart + 800);
       expect(putBlock).toContain('order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled"');

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ChannelCatalogService } from "../../channel-catalog.service";
+import { ChannelCatalogService } from "../../application/channel-catalog.service";
 import { WalmartCatalogAdapter } from "../../adapters/walmart/walmart-catalog.adapter";
 import { WalmartUsApi } from "../../adapters/walmart/walmart-us-api";
 

@@ -19,8 +19,8 @@ import {
   type ListingReview,
   type ListingTaxonomy,
 } from "@shared/types/channel-listing-publication";
-import type { ChannelCatalogService } from "../../channels/channel-catalog.service";
-import { ChannelProviderError } from "../../channels/channel-provider.error";
+import type { ChannelCatalogService } from "../../channels/channel-catalog.service.api";
+import { ChannelProviderError } from "../../channels/channel-provider.error.api";
 import type {
   ListingPublicationProvider,
   PreparedListingItem,
@@ -28,7 +28,7 @@ import type {
 import { ListingSubmissionError } from "./listing-publication-provider.port";
 import type { ListingPublicationStore } from "./listing-publication-store.port";
 import type { ListingUpdateStore } from "./listing-update-ports";
-import type { ListingSetupIntent } from "../../inventory-planning/application/listing-setup-intent";
+import type { ListingSetupIntent } from "../../inventory-planning/listing-setup-intent.api";
 import {
   ListingPublicationError,
   listingAccountKey,

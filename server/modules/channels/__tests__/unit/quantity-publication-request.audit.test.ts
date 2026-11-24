@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { executeAdmittedEbayQuantityRequest, type EbayQuantityHttpRequest, type EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import { executeAdmittedEbayQuantityRequest, type EbayQuantityHttpRequest, type EbayQuantityRequestAdmission } from "../../application/quantity-publication-request";
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 
 function fixture(options: { quantities?: ReadonlyMap<string, number> | null; blocked?: boolean;

@@ -29,9 +29,9 @@ vi.mock("../../infrastructure/ebay-listing-client", () => ({
 vi.mock("../../infrastructure/ebay-listing-helpers", () => ({ determineVariationAspectName: () => "Pack Size", resolveChannelPriceResolution: fixture.prices }));
 // The full writer, catalog adapter and saved-publication gate are exercised in
 // ebay-business-policies.integration and ebay-policy-publication.integration.
-vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: { resolveProductPolicies: fixture.policies } }));
-vi.mock("../../ebay-listing-draft", () => ({ buildEbayRouteListingDraft: fixture.build }));
-vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: fixture.identity }));
+vi.mock("../../application/ebay-business-policies", () => ({ ebayBusinessPolicies: { resolveProductPolicies: fixture.policies } }));
+vi.mock("../../application/ebay-listing-draft", () => ({ buildEbayRouteListingDraft: fixture.build }));
+vi.mock("../../ebay-listing-sync.api", () => ({ readExistingEbayListingIdentityForProduct: fixture.identity }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", () => ({ createEbayMarketplaceRegistrationAdapters: () => ({ observer: {}, inspector: { inspectExistingPublication: fixture.inspect } }) }));
 vi.mock("../../infrastructure/ebay-channel-listing-sync", () => ({ syncChannelListings: fixture.sync }));
 vi.mock("../../infrastructure/ebay-active-listing-sync", () => ({ ebayListingSyncService: fixture.jobs }));
@@ -44,8 +44,8 @@ vi.mock("../../listing-connectors/ebay-listing.connector", async importOriginal 
 }));
 
 import { ebayListingPushService, prepareEbayPublicationCompletion, readEbayPublicationSource } from "../../infrastructure/ebay-listing-push";
-import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
-import { assertEbayPreparedIntent } from "../../ebay-prepared-intent";
+import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../domain/ebay-listing-sync.domain";
+import { assertEbayPreparedIntent } from "../../application/ebay-prepared-intent";
 
 describe("eBay publication application composition", () => {
   beforeEach(() => {

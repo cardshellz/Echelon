@@ -1,10 +1,10 @@
 import { vi } from "vitest";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
-import { EbayPublicationCompletionExecution, type PreparedEbayPublication } from "../../ebay-publication-completion.service";
+import { EbayPublicationCompletionExecution, type PreparedEbayPublication } from "../../application/ebay-publication-completion.service";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
-import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
-import type { EbayListingExecutionContext } from "../../ebay-listing-sync.service";
-import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.domain";
+import type { EbayListingSyncIdentity } from "../../domain/ebay-listing-sync.domain";
+import type { EbayListingExecutionContext } from "../../application/ebay-listing-sync.service";
+import { resolveEbayPublicationTarget } from "../../domain/ebay-publication-completion.domain";
 import { syncIdentity, syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 
 export async function publicationCompletionFixture(automaticRecovery?: ConstructorParameters<typeof EbayPublicationCompletionExecution>[4], options: { missing?: boolean; source?: EbayListingSyncIdentity } = {}) {

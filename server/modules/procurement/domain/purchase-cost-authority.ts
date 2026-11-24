@@ -4,7 +4,7 @@ import {
   type PurchaseCostAmount, type PurchaseCostAuthority, type PurchaseCostAuthorityInput, type PurchaseCostInvoice,
 } from "@shared/procurement/purchase-cost-authority";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
-import { costFingerprint } from "../../inventory/domain/cost-fingerprint";
+import { costFingerprint } from "../../inventory/cost-fingerprint.api";
 import { exactAuthorityMoney, projectAuthorityAmount, PurchaseCostAuthorityError, sumAuthorityAmounts } from "./purchase-cost-authority-money";
 
 const key = (row: { reference: { documentId: number; lineId: number } }): string => `${row.reference.documentId}:${row.reference.lineId}`;

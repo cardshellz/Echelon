@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { resolveRecoveredShipNotifyNoMatchExceptions } from "../../ship-notify-reconciliation.service";
+import { resolveRecoveredShipNotifyNoMatchExceptions } from "../../application/ship-notify-reconciliation.service";
 
 function queryText(query: any): string {
   return (query?.queryChunks ?? [])

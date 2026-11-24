@@ -23,7 +23,7 @@ const ACCEPTANCE_REPOSITORY_SRC = readSource(
   "../../infrastructure/dropship-order-acceptance.repository.ts",
 );
 const OMS_DROPSHIP_ORDER_COMMAND_SRC = readSource(
-  "../../../oms/dropship-order-command.ts",
+  "../../../oms/application/dropship-order-command.ts",
 );
 
 describe("PgDropshipOrderAcceptanceRepository", () => {

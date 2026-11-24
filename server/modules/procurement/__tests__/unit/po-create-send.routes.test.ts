@@ -1,6 +1,6 @@
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 // Planning endpoints have their own route suite; this fixture registers only the owner under test.
-vi.mock("../../purchase-planning-policy.routes", () => ({ registerPurchasePlanningPolicyRoutes: vi.fn() }));
+vi.mock("../../interfaces/http/purchase-planning-policy.routes", () => ({ registerPurchasePlanningPolicyRoutes: vi.fn() }));
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -41,15 +41,15 @@ vi.mock("../../../../modules/catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
-vi.mock("../../procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
-vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
+vi.mock("../../infrastructure/procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
+vi.mock("../../application/ap-ledger.service", () => ({}));
+vi.mock("../../application/po-document", () => ({ renderPoHtml: vi.fn() }));
 vi.mock("../../../notifications/email-delivery.api", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 const settingsCommandMocks = vi.hoisted(() => ({ update: vi.fn() }));
-vi.mock("../../procurement-settings.commands", async importOriginal => ({
-  ...await importOriginal<typeof import("../../procurement-settings.commands")>(),
+vi.mock("../../application/procurement-settings.commands", async importOriginal => ({
+  ...await importOriginal<typeof import("../../application/procurement-settings.commands")>(),
   procurementSettingsCommands: settingsCommandMocks,
 }));
 
@@ -58,7 +58,7 @@ const poEmailOutboxMocks = vi.hoisted(() => ({
   list: vi.fn(),
   replay: vi.fn(),
 }));
-vi.mock("../../po-email-outbox.service", () => ({
+vi.mock("../../application/po-email-outbox.service", () => ({
   enqueuePurchaseOrderEmail: poEmailOutboxMocks.enqueue,
   listPurchaseOrderEmailDeliveries: poEmailOutboxMocks.list,
   replayDeadLetterPurchaseOrderEmail: poEmailOutboxMocks.replay,
@@ -74,17 +74,17 @@ vi.mock("../../po-email-outbox.service", () => ({
 }));
 
 const entryCommandMocks = vi.hoisted(() => ({ execute: vi.fn(), factory: vi.fn() }));
-vi.mock("../../purchase-order-entry.commands", async original => ({
-  ...await original<typeof import("../../purchase-order-entry.commands")>(),
+vi.mock("../../application/purchase-order-entry.commands", async original => ({
+  ...await original<typeof import("../../application/purchase-order-entry.commands")>(),
   createPurchaseOrderEntryCommands: (owner: unknown) => {
     entryCommandMocks.factory(owner);
     return { execute: entryCommandMocks.execute };
   },
 }));
-import { hashPurchaseOrderEntryCommandIdentity, purchaseOrderEntryCommandScope, PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL } from "../../purchase-order-entry.commands";
+import { hashPurchaseOrderEntryCommandIdentity, purchaseOrderEntryCommandScope, PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL } from "../../application/purchase-order-entry.commands";
 
 // Now import the router registrar after mocks are in place.
-import { registerPurchasingRoutes } from "../../procurement.routes";
+import { registerPurchasingRoutes } from "../../interfaces/http/procurement.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 
 function buildPurchasingMock(overrides: Record<string, any> = {}) {

@@ -83,12 +83,12 @@ describe("inventory availability Phase 2 shadow evidence contract", () => {
     const operationalConsumers = [
       "server/modules/inventory/application/atp.service.ts",
       "server/modules/inventory/application/recipe-capacity.service.ts",
-      "server/modules/channels/reservation.service.ts",
-      "server/modules/channels/allocation-engine.service.ts",
-      "server/modules/channels/sync.service.ts",
-      "server/modules/channels/variant-availability-sync.service.ts",
+      "server/modules/channels/application/reservation.service.ts",
+      "server/modules/channels/application/allocation-engine.service.ts",
+      "server/modules/channels/application/sync.service.ts",
+      "server/modules/channels/application/variant-availability-sync.service.ts",
       "server/modules/dropship/infrastructure/dropship-atp.provider.ts",
-      "server/modules/oms/ebay-order-ingestion.ts",
+      "server/modules/oms/application/ebay-order-ingestion.ts",
       "server/routes/shopify.routes.ts",
       "server/routes/ebay/ebay-listings.routes.ts",
     ];

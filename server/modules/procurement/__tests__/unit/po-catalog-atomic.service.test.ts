@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const procurementDir = join(process.cwd(), "server", "modules", "procurement");
 const purchasingSubDir = join(procurementDir, "purchasing");
 const source = [
-  readFileSync(join(procurementDir, "purchasing.service.ts"), "utf8"),
+  readFileSync(join(procurementDir, "application/purchasing.service.ts"), "utf8"),
   ...(existsSync(purchasingSubDir)
     ? readdirSync(purchasingSubDir)
         .filter((name) => name.endsWith(".ts"))

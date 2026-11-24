@@ -5,8 +5,8 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { listRequestForQuotes } from "../../purchasing-rfq.service";
-import type { RfqWorkListDatabase } from "../../rfq-work-list.repository";
+import { listRequestForQuotes } from "../../application/purchasing-rfq.service";
+import type { RfqWorkListDatabase } from "../../infrastructure/rfq-work-list.repository";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;

@@ -4,7 +4,7 @@ import {
   ShopifyInventoryWriteRejectedError,
   shopifyInventoryWriteRejectionCode,
 } from "../../adapters/shopify-inventory-write.error";
-import { ChannelInventoryPublicationTransportAdapter } from "../../channel-inventory-publication-transport.adapter";
+import { ChannelInventoryPublicationTransportAdapter } from "../../infrastructure/channel-inventory-publication-transport.adapter";
 import { InventoryPublicationTransportError } from "../../../inventory-planning/application/inventory-publication-transport";
 import { createAdmittedQuantityTestOwner } from "../fixtures/quantity-publication-admission";
 

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as waitForRetry } from "node:timers/promises";
 import { expect, it } from "vitest";
 import { previewSupplierReturnStock } from "../../../inventory/application/supplier-return-stock";
-import { createSupplierReturnCommands, SUPPLIER_RETURN_COMMAND_SCOPE } from "../../supplier-return.commands";
+import { createSupplierReturnCommands, SUPPLIER_RETURN_COMMAND_SCOPE } from "../../application/supplier-return.commands";
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";

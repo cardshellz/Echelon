@@ -5,8 +5,8 @@ import {
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { cutoverReceiptSchemaFixtureSql } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-receipt-schema.fixture";
-import { readOmsCutoverReconstruction } from "../../inventory-cutover-reconstruction.reader";
-import { deriveOmsLineAuthority } from "../../oms-line-authority";
+import { readOmsCutoverReconstruction } from "../../infrastructure/inventory-cutover-reconstruction.reader";
+import { deriveOmsLineAuthority } from "../../application/oms-line-authority";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";

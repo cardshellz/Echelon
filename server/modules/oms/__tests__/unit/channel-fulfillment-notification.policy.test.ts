@@ -4,7 +4,7 @@ import {
   CHANNEL_FULFILLMENT_REPAIR_SOURCES,
   resolveNewChannelFulfillmentNotifyCustomer,
   resolvePersistedChannelFulfillmentNotifyCustomer,
-} from "../../channel-fulfillment-notification.policy";
+} from "../../domain/channel-fulfillment-notification.policy";
 
 const repairSources = [
   ...Object.values(CHANNEL_FULFILLMENT_REPAIR_SOURCES),

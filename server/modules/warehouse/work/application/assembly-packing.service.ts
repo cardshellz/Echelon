@@ -3,8 +3,8 @@ import { assemblyPackingCommandSchema, assemblyPackingReceiptSchema, assemblyPac
 import { workEvidenceIdSchema } from "@shared/warehouse-assembly-work";
 import { lockPackingReadiness, packingReadinessBlockers, recordAssemblyPackingReady } from "../../../wms/assembly-and-packing.api";
 import { lockPackingReplenishmentBlockers } from "../../../inventory/work-execution.api";
-import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
-import { lockAssemblyPackingPickEvidence } from "../../../inventory-planning/application/assembly-packing-claim-reader";
+import { lockAssemblyClaimForWork } from "../../../inventory-planning/assembly-work-claim-access.api";
+import { lockAssemblyPackingPickEvidence } from "../../../inventory-planning/assembly-packing-claim-reader.api";
 import { requireAssemblyScope } from "../domain/assembly-work";
 import { WarehouseWorkError } from "../domain/work-configuration";
 import { AssemblyPackingRepository } from "../infrastructure/assembly-packing.repository";

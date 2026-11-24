@@ -1,4 +1,4 @@
-import type { InventoryAvailabilityTransactionQueryClient } from "../../inventory-planning/application/inventory-availability-transaction-query.port";
+import type { InventoryAvailabilityTransactionQueryClient } from "../../inventory-planning/inventory-availability-transaction-query.port.api";
 import type { WarehouseSourceActivationEvidence } from "@shared/types/warehouse-source-activation";
 import { warehouseSourceActivationEvidenceSchema } from "@shared/types/warehouse-source-activation";
 import { canonicalJson } from "@shared/utils/canonical-json";

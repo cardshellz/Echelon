@@ -1,18 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ChannelFulfillmentProviderError } from "../../../channels/channel-fulfillment-provider.error";
-import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../../channel-fulfillment-notification.policy";
+import { ChannelFulfillmentProviderError } from "../../../channels/domain/channel-fulfillment-provider.error";
+import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../../domain/channel-fulfillment-notification.policy";
 
 import type {
   ChannelFulfillmentAuthorityRepository,
   ClaimedChannelFulfillmentCommand,
-} from "../../channel-fulfillment-authority.repository";
+} from "../../infrastructure/channel-fulfillment-authority.repository";
 import {
   calculateChannelFulfillmentRetryAt,
   createChannelFulfillmentAuthorityService,
   createCompatibilityChannelFulfillmentProviderExecutor,
-} from "../../channel-fulfillment-authority.service";
+} from "../../application/channel-fulfillment-authority.service";
 
 function command(overrides: Partial<ClaimedChannelFulfillmentCommand> = {}): ClaimedChannelFulfillmentCommand {
   return {
@@ -263,7 +263,7 @@ describe("channel fulfillment authority service", () => {
 
   it("derives OMS order authority from exact OMS-line lineage, not a legacy aggregate cast", () => {
     const repositorySource = readFileSync(
-      resolve(__dirname, "../../channel-fulfillment-authority.repository.ts"),
+      resolve(__dirname, "../../infrastructure/channel-fulfillment-authority.repository.ts"),
       "utf8",
     );
 
@@ -274,7 +274,7 @@ describe("channel fulfillment authority service", () => {
 
   it("locks fulfillment plan lines before aggregating shipped quantity", () => {
     const repositorySource = readFileSync(
-      resolve(__dirname, "../../channel-fulfillment-authority.repository.ts"),
+      resolve(__dirname, "../../infrastructure/channel-fulfillment-authority.repository.ts"),
       "utf8",
     );
     const recalculateSource = repositorySource.match(
@@ -296,7 +296,7 @@ describe("channel fulfillment authority service", () => {
 
   it("excludes suppressed providers before evaluating channel writeback policy", () => {
     const repositorySource = readFileSync(
-      resolve(__dirname, "../../channel-fulfillment-authority.repository.ts"),
+      resolve(__dirname, "../../infrastructure/channel-fulfillment-authority.repository.ts"),
       "utf8",
     );
     const materializationSource = repositorySource.match(

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { WmsShipmentPrerequisiteError, WmsSyncService } from "../../wms-sync.service";
-import type { ReconcileOrderDemandCommand } from "../../../channels/reservation.service";
+import { WmsShipmentPrerequisiteError, WmsSyncService } from "../../application/wms-sync.service";
+import type { ReconcileOrderDemandCommand } from "../../../channels/application/reservation.service";
 
 // 2026-10-08, #63964: three lines were authorized after the order's first
 // claim. reserveOrder refused the changed demand (ACTIVE_CLAIM_REPLACEMENT_REQUIRED),

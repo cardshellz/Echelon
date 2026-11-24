@@ -3,7 +3,7 @@ import {
   applyPricingRule,
   parseDollarPriceToCents,
   resolveChannelListingPrice,
-} from "../../channel-pricing-resolver";
+} from "../../application/channel-pricing-resolver";
 
 function createMockDb(responses: unknown[][]) {
   const pending = [...responses];

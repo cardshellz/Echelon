@@ -4,7 +4,7 @@ import { warehouseStorage } from "../..";
 import { inventoryStorage } from "../../../inventory";
 const storage = { ...warehouseStorage, ...inventoryStorage };
 import { requirePermission, requireAuth } from "../../../../routes/middleware";
-import { sendInventoryQuantityError } from "../../../inventory/interfaces/quantity-command.middleware";
+import { sendInventoryQuantityError } from "../../../inventory/quantity-command.middleware.api";
 
 export function registerSettingsRoutes(app: Express) {
   // ============================================

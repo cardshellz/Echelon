@@ -10,7 +10,7 @@ import { createSharedProductPhotoImporter } from "../../application/shared-produ
 import { PgCatalogVariantPublicationPhotoReader, readPublicCatalogImage, readCatalogPublicationImages, resolveCatalogPublicationPhotos } from "../../infrastructure/catalog-publication-images.reader";
 import { createCatalogPublicImageUrl } from "../../domain/catalog-public-image";
 import { pinCatalogPublicationMediaVersions } from "../../domain/catalog-publication-media-versions";
-import { ChannelEbayListingPhotoResolver } from "../../../channels/ebay-listing-photos.service";
+import { ChannelEbayListingPhotoResolver } from "../../../channels/application/ebay-listing-photos.service";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 
 vi.mock("../../../../db", () => ({ db: {} }));

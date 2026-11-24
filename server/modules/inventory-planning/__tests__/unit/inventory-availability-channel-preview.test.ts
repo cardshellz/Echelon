@@ -4,7 +4,7 @@ import type { PlannerShadowRunDto } from "@shared/types/inventory-availability-p
 import type {
   ProductAllocationResult,
   VariantChannelAllocation,
-} from "../../../channels/allocation-engine.service";
+} from "../../../channels/application/allocation-engine.service";
 import {
   inventoryAvailabilityChannelPreviewTestables,
 } from "../../infrastructure/inventory-availability-channel-preview.repository";

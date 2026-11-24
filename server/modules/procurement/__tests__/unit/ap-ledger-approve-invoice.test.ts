@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // These orchestration fixtures contain ordinary product/manual invoices. The real
 // source reader and rejection behavior are covered by shipment-billing-ownership.integration.test.ts.
-vi.mock("../../shipment-billing-ownership.repository", () => ({
+vi.mock("../../infrastructure/shipment-billing-ownership.repository", () => ({
   readInvoiceSourceCapabilities: vi.fn(async () => {
     const verified = { allowed: true, code: "AP_INVOICE_SOURCE_VERIFIED", reason: "Fixture has ordinary invoice source ownership." };
     return { purchaseOrderLinks: verified, approval: verified, payment: verified, freightSourceLineIds: [] };
@@ -90,9 +90,9 @@ vi.mock("drizzle-orm", () => ({
   like: vi.fn(),
 }));
 
-vi.mock("../../po-exceptions.service", () => mockDetectionHooks);
+vi.mock("../../application/po-exceptions.service", () => mockDetectionHooks);
 
-import { approveInvoice } from "../../ap-ledger.service";
+import { approveInvoice } from "../../application/ap-ledger.service";
 
 describe("approveInvoice", () => {
   beforeEach(() => {

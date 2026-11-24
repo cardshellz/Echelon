@@ -1,8 +1,8 @@
 import type { InventoryEbayPublicationReadinessInput } from "@shared/types/ebay-publication-readiness";
 import { pool } from "../../../db";
 import { ensureEbayPublicationReady, InventoryPublicationMembershipError, InventoryPublicationSelectionError } from "../../inventory-planning/quantity-publication.api";
-import { EbayListingSyncError } from "../ebay-listing-sync.domain";
-import type { VerifiedEbayListingPreparation } from "../ebay-listing-preparation-scope";
+import { EbayListingSyncError } from "../domain/ebay-listing-sync.domain";
+import type { VerifiedEbayListingPreparation } from "../application/ebay-listing-preparation-scope";
 
 /** Publishing and maintenance share one stock preparation owner. The caller
  * supplies the identity verified against eBay and the durable job's actor/key. */

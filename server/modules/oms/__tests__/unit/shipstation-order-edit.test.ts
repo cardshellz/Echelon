@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
-import { createShipStationService } from "../../shipstation.service";
+import { createShipStationService } from "../../application/shipstation.service";
 
 const OPERATION = "00000000-0000-4000-8000-000000000001";
 const dialect = new PgDialect();

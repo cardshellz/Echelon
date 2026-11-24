@@ -10,7 +10,7 @@ import {
   type HistoricalSplitRepairFlags,
   type HistoricalSplitRepairPackagePlan,
   type HistoricalSplitRetryCandidate,
-} from "../../historical-shipstation-split-repair.service";
+} from "../../application/historical-shipstation-split-repair.service";
 
 function providerShipment(overrides: Record<string, unknown> = {}): any {
   return {

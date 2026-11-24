@@ -12,12 +12,12 @@ import {
 import type { PlannerShadowRunDto } from "@shared/types/inventory-availability-planner";
 
 import { db } from "../../../db";
-import { isAllocationEngineError } from "../../channels/allocation-engine.errors";
+import { isAllocationEngineError } from "../../channels/allocation-engine.errors.api";
 import {
   createAllocationEngine,
   type ProductAllocationResult,
   type VariantChannelAllocation,
-} from "../../channels/allocation-engine.service";
+} from "../../channels/allocation-engine.service.api";
 import type {
   InventoryAvailabilityChannelPreviewStore,
 } from "../application/inventory-availability-backfill.service";

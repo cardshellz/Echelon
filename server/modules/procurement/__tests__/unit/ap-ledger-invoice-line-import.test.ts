@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // These orchestration fixtures contain ordinary product/manual invoices. The real
 // source reader and rejection behavior are covered by shipment-billing-ownership.integration.test.ts.
-vi.mock("../../shipment-billing-ownership.repository", () => ({
+vi.mock("../../infrastructure/shipment-billing-ownership.repository", () => ({
   readInvoiceSourceCapabilities: vi.fn(async () => {
     const verified = { allowed: true, code: "AP_INVOICE_SOURCE_VERIFIED", reason: "Fixture has ordinary invoice source ownership." };
     return { purchaseOrderLinks: verified, approval: verified, payment: verified, freightSourceLineIds: [] };
@@ -70,7 +70,7 @@ const mocks = vi.hoisted(() => ({
   invoiceTotalCents: 0,
 }));
 
-vi.mock("../../po-financial-evidence.repository", () => ({
+vi.mock("../../infrastructure/po-financial-evidence.repository", () => ({
   readPoFinancialEvidenceSourcesWithClient: vi.fn(async () => new Map([[7, {
     purchaseOrderId: 7, vendorId: 4, currency: "USD", invoices: [{ id: 55, vendorId: 4, currency: "USD", status: "received",
       invoicedAmountCents: mocks.invoiceTotalCents, paidAmountCents: 0, balanceCents: mocks.invoiceTotalCents,
@@ -89,7 +89,7 @@ vi.mock("@shared/schema", () => ({
   vendors: {},
 }));
 vi.mock("@shared/schema/procurement.schema", () => ({}));
-vi.mock("../../po-exceptions.service", () => ({
+vi.mock("../../application/po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
   detectFinancialExceptions: mocks.detectFinancialExceptions,
 }));
@@ -195,7 +195,7 @@ describe("AP ledger invoice line imports", () => {
       { id: 202, purchaseOrderLineId: 102 },
     );
 
-    const { importLinesFromPO } = await import("../../ap-ledger.service");
+    const { importLinesFromPO } = await import("../../application/ap-ledger.service");
     const lines = await importLinesFromPO(55, 7, "ops-user");
 
     expect(lines).toEqual([{ id: 202, purchaseOrderLineId: 102 }]);
@@ -226,7 +226,7 @@ describe("AP ledger invoice line imports", () => {
       { id: 301, purchaseOrderLineId: 201 },
     );
 
-    const { importLinesFromPO } = await import("../../ap-ledger.service");
+    const { importLinesFromPO } = await import("../../application/ap-ledger.service");
     const lines = await importLinesFromPO(55, 7, "ops-user");
 
     expect(lines).toEqual([{ id: 301, purchaseOrderLineId: 201 }]);
@@ -265,7 +265,7 @@ describe("AP ledger invoice line imports", () => {
       { id: 303, purchaseOrderLineId: 203 },
     );
 
-    const { importLinesFromPO } = await import("../../ap-ledger.service");
+    const { importLinesFromPO } = await import("../../application/ap-ledger.service");
     await importLinesFromPO(55, 7, "ops-user");
 
     const lineInsertIndex = mocks.db.insert.mock.calls.findIndex(
@@ -299,7 +299,7 @@ describe("AP ledger invoice line imports", () => {
       { id: 302, purchaseOrderLineId: 202 },
     );
 
-    const { importLinesFromPO } = await import("../../ap-ledger.service");
+    const { importLinesFromPO } = await import("../../application/ap-ledger.service");
     await importLinesFromPO(55, 7, "ops-user");
 
     const lineInsertIndex = mocks.db.insert.mock.calls.findIndex(

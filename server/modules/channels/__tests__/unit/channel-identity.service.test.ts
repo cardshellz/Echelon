@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("../../../../infrastructure/auditLogger", () => ({ persistAuditEvent: vi.fn().mockResolvedValue(undefined) }));
 import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
-import { ChannelIdentityService } from "../../channel-identity.service";
+import { ChannelIdentityService } from "../../application/channel-identity.service";
 import { ShopifyIdentityReader } from "../../adapters/shopify-identity.reader";
 
 const account = { id: 7, channelId: 2, shopDomain: "second.myshopify.com", accessToken: "test", apiVersion: "2024-01", shopifyLocationId: "20" };

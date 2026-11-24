@@ -1,11 +1,11 @@
 import { PgDialect } from "drizzle-orm/pg-core";
-import { resolveReceiptCostEvidence } from "../../receipt-cost-evidence.service";
-vi.mock("../../receipt-cost-evidence.service", () => ({ resolveReceiptCostEvidence: vi.fn() }));
+import { resolveReceiptCostEvidence } from "../../application/receipt-cost-evidence.service";
+vi.mock("../../application/receipt-cost-evidence.service", () => ({ resolveReceiptCostEvidence: vi.fn() }));
 import { describe, it, expect, vi } from "vitest";
 import {
   ReceivingService,
   __testing__,
-} from "../../receiving.service";
+} from "../../application/receiving.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests for the mills (4-decimal per-unit cost) contract on

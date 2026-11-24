@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { PoQuantityAmendmentPreview } from "@shared/procurement/po-quantity-amendment";
-import { buildPoAmendmentImpact } from "../../po-amendment-impact.policy";
-import type { PoAmendmentDependencies } from "../../po-amendment-dependencies.repository";
+import { buildPoAmendmentImpact } from "../../domain/po-amendment-impact.policy";
+import type { PoAmendmentDependencies } from "../../infrastructure/po-amendment-dependencies.repository";
 import {
   planPurchaseOrderQuantityExceptions,
   quantityVarianceLineLabel,
-} from "../../purchase-order-quantity-exceptions.policy";
+} from "../../domain/purchase-order-quantity-exceptions.policy";
 
 const line = {
   id: 11,

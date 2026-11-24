@@ -2,9 +2,9 @@ import { z } from "zod";
 import { assertShipmentNotRetiredPg } from "../../inventory-planning/cutover-retired-work.api";
 import { WMS_WAREHOUSE_STATUS_VALUES } from "@shared/enums/order-status";
 import { canonicalClaimDispatchCommandSchema, canonicalClaimDispatchEvidenceSchema, type CanonicalClaimDispatchEvidence } from "@shared/types/inventory-availability-dispatch";
-import type { CanonicalClaimDispatchSourceOwner } from "../../inventory-planning/application/inventory-availability-dispatch.port";
-import type { CanonicalClaimDispatchSourcePreparationOwner, CanonicalClaimDispatchPreparedSource } from "../../inventory-planning/application/inventory-availability-dispatch-source-command.port";
-import { canonicalClaimDispatchSourceRequestSchema } from "../../inventory-planning/domain/inventory-availability-dispatch-source-command";
+import type { CanonicalClaimDispatchSourceOwner } from "../../inventory-planning/inventory-availability-dispatch.port.api";
+import type { CanonicalClaimDispatchSourcePreparationOwner, CanonicalClaimDispatchPreparedSource } from "../../inventory-planning/inventory-availability-dispatch-source-command.port.api";
+import { canonicalClaimDispatchSourceRequestSchema } from "../../inventory-planning/inventory-availability-dispatch-source-command.api";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const bigintId = z.string().regex(/^[1-9][0-9]{0,18}$/);

@@ -1,5 +1,5 @@
 import type { db as applicationDb } from "../db";
-import type { ChannelFulfillmentProviderClients } from "../modules/channels/channel-fulfillment-provider-clients.service";
+import type { ChannelFulfillmentProviderClients } from "../modules/channels/application/channel-fulfillment-provider-clients.service";
 import {
   createChannelFulfillmentAuthorityRepository,
   createChannelFulfillmentProjector,

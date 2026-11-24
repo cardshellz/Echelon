@@ -2,8 +2,8 @@ import { fixedImageInspector } from "../../../catalog/__tests__/fixtures/catalog
 import type { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCatalogPublicImageUrl } from "../../../catalog/domain/catalog-public-image";
-import { ChannelEbayListingPhotoResolver } from "../../ebay-listing-photos.service";
-import { buildEbayListingPhotoPlan, ebayListingImagesFromUrls, EbayListingPhotoError } from "../../ebay-listing-photos.domain";
+import { ChannelEbayListingPhotoResolver } from "../../application/ebay-listing-photos.service";
+import { buildEbayListingPhotoPlan, ebayListingImagesFromUrls, EbayListingPhotoError } from "../../domain/ebay-listing-photos.domain";
 import { readExistingEbayListingPhotos } from "../../adapters/ebay/ebay-listing-photos.reader";
 import { EbayApiRequestError, isMissingEbayInventoryResource } from "../../adapters/ebay/ebay-api-error";
 import { EbayApiClient } from "../../adapters/ebay/ebay-api.client";

@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { z } from "zod";
-import type { QuantityPublicationCatchup } from "../../inventory-planning/application/quantity-publication-admission.port";
-import { quantityPublicationScopeSchema, QuantityPublicationAdmissionError, type QuantityPublicationScope } from "../../inventory-planning/domain/quantity-publication-admission";
+import type { QuantityPublicationCatchup } from "../../inventory-planning/quantity-publication-admission.port.api";
+import { quantityPublicationScopeSchema, QuantityPublicationAdmissionError, type QuantityPublicationScope } from "../../inventory-planning/quantity-publication-admission-domain.api";
 import type { DropshipListingPreviewService } from "../application/dropship-listing-preview-service";
 import type { DropshipListingPushWorkerService } from "../application/dropship-listing-push-worker-service";
 import type { DropshipListingPushOpsService } from "../application/dropship-listing-push-ops-service";

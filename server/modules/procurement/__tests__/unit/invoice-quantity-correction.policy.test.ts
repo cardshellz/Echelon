@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { invoiceAmountPerPiece, invoiceQuantityApprovalRequestSchema, invoiceQuantityPreviewRequestSchema } from "@shared/procurement/invoice-quantity-correction";
-import { invoiceQuantityContext, planInvoiceQuantityCorrection, assertInvoiceQuantityAuthority } from "../../invoice-quantity-correction.policy";
-import type { InvoiceCorrectionFacts } from "../../invoice-quantity-correction.policy";
-import type { AmendmentFacts } from "../../po-quantity-amendment.policy";
+import { invoiceQuantityContext, planInvoiceQuantityCorrection, assertInvoiceQuantityAuthority } from "../../domain/invoice-quantity-correction.policy";
+import type { InvoiceCorrectionFacts } from "../../domain/invoice-quantity-correction.policy";
+import type { AmendmentFacts } from "../../domain/po-quantity-amendment.policy";
 import type { PurchaseApprovalActor } from "../../../identity/domain/purchase-approval-authority";
 
 const version = "a".repeat(64);

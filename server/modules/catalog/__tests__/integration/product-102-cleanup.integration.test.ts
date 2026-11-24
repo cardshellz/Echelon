@@ -7,8 +7,8 @@ import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { createPurchaseForecastBacktestingRepository } from "../../../procurement/purchase-forecast-backtesting.repository";
-import { correctProduct102PurchasingIdentity } from "../../../procurement/product-102-identity-cleanup.repository";
+import { createPurchaseForecastBacktestingRepository } from "../../../procurement/infrastructure/purchase-forecast-backtesting.repository";
+import { correctProduct102PurchasingIdentity } from "../../../procurement/infrastructure/product-102-identity-cleanup.repository";
 import { correctProduct102CountIdentity } from "../../../inventory/infrastructure/product-102-count-identity.repository";
 import {
   Product102CleanupService,

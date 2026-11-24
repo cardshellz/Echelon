@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const WMS_SYNC_SRC = readFileSync(
-  fileURLToPath(new URL("../../wms-sync.service.ts", import.meta.url)),
+  fileURLToPath(new URL("../../application/wms-sync.service.ts", import.meta.url)),
   "utf8",
 );
 const CREATE_SHIPMENT_SRC = readFileSync(
@@ -25,7 +25,7 @@ const CREATE_SHIPMENT_SRC = readFileSync(
 );
 const RESERVATION_SRC = readFileSync(
   fileURLToPath(
-    new URL("../../../channels/reservation.service.ts", import.meta.url),
+    new URL("../../../channels/application/reservation.service.ts", import.meta.url),
   ),
   "utf8",
 );
@@ -287,7 +287,7 @@ describe("createShipmentForOrder :: useXactLock option", () => {
 
 // ─── Behavioral: ReservationService dbOverride ──────────────────────
 
-import { createReservationService } from "../../../channels/reservation.service";
+import { createReservationService } from "../../../channels/application/reservation.service";
 
 describe("ReservationService :: dbOverride threading", () => {
   function makeServiceWithSpies() {

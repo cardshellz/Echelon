@@ -5,8 +5,8 @@ import { receivingEntryCommandResultSchema } from "@shared/procurement/receiving
 import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import type { QuantityLedgerTestContext } from "../../../inventory/__tests__/fixtures/quantity-ledger-database";
-import { createReceivingEntryCommands, hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../receiving-entry.commands";
-import type { ReceivingService } from "../../receiving.service";
+import { createReceivingEntryCommands, hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../application/receiving-entry.commands";
+import type { ReceivingService } from "../../application/receiving.service";
 
 /** Registered by the existing active-ledger receipt suite: all owners, authority,
  * command storage, row locks, stock journals and audit writes use PostgreSQL. */

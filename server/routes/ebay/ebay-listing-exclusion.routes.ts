@@ -2,7 +2,7 @@ import type { Router, Request, Response } from "express";
 import { z } from "zod";
 import { requireAuth, requirePermission } from "../middleware";
 import { ebayProductExclusionRequestSchema, ebayProductExclusionResultSchema } from "@shared/types/ebay-listing-exclusion";
-import type { EbayListingExclusionService } from "../../modules/channels/ebay-listing-exclusion";
+import type { EbayListingExclusionService } from "../../modules/channels/ebay-listing-exclusion.api";
 import { listingFailure, listingFailureStatus } from "./ebay-listing-errors";
 
 const productIdSchema = z.coerce.number().int().positive().max(2_147_483_647);

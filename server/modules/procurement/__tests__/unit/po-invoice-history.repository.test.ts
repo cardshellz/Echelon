@@ -1,7 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
-import { hasPoInvoiceHistory, readPoInvoiceHistory } from "../../po-invoice-history.repository";
+import { hasPoInvoiceHistory, readPoInvoiceHistory } from "../../infrastructure/po-invoice-history.repository";
 
 describe("locked PO invoice relationship evidence", () => {
   it.each([

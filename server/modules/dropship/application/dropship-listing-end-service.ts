@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { EbayListingInspection } from "../../marketplace-listings/domain/ebay-listing-inspection";
+import type { EbayListingInspection } from "../../marketplace-listings/ebay-listing-inspection.api";
 import {
   decideDueRowAction,
   decideGlobalBreaker,

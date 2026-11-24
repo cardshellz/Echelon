@@ -1,6 +1,6 @@
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 // Planning endpoints have their own route suite; this fixture registers only the owner under test.
-vi.mock("../../purchase-planning-policy.routes", () => ({ registerPurchasePlanningPolicyRoutes: vi.fn() }));
+vi.mock("../../interfaces/http/purchase-planning-policy.routes", () => ({ registerPurchasePlanningPolicyRoutes: vi.fn() }));
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -10,8 +10,8 @@ import { AddressInfo } from "net";
 // Quantity evidence is covered by the source-capacity domain tests. HTTP
 // forwards the shared projection, including separate unknown/review rows.
 const capacityRead = vi.hoisted(() => ({ get: vi.fn() }));
-vi.mock("../../shipment-source-capacity", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../shipment-source-capacity")>(),
+vi.mock("../../application/shipment-source-capacity", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../application/shipment-source-capacity")>(),
   getShippablePurchaseOrderLines: capacityRead.get,
 }));
 
@@ -39,13 +39,13 @@ vi.mock("../../../../modules/catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
-vi.mock("../../procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
-vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
+vi.mock("../../infrastructure/procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
+vi.mock("../../application/ap-ledger.service", () => ({}));
+vi.mock("../../application/po-document", () => ({ renderPoHtml: vi.fn() }));
 vi.mock("../../../notifications/email-delivery.api", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
-import { registerPurchasingRoutes } from "../../procurement.routes";
+import { registerPurchasingRoutes } from "../../interfaces/http/procurement.routes";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

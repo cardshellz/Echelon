@@ -17,7 +17,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { ShippingEngine } from "../engine";
+import type { ShippingEngine } from "../domain/engine";
 import { normalizeShipStationV1Date } from "@shared/utils/shipstation-date";
 import type {
   EnginePushResult,
@@ -32,7 +32,7 @@ import type {
   CanonicalShipmentEvent,
   EngineRefResolutionMetrics,
   OrderEditShipmentSyncInput,
-} from "../types";
+} from "../domain/types";
 import {
   mapShipStationShipmentToCanonicalEvent,
   normalizeShipStationWebhookPayload,

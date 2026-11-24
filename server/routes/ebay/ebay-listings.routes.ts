@@ -1,9 +1,9 @@
 import { ChannelReadCoordinator } from "../../modules/marketplace-listings/application/channel-read-coordinator";
 import { channelListingInventorySchema } from "@shared/types/channel-listing-inventory";
 import { EbayListingFeedReader } from "../../modules/channels/infrastructure/ebay-listing-feed.reader";
-import { ebayListingPushRequestSchema, ebayListingPushService } from "../../modules/channels/ebay-listing-push";
+import { ebayListingPushRequestSchema, ebayListingPushService } from "../../modules/channels/ebay-listing-push.api";
 import { PostgresEbayListingRecoveryContinuation } from "../../modules/channels/infrastructure/ebay-listing-recovery-continuation";
-import { ebayListingSyncRepository, syncActiveListings } from "../../modules/channels/ebay-listing-sync";
+import { ebayListingSyncRepository, syncActiveListings } from "../../modules/channels/ebay-listing-sync.api";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -13,24 +13,24 @@ import { createStaffStreamObserver } from "../../modules/identity";
 import { getAuthService, getChannelConnection, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { resolveChannelPrice } from "../../modules/channels/infrastructure/ebay-listing-helpers";
 import { createCatalogPublicImageUrl } from "../../modules/catalog/domain/catalog-public-image";
-import { readEbayListingPhotoReadiness } from "../../modules/channels/ebay-listing-photo-readiness";
+import { readEbayListingPhotoReadiness } from "../../modules/channels/application/ebay-listing-photo-readiness";
 import {
   EbayMarketplaceListingConnector,
 } from "../../modules/channels/listing-connectors/ebay-listing.connector";
-import { ebayListingSyncService } from '../../modules/channels/ebay-listing-sync';
-import { EbayListingRecoveryService } from '../../modules/channels/ebay-listing-sync';
+import { ebayListingSyncService } from '../../modules/channels/ebay-listing-sync.api';
+import { EbayListingRecoveryService } from '../../modules/channels/ebay-listing-sync.api';
 import { EbayPublicationRecoveryService, PostgresEbayPublicationRecoveryRepository } from '../../modules/inventory-planning/quantity-publication.api';
 import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
-import { EbayListingFeedInventoryService } from '../../modules/channels/ebay-listing-feed-inventory';
+import { EbayListingFeedInventoryService } from '../../modules/channels/ebay-listing-feed-inventory.api';
 import { listingFailure, listingFailureStatus } from './ebay-listing-errors';
 import { registerEbayListingRecoveryRoutes } from './ebay-listing-recovery.routes';
 import { registerEbayListingMappingRoutes } from './ebay-listing-mapping.routes';
-import { ebayListingMappingService } from '../../modules/channels/ebay-listing-mapping';
+import { ebayListingMappingService } from '../../modules/channels/ebay-listing-mapping.api';
 import { registerEbayPublicationStockRoutes } from './ebay-publication-stock.routes';
-import { ebayPublicationStockService } from '../../modules/channels/ebay-publication-stock';
-import { readEbayPushRecoveryIdentity } from '../../modules/channels/ebay-listing-push';
+import { ebayPublicationStockService } from '../../modules/channels/ebay-publication-stock.api';
+import { readEbayPushRecoveryIdentity } from '../../modules/channels/ebay-listing-push.api';
 import { ebayListingSyncJobSchema } from '@shared/types/ebay-listing-sync';
-import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
+import { queueVariantAvailabilityRepair } from "../../modules/channels/application/variant-availability-sync.service";
 import {
   createEbayRouteListingClient,
 } from "./ebay-listing-connector-client";

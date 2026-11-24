@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type {
   PackageAllocationDiscoveryExecutionAuditReport,
-} from "../../../modules/shipping/package-allocation-authority-discovery-execution-audit.repository";
+} from "../../../modules/shipping/infrastructure/package-allocation-authority-discovery-execution-audit.repository";
 import {
   PackageAllocationDiscoveryExecutionAuditJobError,
   assertPackageAllocationDiscoveryExecutionAuditEnabled,

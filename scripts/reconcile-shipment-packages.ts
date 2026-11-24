@@ -1,6 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import type { PackageReconciliationRequest } from "../server/modules/oms/package-reconciliation.service";
+import type { PackageReconciliationRequest } from "../server/modules/oms/application/package-reconciliation.service";
 
 export function parsePackageReconciliationFlags(args: readonly string[]) {
   const values = new Map<string,string>();let execute=false;
@@ -30,8 +30,8 @@ export async function runPackageReconciliationCli(args:readonly string[]) {
   // Load application composition only after validating the explicit scope.
   const [{db,pool},{createChannelFulfillmentProviderClients},{ChannelIdentityService},{channels},
     {eq},{createPackageReconciliationService}]=await Promise.all([
-      import('../server/db'),import('../server/modules/channels/channel-fulfillment-provider-clients.service'),
-      import('../server/modules/channels/channel-identity.service'),import('../shared/schema'),import('drizzle-orm'),import('../server/services/package-reconciliation'),
+      import('../server/db'),import('../server/modules/channels/application/channel-fulfillment-provider-clients.service'),
+      import('../server/modules/channels/application/channel-identity.service'),import('../shared/schema'),import('drizzle-orm'),import('../server/services/package-reconciliation'),
     ]);
   try{
     const clients=createChannelFulfillmentProviderClients({channels:{async getChannelById(id){return(await db.select().from(channels).where(eq(channels.id,id)).limit(1))[0]??null;}},

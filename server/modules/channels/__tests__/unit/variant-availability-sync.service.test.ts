@@ -11,15 +11,15 @@ const repository = vi.hoisted(() => ({
   supersedeAvailabilityClaim: vi.fn(),
 }));
 
-vi.mock("../../variant-availability-sync.repository", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../variant-availability-sync.repository")>()),
+vi.mock("../../infrastructure/variant-availability-sync.repository", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infrastructure/variant-availability-sync.repository")>()),
   ...repository,
 }));
 
 import {
   createVariantAvailabilitySyncService,
   queueVariantAvailabilityRepair,
-} from "../../variant-availability-sync.service";
+} from "../../application/variant-availability-sync.service";
 
 const CLAIM = {
   channelId: 67,

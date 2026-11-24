@@ -19,7 +19,7 @@ import {
   channelStockUpdateDeadLetterDestinationCountSql,
   channelStockUpdateDeadLetterDestinationSampleSql,
 } from "../../channel-stock-update-dead-letters.api";
-import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/channel-inventory-publication-transport.adapter";
+import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/infrastructure/channel-inventory-publication-transport.adapter";
 import { ShopifyAdapter } from "../../../channels/adapters/shopify.adapter";
 
 // Channels PR1 (PLAN-CH-v3 section 6 "Outbox (PR1)" and Ops Health): end to end over the

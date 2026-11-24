@@ -4,11 +4,11 @@ import {
   assertEbayListingSourceIdentityUnchanged,
   resolveExistingEbayListingIdentity,
   type ExistingEbayListingIdentityRow,
-} from "../../ebay-existing-listing-identity";
-import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
+} from "../../application/ebay-existing-listing-identity";
+import type { EbayListingSyncIdentity } from "../../domain/ebay-listing-sync.domain";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 import type { EbayRegistrationReadRequest, EbayRegistrationReadResponse } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
-import { buildEbayRouteListingDraft } from "../../ebay-listing-draft";
+import { buildEbayRouteListingDraft } from "../../application/ebay-listing-draft";
 import { readExistingEbayListingPhotos } from "../../adapters/ebay/ebay-listing-photos.reader";
 
 const account = { channelId: 67, connectionId: 12, accountId: "seller-verified", marketplaceId: "EBAY_US" };

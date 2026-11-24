@@ -7,19 +7,19 @@ import {
   purchaseOrders as purchaseOrdersTable,
   vendorProducts as vendorProductsTable,
 } from "@shared/schema";
-import { purchaseApprovalLinesFingerprint } from "../purchase-approval-review";
+import { purchaseApprovalLinesFingerprint } from "../application/purchase-approval-review";
 import {
   assertUniqueHighestApprovalTier,
   PurchaseApprovalAuthorityError,
-} from "../purchase-order-approval.policy";
-import { PoLifecycleError } from "../purchase-order-lifecycle.service";
+} from "../domain/purchase-order-approval.policy";
+import { PoLifecycleError } from "../application/purchase-order-lifecycle.service";
 import {
   millisecondTransactionTimestamp,
   nextPurchaseOrderUpdatedAt,
   purchaseOrderUpdatedAtMatchesApplicationVersion,
-} from "../purchase-order-lifecycle-version";
-import { checkReceiveConfigurationReadyToLeaveDraft } from "../receive-configuration-policy";
-import { assessSupplierQuoteValidity } from "../supplier-quote-validity";
+} from "../application/purchase-order-lifecycle-version";
+import { checkReceiveConfigurationReadyToLeaveDraft } from "../application/receive-configuration-policy";
+import { assessSupplierQuoteValidity } from "../application/supplier-quote-validity";
 import type { PurchasingCosting } from "./purchasing-costing";
 import {
   isValidIsoDateOnly,

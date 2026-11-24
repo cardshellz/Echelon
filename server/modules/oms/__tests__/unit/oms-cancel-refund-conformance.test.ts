@@ -21,8 +21,8 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
   return source.slice(start, end);
 }
 
-const OMS_WEBHOOKS_SRC = readSource("../../oms-webhooks.ts");
-const SHOPIFY_REFUND_SRC = readSource("../../shopify-refund-cascade.service.ts");
+const OMS_WEBHOOKS_SRC = readSource("../../application/oms-webhooks.ts");
+const SHOPIFY_REFUND_SRC = readSource("../../application/shopify-refund-cascade.service.ts");
 const SHIPMENT_ROLLUP_SRC = readSource("../../../orders/application/shipment-rollup.ts");
 const WMS_SHIPMENT_ITEMS_REPO_SRC = readSource("../../../wms/infrastructure/outbound-shipment-items-mutations.repository.ts");
 const WMS_SHIPMENTS_REPO_SRC = readSource("../../../wms/infrastructure/outbound-shipments-mutations.repository.ts");

@@ -6,8 +6,8 @@ import express, {
 } from "express";
 import type {} from "../../../../platform/http/raw-body-request";
 import { logger } from "../../../../platform/observability/logger";
-import { isInventoryCutoverOpeningBulkJsonRequest } from "../../../inventory-planning/interfaces/http/inventory-cutover-opening-body.middleware";
-import { isDropshipBulkJsonRequest } from "../../../dropship/interfaces/http/dropship-bulk-json.middleware";
+import { isInventoryCutoverOpeningBulkJsonRequest } from "../../../inventory-planning/inventory-cutover-opening-body.middleware.api";
+import { isDropshipBulkJsonRequest } from "../../../dropship/dropship-bulk-json.middleware.api";
 
 const RATE_TABLE_ADMIN_BULK_POST_PATHS = new Set([
   "/api/shipping/admin/rate-tables/parse-csv",
