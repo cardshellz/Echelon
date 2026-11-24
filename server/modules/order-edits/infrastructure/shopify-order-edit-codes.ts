@@ -23,6 +23,7 @@ import {
   type OrderEditSnapshot,
 } from "../application/order-edit-provider";
 import type { OrderEditCodePricingLine } from "../domain/order-edit-code-pricing";
+import type { OrderEditCodeMinimum } from "../domain/order-edit-code-minimum";
 import type { OrderEditRewards } from "../application/order-edit-rewards";
 
 const money = z.object({ amount: z.string(), currencyCode: z.literal("USD") });
@@ -98,6 +99,66 @@ const lookupSchema = z.object({
     })
     .nullable(),
 });
+// The minimum purchase of a code that is already on the order. Deliberately
+// narrower than ORDER_EDIT_CODE_LOOKUP: that query proves a newly entered code
+// is one this editor can apply, and would reject a checkout code of any other
+// shape. Here only the minimum matters.
+export const ORDER_EDIT_CODE_MINIMUM_LOOKUP = `query EchelonEditCodeMinimum($code: String!) {
+  codeDiscountNodeByCode(code: $code) { id codeDiscount { __typename ... on DiscountCodeBasic {
+    minimumRequirement { __typename ... on DiscountMinimumSubtotal { greaterThanOrEqualToSubtotal { amount currencyCode } }
+      ... on DiscountMinimumQuantity { greaterThanOrEqualToQuantity } }
+  } } }
+}`;
+const minimumLookupSchema = z.object({
+  codeDiscountNodeByCode: z
+    .object({
+      id: z.string(),
+      codeDiscount: z.object({
+        __typename: z.string().min(1),
+        minimumRequirement: z
+          .union([
+            z.object({
+              __typename: z.literal("DiscountMinimumSubtotal"),
+              greaterThanOrEqualToSubtotal: money,
+            }),
+            z.object({
+              __typename: z.literal("DiscountMinimumQuantity"),
+              greaterThanOrEqualToQuantity: z.string().regex(/^\d{1,9}$/),
+            }),
+          ])
+          .nullable()
+          .optional(),
+      }),
+    })
+    .nullable(),
+});
+/**
+ * Returns null when the sales channel states no minimum purchase for the code:
+ * the code has none, it has been deleted since checkout, or it is a kind of
+ * discount that carries no minimum-purchase field (only basic codes do).
+ */
+export function readOrderEditCodeMinimum(
+  raw: unknown,
+): OrderEditCodeMinimum | null {
+  const result = minimumLookupSchema.safeParse(raw);
+  if (!result.success)
+    fail(
+      "ORDER_EDIT_CODE_MINIMUM_UNAVAILABLE",
+      "We could not check the terms of the discount code on this order. Your order has not changed. Please try again shortly.",
+    );
+  const minimum =
+    result.data.codeDiscountNodeByCode?.codeDiscount.minimumRequirement;
+  if (!minimum) return null;
+  return minimum.__typename === "DiscountMinimumSubtotal"
+    ? {
+        type: "subtotal",
+        amountCents: cents(minimum.greaterThanOrEqualToSubtotal.amount),
+      }
+    : {
+        type: "quantity",
+        quantity: Number(minimum.greaterThanOrEqualToQuantity),
+      };
+}
 const AUTOMATIC_RULES = `query EchelonEditCombinationRules {
   shopifyFunctions(first: 100) { nodes { id handle } pageInfo { hasNextPage } }
   discountNodes(first: 100, query: "method:automatic") { nodes { id discount { __typename
@@ -242,6 +303,23 @@ export class ShopifyOrderEditCodes {
       });
     }
     return verifiedRules;
+  }
+
+  /** Today's minimum purchase for each checkout code that has one. Reads only. */
+  async checkoutCodeMinimums(
+    codes: string[],
+  ): Promise<Array<{ code: string; minimum: OrderEditCodeMinimum }>> {
+    const minimums = await Promise.all(
+      codes.map(async (code) => ({
+        code,
+        minimum: readOrderEditCodeMinimum(
+          await this.request(ORDER_EDIT_CODE_MINIMUM_LOOKUP, { code }),
+        ),
+      })),
+    );
+    return minimums.flatMap(({ code, minimum }) =>
+      minimum ? [{ code, minimum }] : [],
+    );
   }
 
   private readRules(
