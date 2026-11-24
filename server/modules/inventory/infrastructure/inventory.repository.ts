@@ -598,14 +598,17 @@ export function createInventoryMethods(
     const txIds = results.map((r) => r.id);
     const creditedIds = new Set<number>();
     if (txIds.length > 0) {
-      const idSql = sql.join(txIds.map((id) => sql`${id}`), sql`, `);
-      const creditRows = await db.execute(sql`
-        SELECT transfer_transaction_id
-        FROM inventory.replen_transfer_credits
-        WHERE transfer_transaction_id IN (${idSql})
-      `);
-      for (const row of (creditRows.rows ?? []) as any[]) {
-        creditedIds.add(Number(row.transfer_transaction_id));
+      const regRes = await db.execute(sql`SELECT to_regclass('inventory.replen_transfer_credits') AS reg`);
+      if (regRes.rows?.[0]?.reg) {
+        const idSql = sql.join(txIds.map((id) => sql`${id}`), sql`, `);
+        const creditRows = await db.execute(sql`
+          SELECT transfer_transaction_id
+          FROM inventory.replen_transfer_credits
+          WHERE transfer_transaction_id IN (${idSql})
+        `);
+        for (const row of (creditRows.rows ?? []) as any[]) {
+          creditedIds.add(Number(row.transfer_transaction_id));
+        }
       }
     }
 
@@ -681,13 +684,16 @@ export function createInventoryMethods(
       throw new Error("A reverse transfer cannot itself be undone; create a new transfer instead");
     }
 
-    const credited = await tx.execute(sql`
-      SELECT 1 FROM inventory.replen_transfer_credits
-      WHERE transfer_transaction_id = ${transactionId}
-      LIMIT 1
-    `);
-    if ((credited.rows ?? []).length > 0) {
-      throw new Error("Transfers already credited to a replenishment task cannot be undone");
+    const creditReg = await tx.execute(sql`SELECT to_regclass('inventory.replen_transfer_credits') AS reg`);
+    if (creditReg.rows?.[0]?.reg) {
+      const credited = await tx.execute(sql`
+        SELECT 1 FROM inventory.replen_transfer_credits
+        WHERE transfer_transaction_id = ${transactionId}
+        LIMIT 1
+      `);
+      if ((credited.rows ?? []).length > 0) {
+        throw new Error("Transfers already credited to a replenishment task cannot be undone");
+      }
     }
 
     const alreadyUndone = await tx
