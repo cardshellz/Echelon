@@ -3,7 +3,8 @@ import { schedulerIsDisabled } from "../../../infrastructure/scheduler-config";
 import { InboundTrackingRepository } from "../infrastructure/inbound-tracking.repository";
 import { createInboundTrackingProviders } from "./inbound-tracking.providers";
 import { InboundTrackingService } from "./inbound-tracking.service";
-const logger = { info: (event: Record<string, unknown>) => console.info(JSON.stringify(event)), error: (event: Record<string, unknown>) => console.error(JSON.stringify(event)) };
+import { logger as platformLogger } from "../../../platform/observability/logger";
+const logger = { info: (event: Record<string, unknown>) => platformLogger.info("procurement.inbound_tracking_runtime", { detail: JSON.stringify(event) }), error: (event: Record<string, unknown>) => platformLogger.error("procurement.inbound_tracking_runtime", { error: JSON.stringify(event) }) };
 let service: InboundTrackingService | undefined;
 /** Reads and manual refresh must reflect the same emergency stops as polling. */
 export function inboundTrackingPollingEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {

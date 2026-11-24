@@ -15,6 +15,7 @@ import {
   registerCustomerReturnCustomerRoutes,
   type CustomerReturnCustomerRouteDependencies,
 } from "../../interfaces/http/customer-return-customer.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const NOW = new Date("2026-09-29T12:00:00.000Z");
 const SHOP = "returns-test.myshopify.com";
@@ -150,8 +151,8 @@ async function setup() {
     },
     download: vi.fn(),
   }));
-  const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-  const infoLog = vi.spyOn(console, "info").mockImplementation(() => {});
+  const errorLog = spyLoggerJson("error");
+  const infoLog = spyLoggerJson("info");
   const app = express();
   app.set("trust proxy", 1);
   app.use(express.json({ limit: "16kb" }));
@@ -687,12 +688,10 @@ describe("direct Shopify returns proof HTTP lifecycle", () => {
         message: "Returns are temporarily unavailable. Please try again.",
       },
     });
-    expect(s.errorLog).toHaveBeenCalledWith(
-      JSON.stringify({
-        event: "customer_return_request_failed",
-        code: "RETURN_CUSTOMER_UNAVAILABLE",
-      }),
-    );
+    expect(JSON.parse(s.errorLog.mock.calls[0][0])).toMatchObject({
+      event: "customer_return_request_failed",
+      code: "RETURN_CUSTOMER_UNAVAILABLE",
+    });
     expect(JSON.stringify(s.errorLog.mock.calls)).not.toContain(SHOPIFY_SECRET);
     expect(s.services).not.toHaveBeenCalled();
   });

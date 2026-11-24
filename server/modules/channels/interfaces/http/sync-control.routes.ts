@@ -19,6 +19,7 @@ import {
   InventoryPublicationGlobalControlService,
   PostgresInventoryPublicationGlobalControlStore,
 } from "../../../inventory-planning/publication-global-control.api";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerSyncControlRoutes(app: Express) {
   const manualSync = createManualSyncRunner();
@@ -37,7 +38,7 @@ export function registerSyncControlRoutes(app: Express) {
       const settings = await syncSettings.getGlobalSettings();
       res.json(settings);
     } catch (error: any) {
-      console.error("Error fetching sync settings:", error);
+      logger.error("channels.sync_control_routes", { message: "Error fetching sync settings:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch sync settings" });
     }
   });
@@ -67,7 +68,7 @@ export function registerSyncControlRoutes(app: Express) {
       void req.app.locals.inventoryPublicationSweepScheduler?.refresh?.();
       return res.json(updated);
     } catch (error: any) {
-      console.error("Error updating sync settings:", error);
+      logger.error("channels.sync_control_routes", { message: "Error updating sync settings:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error instanceof InventoryAvailabilityMasterDataError) {
         return res.status(error.status).json({
@@ -93,7 +94,7 @@ export function registerSyncControlRoutes(app: Express) {
       }
       res.json(config);
     } catch (error: any) {
-      console.error("Error fetching channel sync config:", error);
+      logger.error("channels.sync_control_routes", { message: "Error fetching channel sync config:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch channel sync config" });
     }
   });
@@ -119,7 +120,7 @@ export function registerSyncControlRoutes(app: Express) {
       const updated = await syncSettings.getChannelSyncConfig(channelId);
       res.json(updated);
     } catch (error: any) {
-      console.error("Error updating channel sync config:", error);
+      logger.error("channels.sync_control_routes", { message: "Error updating channel sync config:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update channel sync config" });
     }
@@ -147,7 +148,7 @@ export function registerSyncControlRoutes(app: Express) {
       );
       res.json({ warehouseId, feedEnabled });
     } catch (error: any) {
-      console.error("Error updating warehouse feed toggle:", error);
+      logger.error("channels.sync_control_routes", { message: "Error updating warehouse feed toggle:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update warehouse feed toggle" });
     }
@@ -175,7 +176,7 @@ export function registerSyncControlRoutes(app: Express) {
       const result = await syncSettings.getSyncLog(params);
       res.json(result);
     } catch (error: any) {
-      console.error("Error fetching sync log:", error);
+      logger.error("channels.sync_control_routes", { message: "Error fetching sync log:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch sync log" });
     }
   });
@@ -188,7 +189,7 @@ export function registerSyncControlRoutes(app: Express) {
       const summary = await syncSettings.getSyncLogSummary(hoursBack);
       res.json(summary);
     } catch (error: any) {
-      console.error("Error fetching sync log summary:", error);
+      logger.error("channels.sync_control_routes", { message: "Error fetching sync log summary:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch sync log summary" });
     }
   });
@@ -245,7 +246,7 @@ export function registerSyncControlRoutes(app: Express) {
         engineRefResolution: getEngineRefResolutionMetrics(),
       });
     } catch (error: any) {
-      console.error("Error fetching sync status:", error);
+      logger.error("channels.sync_control_routes", { message: "Error fetching sync status:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch sync status" });
     }
     },
@@ -284,7 +285,7 @@ export function registerSyncControlRoutes(app: Express) {
         status: manualSync.getStatus(),
       });
     } catch (error: any) {
-      console.error("Error triggering sync:", error);
+      logger.error("channels.sync_control_routes", { message: "Error triggering sync:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to trigger sync" });
     }

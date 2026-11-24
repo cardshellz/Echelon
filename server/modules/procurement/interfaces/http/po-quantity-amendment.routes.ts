@@ -10,6 +10,7 @@ import { PurchaseApprovalAuthorityError } from "../../domain/purchase-order-appr
 import { CostEvidenceError } from "../../../inventory/cost-evidence-values.api";
 import { ShipmentTrackingError } from "../../application/shipment-tracking.service";
 import { poAmendmentIdSchema } from "@shared/procurement/po-quantity-amendment";
+import { logger } from "../../../../platform/observability/logger";
 
 function purchaseOrderId(value: unknown): number {
   const parsed = typeof value === "string" && /^[1-9]\d*$/.test(value)
@@ -25,7 +26,7 @@ export function registerPoQuantityAmendmentRoutes(app: Express, service = create
     if (error instanceof PurchaseApprovalAuthorityError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
     if (error instanceof CostEvidenceError || error instanceof ShipmentTrackingError) return res.status(409).json({ error: error.message, code: "PO_AMENDMENT_COST_REVIEW" });
     if (error instanceof z.ZodError) return res.status(409).json({ error: "Recorded PO evidence is invalid. Review the source records.", code: "PO_AMENDMENT_SOURCE_INVALID" });
-    console.error(JSON.stringify({ event: "po_quantity_amendment_failed", purchaseOrderId: req.params.id, actorId: req.session.user?.id, message: error instanceof Error ? error.message : "Unknown failure" }));
+    logger.error("po_quantity_amendment_failed", { event: "po_quantity_amendment_failed", purchaseOrderId: req.params.id, actorId: req.session.user?.id, message: error instanceof Error ? error.message : "Unknown failure" });
     return res.status(500).json({ error: "Could not complete the quantity correction. Retry the saved request.", code: "PO_AMENDMENT_FAILED" });
   }
   const root = "/api/purchase-orders/:id/quantity-amendment";

@@ -1,3 +1,4 @@
+import { logger } from "../../../platform/observability/logger";
 const MAX_SERIALIZATION_ATTEMPTS = 3;
 
 type MasterDataOperation = "create_transformation_draft" | "edit_transformation_draft"
@@ -21,12 +22,7 @@ export async function retrySerializableMasterDataTransaction<T>(
       return await executeTransaction();
     } catch (error) {
       if (attempt >= MAX_SERIALIZATION_ATTEMPTS || !isSerializationFailure(error)) throw error;
-      console.warn(JSON.stringify({
-        code: "INVENTORY_AVAILABILITY_SERIALIZATION_RETRY",
-        operation,
-        failedAttempt: attempt,
-        maxAttempts: MAX_SERIALIZATION_ATTEMPTS,
-      }));
+      logger.warn("INVENTORY_AVAILABILITY_SERIALIZATION_RETRY", { code: "INVENTORY_AVAILABILITY_SERIALIZATION_RETRY", operation, failedAttempt: attempt, maxAttempts: MAX_SERIALIZATION_ATTEMPTS });
     }
   }
 }

@@ -57,6 +57,7 @@ vi.mock("../../../notifications/email-delivery.api", () => ({}));
 vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 import { registerPurchasingRoutes } from "../../interfaces/http/procurement.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 function guardedService<T extends object>(
   name: string,
@@ -202,9 +203,7 @@ describe("PO shipment costs read endpoint", () => {
     expect((await read()).status).toBe(404);
   });
   it("logs and returns a classified read failure without exposing database details", async () => {
-    const logger = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
+    const logger = spyLoggerJson("error");
     try {
       getCosts.mockRejectedValue(new Error("private database detail"));
       const response = await read();

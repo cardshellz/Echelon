@@ -9,6 +9,7 @@ import {
   getFinancialCommandOperationsDetail,
   rearmDeadFinancialCommand,
 } from "./financial-command-operations.service";
+import { logger } from "../observability/logger";
 
 const listQuerySchema = z.object({
   status: z.enum([
@@ -106,6 +107,6 @@ function sendError(res: any, error: unknown, fallback: string): void {
     res.status(error.statusCode).json({ error: error.message, code: error.code });
     return;
   }
-  console.error(`[Financial Command Operations] ${fallback}`, error);
+  logger.error("platform.financial_command_operations_routes", { message: `[Financial Command Operations] ${fallback}`, error: error });
   res.status(500).json({ error: fallback, code: "FINANCIAL_COMMAND_OPERATIONS_FAILED" });
 }

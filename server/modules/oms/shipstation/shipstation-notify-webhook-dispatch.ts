@@ -32,6 +32,7 @@ import {
 } from "./shipstation-contracts";
 import type { ShipStationNotifyPackageResolution } from "./shipstation-notify-package-resolution";
 import type { ShipStationNotifyV2Execution } from "./shipstation-notify-v2-execution";
+import { logger } from "../../../platform/observability/logger";
 
 export function createShipStationNotifyWebhookDispatch(
   ctx: ShipStationRuntimeContext,
@@ -168,11 +169,7 @@ export function createShipStationNotifyWebhookDispatch(
       FROM oms.oms_orders
       WHERE id = ${omsOrderId}
     `);
-    console.error(JSON.stringify({
-      code: "SHIP_NOTIFY_LEGACY_AUTHORITY_REVIEW_REQUIRED",
-      omsOrderId,
-      ...details,
-    }));
+    logger.error("SHIP_NOTIFY_LEGACY_AUTHORITY_REVIEW_REQUIRED", { code: "SHIP_NOTIFY_LEGACY_AUTHORITY_REVIEW_REQUIRED", omsOrderId, ...details });
   }
 
   /**
@@ -349,28 +346,13 @@ export function createShipStationNotifyWebhookDispatch(
         resolvedBy: "system:shipstation_webhook",
       });
       if (recovery.resolvedCount > 0) {
-        console.log(JSON.stringify({
-          level: "info",
-          action: "ship_notify_no_match_resolved",
-          outcome: "recovered",
-          ss_shipment_id: shipment.shipmentId,
-          ss_order_id: shipment.orderId ?? null,
-          resolved_count: recovery.resolvedCount,
-          exception_ids: recovery.recovered.map((row) => row.exceptionId),
-        }));
+        logger.info("ship_notify_no_match_resolved", { outcome: "recovered", ss_shipment_id: shipment.shipmentId, ss_order_id: shipment.orderId ?? null, resolved_count: recovery.resolvedCount, exception_ids: recovery.recovered.map((row) => row.exceptionId) });
       }
     } catch (error: any) {
       // The fulfillment event already committed. Exception housekeeping must
       // remain retryable without turning a successful provider callback into a
       // failed webhook delivery.
-      console.error(JSON.stringify({
-        level: "error",
-        action: "ship_notify_no_match_resolve_failed",
-        outcome: "error",
-        ss_shipment_id: shipment.shipmentId,
-        ss_order_id: shipment.orderId ?? null,
-        error: error?.message ?? String(error),
-      }));
+      logger.error("ship_notify_no_match_resolve_failed", { outcome: "error", ss_shipment_id: shipment.shipmentId, ss_order_id: shipment.orderId ?? null, error: error?.message ?? String(error) });
     }
   }
   async function processShipmentNotification(
@@ -433,26 +415,12 @@ export function createShipStationNotifyWebhookDispatch(
     // shipment. Log a structured warning so ops can investigate.
     // Previously this was silent — the webhook returned 200 and
     // ShipStation would not retry, stranding the shipment.
-    console.error(
-      JSON.stringify({
-        level: "error",
-        action: "ship_notify_no_match",
-        outcome: "unmatched",
-        ss_shipment_id: shipment.shipmentId ?? null,
-        ss_order_id: shipment.orderId ?? null,
-        ss_order_key: shipment.orderKey ?? null,
-        tracking: shipment.trackingNumber ?? null,
-        carrier: shipment.carrierCode ?? null,
-        v2_fallback: v2Result.fallback,
-      }),
-    );
+    logger.error("ship_notify_no_match", { outcome: "unmatched", ss_shipment_id: shipment.shipmentId ?? null, ss_order_id: shipment.orderId ?? null, ss_order_key: shipment.orderKey ?? null, tracking: shipment.trackingNumber ?? null, carrier: shipment.carrierCode ?? null, v2_fallback: v2Result.fallback });
 
     try {
       await recordShipNotifyNoMatchException(shipment, v2Result.fallback);
     } catch (exceptionErr: any) {
-      console.error(
-        `[ShipStation Webhook] Failed to persist no-match reconciliation exception for SS shipment ${shipment.shipmentId}: ${exceptionErr?.message}`,
-      );
+      logger.error("oms.shipstation_notify_webhook_dispatch", { message: `[ShipStation Webhook] Failed to persist no-match reconciliation exception for SS shipment ${shipment.shipmentId}: ${exceptionErr?.message}` });
     }
 
     return { processed: false };
@@ -589,9 +557,7 @@ export function createShipStationNotifyWebhookDispatch(
           shipmentId: Number.isInteger(shipment.shipmentId) ? shipment.shipmentId : null,
           message: err?.message || String(err),
         });
-        console.error(
-          `[ShipStation Webhook] Error processing shipment ${shipment.shipmentId}: ${err?.message || String(err)}`,
-        );
+        logger.error("oms.shipstation_notify_webhook_dispatch", { message: `[ShipStation Webhook] Error processing shipment ${shipment.shipmentId}: ${err?.message || String(err)}` });
       }
     }
 

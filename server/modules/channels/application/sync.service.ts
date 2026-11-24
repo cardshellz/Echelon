@@ -93,7 +93,7 @@ class ChannelSyncService {
   /** Wire the compatibility orchestrator after construction. */
   setOrchestrator(orchestrator: any): void {
     this.orchestrator = orchestrator;
-    console.log("[ChannelSync] Orchestrator wired — event-driven syncs will use Allocation Engine");
+    logger.info("channels.sync_service", { message: "[ChannelSync] Orchestrator wired — event-driven syncs will use Allocation Engine" });
   }
 
   setInventoryChangePublisher(
@@ -191,10 +191,8 @@ class ChannelSyncService {
 
     // No orchestrator wired — this is a configuration error in Echelon.
     // The orchestrator must be set via setOrchestrator() after construction.
-    console.error(
-      `[ChannelSync] No orchestrator wired for syncProduct(${productId}). ` +
-        `Legacy allocation path has been removed — wire the orchestrator via setOrchestrator().`,
-    );
+    logger.error("channels.sync_service", { error: `[ChannelSync] No orchestrator wired for syncProduct(${productId}). ` +
+        `Legacy allocation path has been removed — wire the orchestrator via setOrchestrator().` });
     return {
       productId,
       synced: 0,
@@ -553,7 +551,7 @@ class ChannelSyncService {
     }
 
     if (blocked.length > 0) {
-      console.warn(JSON.stringify({ action: "channel_feed.discovery", outcome: "blocked", blocked }));
+      logger.warn("channel_feed.discovery", { outcome: "blocked", blocked });
     }
     return { created, channels: activeChannels.length, blocked };
   }

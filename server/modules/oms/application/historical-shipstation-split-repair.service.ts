@@ -3,6 +3,7 @@ import { normalizeShipStationV1Date } from "@shared/utils/shipstation-date";
 
 import type { ShipStationShipment } from "./shipstation.service";
 import { parseExactPositiveWmsShipmentItems } from "../../shipping/shipstation-provider-reconciliation.api";
+import { logger } from "../../../platform/observability/logger";
 
 export const HISTORICAL_SPLIT_REPAIR_SOURCE =
   "historical_ss_split_repair";
@@ -398,7 +399,9 @@ export async function runHistoricalShipStationSplitRepair(
   flags: HistoricalSplitRepairFlags,
   dependencies: HistoricalSplitRepairDependencies,
 ): Promise<HistoricalSplitRepairSummary> {
-  const log = dependencies.log ?? console.log;
+  const log =
+    dependencies.log ??
+    ((message: string) => logger.info("oms.historical_shipstation_split_repair", { message }));
   const candidates = await dependencies.loadRetryCandidates(flags);
   if (flags.mode === "execute" && flags.confirmCount !== candidates.length) {
     throw new Error(

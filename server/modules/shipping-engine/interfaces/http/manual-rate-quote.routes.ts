@@ -7,6 +7,7 @@ import {
   ManualRateQuoteError,
   runManualRateQuote,
 } from "../../application/manual-rate-quote.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export interface ManualRateQuoteRouteDependencies {
   runManualRateQuote: typeof runManualRateQuote;
@@ -158,13 +159,9 @@ export function registerManualRateQuoteRoutes(
             },
           });
         }
-        console.error(JSON.stringify({
-          code: "SHIPPING_RATE_TEST_FAILED",
-          message: "Manual shipping-rate test failed.",
-          context: {
+        logger.error("SHIPPING_RATE_TEST_FAILED", { code: "SHIPPING_RATE_TEST_FAILED", message: "Manual shipping-rate test failed.", context: {
             error: error instanceof Error ? error.message : String(error),
-          },
-        }));
+          } });
         return res.status(500).json({
           error: {
             code: "SHIPPING_RATE_TEST_FAILED",

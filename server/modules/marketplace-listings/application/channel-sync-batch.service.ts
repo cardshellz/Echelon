@@ -15,6 +15,7 @@ import {
   type SyncDestination,
   type SyncBatchMember,
 } from "../domain/channel-sync-batch";
+import { logger } from "../../../platform/observability/logger";
 
 export interface ChannelSyncBatchAdapter {
   select(channelId: number, productIds?: number[]): Promise<{
@@ -155,13 +156,7 @@ export class ChannelSyncBatchService {
             this.deps.now(),
             error.refusal,
           );
-          console.error(
-            JSON.stringify({
-              event: "channel_sync_batch_admission_refused",
-              batchId: batch.id,
-              code: error.refusal.code,
-            }),
-          );
+          logger.error("channel_sync_batch_admission_refused", { event: "channel_sync_batch_admission_refused", batchId: batch.id, code: error.refusal.code });
           result.failed++;
           continue;
         }
@@ -169,13 +164,7 @@ export class ChannelSyncBatchService {
           error instanceof ChannelSyncBatchError
             ? error.code
             : "SYNC_BATCH_ADMISSION_RETRY";
-        console.error(
-          JSON.stringify({
-            event: "channel_sync_batch_deferred",
-            batchId: batch.id,
-            code,
-          }),
-        );
+        logger.error("channel_sync_batch_deferred", { event: "channel_sync_batch_deferred", batchId: batch.id, code });
         await this.deps.store.defer(
           batch.id,
           token,
@@ -195,12 +184,7 @@ export class ChannelSyncBatchService {
         .read(batch);
       return projectSyncBatch(batch, statuses, this.deps.now());
     } catch {
-      console.error(
-        JSON.stringify({
-          event: "channel_sync_batch_status_unavailable",
-          batchId: batch.id,
-        }),
-      );
+      logger.error("channel_sync_batch_status_unavailable", { event: "channel_sync_batch_status_unavailable", batchId: batch.id });
       return projectSyncBatch(
         batch,
         batch.members.map((member) => ({

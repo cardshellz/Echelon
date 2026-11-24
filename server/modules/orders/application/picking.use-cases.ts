@@ -596,7 +596,7 @@ export class PickingUseCases {
         },
       });
     } catch (error: any) {
-      console.warn(`[Pick] failed to log rejected pick command for item ${params.beforeItem.id}: ${error?.message || error}`);
+      platformLogger.warn("orders.picking_use_cases", { message: `[Pick] failed to log rejected pick command for item ${params.beforeItem.id}: ${error?.message || error}` });
     }
   }
 
@@ -851,7 +851,7 @@ export class PickingUseCases {
             },
           });
         } catch (notifyErr: any) {
-          console.warn(`[Allocation] blocked notification failed: ${notifyErr.message}`);
+          platformLogger.warn("orders.picking_use_cases", { message: `[Allocation] blocked notification failed: ${notifyErr.message}` });
         }
       }
 
@@ -1106,7 +1106,7 @@ export class PickingUseCases {
         });
       }
     } catch (notifyErr: any) {
-      console.warn(`[Allocation] notification failed: ${notifyErr.message}`);
+      platformLogger.warn("orders.picking_use_cases", { message: `[Allocation] notification failed: ${notifyErr.message}` });
     }
 
     return {
@@ -2142,7 +2142,7 @@ export class PickingUseCases {
     // counter already proves a full pick. Do not bless a malformed terminal row.
     if (status === "completed" && beforeItem.status === "completed"
       && currentPickedQuantity === beforeItem.quantity) {
-      console.log(`[Pick] Item ${itemId} is already fully picked - returning success (idempotent)`);
+      platformLogger.info("orders.picking_use_cases", { message: `[Pick] Item ${itemId} is already fully picked - returning success (idempotent)` });
       return { success: true, item: beforeItem as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
     }
 
@@ -2205,7 +2205,7 @@ export class PickingUseCases {
       effectiveShortReason === beforeItem.shortReason
     ) {
       if (currentPickedQuantity > 0 && ["in_progress", "short"].includes(status)) {
-        console.log(`[Pick] Item ${itemId} already has the requested progress - returning success (idempotent)`);
+        platformLogger.info("orders.picking_use_cases", { message: `[Pick] Item ${itemId} already has the requested progress - returning success (idempotent)` });
         return { success: true, item: beforeItem as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
       }
       const message = `Pick request did not change item ${itemId}`;
@@ -2256,7 +2256,7 @@ export class PickingUseCases {
       });
 
       if (atomicResult.idempotentReplay) {
-        console.log(`[Pick] Item ${itemId} reached the requested progress while waiting for its lock - returning success (idempotent)`);
+        platformLogger.info("orders.picking_use_cases", { message: `[Pick] Item ${itemId} reached the requested progress while waiting for its lock - returning success (idempotent)` });
         return { success: true, item: atomicResult.item as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
       }
 
@@ -2276,7 +2276,7 @@ export class PickingUseCases {
         userId,
       });
       if (atomicResult.idempotentReplay) {
-        console.log(`[Pick] Item ${itemId} reached the requested status while waiting for its lock - returning success (idempotent)`);
+        platformLogger.info("orders.picking_use_cases", { message: `[Pick] Item ${itemId} reached the requested status while waiting for its lock - returning success (idempotent)` });
         return { success: true, item: atomicResult.item as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
       }
       item = atomicResult.item;
@@ -2284,7 +2284,7 @@ export class PickingUseCases {
 
     if (!item) {
       // A guarded status-only update lost its optimistic race.
-      console.error(`[Pick] status_conflict on item ${itemId}: status='${beforeItem.status}', requested='${status}', pickedQty=${requestedPickedQuantity}`);
+      platformLogger.error("orders.picking_use_cases", { message: `[Pick] status_conflict on item ${itemId}: status='${beforeItem.status}', requested='${status}', pickedQty=${requestedPickedQuantity}` });
       return { success: false, error: "status_conflict", message: `Item ${itemId} status conflict` };
     }
 
@@ -2465,7 +2465,7 @@ export class PickingUseCases {
         }
       } catch (replenErr: any) {
         const failReason = replenErr?.message || "unknown_error";
-        console.warn(`[Replen] Short-pick queue failed for item=${item.id} sku=${item.sku}: ${failReason}`);
+        platformLogger.warn("orders.picking_use_cases", { message: `[Replen] Short-pick queue failed for item=${item.id} sku=${item.sku}: ${failReason}` });
         inventoryCtx.replen.triggered = true;
         inventoryCtx.replen.autoExecuted = false;
         inventoryCtx.replen.autoExecutedFailed = true;
@@ -2550,10 +2550,8 @@ export class PickingUseCases {
             const movedForPickBin = autoExecuted
               ? await this.describeInlineReplenMove(replenResult.task, deductResult.productVariantId, moved)
               : null;
-            console.log(
-              `[Replen] Replen task for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ` +
-              `status=${taskStatus ?? "none"} moved=${moved} base units`,
-            );
+            platformLogger.info("orders.picking_use_cases", { detail: `[Replen] Replen task for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ` +
+              `status=${taskStatus ?? "none"} moved=${moved} base units` });
             inventoryCtx.replen.triggered = true;
             inventoryCtx.replen.taskId = replenResult.task?.id ?? null;
             inventoryCtx.replen.taskStatus = taskStatus;
@@ -2579,13 +2577,13 @@ export class PickingUseCases {
           } else {
             // createAndExecuteReplen returned null — guidance check says no replen needed
             // (threshold not met, or no source stock). Nothing to do — this is the normal case.
-            console.log(`[Replen] No replen needed after pick for variant=${deductResult.productVariantId} loc=${deductResult.locationId}`);
+            platformLogger.info("orders.picking_use_cases", { message: `[Replen] No replen needed after pick for variant=${deductResult.productVariantId} loc=${deductResult.locationId}` });
           }
         } catch (replenErr: any) {
           if (commandKey) throw replenErr;
           // Replen failed — don't block the picker, but surface a persistent alert
           const failReason = replenErr?.message || "unknown_error";
-          console.warn(`[Replen] Auto-execute failed for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ${failReason}`);
+          platformLogger.warn("orders.picking_use_cases", { message: `[Replen] Auto-execute failed for variant=${deductResult.productVariantId} loc=${deductResult.locationId}: ${failReason}` });
 
           // Still show replen triggered so UI surfaces the failure alert
           inventoryCtx.replen.triggered = true;
@@ -2607,7 +2605,7 @@ export class PickingUseCases {
             reason: failReason,
             deviceType: deviceType || "desktop",
             sessionId,
-          }).catch((err: any) => console.warn("[PickingLog] replen failure log failed:", err.message));
+          }).catch((err: any) => platformLogger.warn("orders.picking_use_cases", { message: "[PickingLog] replen failure log failed:", error: err.message }));
         }
 
         // The pick and required replenishment have committed. Channel publication
@@ -2672,7 +2670,7 @@ export class PickingUseCases {
         if (deductResult.locationId) {
           const replenGuidance = await this.replenishment
             .checkReplenNeeded(deductResult.productVariantId, deductResult.locationId)
-            .catch((err: any) => { console.warn("[Replen] guidance check failed (deduct fail path):", err.message); return null; });
+            .catch((err: any) => { platformLogger.warn("orders.picking_use_cases", { message: "[Replen] guidance check failed (deduct fail path):", error: err.message }); return null; });
 
           if (replenGuidance?.needed) {
             inventoryCtx.replen.triggered = true;
@@ -2902,7 +2900,7 @@ export class PickingUseCases {
         },
       });
     } catch (notifyErr: any) {
-      console.warn(`[Pick] inline inventory review notification failed: ${notifyErr.message}`);
+      platformLogger.warn("orders.picking_use_cases", { message: `[Pick] inline inventory review notification failed: ${notifyErr.message}` });
     }
   }
 
@@ -3117,7 +3115,7 @@ export class PickingUseCases {
     const updatedLevel = await inventoryCore.getLevel(productVariant.id, pickLocationId);
     const loc = allLocations.find(l => l.id === pickLocationId);
 
-    console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
+    platformLogger.info("orders.picking_use_cases", { message: `[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}` });
 
     return {
       success: true,
@@ -3140,7 +3138,7 @@ export class PickingUseCases {
     const guidance = await this.replenishment.checkReplenNeeded(params.productVariantId, params.locationId, {
       forceWhenAtOrBelowZero: true,
     }).catch((err: any) => {
-      console.warn(`[Replen] pre-pick guidance failed for item=${params.item.id} sku=${params.item.sku}:`, err?.message || err);
+      platformLogger.warn("orders.picking_use_cases", { message: `[Replen] pre-pick guidance failed for item=${params.item.id} sku=${params.item.sku}:`, error: err?.message || err });
       return null;
     });
 
@@ -3907,15 +3905,13 @@ export class PickingUseCases {
         // One order's failure must not stop the others; the caller surfaces the
         // count, and the next pass retries it.
         totals.failed++;
-        console.error(JSON.stringify({ level: "error", action: "pick_exception_recheck", outcome: "failed",
-          wms_order_id: orderId, error_code: error?.code ?? null, error: error?.message ?? String(error) }));
+        platformLogger.error("pick_exception_recheck", { outcome: "failed", wms_order_id: orderId, error_code: error?.code ?? null, error: error?.message ?? String(error) });
       }
     }
 
     if (rows.length === limit) {
       // Visible, not silent: a full batch can delay orders behind it.
-      console.warn(JSON.stringify({ level: "warn", action: "pick_exception_recheck", outcome: "batch_full",
-        limit, released: totals.released, still_blocked: totals.stillBlocked }));
+      platformLogger.warn("pick_exception_recheck", { outcome: "batch_full", limit, released: totals.released, still_blocked: totals.stillBlocked });
     }
     return totals;
   }
@@ -3944,8 +3940,7 @@ export class PickingUseCases {
     if (!projected) return "changed";
     if (projected.warehouseStatus === "exception") return "blocked";
     this.triggerCartonizationShadow(orderId);
-    console.log(JSON.stringify({ level: "info", action: "pick_exception_recheck", outcome: "released",
-      wms_order_id: orderId, before: "exception", after: projected.warehouseStatus }));
+    platformLogger.info("pick_exception_recheck", { outcome: "released", wms_order_id: orderId, before: "exception", after: projected.warehouseStatus });
     return "released";
   }
 
@@ -3992,16 +3987,11 @@ export class PickingUseCases {
     void this.cartonization.ensurePackPlan({ wmsOrderId: orderId })
       .then((plan) => {
         if (!plan?.complete) {
-          console.warn(
-            `[CartonizationShadow] order ${orderId}: no verified plan; WMS handoff unchanged`,
-          );
+          platformLogger.warn("orders.picking_use_cases", { message: `[CartonizationShadow] order ${orderId}: no verified plan; WMS handoff unchanged` });
         }
       })
       .catch((error) => {
-        console.warn(
-          `[CartonizationShadow] order ${orderId}: execution failed; WMS handoff unchanged`,
-          error,
-        );
+        platformLogger.warn("orders.picking_use_cases", { message: `[CartonizationShadow] order ${orderId}: execution failed; WMS handoff unchanged`, error: error });
       });
   }
 
@@ -4038,7 +4028,7 @@ export class PickingUseCases {
     }
 
     if (didReplen) {
-      console.log(`[BinCount] picker reported replen for ${sku} at location ${locationId}; recording count only`);
+      platformLogger.info("orders.picking_use_cases", { message: `[BinCount] picker reported replen for ${sku} at location ${locationId}; recording count only` });
     }
 
     // Step 1: Re-read current system qty. Any replen movement must already be system-recorded.
@@ -4085,7 +4075,7 @@ export class PickingUseCases {
             },
           });
         } catch (notifyErr: any) {
-          console.warn(`[BinCount] Cycle count notification failed: ${notifyErr.message}`);
+          platformLogger.warn("orders.picking_use_cases", { message: `[BinCount] Cycle count notification failed: ${notifyErr.message}` });
         }
       }
     } else {
@@ -4170,7 +4160,7 @@ export class PickingUseCases {
         const bin = await this.replenishment.resolveDedicatedReplenBin?.(target.productVariantId, target.locationId);
         if (bin && bin.locationId !== target.locationId) replenBins[String(id)] = { locationCode: bin.locationCode };
       } catch (error) {
-        console.warn(JSON.stringify({ event: "picker_replen_hint_unavailable", orderItemId: id, message: error instanceof Error ? error.message : String(error) }));
+        platformLogger.warn("picker_replen_hint_unavailable", { event: "picker_replen_hint_unavailable", orderItemId: id, message: error instanceof Error ? error.message : String(error) });
       }
     }
     return { replenBins };
@@ -4300,8 +4290,7 @@ export class PickingUseCases {
       bySku = await this.storage.getScanDisplayBySkus(Array.from(skus));
     } catch (error) {
       // Barcode and photo are display only; never let them fail the pick queue.
-      console.warn(JSON.stringify({ level: "warn", action: "picker_scan_display", outcome: "skipped",
-        error: error instanceof Error ? error.message : String(error) }));
+      platformLogger.warn("picker_scan_display", { outcome: "skipped", error: error instanceof Error ? error.message : String(error) });
       return display;
     }
     for (const sku of Array.from(skus)) {
@@ -4342,7 +4331,7 @@ export class PickingUseCases {
         const prediction = predictions.get(key);
         if (prediction) results.set(item.id, prediction);
       } catch (error) {
-        console.warn("[PickQueue] replen prediction unavailable", { orderItemId: item.id, productVariantId, warehouseLocationId, error });
+        platformLogger.warn("orders.picking_use_cases", { message: "[PickQueue] replen prediction unavailable", orderItemId: item.id, productVariantId, warehouseLocationId, error });
       }
     }
     return results;

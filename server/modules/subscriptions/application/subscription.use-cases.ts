@@ -5,6 +5,7 @@ import * as shopifyAdapter from "../infrastructure/shopify.adapter";
 import * as domain from "../domain/subscription.domain";
 import type { ContractWebhookPayload, BillingWebhookPayload, PlanRecord } from "../domain/subscription.types";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
+import { logger } from "../../../platform/observability/logger";
 
 const DUNNING_MAX_RETRIES = parseInt(process.env.SUBSCRIPTION_DUNNING_MAX_RETRIES || "4", 10);
 
@@ -77,11 +78,11 @@ export async function processContractCreatedUseCase(payload: ContractWebhookPayl
   const contractGid = payload.admin_graphql_api_id;
   const shopifyCustomerId = payload.customer_id;
 
-  console.log(`[Subscription UseCase] Processing Contract Create: ${contractId}`);
+  logger.info("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Processing Contract Create: ${contractId}` });
 
   const existing = await storage.findSubscriptionByContractId(contractId);
   if (existing) {
-    console.log(`[Subscription UseCase] Contract ${contractId} already processed.`);
+    logger.info("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Contract ${contractId} already processed.` });
     return;
   }
 
@@ -101,7 +102,7 @@ export async function processContractCreatedUseCase(payload: ContractWebhookPayl
   );
 
   if (!targetPlan) {
-    console.error(`[Subscription UseCase] Cannot resolve target plan for contract ${contractId}`);
+    logger.error("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Cannot resolve target plan for contract ${contractId}` });
     await storage.insertEvent({
       shopify_subscription_contract_id: contractId,
       event_type: "error",
@@ -115,7 +116,7 @@ export async function processContractCreatedUseCase(payload: ContractWebhookPayl
   const customerGid = payload.admin_graphql_api_customer_id;
   const customer = await shopifyAdapter.getShopifyCustomer(customerGid);
   if (!customer) {
-    console.error(`[Subscription UseCase] Cannot fetch customer ${shopifyCustomerId}`);
+    logger.error("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Cannot fetch customer ${shopifyCustomerId}` });
     return;
   }
 
@@ -165,7 +166,7 @@ export async function processContractCreatedUseCase(payload: ContractWebhookPayl
       tx,
     );
 
-    console.log(`[Subscription UseCase] Transacted Subscription ${subscriptionId} for Member ${memberId}`);
+    logger.info("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Transacted Subscription ${subscriptionId} for Member ${memberId}` });
   });
 }
 
@@ -174,19 +175,19 @@ export async function processContractUpdatedUseCase(payload: ContractWebhookPayl
   const subscription = await storage.findSubscriptionByContractId(contractId);
 
   if (!subscription) {
-    console.warn(`[Subscription UseCase] Contract ${contractId} not found in DB for update`);
+    logger.warn("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Contract ${contractId} not found in DB for update` });
     return;
   }
 
   if (payload.revision_id && subscription.revision_id) {
     if (parseInt(payload.revision_id, 10) <= parseInt(subscription.revision_id, 10)) {
-      console.log(`[Subscription UseCase] Skipping stale update for contract ${contractId}`);
+      logger.info("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Skipping stale update for contract ${contractId}` });
       return;
     }
   }
 
   const status = payload.status?.toLowerCase();
-  console.log(`[Subscription UseCase] Contract ${contractId} updated: status=${status}`);
+  logger.info("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Contract ${contractId} updated: status=${status}` });
 
   if (status === "cancelled") {
     if (subscription.status !== "cancelled") {
@@ -268,7 +269,7 @@ export async function processBillingSuccessUseCase(payload: BillingWebhookPayloa
       tx,
     );
   });
-  console.log(`[Subscription UseCase] Billing success for contract ${contractId}`);
+  logger.info("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Billing success for contract ${contractId}` });
 }
 
 export async function processBillingFailureUseCase(payload: BillingWebhookPayload): Promise<void> {
@@ -452,7 +453,7 @@ export async function cancelSubscriptionUseCase(
       const errMessage = err instanceof Error ? err.message : String(err);
       const uncertain = !shopifyAdapter.isDefinitiveSubscriptionProviderRejection(err);
       warning = `Local subscription cancelled, but remote Shopify contract cancellation could not be confirmed: ${errMessage}`;
-      console.warn(`[Subscription UseCase] ${warning}`);
+      logger.warn("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] ${warning}` });
       await storage.insertEvent({
         member_subscription_id: subscriptionId,
         shopify_subscription_contract_id: subscription.shopify_subscription_contract_id,
@@ -809,13 +810,13 @@ export async function registerSubscriptionWebhooksUseCase(baseUrl: string): Prom
     try {
       const result = await shopifyAdapter.registerWebhookSubscriptionGraphql(topic, `${baseUrl}${path}`);
       if (result.userErrors?.length > 0) {
-        console.warn(`[Subscription UseCase] Webhook ${topic} error: ${result.userErrors.map((e: any) => e.message).join(", ")}`);
+        logger.warn("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Webhook ${topic} error: ${result.userErrors.map((e: any) => e.message).join(", ")}` });
       } else {
         registered.push(topic);
-        console.log(`[Subscription UseCase] Registered webhook: ${topic}`);
+        logger.info("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Registered webhook: ${topic}` });
       }
     } catch (err: any) {
-      console.error(`[Subscription UseCase] Failed to register webhook ${topic}: ${err.message}`);
+      logger.error("subscriptions.subscription_use_cases", { message: `[Subscription UseCase] Failed to register webhook ${topic}: ${err.message}` });
     }
   }
 

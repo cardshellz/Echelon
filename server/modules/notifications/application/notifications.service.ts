@@ -10,6 +10,7 @@ import {
   type NotificationPreference,
 } from "@shared/schema";
 import { broadcastToUser } from "../../../websocket";
+import { logger } from "../../../platform/observability/logger";
 
 const NOTIFICATION_PREFS_ADVISORY_LOCK_NAMESPACE = 918_440;
 const DEFAULT_DEDUPE_WINDOW_SECONDS = 300;
@@ -214,7 +215,7 @@ export async function notify(
     .limit(1);
 
   if (!nt) {
-    console.warn(`[Notifications] Unknown notification type: ${typeKey}`);
+    logger.warn("notifications.service", { message: `[Notifications] Unknown notification type: ${typeKey}` });
     return;
   }
 
@@ -293,13 +294,11 @@ export async function notify(
         },
       });
     } catch (wsError) {
-      console.warn(`[Notifications] WebSocket hint failed for user ${n.userId}`, wsError);
+      logger.warn("notifications.service", { message: `[Notifications] WebSocket hint failed for user ${n.userId}`, detail: wsError });
     }
   }
 
-  console.log(
-    `[Notifications] Sent "${typeKey}" to ${recipients.length} user(s)`
-  );
+  logger.info("notifications.service", { message: `[Notifications] Sent "${typeKey}" to ${recipients.length} user(s)` });
 }
 
 /**

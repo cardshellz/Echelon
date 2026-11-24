@@ -7,6 +7,7 @@ import {
   type ProductCategoryChanges,
   type ProductCategoryUpdateOptions,
 } from "../../infrastructure/product-category-update.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 export function normalizeCategorySlug(value: string): string {
   return value
@@ -52,7 +53,7 @@ export function registerProductCategoryUpdateRoute(
       if (error?.code === "23505") {
         return res.status(409).json({ error: "Category already exists" });
       }
-      console.error("Error updating product category:", error);
+      logger.error("catalog.product_category_update_routes", { message: "Error updating product category:", error: error });
       res.status(500).json({ error: "Failed to update product category" });
     }
   });

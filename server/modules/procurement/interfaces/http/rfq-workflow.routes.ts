@@ -8,6 +8,7 @@ import { financialCommandFromRequest } from "../../../../platform/commands/http-
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 import { createRfqWorkflowService, RfqWorkflowError, type RfqWorkflowCommand } from "../../application/rfq-workflow.service";
 import { createRfqWorkflowCommands, RFQ_WORKFLOW_COMMAND_PRINCIPAL, rfqWorkflowCommandScope } from "../../application/rfq-workflow.commands";
+import { logger } from "../../../../platform/observability/logger";
 
 const pathId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(rfqResourceIdSchema);
 function actor(req: Request): string | undefined { return (req as Request & { user?: { id?: string } }).user?.id ?? req.session?.user?.id; }
@@ -23,7 +24,7 @@ export function registerRfqWorkflowRoutes(app: Express): void {
     }
     if (error instanceof RfqWorkflowError && error.statusCode < 500) return res.status(error.statusCode).json({ code: error.code, error: error.message });
     if (error instanceof z.ZodError) return res.status(400).json({ code: "RFQ_REQUEST_INVALID", error: "The RFQ request is invalid." });
-    console.error(JSON.stringify({ event: "procurement.rfq.workflow_failed", actorId: actor(req) ?? null, rfqId: req.params.rfqId, errorType: error instanceof Error ? error.name : typeof error, code: "RFQ_TRANSIENT_FAILURE" }));
+    logger.error("procurement.rfq.workflow_failed", { event: "procurement.rfq.workflow_failed", actorId: actor(req) ?? null, rfqId: req.params.rfqId, errorType: error instanceof Error ? error.name : typeof error, code: "RFQ_TRANSIENT_FAILURE" });
     return res.status(500).json({ code: "RFQ_TRANSIENT_FAILURE", error: "RFQ workflow failed. Retry the same command without changing its key." });
   }
 

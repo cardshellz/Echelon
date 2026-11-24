@@ -428,16 +428,7 @@ export function createShipStationPushHandlers(
         );
       }
       await commitLocalQuantity();
-      console.log(JSON.stringify({
-        level: "info",
-        action: "shipstation_line_quantity_amended",
-        outcome: "applied",
-        shipment_id: shipmentId,
-        shipment_item_id: shipmentItemId,
-        engine_ref: shipstationOrderId,
-        before: currentQuantity,
-        after: targetQuantity,
-      }));
+      platformLogger.info("shipstation_line_quantity_amended", { outcome: "applied", shipment_id: shipmentId, shipment_item_id: shipmentItemId, engine_ref: shipstationOrderId, before: currentQuantity, after: targetQuantity });
       return { state: "applied", providerStatus };
     });
   }
@@ -872,11 +863,9 @@ export function createShipStationPushHandlers(
             orderKey = siblingKey;
             payload.orderKey = siblingKey;
           }
-          console.warn(
-            `[ShipStation] Duplicate full shipment for WMS order ${shipmentRow.order_id}: ` +
+          platformLogger.warn("oms.shipstation_push_shipment", { detail: `[ShipStation] Duplicate full shipment for WMS order ${shipmentRow.order_id}: ` +
               `shipment ${shipmentId} adopting sibling SS order ${hitSsId} ` +
-              `instead of creating a second ShipStation order`,
-          );
+              `instead of creating a second ShipStation order` });
         }
       }
     }
@@ -934,10 +923,8 @@ export function createShipStationPushHandlers(
         }
 
         await recomputeOrderStatusFromShipments(db, adoption.wmsOrderId);
-        console.warn(
-          `[ShipStation] pushShipment ${shipmentId}: adopted exact existing SS order ` +
-            `${proof.providerOrderId} for key ${proof.orderKey}; no provider write was repeated`,
-        );
+        platformLogger.warn("oms.shipstation_push_shipment", { detail: `[ShipStation] pushShipment ${shipmentId}: adopted exact existing SS order ` +
+            `${proof.providerOrderId} for key ${proof.orderKey}; no provider write was repeated` });
         return {
           shipstationOrderId: proof.providerOrderId,
           orderKey: proof.orderKey,
@@ -946,9 +933,7 @@ export function createShipStationPushHandlers(
     }
     if (ssOrderIdForPayload) {
       payload.orderId = ssOrderIdForPayload;
-      console.log(
-        `[ShipStation] Updating existing SS order ${ssOrderIdForPayload} for WMS shipment ${shipmentId} (key: ${orderKey})`,
-      );
+      platformLogger.info("oms.shipstation_push_shipment", { message: `[ShipStation] Updating existing SS order ${ssOrderIdForPayload} for WMS shipment ${shipmentId} (key: ${orderKey})` });
     }
 
     // A keyed CREATE (no orderId) is never replayed after a 429: the first
@@ -1035,9 +1020,7 @@ export function createShipStationPushHandlers(
     }
     await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);
 
-    console.log(
-      `[ShipStation] ${isUpdate ? "Updated" : "Pushed"} WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})`,
-    );
+    platformLogger.info("oms.shipstation_push_shipment", { message: `[ShipStation] ${isUpdate ? "Updated" : "Pushed"} WMS shipment ${shipmentId} → SS order ${result.orderId} (key: ${orderKey})` });
 
     return { shipstationOrderId: result.orderId, orderKey };
   }

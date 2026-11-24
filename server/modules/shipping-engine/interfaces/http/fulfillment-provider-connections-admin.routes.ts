@@ -8,6 +8,7 @@ import {
 import { AesGcmFulfillmentProviderCredentialCipher } from "../../infrastructure/fulfillment-provider-credential-cipher";
 import { PostgresFulfillmentProviderConnectionStore } from "../../infrastructure/fulfillment-provider-connections.repository";
 import { createFulfillmentProviderRegistry } from "../../infrastructure/fulfillment-provider-registry";
+import { logger } from "../../../../platform/observability/logger";
 
 const idSchema = z.coerce.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(16).max(200);
@@ -203,15 +204,7 @@ function sendConnectionError(
       },
     });
   }
-  console.error(JSON.stringify({
-    timestamp: new Date().toISOString(),
-    level: "error",
-    event: "shipping.fulfillment_provider_connection.admin_failed",
-    action,
-    actorUserId,
-    errorName: error instanceof Error ? error.name : "UnknownError",
-    errorCode: postgresErrorCode(error),
-  }));
+  logger.error("shipping.fulfillment_provider_connection.admin_failed", { timestamp: new Date().toISOString(), event: "shipping.fulfillment_provider_connection.admin_failed", actorUserId, errorName: error instanceof Error ? error.name : "UnknownError", errorCode: postgresErrorCode(error) });
   return res.status(500).json({
     error: {
       code: "SHIPPING_FULFILLMENT_PROVIDER_CONNECTION_INTERNAL_ERROR",
@@ -226,12 +219,7 @@ function logRejectedCommand(input: {
   errorCode: string;
   status: number;
 }): void {
-  console.warn(JSON.stringify({
-    timestamp: new Date().toISOString(),
-    level: "warn",
-    event: "shipping.fulfillment_provider_connection.command_rejected",
-    ...input,
-  }));
+  logger.warn("shipping.fulfillment_provider_connection.command_rejected", { timestamp: new Date().toISOString(), event: "shipping.fulfillment_provider_connection.command_rejected", ...input });
 }
 
 function auditActorOrNull(req: Request): string | null {

@@ -3,6 +3,7 @@ import type {
   ReceivingReconciliationLine,
 } from "./purchase-order-receipt-reconciliation.service";
 import type { ReceivingIntegrityTransaction } from "../infrastructure/receiving-close-integrity.repository";
+import { logger } from "../../../platform/observability/logger";
 
 export type ReceivingOrchestrationPurchasing = {
   onReceivingOrderClosed(
@@ -188,10 +189,7 @@ async function failReconciliation(params: {
         details,
       });
     } catch (error) {
-      console.warn(
-        `[Receiving] Failed to record PO reconciliation exception for receiving order ${params.receivingOrderId}:`,
-        error,
-      );
+      logger.warn("procurement.receiving_orchestration_service", { message: `[Receiving] Failed to record PO reconciliation exception for receiving order ${params.receivingOrderId}:`, error: error });
     }
   }
 

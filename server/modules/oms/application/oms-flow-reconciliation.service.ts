@@ -39,6 +39,7 @@ import {
   recordRunCompleted,
   runBootCatchUpIfBehind,
 } from "../../../infrastructure/scheduler-run-registry";
+import { logger } from "../../../platform/observability/logger";
 
 const LOG_PREFIX = "[OMS Flow Reconciliation]";
 const LOCK_ID = 918405;
@@ -872,10 +873,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     (outcome): outcome is Extract<FlowCheckOutcome, { ok: false }> => !outcome.ok,
   );
   for (const failure of failedChecks) {
-    console.error(JSON.stringify({
-      level: "error", action: "oms_flow_check", outcome: "failed",
-      error_code: failure.code, error: failure.error,
-    }));
+    logger.error("oms_flow_check", { outcome: "failed", error_code: failure.code, error: failure.error });
   }
 
   const issues: OmsOpsIssue[] = [
@@ -989,7 +987,7 @@ export async function runOmsFlowReconciliation(
     } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
       stepErrors.push(`${name}: ${message}`);
-      console.error(`${LOG_PREFIX} step '${name}' failed (continuing): ${message}`);
+      logger.error("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} step '${name}' failed (continuing): ${message}` });
       return fallback;
     }
   };
@@ -1006,7 +1004,7 @@ export async function runOmsFlowReconciliation(
   }
   if (issues.length > 0) {
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
-    console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
+    logger.warn("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} detected flow issues: ${summary}` });
   }
   await step("autoCloseResolvedDeadFulfillmentRetries", () => autoCloseResolvedDeadFulfillmentRetries(dbArg), 0);
   await step("autoRemediateCriticalFlowIssues", () => autoRemediateCriticalFlowIssues(dbArg, issues, dependencies), undefined);
@@ -1073,7 +1071,7 @@ async function remediateMissingReservations(
       LIMIT ${AUTO_RESERVATION_REPAIR_LIMIT}
     `);
   } catch (err: any) {
-    console.error(`${LOG_PREFIX} missing-reservation sweep query failed: ${err?.message}`);
+    logger.error("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} missing-reservation sweep query failed: ${err?.message}` });
     return;
   }
 
@@ -1082,21 +1080,15 @@ async function remediateMissingReservations(
     try {
       const result = await svc.reserveOrder(wmsOrderId);
       if (result.failed.length > 0) {
-        console.warn(
-          `${LOG_PREFIX} re-reservation shortfall for WMS order ${wmsOrderId}: ` +
+        logger.warn("oms.flow_reconciliation_service", { detail: `${LOG_PREFIX} re-reservation shortfall for WMS order ${wmsOrderId}: ` +
             result.failed.map((f) => `${f.sku}: ${f.reason}`).join(", ") +
-            " — proceeding without hold; unreservable lines surface as pick shorts",
-        );
+            " — proceeding without hold; unreservable lines surface as pick shorts" });
       } else if (result.reserved > 0) {
-        console.warn(
-          `${LOG_PREFIX} re-reserved WMS order ${wmsOrderId} (${result.reserved} item(s)) — ` +
-            `original reservation was missing`,
-        );
+        logger.warn("oms.flow_reconciliation_service", { detail: `${LOG_PREFIX} re-reserved WMS order ${wmsOrderId} (${result.reserved} item(s)) — ` +
+            `original reservation was missing` });
       }
     } catch (err: any) {
-      console.error(
-        `${LOG_PREFIX} re-reservation failed for WMS order ${wmsOrderId}: ${err?.message} — will retry next sweep`,
-      );
+      logger.error("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} re-reservation failed for WMS order ${wmsOrderId}: ${err?.message} — will retry next sweep` });
     }
   }
 }
@@ -1183,8 +1175,7 @@ export async function refreshShortClaims(
       if (result.outcome === "refreshed") {
         totals.refreshed += 1;
         declinedShortClaimState.delete(wmsOrderId);
-        console.log(JSON.stringify({ level: "info", action: "refresh_short_claim", outcome: "refreshed",
-          wms_order_id: wmsOrderId, after: { claimId: result.claimId }, idempotent_replay: result.idempotentReplay }));
+        logger.info("refresh_short_claim", { outcome: "refreshed", wms_order_id: wmsOrderId, after: { claimId: result.claimId }, idempotent_replay: result.idempotentReplay });
       } else {
         // Expected while stock is still missing, reserved elsewhere, or only case-break / unverified supply exists.
         totals.declined += 1;
@@ -1201,17 +1192,14 @@ export async function refreshShortClaims(
       }
     } catch (err: any) {
       totals.failed += 1;
-      console.error(JSON.stringify({ level: "error", action: "refresh_short_claim", outcome: "failed",
-        wms_order_id: wmsOrderId, error_code: err?.code ?? null, error: err?.message ?? String(err) }));
+      logger.error("refresh_short_claim", { outcome: "failed", wms_order_id: wmsOrderId, error_code: err?.code ?? null, error: err?.message ?? String(err) });
     }
   }
   if (totals.refreshed + totals.declined + totals.failed > 0) {
     const declineBreakdown = Object.entries(sweepDeclineCodes)
       .map(([code, count]) => `${code}:${count}`)
       .join(",");
-    console.log(
-      `${LOG_PREFIX} short-claim refresh: refreshed=${totals.refreshed} declined=${totals.declined} failed=${totals.failed}${declineBreakdown ? ` decline_codes=${declineBreakdown}` : ""}`,
-    );
+    logger.info("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} short-claim refresh: refreshed=${totals.refreshed} declined=${totals.declined} failed=${totals.failed}${declineBreakdown ? ` decline_codes=${declineBreakdown}` : ""}` });
   }
   if (totals.failed > 0) {
     // Surface on the scheduler heartbeat via the step wrapper.
@@ -1231,7 +1219,7 @@ export async function retryConfirmedPickCorrections(
   if (!dependencies.pickCorrections) return { resolved: 0, waiting: 0 };
   const totals = await dependencies.pickCorrections.retryConfirmedPicks(CONFIRMED_PICK_RETRY_LIMIT);
   if (totals.resolved > 0) {
-    console.log(`${LOG_PREFIX} confirmed pick corrections posted: resolved=${totals.resolved} waiting=${totals.waiting}`);
+    logger.info("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} confirmed pick corrections posted: resolved=${totals.resolved} waiting=${totals.waiting}` });
   }
   return totals;
 }
@@ -1247,7 +1235,7 @@ export async function releaseClearedPickExceptions(
   if (!dependencies.pickExceptions) return { checked: 0, released: 0, stillBlocked: 0, failed: 0 };
   const totals = await dependencies.pickExceptions.releaseClearedPickExceptions(PICK_EXCEPTION_RECHECK_LIMIT);
   if (totals.released > 0) {
-    console.log(`${LOG_PREFIX} exception orders with no blocker left moved to ready_to_ship: released=${totals.released} stillBlocked=${totals.stillBlocked}`);
+    logger.info("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} exception orders with no blocker left moved to ready_to_ship: released=${totals.released} stillBlocked=${totals.stillBlocked}` });
   }
   if (totals.failed > 0) {
     // Surfaces on the scheduler heartbeat; the other orders were still processed.
@@ -1362,7 +1350,7 @@ export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<
 
   const closed = rows(result).filter((row) => row?.id != null).length;
   if (closed > 0) {
-    console.warn(`${LOG_PREFIX} auto-closed ${closed} resolved fulfillment/tracking retry row(s)`);
+    logger.warn("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} auto-closed ${closed} resolved fulfillment/tracking retry row(s)` });
   }
   return closed;
 }
@@ -1419,14 +1407,12 @@ async function autoRemediateCriticalFlowIssues(
         }, dependencies);
         if (result.changed) changed++;
       } catch (error: any) {
-        console.warn(
-          `${LOG_PREFIX} auto-remediation failed for ${mapping.code}: ${error?.message || error}`,
-        );
+        logger.warn("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} auto-remediation failed for ${mapping.code}: ${error?.message || error}` });
       }
     }
 
     if (changed > 0) {
-      console.warn(`${LOG_PREFIX} auto-remediated ${changed} ${mapping.code} row(s)`);
+      logger.warn("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} auto-remediated ${changed} ${mapping.code} row(s)` });
     }
   }
 }
@@ -1467,7 +1453,7 @@ async function autoQueueStaleTrackingPushRetries(
   }
 
   if (handedOff > 0) {
-    console.warn(`${LOG_PREFIX} handed off ${handedOff} stale eBay writeback(s) to canonical authority`);
+    logger.warn("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} handed off ${handedOff} stale eBay writeback(s) to canonical authority` });
   }
 }
 
@@ -1494,7 +1480,7 @@ async function autoQueueStaleShipStationPushRetries(
   }
 
   if (queued > 0) {
-    console.warn(`${LOG_PREFIX} auto-queued ${queued} ShipStation shipment push retry row(s)`);
+    logger.warn("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} auto-queued ${queued} ShipStation shipment push retry row(s)` });
   }
 }
 
@@ -1531,7 +1517,7 @@ async function autoQueueMissingShopifyFulfillmentRetries(
   }
 
   if (handedOff > 0) {
-    console.warn(`${LOG_PREFIX} handed off ${handedOff} missing Shopify writeback(s) to canonical authority`);
+    logger.warn("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} handed off ${handedOff} missing Shopify writeback(s) to canonical authority` });
   }
 }
 
@@ -1830,14 +1816,10 @@ export async function remediateOmsFlowIssue(
             { disposition: "cancel" },
           );
         } catch (err: any) {
-          console.error(
-            `${LOG_PREFIX} reservation release failed for WMS order ${wmsOrderId} after reconcile-cancel: ${err?.message}`,
-          );
+          logger.error("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} reservation release failed for WMS order ${wmsOrderId} after reconcile-cancel: ${err?.message}` });
         }
       } else {
-        console.error(
-          `${LOG_PREFIX} reservation service not wired — reconcile-cancel of WMS order ${wmsOrderId} did NOT release reservations`,
-        );
+        logger.error("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} reservation service not wired — reconcile-cancel of WMS order ${wmsOrderId} did NOT release reservations` });
       }
     }
 
@@ -2095,7 +2077,7 @@ export function startOmsFlowReconciliationScheduler(
       reconciliationSchedulerLastSuccessAt = new Date();
     }).catch((err) => {
       reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);
-      console.error(`${LOG_PREFIX} scheduled run error: ${reconciliationSchedulerLastError}`);
+      logger.error("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} scheduled run error: ${reconciliationSchedulerLastError}` });
     });
   };
 
@@ -2116,11 +2098,11 @@ export function startOmsFlowReconciliationScheduler(
       if (ran) reconciliationSchedulerLastSuccessAt = new Date();
     }).catch((err) => {
       reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);
-      console.error(`${LOG_PREFIX} boot run error: ${reconciliationSchedulerLastError}`);
+      logger.error("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} boot run error: ${reconciliationSchedulerLastError}` });
     });
   };
 
-  console.log(`${LOG_PREFIX} Scheduler started (every 15 minutes, dyno-safe lock)`);
+  logger.info("oms.flow_reconciliation_service", { message: `${LOG_PREFIX} Scheduler started (every 15 minutes, dyno-safe lock)` });
   setTimeout(bootLocked, 20_000);
   setInterval(runLocked, RECONCILIATION_INTERVAL_MS);
 }

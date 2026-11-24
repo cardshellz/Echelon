@@ -6,6 +6,7 @@ import {
   createDropshipShopifyReturnIntakePollServiceFromEnv,
 } from "./dropship-return-intake.factory";
 import type { DropshipReturnIntakeSweepResult } from "../application/dropship-return-intake-poll-service";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * Channel return-intake runner (stack 4/4; design spec D2a): polls connected
@@ -73,20 +74,12 @@ export function startDropshipReturnIntakeWorker(): void {
             || perPlatform.returnsExcepted > 0
             || perPlatform.returnsFailed > 0
           ) {
-            console.info(JSON.stringify({
-              code: "DROPSHIP_RETURN_INTAKE_SWEEP_COMPLETED",
-              message: "Dropship channel return intake sweep completed.",
-              context: perPlatform,
-            }));
+            logger.info("DROPSHIP_RETURN_INTAKE_SWEEP_COMPLETED", { code: "DROPSHIP_RETURN_INTAKE_SWEEP_COMPLETED", message: "Dropship channel return intake sweep completed.", context: perPlatform });
           }
         }
       });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "DROPSHIP_RETURN_INTAKE_SWEEP_FAILED",
-        message: "Dropship channel return intake sweep failed.",
-        context: buildSchedulerFailureContext(error),
-      }));
+      logger.error("DROPSHIP_RETURN_INTAKE_SWEEP_FAILED", { code: "DROPSHIP_RETURN_INTAKE_SWEEP_FAILED", message: "Dropship channel return intake sweep failed.", context: buildSchedulerFailureContext(error) });
     }
   };
 
@@ -95,11 +88,7 @@ export function startDropshipReturnIntakeWorker(): void {
     intervalMs,
     run: runLockedSweep,
   });
-  console.info(JSON.stringify({
-    code: "DROPSHIP_RETURN_INTAKE_WORKER_STARTED",
-    message: "Dropship channel return intake worker started.",
-    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
-  }));
+  logger.info("DROPSHIP_RETURN_INTAKE_WORKER_STARTED", { code: "DROPSHIP_RETURN_INTAKE_WORKER_STARTED", message: "Dropship channel return intake worker started.", context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" } });
 }
 
 function envPositiveInteger(name: string, fallback: number): number {

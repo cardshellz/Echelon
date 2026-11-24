@@ -3,6 +3,7 @@ import { walmartIdentifier } from "@shared/types/walmart-channel";
 import { WalmartApiError, type WalmartClient } from "./walmart-client";
 import type { ChannelCatalogItem, ChannelCatalogPage, ChannelCatalogQuery } from "@shared/types/channel-catalog";
 import { priceFromWalmart } from "./walmart-listing-schema";
+import { logger } from "../../../../platform/observability/logger";
 
 const id = walmartIdentifier;
 const quantity = z.object({ unitOfMeasurement: z.enum(["EACH", "EA"]), amount: z.string().regex(/^\d+$/)
@@ -68,7 +69,7 @@ function catalogPrice(sku: string, value: unknown): Pick<ChannelCatalogItem, "pr
     return { priceCents: priceFromWalmart(money.parse(value).amount) };
   } catch {
     // Optional merchandising data must not hide otherwise valid SKU identities.
-    console.error(JSON.stringify({ code: "WALMART_CATALOG_PRICE_INVALID", operation: "catalog_price", sku }));
+    logger.error("WALMART_CATALOG_PRICE_INVALID", { code: "WALMART_CATALOG_PRICE_INVALID", operation: "catalog_price", sku });
     return { priceCents: null, priceError: "Walmart's price could not be read. Refresh listings to try again." };
   }
 }

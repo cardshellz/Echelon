@@ -8,6 +8,7 @@ import { DropshipError } from "../../domain/errors";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 import { registerDropshipListingShippingEstimateRoutes, LISTING_SHIPPING_ESTIMATE_REQUESTS_PER_MINUTE,
   createStaffCalculationViewer, LISTING_SHIPPING_CALCULATION_PERMISSION } from "../../interfaces/http/dropship-listing-shipping-estimate.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const input = { storeConnectionId: 22, productVariantId: 101, quantity: 1, destination: { country: "US", region: "PA", postalCode: "17046" } };
 const unavailable: ListingShippingEstimateResult = { status: "unavailable", storeConnectionId: 22, productVariantId: 101, quantity: 1, destination: { country: "US", region: "PA", postalCode: "17046" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, message: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE };
@@ -150,7 +151,7 @@ describe("staff calculation viewer", () => {
     expect(await createStaffCalculationViewer(async () => false)(requestWithUser({ id: "staff-1" }))).toBe(false);
   });
   it("fails closed when the permission check throws", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = spyLoggerJson("warn");
     try {
       expect(await createStaffCalculationViewer(async () => { throw new Error("identity offline"); })(requestWithUser({ id: "staff-1" }))).toBe(false);
       expect(warn).toHaveBeenCalledOnce();

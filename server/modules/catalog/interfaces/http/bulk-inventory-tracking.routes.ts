@@ -9,6 +9,7 @@ import { createBulkInventoryTrackingService } from "../../application/bulk-inven
 import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work.api";
 
 import { InventoryTrackingHistoryCapacityError } from "@shared/catalog/inventory-tracking-history";
+import { logger } from "../../../../platform/observability/logger";
 
 function sendError(res: Response, error: unknown): Response {
   const busy = publicationSelectionBusyIssue(error);
@@ -18,8 +19,7 @@ function sendError(res: Response, error: unknown): Response {
     for (const [key, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(key, value);
     return res.status(error.statusCode).json({ error: error.message, code: error.code });
   }
-  console.error(JSON.stringify({ event: "catalog.inventory_tracking_bulk.failed", code: "BULK_INVENTORY_TRACKING_FAILED",
-    message: error instanceof Error ? error.message : "Unknown failure" }));
+  logger.error("catalog.inventory_tracking_bulk.failed", { event: "catalog.inventory_tracking_bulk.failed", code: "BULK_INVENTORY_TRACKING_FAILED", message: error instanceof Error ? error.message : "Unknown failure" });
   return res.status(500).json({ error: "Unable to complete the inventory tracking request. Retry the same request.",
     code: "BULK_INVENTORY_TRACKING_FAILED" });
 }

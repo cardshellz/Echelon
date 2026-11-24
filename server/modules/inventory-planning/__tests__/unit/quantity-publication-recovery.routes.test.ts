@@ -7,6 +7,7 @@ import { QuantityPublicationRecoveryService } from "../../application/quantity-p
 import { QuantityPublicationAdmissionError } from "../../domain/quantity-publication-admission";
 import { CUTOVER_COMPLETION_NOW as NOW } from "../fixtures/inventory-cutover-completion.fixture";
 import { pendingRecovery, recoveryRequest, recoveryResult } from "../fixtures/quantity-publication-recovery.fixture";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 vi.mock("../../../identity", () => ({ hasPermission }));
@@ -25,7 +26,7 @@ describe("publication recovery activation-role HTTP boundary", () => {
   const confirmationOutcome = { basis: "operator_attestation", providerWriteAttempted: false, confirmed: [{ attemptId: "20", replay: false }], skipped: [] };
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
     session = { user: { id: "operator-1" } };
     service = { pending: vi.fn(async () => pendingRecovery()), attest: vi.fn(async () => recoveryResult()),
       attestProviderAnswers: vi.fn(async () => confirmationOutcome) };
@@ -173,7 +174,7 @@ describe("publication recovery activation-role HTTP boundary", () => {
     const response = await request(server.url + ROOT + "/attest", recoveryRequest());
     expect(response).toMatchObject({ status: 500, body: { error: { code: "CUTOVER_COMMAND_FAILED" } } });
     expect(JSON.stringify(response.body)).not.toMatch(/secret|token/);
-    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toMatch(/secret|token/);
+    expect(JSON.stringify(getLoggerJsonSpy("error").mock.calls)).not.toMatch(/secret|token/);
   });
 
   it("rejects misleading or extra service output without exposing partial recovery", async () => {

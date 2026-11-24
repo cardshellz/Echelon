@@ -2,6 +2,7 @@ import { db, pool } from "../../../db";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { refreshControlTowerFlowSnapshotIfDue } from "./control-tower-flow-snapshot.service";
 import { runControlTowerProjectionJob } from "./control-tower-v2.job";
+import { logger } from "../../../platform/observability/logger";
 
 const CONTROL_TOWER_PROJECTOR_LOCK_ID = 736207;
 const DEFAULT_INTERVAL_MS = 60_000;
@@ -35,18 +36,12 @@ export async function runControlTowerProjectionOnce(): Promise<void> {
   try {
     const result = await runControlTowerProjectionJob({ client, execute: true });
     const flowSnapshot = await refreshControlTowerFlowSnapshotIfDue({ client, db });
-    console.log("[Operations Control Tower projector] run complete", {
-      startedAt: result.startedAt,
-      completedAt: result.completedAt,
-      failedSources: result.failedSources,
-      sources: result.sources.map((source) => ({
+    logger.info("operations.control_tower_v2_scheduler", { message: "[Operations Control Tower projector] run complete", startedAt: result.startedAt, completedAt: result.completedAt, failedSources: result.failedSources, sources: result.sources.map((source) => ({
         name: source.sourceName,
         status: source.status,
         rowsScanned: source.rowsScanned,
         rowsFailed: source.rowsFailed,
-      })),
-      flowSnapshot,
-    });
+      })), flowSnapshot });
   } finally {
     client.release();
   }
@@ -62,13 +57,13 @@ export function startControlTowerProjectionScheduler(options: {
   environment?: NodeJS.ProcessEnv;
 } = {}): ControlTowerProjectionSchedulerHandle {
   if (activeSchedulerHandle !== null) {
-    console.warn("[Operations Control Tower projector] scheduler already running; reusing existing handle");
+    logger.warn("operations.control_tower_v2_scheduler", { message: "[Operations Control Tower projector] scheduler already running; reusing existing handle" });
     return activeSchedulerHandle;
   }
 
   const intervalMs = projectorIntervalMs(options.environment ?? process.env);
   const initialDelayMs = controlTowerProjectorInitialDelayMs(intervalMs);
-  console.log(`[Operations Control Tower projector] scheduler started intervalMs=${intervalMs} initialDelayMs=${initialDelayMs}`);
+  logger.info("operations.control_tower_v2_scheduler", { message: `[Operations Control Tower projector] scheduler started intervalMs=${intervalMs} initialDelayMs=${initialDelayMs}` });
 
   let stopped = false;
   let inFlight = false;
@@ -76,13 +71,13 @@ export function startControlTowerProjectionScheduler(options: {
   const run = () => {
     if (stopped) return;
     if (inFlight) {
-      console.warn("[Operations Control Tower projector] skipping overlapping tick while previous run is still active");
+      logger.warn("operations.control_tower_v2_scheduler", { message: "[Operations Control Tower projector] skipping overlapping tick while previous run is still active" });
       return;
     }
     inFlight = true;
     runLockedProjection()
       .catch((error) => {
-        console.error("[Operations Control Tower projector] scheduled projection failed", error);
+        logger.error("operations.control_tower_v2_scheduler", { message: "[Operations Control Tower projector] scheduled projection failed", error: error });
       })
       .finally(() => {
         inFlight = false;

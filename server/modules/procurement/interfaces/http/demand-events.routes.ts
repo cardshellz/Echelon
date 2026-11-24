@@ -19,6 +19,7 @@ import {
   demandEventStatusEnum,
   demandEventTypeEnum,
 } from "@shared/schema/procurement.schema";
+import { logger } from "../../../../platform/observability/logger";
 
 const nullableNotes = z.string().trim().max(4000).nullable().optional();
 
@@ -110,7 +111,7 @@ function respondError(res: Response, error: unknown, operation: string): Respons
   if (error instanceof z.ZodError) {
     return res.status(400).json({ error: "Validation failed", code: "DEMAND_EVENT_INVALID_INPUT", details: error.issues });
   }
-  console.error(`[DemandEvents] ${operation} failed:`, error);
+  logger.error("procurement.demand_events_routes", { message: `[DemandEvents] ${operation} failed:`, error: error });
   return res.status(500).json({ error: `Failed to ${operation} demand event`, code: "DEMAND_EVENT_INTERNAL_ERROR" });
 }
 

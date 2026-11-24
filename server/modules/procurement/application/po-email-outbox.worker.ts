@@ -3,6 +3,7 @@ import { pool } from "../../../db";
 import { sendEmail, type EmailDeliveryResult } from "../../notifications/email-delivery.api";
 import type { PoEmailOutboxDbPool } from "./po-email-outbox.service";
 import { inspectPoEmailDocument, type PoEmailDocumentMetadata, type PoEmailDocumentHoldReason } from "./po-email-document-contract";
+import { logger } from "../../../platform/observability/logger";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const DEFAULT_BATCH_SIZE = 10;
@@ -51,7 +52,7 @@ export function getPoEmailOutboxWorkerHeartbeat(): PoEmailOutboxWorkerHeartbeat 
 
 export function startPoEmailOutboxWorker(): void {
   if (timer) {
-    console.warn(`${LOG_PREFIX} Worker already started; ignoring duplicate start`);
+    logger.warn("procurement.po_email_outbox_worker", { message: `${LOG_PREFIX} Worker already started; ignoring duplicate start` });
     return;
   }
   startedAt = new Date();
@@ -59,7 +60,7 @@ export function startPoEmailOutboxWorker(): void {
   const run = () => void runPoEmailOutboxWorkerTick();
   setTimeout(run, Math.min(intervalMs, 5_000));
   timer = setInterval(run, intervalMs);
-  console.info(`${LOG_PREFIX} Started durable delivery worker (interval ${intervalMs}ms)`);
+  logger.info("procurement.po_email_outbox_worker", { message: `${LOG_PREFIX} Started durable delivery worker (interval ${intervalMs}ms)` });
 }
 
 export async function runPoEmailOutboxWorkerTick(
@@ -75,7 +76,7 @@ export async function runPoEmailOutboxWorkerTick(
     return "success";
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
-    console.error(`${LOG_PREFIX} Worker tick failed`, error);
+    logger.error("procurement.po_email_outbox_worker", { message: `${LOG_PREFIX} Worker tick failed`, error: error });
     return "error";
   } finally {
     inFlight = false;
@@ -138,13 +139,7 @@ export async function processPoEmailOutboxBatch(dependencies: {
   }));
 
   if (claimed.length > 0) {
-    console.info(`${LOG_PREFIX} Batch complete`, {
-      claimed: claimed.length,
-      sent,
-      retried,
-      deadLettered,
-      held,
-    });
+    logger.info("procurement.po_email_outbox_worker", { message: `${LOG_PREFIX} Batch complete`, claimed: claimed.length, sent, retried, deadLettered, held });
   }
   return { claimed: claimed.length, sent, retried, deadLettered, held };
 }
@@ -269,16 +264,7 @@ interface DocumentHoldAuditRow {
 }
 
 function logDocumentHold(row: DocumentHoldAuditRow): void {
-  console.warn(JSON.stringify({
-    event: "po_email_document_hold_applied",
-    actorType: "system",
-    actorId: "po_email_outbox_worker",
-    deliveryId: row.deliveryId,
-    poId: row.poId,
-    previousHold: null,
-    newHoldReason: row.newHoldReason,
-    heldAt: row.heldAt.toISOString(),
-  }));
+  logger.warn("po_email_document_hold_applied", { event: "po_email_document_hold_applied", actorType: "system", actorId: "po_email_outbox_worker", deliveryId: row.deliveryId, poId: row.poId, previousHold: null, newHoldReason: row.newHoldReason, heldAt: row.heldAt.toISOString() });
 }
 
 async function markDeliverySent(
@@ -420,12 +406,7 @@ async function parkAcceptedDeliveryAfterLocalFailure(
       `Delivery ${delivery.id} lost its worker lease after SMTP acceptance while parking local failure`,
     );
   }
-  console.error(`${LOG_PREFIX} Parked accepted delivery after local finalize failure`, {
-    deliveryId: delivery.id,
-    purchaseOrderId: delivery.purchaseOrderId,
-    providerMessageId: result.messageId,
-    error: errorDetail,
-  });
+  logger.error("procurement.po_email_outbox_worker", { message: `${LOG_PREFIX} Parked accepted delivery after local finalize failure`, deliveryId: delivery.id, purchaseOrderId: delivery.purchaseOrderId, providerMessageId: result.messageId, error: errorDetail });
 }
 
 const PRE_COMMIT_SMTP_COMMANDS = new Set([

@@ -9,6 +9,7 @@ import { readCustomerAccountStagingConfig, requireCustomerAccountStorefront } fr
 import { CustomerReturnCustomerAccessError } from "../../application/customer-return-customer-auth.service";
 import { dispatchCustomerReturn } from "./customer-return-dispatch";
 import { returnCustomerPrivateResponse, returnCustomerError } from "./customer-return-customer-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 const envelopeSchema = z.object({ themeId: z.string().regex(/^[1-9][0-9]{0,29}$/),
   action: z.enum(["lookup", "verify", "account", "returns", "logout"]), input: z.unknown(), proof: returnGuestProofSchema.optional() }).strict();
@@ -54,7 +55,7 @@ export function registerCustomerReturnGuestRoutes(app: Express, overrides: Parti
       else res.json(result);
     } catch (error) {
       const code = error instanceof CustomerReturnCustomerAccessError ? error.code : error instanceof z.ZodError ? "RETURN_GUEST_INPUT_INVALID" : "RETURN_GUEST_REQUEST_FAILED";
-      console.warn(JSON.stringify({ event: "guest_return_request_failed", action, code }));
+      logger.warn("guest_return_request_failed", { event: "guest_return_request_failed", code });
       returnCustomerError(res, error);
     }
   });

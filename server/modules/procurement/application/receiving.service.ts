@@ -62,6 +62,7 @@ import {
   type ReceivingOrchestrationPurchasing,
   reconcileLinkedPurchaseOrder,
 } from "./receiving-orchestration.service";
+import { logger } from "../../../platform/observability/logger";
 
 interface InventoryCore {
   receiveInventory(params: {
@@ -1656,9 +1657,7 @@ export class ReceivingService {
         }
       } catch (error) {
         if (error instanceof ShipmentReceiptCoverageError || error instanceof PoDirectCustodySourceError) {
-          console.warn(JSON.stringify({ event: "procurement.receiving.custody_admission_rejected", command: "close_receipt",
-            actorId: userId ?? null, receivingOrderId: orderId, purchaseOrderId: order.purchaseOrderId ?? null,
-            inboundShipmentId: order.inboundShipmentId ?? null, code: error.details.code }));
+          logger.warn("procurement.receiving.custody_admission_rejected", { event: "procurement.receiving.custody_admission_rejected", command: "close_receipt", actorId: userId ?? null, receivingOrderId: orderId, purchaseOrderId: order.purchaseOrderId ?? null, inboundShipmentId: order.inboundShipmentId ?? null, code: error.details.code });
         }
         throw error;
       }
@@ -1808,7 +1807,7 @@ export class ReceivingService {
     // enqueue fails and the operator-visible sync monitor can retry it.
     for (const variantId of Array.from(receivedVariantIds)) {
       this.channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-        console.warn(`[ChannelSync] Post-receive sync failed for variant ${variantId}:`, err),
+        logger.warn("procurement.receiving_service", { message: `[ChannelSync] Post-receive sync failed for variant ${variantId}:`, error: err }),
       );
     }
 
@@ -1830,10 +1829,7 @@ export class ReceivingService {
           });
         }
       } catch (warningError) {
-        console.warn(
-          `[Receiving] Validation warning evaluation failed for receiving order ${orderId}:`,
-          warningError,
-        );
+        logger.warn("procurement.receiving_service", { message: `[Receiving] Validation warning evaluation failed for receiving order ${orderId}:`, detail: warningError });
       }
     }
 

@@ -7,6 +7,7 @@ import {
   type ProjectionPreview,
   type QueryClient,
 } from "../domain/control-tower-v2.domain";
+import { logger } from "../../../platform/observability/logger";
 
 const PROJECTOR_LOCK_PREFIX = "operations_control_tower_projector:";
 const DEFAULT_SOURCE_PAGE_SIZE = 250;
@@ -810,11 +811,7 @@ export async function runControlTowerSourceProjection<Row>(params: {
       errorCode: "PROJECTION_FAILED",
       errorMessage: sanitizedError(error),
     }).catch((runError) => {
-      console.error("[Operations Control Tower] failed to persist source-run failure", {
-        runId,
-        sourceName: params.adapter.name,
-        error: sanitizedError(runError),
-      });
+      logger.error("operations.control_tower_v2_repository", { message: "[Operations Control Tower] failed to persist source-run failure", runId, sourceName: params.adapter.name, error: sanitizedError(runError) });
     });
     throw error;
   }

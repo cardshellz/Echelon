@@ -11,6 +11,7 @@ import { registerSupplierReturnRoutes } from "../../interfaces/http/supplier-ret
 import { SupplierReturnError } from "../../domain/supplier-return.errors";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 import { returnPreview, returnRequest, returnResult } from "../../../../../test/fixtures/supplier-return";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 describe("supplier return HTTP boundary", () => {
   let server: Server, base: string;
@@ -126,7 +127,7 @@ describe("supplier return HTTP boundary", () => {
     expect(response.headers["retry-after"]).toBe("2"); expect(response.body.details.supplierReturnCommandOutcome).toBeUndefined();
   });
   it("logs infrastructure failure and returns recovery guidance without database details", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       commands.record.mockRejectedValue(new Error("private database diagnostic"));
       const response = await request("POST", "/api/supplier-returns", returnRequest());

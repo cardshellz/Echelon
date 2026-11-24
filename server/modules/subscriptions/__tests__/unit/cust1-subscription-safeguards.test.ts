@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const {
   txMock,
@@ -430,17 +431,17 @@ describe("Priority 13 Batch CUST-1 — Subscription Safeguards (CUST-02, CUST-03
     });
 
     it("logs disabled webhook ownership honestly instead of claiming webhook routes were registered (CUST-05)", () => {
-      const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
-      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const infoSpy = spyLoggerJson("info");
 
       registerSubscriptionWebhookRoutes({ post: vi.fn() } as any);
 
       expect(infoSpy).toHaveBeenCalledWith(
         expect.stringContaining("disabled in Echelon (owned by shellz-club-app)"),
       );
-      expect(logSpy).not.toHaveBeenCalledWith(
+      expect(infoSpy).not.toHaveBeenCalledWith(
         expect.stringContaining("Subscription webhook routes registered"),
       );
+      infoSpy.mockRestore();
     });
   });
 });

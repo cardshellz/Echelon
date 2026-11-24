@@ -248,12 +248,7 @@ export async function recoverStaleChannelFulfillmentReceipts(
       }
     } catch (error: any) {
       failed++;
-      console.error(JSON.stringify({
-        code: "CHANNEL_FULFILLMENT_RECEIPT_RECOVERY_FAILED",
-        receiptId,
-        errorCode: typeof error?.code === "string" ? error.code : null,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      }));
+      logger.error("CHANNEL_FULFILLMENT_RECEIPT_RECOVERY_FAILED", { code: "CHANNEL_FULFILLMENT_RECEIPT_RECOVERY_FAILED", receiptId, errorCode: typeof error?.code === "string" ? error.code : null, errorMessage: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -263,10 +258,7 @@ export async function recoverStaleChannelFulfillmentReceipts(
     reviewRequired,
     failed,
   };
-  console.log(JSON.stringify({
-    code: "CHANNEL_FULFILLMENT_RECEIPT_RECOVERY_COMPLETED",
-    ...summary,
-  }));
+  logger.info("CHANNEL_FULFILLMENT_RECEIPT_RECOVERY_COMPLETED", { code: "CHANNEL_FULFILLMENT_RECEIPT_RECOVERY_COMPLETED", ...summary });
   return summary;
 }
 
@@ -368,13 +360,7 @@ export async function recoverShopifyWritebackDebt(
       const snapshot = await fetchSnapshot(order);
       if (!snapshot.complete) {
         reviewRequired++;
-        console.warn(JSON.stringify({
-          code: "SHOPIFY_WRITEBACK_DEBT_SNAPSHOT_INCOMPLETE",
-          omsOrderId: order.id,
-          orderNumber: order.external_order_number,
-          deadRetryCount: order.dead_retry_count,
-          incompleteReasons: snapshot.incompleteReasons,
-        }));
+        logger.warn("SHOPIFY_WRITEBACK_DEBT_SNAPSHOT_INCOMPLETE", { code: "SHOPIFY_WRITEBACK_DEBT_SNAPSHOT_INCOMPLETE", omsOrderId: order.id, orderNumber: order.external_order_number, deadRetryCount: order.dead_retry_count, incompleteReasons: snapshot.incompleteReasons });
         await deferOrder(order, nextRetryAt());
         continue;
       }
@@ -384,12 +370,7 @@ export async function recoverShopifyWritebackDebt(
       if (result.retryRowsResolved > 0) ordersResolved++;
       if (result.unresolved.length > 0) {
         reviewRequired++;
-        console.warn(JSON.stringify({
-          code: "SHOPIFY_WRITEBACK_DEBT_EVIDENCE_INCOMPLETE",
-          omsOrderId: order.id,
-          orderNumber: order.external_order_number,
-          unresolved: result.unresolved,
-        }));
+        logger.warn("SHOPIFY_WRITEBACK_DEBT_EVIDENCE_INCOMPLETE", { code: "SHOPIFY_WRITEBACK_DEBT_EVIDENCE_INCOMPLETE", omsOrderId: order.id, orderNumber: order.external_order_number, unresolved: result.unresolved });
         await deferOrder(order, nextRetryAt());
       }
     } catch (error) {
@@ -398,20 +379,9 @@ export async function recoverShopifyWritebackDebt(
       try {
         await deferOrder(order, nextRetryAt());
       } catch (deferError) {
-        console.error(JSON.stringify({
-          code: "SHOPIFY_WRITEBACK_DEBT_DEFERRAL_FAILED",
-          omsOrderId: order.id,
-          orderNumber: order.external_order_number,
-          errorMessage: deferError instanceof Error ? deferError.message : String(deferError),
-        }));
+        logger.error("SHOPIFY_WRITEBACK_DEBT_DEFERRAL_FAILED", { code: "SHOPIFY_WRITEBACK_DEBT_DEFERRAL_FAILED", omsOrderId: order.id, orderNumber: order.external_order_number, errorMessage: deferError instanceof Error ? deferError.message : String(deferError) });
       }
-      console.error(JSON.stringify({
-        code: "SHOPIFY_WRITEBACK_DEBT_RECOVERY_FAILED",
-        omsOrderId: order.id,
-        orderNumber: order.external_order_number,
-        errorCode: typeof record?.code === "string" ? record.code : null,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      }));
+      logger.error("SHOPIFY_WRITEBACK_DEBT_RECOVERY_FAILED", { code: "SHOPIFY_WRITEBACK_DEBT_RECOVERY_FAILED", omsOrderId: order.id, orderNumber: order.external_order_number, errorCode: typeof record?.code === "string" ? record.code : null, errorMessage: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -518,7 +488,7 @@ export async function runFulfillmentSweep(
   physicalRecovery: ShipStationPhysicalRecoveryService | null = null,
 ) {
   try {
-    console.log(`${LOG_PREFIX} Starting hourly outbound channel writeback sweep...`);
+    logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Starting hourly outbound channel writeback sweep...` });
 
     try {
       const recovery = await resolveRecoveredShipNotifyNoMatchExceptions(dbArg, {
@@ -526,17 +496,13 @@ export async function runFulfillmentSweep(
         resolvedBy: "system:fulfillment_sweeper",
       });
       if (recovery.resolvedCount > 0) {
-        console.log(
-          `${LOG_PREFIX} Auto-resolved ${recovery.resolvedCount} recovered SHIP_NOTIFY no-match exception(s).`,
-        );
+        logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Auto-resolved ${recovery.resolvedCount} recovered SHIP_NOTIFY no-match exception(s).` });
       }
     } catch (error: any) {
       // Channel writeback repair remains independent from exception cleanup.
       // A cleanup failure is observable and retried on the next sweep without
       // blocking customer tracking repairs.
-      console.error(
-        `${LOG_PREFIX} SHIP_NOTIFY exception recovery failed: ${error?.message ?? String(error)}`,
-      );
+      logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} SHIP_NOTIFY exception recovery failed: ${error?.message ?? String(error)}` });
     }
 
     // Recover missing provider-label evidence before the ordinary channel
@@ -545,9 +511,7 @@ export async function runFulfillmentSweep(
       try {
         await runShipStationProviderLabelRecoverySweep(physicalRecovery);
       } catch (error: any) {
-        console.error(
-          `${LOG_PREFIX} ShipStation provider-label recovery failed: ${error?.message ?? String(error)}`,
-        );
+        logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} ShipStation provider-label recovery failed: ${error?.message ?? String(error)}` });
       }
     }
 
@@ -589,7 +553,7 @@ export async function runFulfillmentSweep(
     );
 
     if (candidates.length === 0) {
-      console.log(`${LOG_PREFIX} No missing channel writebacks in the sweep window.`);
+      logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} No missing channel writebacks in the sweep window.` });
       return;
     }
 
@@ -622,27 +586,21 @@ export async function runFulfillmentSweep(
               || recovery.inboxRowsResolved > 0
               || recovery.reviewMarkersCleared > 0
             ) {
-              console.log(
-                `${LOG_PREFIX} Resolved Shopify writeback debt for shipment ${row.shipment_id}: ${JSON.stringify(recovery)}`,
-              );
+              logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Resolved Shopify writeback debt for shipment ${row.shipment_id}: ${JSON.stringify(recovery)}` });
             }
           }
           repushed++;
         } else {
-          console.error(
-            `${LOG_PREFIX} Canonical writeback remains pending for shipment ${row.shipment_id} (${row.provider}, order ${row.order_number ?? row.oms_order_id}): ${JSON.stringify({ commands, dispatch: result.dispatch })}`,
-          );
+          logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Canonical writeback remains pending for shipment ${row.shipment_id} (${row.provider}, order ${row.order_number ?? row.oms_order_id}): ${JSON.stringify({ commands, dispatch: result.dispatch })}` });
         }
       } catch (err: any) {
-        console.error(
-          `${LOG_PREFIX} Error materializing shipment ${row.shipment_id} for ${row.provider}: ${err.message}`,
-        );
+        logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Error materializing shipment ${row.shipment_id} for ${row.provider}: ${err.message}` });
       }
     }
 
-    console.log(`${LOG_PREFIX} Complete. Processed: ${processed}/${candidates.length}, Repushed: ${repushed}`);
+    logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Complete. Processed: ${processed}/${candidates.length}, Repushed: ${repushed}` });
   } catch (err: any) {
-    console.error(`${LOG_PREFIX} Critical error during sweep: ${err.message}`);
+    logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Critical error during sweep: ${err.message}` });
   }
 }
 
@@ -657,19 +615,15 @@ export async function runInboundFulfillmentSweep(
   channelFulfillmentIngress: ChannelFulfillmentIngressService | null = null,
 ) {
   try {
-    console.log(`${LOG_PREFIX} Starting inbound fulfillment sweep...`);
+    logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Starting inbound fulfillment sweep...` });
 
     try {
       const recovery = await recoverShopifyWritebackDebt(dbArg);
       if (recovery.candidates > 0) {
-        console.log(
-          `${LOG_PREFIX} Shopify writeback debt recovery: ${JSON.stringify(recovery)}`,
-        );
+        logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Shopify writeback debt recovery: ${JSON.stringify(recovery)}` });
       }
     } catch (error) {
-      console.error(
-        `${LOG_PREFIX} Shopify writeback debt recovery failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Shopify writeback debt recovery failed: ${error instanceof Error ? error.message : String(error)}` });
     }
 
     // Orders that are paid/active in OMS but NOT shipped in WMS — candidates
@@ -689,7 +643,7 @@ export async function runInboundFulfillmentSweep(
     `);
 
     if (candidates.rows.length === 0) {
-      console.log(`${LOG_PREFIX} No inbound fulfillment candidates found.`);
+      logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} No inbound fulfillment candidates found.` });
       return;
     }
 
@@ -718,15 +672,13 @@ export async function runInboundFulfillmentSweep(
           if (ok) synced++;
         }
       } catch (err: any) {
-        console.error(
-          `${LOG_PREFIX} Error syncing inbound fulfillment for order ${row.id} (${provider}): ${err.message}`,
-        );
+        logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Error syncing inbound fulfillment for order ${row.id} (${provider}): ${err.message}` });
       }
     }
 
-    console.log(`${LOG_PREFIX} Inbound sweep complete. Synced: ${synced}/${candidates.rows.length} candidates.`);
+    logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Inbound sweep complete. Synced: ${synced}/${candidates.rows.length} candidates.` });
   } catch (err: any) {
-    console.error(`${LOG_PREFIX} Critical error during inbound sweep: ${err.message}`);
+    logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Critical error during inbound sweep: ${err.message}` });
   }
 }
 
@@ -740,9 +692,7 @@ export async function runInboundReceiptRecoverySweep(
       channelFulfillmentIngress,
     );
   } catch (error: any) {
-    console.error(
-      `${LOG_PREFIX} Inbound receipt recovery failed: ${error?.message ?? String(error)}`,
-    );
+    logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Inbound receipt recovery failed: ${error?.message ?? String(error)}` });
     throw error;
   }
 }
@@ -761,8 +711,7 @@ export async function runShipStationProviderLabelRecoverySweep(
     || result.trackingWarnings > 0
     || result.errors > 0
   ) {
-    console.log(
-      `${LOG_PREFIX} ShipStation provider-label recovery: ${JSON.stringify({
+    logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} ShipStation provider-label recovery: ${JSON.stringify({
         candidates: result.candidates,
         matchedPackages: result.matchedPackages,
         labelsObserved: result.labelsObserved,
@@ -773,8 +722,7 @@ export async function runShipStationProviderLabelRecoverySweep(
         trackingWarnings: result.trackingWarnings,
         noMatch: result.noMatch,
         errors: result.errors,
-      })}`,
-    );
+      })}` });
   }
   return result;
 }
@@ -789,9 +737,7 @@ export function startFulfillmentSweeper(
     return;
   }
 
-  console.log(
-    `${LOG_PREFIX} Scheduler started (hourly fulfillment sweep, 10-minute provider-label recovery, dyno-safe locks)`,
-  );
+  logger.info("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Scheduler started (hourly fulfillment sweep, 10-minute provider-label recovery, dyno-safe locks)` });
 
   const SWEEPER_LOCK_ID = 8484;
   const INBOUND_LOCK_ID = 8485;
@@ -811,7 +757,7 @@ export function startFulfillmentSweeper(
         logPrefix: LOG_PREFIX,
         run: () => runFulfillmentSweep(dbArg, fulfillmentAuthority, physicalRecovery),
       });
-    }).catch((err) => console.error(`${LOG_PREFIX} Boot run error: ${err.message}`));
+    }).catch((err) => logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Boot run error: ${err.message}` }));
   }, 5000);
 
   // Recover durable receipts independently from provider polling. The
@@ -820,13 +766,13 @@ export function startFulfillmentSweeper(
     setTimeout(() => {
       withAdvisoryLock(RECEIPT_RECOVERY_LOCK_ID, async () => {
         await runInboundReceiptRecoverySweep(dbArg, channelFulfillmentIngress);
-      }).catch((err) => console.error(`${LOG_PREFIX} Receipt boot recovery error: ${err.message}`));
+      }).catch((err) => logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Receipt boot recovery error: ${err.message}` }));
     }, 15000);
 
     setInterval(() => {
       withAdvisoryLock(RECEIPT_RECOVERY_LOCK_ID, async () => {
         await runInboundReceiptRecoverySweep(dbArg, channelFulfillmentIngress);
-      }).catch((err) => console.error(`${LOG_PREFIX} Receipt recovery error: ${err.message}`));
+      }).catch((err) => logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Receipt recovery error: ${err.message}` }));
     }, INBOUND_RECEIPT_RECOVERY_INTERVAL_MS);
   }
 
@@ -835,9 +781,7 @@ export function startFulfillmentSweeper(
       withAdvisoryLock(SHIPSTATION_LABEL_RECOVERY_LOCK_ID, async () => {
         await runShipStationProviderLabelRecoverySweep(physicalRecovery);
       }).catch((err) =>
-        console.error(
-          `${LOG_PREFIX} ShipStation provider-label recovery error: ${err.message}`,
-        ));
+        logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} ShipStation provider-label recovery error: ${err.message}` }));
     }, SHIPSTATION_LABEL_RECOVERY_INTERVAL_MS);
   }
 
@@ -856,7 +800,7 @@ export function startFulfillmentSweeper(
           channelFulfillmentIngress,
         ),
       });
-    }).catch((err) => console.error(`${LOG_PREFIX} Inbound boot run error: ${err.message}`));
+    }).catch((err) => logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Inbound boot run error: ${err.message}` }));
   }, 30000);
 
   // Run every 1 hour thereafter. Recording here as well as on the boot pass is
@@ -866,7 +810,7 @@ export function startFulfillmentSweeper(
     withAdvisoryLock(SWEEPER_LOCK_ID, async () => {
       await runFulfillmentSweep(dbArg, fulfillmentAuthority, physicalRecovery);
       await recordRunCompleted(dbArg, OUTBOUND_SWEEP_JOB_KEY);
-    }).catch((err) => console.error(`${LOG_PREFIX} Scheduled run error: ${err.message}`));
+    }).catch((err) => logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Scheduled run error: ${err.message}` }));
   }, OUTBOUND_SWEEP_INTERVAL_MS);
 
   // Inbound sweep every hour (offset by 30 min from outbound)
@@ -879,7 +823,7 @@ export function startFulfillmentSweeper(
           channelFulfillmentIngress,
         );
         await recordRunCompleted(dbArg, INBOUND_SWEEP_JOB_KEY);
-      }).catch((err) => console.error(`${LOG_PREFIX} Inbound sweep error: ${err.message}`));
+      }).catch((err) => logger.error("oms.fulfillment_sweeper_scheduler", { message: `${LOG_PREFIX} Inbound sweep error: ${err.message}` }));
     }, INBOUND_SWEEP_INTERVAL_MS);
   }, 30 * 60 * 1000);
 }

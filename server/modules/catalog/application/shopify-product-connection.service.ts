@@ -23,6 +23,7 @@ import { createChannelPricingService } from "../../channels/channel-pricing.serv
 import { ChannelPricingError } from "../../channels/channel-pricing.domain.api";
 import { assertLinkSkuProgress, assertLinkSkusAvailable, planLinkSkuAssignments,
   shopifyConnectionRemoteFingerprint } from "./shopify-link-sku-completion";
+import { logger } from "../../../platform/observability/logger";
 
 interface ConnectionPlan {
   source: ShopifyConnectionSource;
@@ -61,7 +62,7 @@ export function createShopifyProductConnectionService(input: {
   log?: (event: Record<string, unknown>) => void;
 }) {
   const { repository, provider, mappingOwner } = input;
-  const log = input.log ?? (event => console.info(JSON.stringify(event)));
+  const log = input.log ?? (event => logger.info("catalog.shopify_product_connection_service", { detail: JSON.stringify(event) }));
 
   async function account(source: ShopifyConnectionSource, request?: ShopifyProductConnectionRequest) {
     const credentials = await repository.credentials(source.channel.id, source.channel);

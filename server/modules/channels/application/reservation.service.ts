@@ -62,6 +62,7 @@ import type {
   ReservationServiceContract,
   ReserveForOrderResult,
 } from "../../inventory-planning/reservation-authority.api";
+import { logger } from "../../../platform/observability/logger";
 
 // Advisory lock namespace for per-product reservation serialization (P0.1b).
 // 918405-918407 are taken by flow-reconciliation / shipment-creation / push.
@@ -258,10 +259,8 @@ class ReservationService implements ReservationServiceContract {
     // Notify on shortfall
     if (shortfall > 0) {
       const sku = variantAtp?.sku ?? `variant#${variantId}`;
-      console.warn(
-        `[RESERVATION] Inventory shortfall: Order #${orderId} item #${orderItemId}: ` +
-          `Only ${toReserve} of ${orderQty} units of ${sku} could be reserved (ATP=${atpUnits})`,
-      );
+      logger.warn("channels.reservation_service", { detail: `[RESERVATION] Inventory shortfall: Order #${orderId} item #${orderItemId}: ` +
+          `Only ${toReserve} of ${orderQty} units of ${sku} could be reserved (ATP=${atpUnits})` });
     }
 
     if (toReserve === 0) {
@@ -316,18 +315,14 @@ class ReservationService implements ReservationServiceContract {
 
       if (fallbackLevel?.warehouseLocationId) {
         reserveLocationId = fallbackLevel.warehouseLocationId;
-        console.warn(
-          `[RESERVATION] No assigned bin (product_locations) for variant ${variantId} — ` +
-            `falling back to inventory_levels location ${reserveLocationId} for order #${orderId}`,
-        );
+        logger.warn("channels.reservation_service", { detail: `[RESERVATION] No assigned bin (product_locations) for variant ${variantId} — ` +
+            `falling back to inventory_levels location ${reserveLocationId} for order #${orderId}` });
       }
     }
 
     if (!reserveLocationId) {
-      console.warn(
-        `[RESERVATION] No assigned bin or inventory_levels for variant ${variantId} — ` +
-          `cannot place reservation for order #${orderId}`,
-      );
+      logger.warn("channels.reservation_service", { detail: `[RESERVATION] No assigned bin or inventory_levels for variant ${variantId} — ` +
+          `cannot place reservation for order #${orderId}` });
       return { reserved: 0, promised: 0, shortfall: orderQty };
     }
 
@@ -344,10 +339,8 @@ class ReservationService implements ReservationServiceContract {
     if (!success) {
       // Should not happen since core no longer checks bin-level stock,
       // but handle defensively
-      console.error(
-        `[RESERVATION] inventoryCore.reserveForOrder returned false unexpectedly ` +
-          `for variant ${variantId} order #${orderId}`,
-      );
+      logger.error("channels.reservation_service", { error: `[RESERVATION] inventoryCore.reserveForOrder returned false unexpectedly ` +
+          `for variant ${variantId} order #${orderId}` });
       return { reserved: 0, promised: 0, shortfall: orderQty };
     }
 
@@ -475,7 +468,7 @@ class ReservationService implements ReservationServiceContract {
     // Post-reservation: fire channel sync (reserving reduces available ATP)
     for (const vid of Array.from(syncVariantIds)) {
       this.channelSync.queueSyncAfterInventoryChange(vid).catch((err: any) =>
-        console.warn(`[ChannelSync] Post-reserve sync failed for variant ${vid}:`, err),
+        logger.warn("channels.reservation_service", { message: `[ChannelSync] Post-reserve sync failed for variant ${vid}:`, error: err }),
       );
     }
 
@@ -651,10 +644,8 @@ class ReservationService implements ReservationServiceContract {
           } catch (releaseErr) {
             if (options?.dbOverride != null) throw releaseErr;
             const msg = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
-            console.error(
-              `[RESERVATION] Failed to release ${releaseQty} units for SKU "${item.sku}" ` +
-                `at location ${level.warehouseLocationId}: ${msg}`,
-            );
+            logger.error("channels.reservation_service", { error: `[RESERVATION] Failed to release ${releaseQty} units for SKU "${item.sku}" ` +
+                `at location ${level.warehouseLocationId}: ${msg}` });
             result.failed.push({
               sku: item.sku,
               orderItemId: item.id,
@@ -667,17 +658,13 @@ class ReservationService implements ReservationServiceContract {
           // Ledger says more is open than the counters hold — counters are
           // already below the attributed amount (historical drift). Not an
           // error: releasing further would over-release someone else.
-          console.warn(
-            `[RESERVATION] Order ${orderId} item ${item.id} (${item.sku}): ledger shows ` +
-              `${remaining} open unit(s) beyond current counters — skipping (drift candidate)`,
-          );
+          logger.warn("channels.reservation_service", { detail: `[RESERVATION] Order ${orderId} item ${item.id} (${item.sku}): ledger shows ` +
+              `${remaining} open unit(s) beyond current counters — skipping (drift candidate)` });
         }
       } catch (err) {
         if (options?.dbOverride != null) throw err;
         const msg = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[RESERVATION] Error releasing reservation for order item ${item.id}: ${msg}`,
-        );
+        logger.error("channels.reservation_service", { message: `[RESERVATION] Error releasing reservation for order item ${item.id}: ${msg}` });
         result.failed.push({
           sku: item.sku,
           orderItemId: item.id,
@@ -689,7 +676,7 @@ class ReservationService implements ReservationServiceContract {
     // Post-release: fire channel sync (releasing increases available ATP)
     for (const vid of Array.from(syncVariantIds)) {
       this.channelSync.queueSyncAfterInventoryChange(vid).catch((err: any) =>
-        console.warn(`[ChannelSync] Post-release sync failed for variant ${vid}:`, err),
+        logger.warn("channels.reservation_service", { message: `[ChannelSync] Post-release sync failed for variant ${vid}:`, error: err }),
       );
     }
 
@@ -1174,10 +1161,8 @@ class ReservationService implements ReservationServiceContract {
       if (level.reservedQty <= currentQty) return result;
 
       excess = level.reservedQty - currentQty;
-      console.log(
-        `[RESERVATION] Orphaned reservation detected (fallback): variant=${productVariantId} ` +
-          `loc=${warehouseLocationId} reserved=${level.reservedQty} onHand=${level.variantQty} excess=${excess}`,
-      );
+      logger.info("channels.reservation_service", { detail: `[RESERVATION] Orphaned reservation detected (fallback): variant=${productVariantId} ` +
+          `loc=${warehouseLocationId} reserved=${level.reservedQty} onHand=${level.variantQty} excess=${excess}` });
 
       // Force-release the excess (counter + lots + ledger, atomically).
       // Replaces a call to a phantom core method that never existed on
@@ -1225,13 +1210,11 @@ class ReservationService implements ReservationServiceContract {
     ));
 
     if (affectedOrderIds.length === 0) {
-      console.log(`[RESERVATION] No affected orders found for re-allocation`);
+      logger.info("channels.reservation_service", { message: `[RESERVATION] No affected orders found for re-allocation` });
       return result;
     }
 
-    console.log(
-      `[RESERVATION] Attempting re-allocation for ${affectedOrderIds.length} order(s)`,
-    );
+    logger.info("channels.reservation_service", { message: `[RESERVATION] Attempting re-allocation for ${affectedOrderIds.length} order(s)` });
 
     // 4. For each order, try to re-reserve from an alternative assigned bin
     for (const orderId of affectedOrderIds) {
@@ -1277,42 +1260,17 @@ class ReservationService implements ReservationServiceContract {
 
           if (res.reserved > 0 || res.promised > 0) {
             result.reallocated++;
-            console.log(
-              `[RESERVATION] Re-allocated order ${orderId} item ${item.id} ` +
-                `(reserved=${res.reserved}, promised=${res.promised}, shortfall=${res.shortfall})`,
-            );
+            logger.info("channels.reservation_service", { detail: `[RESERVATION] Re-allocated order ${orderId} item ${item.id} ` +
+                `(reserved=${res.reserved}, promised=${res.promised}, shortfall=${res.shortfall})` });
           } else {
             result.failed++;
-            console.error(
-              JSON.stringify({
-                level: "ERROR",
-                action: "reallocate_orphaned_reservation",
-                outcome: "requires_review",
-                productVariantId,
-                orderId,
-                orderItemId: item.id,
-                sku: item.sku,
-                warehouseLocationId,
-                message: "No ATP available — order stays partially unreserved and needs manual attention",
-              }),
-            );
+            logger.error("reallocate_orphaned_reservation", { outcome: "requires_review", productVariantId, orderId, orderItemId: item.id, sku: item.sku, warehouseLocationId, message: "No ATP available — order stays partially unreserved and needs manual attention" });
           }
         }
       } catch (err) {
         if (dbOverride != null) throw err;
         result.failed++;
-        console.error(
-          JSON.stringify({
-            level: "ERROR",
-            action: "reallocate_orphaned_reservation",
-            outcome: "requires_review",
-            productVariantId,
-            orderId,
-            warehouseLocationId,
-            error: err instanceof Error ? err.message : String(err),
-            message: "Re-allocation threw — order needs manual review",
-          }),
-        );
+        logger.error("reallocate_orphaned_reservation", { outcome: "requires_review", productVariantId, orderId, warehouseLocationId, error: err instanceof Error ? err.message : String(err), message: "Re-allocation threw — order needs manual review" });
       }
     }
 
@@ -1320,7 +1278,7 @@ class ReservationService implements ReservationServiceContract {
     const syncAfterCommit = () => this.channelSync.queueSyncAfterInventoryChange(productVariantId);
     if (deferUntilCommit) deferUntilCommit(syncAfterCommit);
     else syncAfterCommit().catch((err: any) =>
-      console.warn(`[ChannelSync] Post-reallocation sync failed for variant ${productVariantId}:`, err),
+      logger.warn("channels.reservation_service", { message: `[ChannelSync] Post-reallocation sync failed for variant ${productVariantId}:`, error: err }),
     );
 
     return result;
@@ -1648,9 +1606,7 @@ class ReservationService implements ReservationServiceContract {
       .limit(1);
 
     if (!order) {
-      console.warn(
-        `[RESERVATION] autoReserveOnSync: order not found for Shopify ID "${shopifyOrderId}"`,
-      );
+      logger.warn("channels.reservation_service", { message: `[RESERVATION] autoReserveOnSync: order not found for Shopify ID "${shopifyOrderId}"` });
       return null;
     }
 

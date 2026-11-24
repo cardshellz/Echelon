@@ -28,6 +28,7 @@
  */
 import { db } from "../../../storage/base";
 import { backfillUnassignedWmsOrderItemBin } from "../../wms/order-intake-and-items.api";
+import { logger } from "../../../platform/observability/logger";
 
 type ExecutorLike = Pick<typeof db, "execute">;
 
@@ -51,15 +52,11 @@ export async function backfillOpenOrderItemBinAssignment(params: {
       ...(params.warehouseId !== undefined ? { warehouseId: params.warehouseId } : {}),
     });
     if (updated > 0) {
-      console.log(
-        `[BinAssignment] Backfilled ${updated} open order item(s) to bin ${code} for SKU ${sku}`,
-      );
+      logger.info("orders.bin_location_backfill", { message: `[BinAssignment] Backfilled ${updated} open order item(s) to bin ${code} for SKU ${sku}` });
     }
     return updated;
   } catch (err: any) {
-    console.warn(
-      `[BinAssignment] open-order-item backfill failed (non-fatal): ${err?.message ?? err}`,
-    );
+    logger.warn("orders.bin_location_backfill", { message: `[BinAssignment] open-order-item backfill failed (non-fatal): ${err?.message ?? err}` });
     return 0;
   }
 }

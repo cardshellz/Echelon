@@ -19,6 +19,7 @@ import {
   insertInterwarehouseTransitLocationInWarehouse,
 } from "../../warehouse/cross-module-warehouse-mutations.api";
 import type { InventoryUseCases } from "./inventory.use-cases";
+import { logger } from "../../../platform/observability/logger";
 
 type Database = Pick<typeof db, "transaction" | "execute">;
 type Executor = Pick<typeof db, "execute">;
@@ -497,7 +498,7 @@ export class InterwarehouseTransferService {
           effects_claim_token=NULL,effects_claimed_at=NULL
         WHERE id=${eventId} AND effects_completed_at IS NULL AND effects_claim_token=${claimToken}
       `).catch(() => undefined);
-      console.error(JSON.stringify({ event: "interwarehouse_transfer_followup_pending", eventId, message }));
+      logger.error("interwarehouse_transfer_followup_pending", { event: "interwarehouse_transfer_followup_pending", eventId, message });
       return false;
     }
   }

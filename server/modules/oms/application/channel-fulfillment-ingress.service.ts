@@ -18,6 +18,7 @@ import {
   type NormalizedChannelFulfillmentIngress,
 } from "./channel-fulfillment-ingress";
 import type { EngineCancelResult } from "../../shipping/engine-and-reconcile.api";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 const DEFAULT_RECEIPT_LEASE_DURATION_MS = 120_000;
 const MAX_TRANSIENT_RECEIPT_FAILURES = 5;
@@ -88,9 +89,9 @@ interface ProcessingFailure {
 
 function defaultLogger(): ChannelFulfillmentIngressLogger {
   return {
-    info: (event) => console.log(JSON.stringify(event)),
-    warn: (event) => console.warn(JSON.stringify(event)),
-    error: (event) => console.error(JSON.stringify(event)),
+    info: (event) => platformLogger.info("oms.channel_fulfillment_ingress_service", { detail: JSON.stringify(event) }),
+    warn: (event) => platformLogger.warn("oms.channel_fulfillment_ingress_service", { detail: JSON.stringify(event) }),
+    error: (event) => platformLogger.error("oms.channel_fulfillment_ingress_service", { error: JSON.stringify(event) }),
   };
 }
 

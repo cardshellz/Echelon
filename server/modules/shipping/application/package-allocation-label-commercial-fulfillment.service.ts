@@ -22,6 +22,7 @@ import { PackageAllocationAuthorityResolutionError } from "../domain/package-all
 import { PackageAllocationGroupError } from "../domain/package-allocation-group.domain";
 
 import { PackageAllocationSourceIdentityError } from "../domain/package-allocation-source-identity.domain";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 const ACTIVATION_ACTOR = "system:shipstation_label_commercial_fulfillment";
 const ACTIVATION_REASON =
@@ -122,8 +123,8 @@ const REVIEWABLE_PERSISTENCE_CODES = new Set([
 
 function defaultLogger(): PackageAllocationLabelCommercialFulfillmentLogger {
   return {
-    info: (event) => console.log(JSON.stringify(event)),
-    warn: (event) => console.warn(JSON.stringify(event)),
+    info: (event) => platformLogger.info("shipping.package_allocation_label_commercial_fulfillment_service", { detail: JSON.stringify(event) }),
+    warn: (event) => platformLogger.warn("shipping.package_allocation_label_commercial_fulfillment_service", { detail: JSON.stringify(event) }),
   };
 }
 

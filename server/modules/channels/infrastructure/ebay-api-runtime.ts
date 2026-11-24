@@ -17,6 +17,7 @@ import {
   EbayAuthService,
   createEbayAuthConfig,
 } from "../adapters/ebay/ebay-auth.service";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -161,9 +162,7 @@ export function ebayApiRequest(
             15,
           );
           const waitMs = retryAfter * 1000;
-          console.log(
-            `[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${retryCount + 1}/3...`,
-          );
+          logger.info("channels.ebay_api_runtime", { message: `[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${retryCount + 1}/3...` });
           setTimeout(() => {
             ebayApiRequest(method, path, accessToken, body, retryCount + 1)
               .then(resolve)
@@ -251,9 +250,7 @@ export async function ebayApiRequestWithRateNotify(
                 res.headers["retry-after"],
                 15,
               );
-              console.log(
-                `[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${attempt + 1}/3...`,
-              );
+              logger.info("channels.ebay_api_runtime", { message: `[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${attempt + 1}/3...` });
               if (onRateLimit) onRateLimit(retryAfter);
               setTimeout(() => makeRequest(attempt + 1), retryAfter * 1000);
               return;

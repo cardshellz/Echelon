@@ -6,6 +6,7 @@ import type { EbayAutomaticPublicationRecoveryStore, EbayAutomaticRecoveryResult
 import { quantityPublicationScopeLockKey, retainCatchupScopes } from "./quantity-publication-admission.repository";
 import { reconciliationHash, reconciliationFailure, tryLockReconciliationScopes, withReconciliationTransaction } from "./ebay-publication-reconciliation.persistence";
 import type { LegacyMaintenanceEvidenceReader } from "../application/legacy-maintenance-evidence.port";
+import { logger } from "../../../platform/observability/logger";
 
 interface AttemptRow {
   id: string; owner_kind: string; before_record: string; affected_scope_keys: string[]; outbox_scope_proven: boolean;
@@ -92,8 +93,7 @@ export class PostgresEbayAutomaticPublicationRecoveryRepository implements EbayA
       if (error instanceof QuantityPublicationAdmissionError) throw error;
       const sqlState = error instanceof Error && "code" in error && typeof error.code === "string"
         && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : null;
-      console.error(JSON.stringify({ event: "ebay_automatic_publication_recovery_failed", syncJobId: command.syncJobId,
-        code: "PUBLICATION_AUTOMATIC_RECOVERY_FAILED", sqlState }));
+      logger.error("ebay_automatic_publication_recovery_failed", { event: "ebay_automatic_publication_recovery_failed", syncJobId: command.syncJobId, code: "PUBLICATION_AUTOMATIC_RECOVERY_FAILED", sqlState });
       throw Object.assign(reconciliationFailure("PUBLICATION_AUTOMATIC_RECOVERY_FAILED",
         "The saved inventory recovery could not commit. Sync will retry automatically without changing the old request evidence."), { cause: error });
     });

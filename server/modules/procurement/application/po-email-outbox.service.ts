@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "crypto";
 import { pool } from "../../../db";
 import { buildPurchaseOrderEmail } from "./po-email-builder";
 import { inspectPoEmailDocument, type PoEmailDocumentMetadata } from "./po-email-document-contract";
+import { logger } from "../../../platform/observability/logger";
 
 export type PoEmailDeliveryStatus = "queued" | "processing" | "sent" | "partially_sent" | "dead_letter";
 
@@ -120,11 +121,7 @@ export async function enqueuePurchaseOrderEmail(
   } catch (error) {
     const rejectionCode = error !== null && typeof error === "object" && "code" in error && typeof error.code === "string"
       ? error.code : "PURCHASE_ORDER_DOCUMENT_BUILD_FAILED";
-    console.warn("[PO Email Outbox] Enqueue rejected", {
-      code: rejectionCode,
-      purchaseOrderId: input.purchaseOrderId,
-      actorId: input.createdBy ?? null,
-    });
+    logger.warn("procurement.po_email_outbox_service", { message: "[PO Email Outbox] Enqueue rejected", code: rejectionCode, purchaseOrderId: input.purchaseOrderId, actorId: input.createdBy ?? null });
     if (error instanceof Error && error.message === "Purchase order not found") {
       throw new PoEmailOutboxError(error.message, 404, "PURCHASE_ORDER_NOT_FOUND");
     }

@@ -13,6 +13,7 @@ import {
   recordOutboundShipmentAlreadyShippedInEngineInWms,
 } from "../../wms/outbound-shipment-mutations.api";
 import { cancelWmsOrderAndRelease } from "./cancel-wms-order";
+import { logger } from "../../../platform/observability/logger";
 
 export const OMS_WMS_CANCEL_RECONCILE_LOCK_ID = 918504;
 
@@ -65,10 +66,7 @@ export function startOmsWmsCancelReconcileScheduler(
         }
       }
       if (corrected.length > 0) {
-        console.warn(
-          `[OMS<->WMS Reconcile] Corrected ${corrected.length} divergent order(s):`,
-          corrected.map((r: any) => `${r.order_number} (oms=${r.oms_status})`).join(", "),
-        );
+        logger.warn("orders.oms_wms_cancel_reconcile_scheduler", { message: `[OMS<->WMS Reconcile] Corrected ${corrected.length} divergent order(s):`, detail: corrected.map((r: any) => `${r.order_number} (oms=${r.oms_status})`).join(", ") });
 
         const cancelledIds = corrected.map((r: any) => r.id);
         if (cancelledIds.length > 0) {
@@ -93,29 +91,23 @@ export function startOmsWmsCancelReconcileScheduler(
                   // P0.3: only "already_shipped" proves a package left the building.
                   if (cancelResult?.state === "already_shipped") {
                     await recordOutboundShipmentAlreadyShippedInEngineInWms(db, row.shipment_id);
-                    console.log(
-                      `[OMS<->WMS Reconcile] Engine order ${ref.engineOrderRef} already shipped — recorded shipped for shipment ${row.shipment_id}`,
-                    );
+                    logger.info("orders.oms_wms_cancel_reconcile_scheduler", { message: `[OMS<->WMS Reconcile] Engine order ${ref.engineOrderRef} already shipped — recorded shipped for shipment ${row.shipment_id}` });
                   } else {
                     await cancelOutboundShipmentAfterEngineCascadeInWms(db, row.shipment_id);
-                    console.log(
-                      `[OMS<->WMS Reconcile] Cancelled engine order ${ref.engineOrderRef} for shipment ${row.shipment_id} (${cancelResult?.state ?? "cancelled"})`,
-                    );
+                    logger.info("orders.oms_wms_cancel_reconcile_scheduler", { message: `[OMS<->WMS Reconcile] Cancelled engine order ${ref.engineOrderRef} for shipment ${row.shipment_id} (${cancelResult?.state ?? "cancelled"})` });
                   }
                 } catch (ssErr: any) {
-                  console.warn(
-                    `[OMS<->WMS Reconcile] Failed to cancel engine order for shipment ${row.shipment_id}: ${ssErr?.message}`,
-                  );
+                  logger.warn("orders.oms_wms_cancel_reconcile_scheduler", { message: `[OMS<->WMS Reconcile] Failed to cancel engine order for shipment ${row.shipment_id}: ${ssErr?.message}` });
                 }
               }
             }
           } catch (err: any) {
-            console.warn("[OMS<->WMS Reconcile] SS cascade error:", err?.message);
+            logger.warn("orders.oms_wms_cancel_reconcile_scheduler", { message: "[OMS<->WMS Reconcile] SS cascade error:", error: err?.message });
           }
         }
       }
     } catch (err: any) {
-      console.warn("[OMS<->WMS Reconcile] Sweep error:", err?.message);
+      logger.warn("orders.oms_wms_cancel_reconcile_scheduler", { message: "[OMS<->WMS Reconcile] Sweep error:", error: err?.message });
     }
   };
 

@@ -5,6 +5,7 @@ import type { DropshipCostDetectionService } from "../../application/dropship-co
 import { DropshipError } from "../../domain/errors";
 import { createDropshipCostChangeListingActionServiceFromEnv } from "../../infrastructure/dropship-cost-change-listing-action.factory";
 import { createDropshipCostDetectionServiceFromEnv } from "../../infrastructure/dropship-cost-detection.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 /**
  * Admin read surface for what cost detection has found (migration 0711,
@@ -73,12 +74,7 @@ function sendCostChangeActivityError(res: Response, error: unknown): Response {
       error: { code: error.code, message: error.message, context: error.context },
     });
   }
-  console.error(JSON.stringify({
-    level: "error",
-    code: "DROPSHIP_COST_CHANGE_ACTIVITY_INTERNAL_ERROR",
-    message: "Unexpected cost change activity request error.",
-    context: { error: error instanceof Error ? error.message : String(error) },
-  }));
+  logger.error("DROPSHIP_COST_CHANGE_ACTIVITY_INTERNAL_ERROR", { code: "DROPSHIP_COST_CHANGE_ACTIVITY_INTERNAL_ERROR", message: "Unexpected cost change activity request error.", context: { error: error instanceof Error ? error.message : String(error) } });
   return res.status(500).json({
     error: { code: "DROPSHIP_COST_CHANGE_ACTIVITY_INTERNAL_ERROR", message: "Dropship cost change activity request failed." },
   });

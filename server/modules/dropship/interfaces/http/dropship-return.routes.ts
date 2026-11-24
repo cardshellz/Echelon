@@ -6,6 +6,7 @@ import type { DropshipNoInspectionReviewService } from "../../application/dropsh
 import { createDropshipReturnServiceFromEnv } from "../../infrastructure/dropship-return.factory";
 import { createDropshipNoInspectionReviewServiceFromEnv } from "../../infrastructure/dropship-no-inspection-review.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -237,12 +238,12 @@ function sendDropshipReturnError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[DropshipReturnRoutes] Unexpected return error:", error);
+  logger.error("dropship.return_routes", { message: "[DropshipReturnRoutes] Unexpected return error:", error: error });
   // Extra diagnostic: log the stack trace explicitly for Heroku log drain
   if (error instanceof Error) {
-    console.error(`[DROPSHIP-500-DEBUG] ${error.name}: ${error.message}\n${error.stack}`);
+    logger.error("dropship.return_routes", { message: `[DROPSHIP-500-DEBUG] ${error.name}: ${error.message}\n${error.stack}` });
   } else {
-    console.error(`[DROPSHIP-500-DEBUG] Non-Error thrown: ${JSON.stringify(error)}`);
+    logger.error("dropship.return_routes", { message: `[DROPSHIP-500-DEBUG] Non-Error thrown: ${JSON.stringify(error)}` });
   }
   return res.status(500).json({
     error: {

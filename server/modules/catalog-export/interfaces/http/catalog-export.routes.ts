@@ -9,6 +9,7 @@ import {
   type NormalizedCatalogExportPage,
 } from "../../domain/catalog-export";
 import { PostgresCatalogExportRepository } from "../../infrastructure/postgres-catalog-export.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const querySchema = z.object({
   cursor: z.string().trim().min(1).max(255).optional(),
@@ -134,11 +135,7 @@ export function registerCatalogExportRoutes(
             },
           });
         }
-        console.error(JSON.stringify({
-          code: "CATALOG_EXPORT_FAILED",
-          message: "Catalog export failed.",
-          context: { error: error instanceof Error ? error.message : String(error) },
-        }));
+        logger.error("CATALOG_EXPORT_FAILED", { code: "CATALOG_EXPORT_FAILED", message: "Catalog export failed.", context: { error: error instanceof Error ? error.message : String(error) } });
         return res.status(500).json({
           error: {
             code: "CATALOG_EXPORT_FAILED",

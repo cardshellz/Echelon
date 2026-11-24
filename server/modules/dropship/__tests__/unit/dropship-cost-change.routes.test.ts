@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipCostChangeNoticeService } from "../../application/dropship-cost-change-notice-service";
 import { DropshipError } from "../../domain/errors";
 import { registerDropshipCostChangeRoutes, statusForVendorCostChangeError } from "../../interfaces/http/dropship-cost-change.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 
@@ -50,7 +51,7 @@ describe("dropship vendor cost change routes", () => {
     service.fail = new DropshipError("DROPSHIP_ENTITLEMENT_REQUIRED", "no", {});
     expect((await jsonRequest(`${server.url}/api/dropship/cost-changes`)).status).toBe(403);
     service.fail = new Error("boom");
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const errorSpy = spyLoggerJson("error");
     const response = await jsonRequest(`${server.url}/api/dropship/cost-changes`);
     expect(response.status).toBe(500);
     expect(response.body).toEqual({ error: { code: "DROPSHIP_COST_CHANGE_INTERNAL_ERROR", message: "Dropship cost change request failed." } });

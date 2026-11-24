@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { logger } from "../platform/observability/logger";
 
 /**
  * Durable record of when a scheduled sweep last completed.
@@ -85,10 +86,7 @@ export async function isBehindSchedule(
     if (!lastRunAt) return true;
     return now.getTime() - lastRunAt.getTime() >= intervalMs;
   } catch (error: any) {
-    console.error(
-      `[scheduler-run-registry] could not read last run for ${jobKey}; running anyway:`,
-      error?.message ?? error,
-    );
+    logger.error("infrastructure.scheduler_run_registry", { message: `[scheduler-run-registry] could not read last run for ${jobKey}; running anyway:`, error: error?.message ?? error });
     return true;
   }
 }
@@ -123,7 +121,7 @@ export async function runBootCatchUpIfBehind(input: {
 }): Promise<boolean> {
   const { db, jobKey, intervalMs, logPrefix, run } = input;
   if (!(await isBehindSchedule(db, jobKey, intervalMs))) {
-    console.log(`${logPrefix} Boot catch-up skipped - ${jobKey} is on schedule.`);
+    logger.info("infrastructure.scheduler_run_registry", { message: `${logPrefix} Boot catch-up skipped - ${jobKey} is on schedule.` });
     return false;
   }
   const result = await run();
@@ -170,9 +168,7 @@ export async function runOneShotIfNeverCompleted(input: {
 }): Promise<{ executed: boolean; alreadyCompletedAt: string | null }> {
   const prior = await getLastRunAt(input.db, input.oneShotKey);
   if (prior) {
-    console.log(
-      `${input.logPrefix} Skipping one-shot '${input.oneShotKey}' (already completed at ${prior.toISOString()}).`,
-    );
+    logger.info("infrastructure.scheduler_run_registry", { message: `${input.logPrefix} Skipping one-shot '${input.oneShotKey}' (already completed at ${prior.toISOString()}).` });
     return { executed: false, alreadyCompletedAt: prior.toISOString() };
   }
   await input.run();

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { ConnectionOptions } from "node:tls";
 import type { PoolConfig } from "pg";
+import { logger } from "./platform/observability/logger";
 
 export const DATABASE_SEARCH_PATH = [
   '"$user"',
@@ -125,15 +126,21 @@ export function resolvePostgresPoolSslConfig(
 
   if (!loggedUnverifiedFallbackWarning && !env.VITEST) {
     loggedUnverifiedFallbackWarning = true;
-    const warn = deps.warn ?? console.warn;
-    warn(
-      JSON.stringify({
-        level: "warn",
-        event: "postgres_ssl_unverified_fallback",
-        host: host || null,
-        hint: "Configure DATABASE_SSL_CA, PGSSLROOTCERT, or DATABASE_SSL_REJECT_UNAUTHORIZED=true for verified PostgreSQL TLS.",
-      }),
-    );
+    const payload = {
+      event: "postgres_ssl_unverified_fallback",
+      host: host || null,
+      hint: "Configure DATABASE_SSL_CA, PGSSLROOTCERT, or DATABASE_SSL_REJECT_UNAUTHORIZED=true for verified PostgreSQL TLS.",
+    };
+    if (deps.warn) {
+      deps.warn(
+        JSON.stringify({
+          level: "warn",
+          ...payload,
+        }),
+      );
+    } else {
+      logger.warn("postgres_ssl_unverified_fallback", payload);
+    }
   }
 
   return {

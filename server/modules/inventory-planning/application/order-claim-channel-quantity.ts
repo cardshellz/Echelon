@@ -1,4 +1,5 @@
 import type { InventoryAvailabilityClaimStore } from "./inventory-availability-claim.port";
+import { logger } from "../../../platform/observability/logger";
 
 export interface OrderClaimVariantReader {
   listClaimedVariantIds(orderIds: readonly number[]): Promise<readonly number[]>;
@@ -27,7 +28,7 @@ export function withChannelQuantityUpdates(
   store: InventoryAvailabilityClaimStore,
   dependencies: { variants: OrderClaimVariantReader; announce: InventoryChangeAnnouncer; log?: Log },
 ): InventoryAvailabilityClaimStore {
-  const log: Log = dependencies.log ?? (entry => console.error(JSON.stringify(entry)));
+  const log: Log = dependencies.log ?? (entry => logger.error("inventory-planning.order_claim_channel_quantity", { error: JSON.stringify(entry) }));
   const announceOrders = async (orderIds: readonly number[], action: string): Promise<void> => {
     try {
       const variantIds = await dependencies.variants.listClaimedVariantIds(orderIds);

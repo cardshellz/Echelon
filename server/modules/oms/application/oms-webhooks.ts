@@ -88,6 +88,7 @@ import {
   ensureChannelOrderQueuedForWmsSync,
   ingestAndRoute,
 } from "./channel-order-ingest-and-route";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -276,9 +277,7 @@ export async function cascadeShopifyCancelToShipments(
       });
       cascadeResults.push({ shipmentId, mode: result.mode });
     } catch (e: any) {
-      console.error(
-        `${logPrefix} handleCustomerCancelOnShipment failed for shipment ${shipmentId}: ${e.message}`,
-      );
+      logger.error("oms.webhooks", { message: `${logPrefix} handleCustomerCancelOnShipment failed for shipment ${shipmentId}: ${e.message}` });
       cascadeResults.push({ shipmentId, mode: "error", error: e.message });
     }
   }
@@ -289,9 +288,7 @@ export async function cascadeShopifyCancelToShipments(
     const result = await helpers.recomputeOrderStatusFromShipments(db, wmsOrderId);
     rollupChanged = result.changed;
   } catch (e: any) {
-    console.error(
-      `${logPrefix} recomputeOrderStatusFromShipments failed for order ${wmsOrderId}: ${e.message}`,
-    );
+    logger.error("oms.webhooks", { message: `${logPrefix} recomputeOrderStatusFromShipments failed for order ${wmsOrderId}: ${e.message}` });
   }
 
   return { hadShipments: true, cascadeResults, rollupChanged };
@@ -340,7 +337,7 @@ export async function cancelOrderCascade(
           try {
             return await opts.shippingEngine!.cancel(toEngineRef(ssOrderId));
           } catch (e: any) {
-            console.error(`${LOG} Engine cancel failed for orderRef=${ssOrderId}: ${e.message}`);
+            logger.error("oms.webhooks", { message: `${LOG} Engine cancel failed for orderRef=${ssOrderId}: ${e.message}` });
             throw e;
           }
         },
@@ -351,7 +348,7 @@ export async function cancelOrderCascade(
             try {
               return await opts.shipStationService!.cancelOrder(ssOrderId);
             } catch (e: any) {
-              console.error(`${LOG} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}`);
+              logger.error("oms.webhooks", { message: `${LOG} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}` });
               throw e;
             }
           },
@@ -381,9 +378,9 @@ export async function cancelOrderCascade(
           undefined,
           { disposition: "cancel" },
         );
-        console.log(`${LOG} Released reservations for WMS order ${wmsRow.id}`);
+        logger.info("oms.webhooks", { message: `${LOG} Released reservations for WMS order ${wmsRow.id}` });
       } catch (e: any) {
-        console.error(`${LOG} Failed to release reservations for WMS ${wmsRow.id}: ${e.message}`);
+        logger.error("oms.webhooks", { message: `${LOG} Failed to release reservations for WMS ${wmsRow.id}: ${e.message}` });
         try {
           await db.insert(omsOrderEvents).values({
             orderId: omsOrderId,
@@ -417,7 +414,7 @@ export async function cancelOrderCascade(
         shipmentOutcomes: cascade.cascadeResults,
         rollupChanged: cascade.rollupChanged,
       };
-      console.log(`${LOG} cancel cascade for WMS ${wmsRow.id}: ${JSON.stringify(cascade.cascadeResults)}`);
+      logger.info("oms.webhooks", { message: `${LOG} cancel cascade for WMS ${wmsRow.id}: ${JSON.stringify(cascade.cascadeResults)}` });
     } else {
       await cancelWmsOrder(db, wmsRow.id, opts.source);
       cancelCascadeDetails = { wmsOrderId: wmsRow.id, noShipments: true };
@@ -654,7 +651,7 @@ export function registerOmsWebhooks(
     }
 
     if (!rawBody || !Buffer.isBuffer(rawBody) || rawBody.length === 0) {
-      console.warn(`${LOG_PREFIX} Empty or missing rawBody`);
+      logger.warn("oms.webhooks", { message: `${LOG_PREFIX} Empty or missing rawBody` });
       res.status(200).send("ok"); // Return 200 to prevent retries
       return null;
     }
@@ -663,9 +660,9 @@ export function registerOmsWebhooks(
       const s = process.env.SHOPIFY_API_SECRET || process.env.SHOPIFY_WEBHOOK_SECRET;
       if (s) {
         const computed = crypto.createHmac("sha256", s).update(rawBody as Buffer).digest("base64");
-        console.warn(`${LOG_PREFIX} HMAC debug: expected=${computed.substring(0,20)}... got=${(hmac||"").substring(0,20)}... secret_len=${s.length} body_len=${(rawBody as Buffer).length} rawBody_type=${typeof rawBody} is_buffer=${Buffer.isBuffer(rawBody)}`);
+        logger.warn("oms.webhooks", { message: `${LOG_PREFIX} HMAC debug: expected=${computed.substring(0,20)}... got=${(hmac||"").substring(0,20)}... secret_len=${s.length} body_len=${(rawBody as Buffer).length} rawBody_type=${typeof rawBody} is_buffer=${Buffer.isBuffer(rawBody)}` });
       }
-      console.warn(`${LOG_PREFIX} HMAC verification failed`);
+      logger.warn("oms.webhooks", { message: `${LOG_PREFIX} HMAC verification failed` });
       res.status(401).send("Unauthorized");
       return null;
     }
@@ -679,7 +676,7 @@ export function registerOmsWebhooks(
     try {
       return JSON.parse(rawBody.toString("utf8"));
     } catch (err) {
-      console.error(`${LOG_PREFIX} JSON parse failed:`, err);
+      logger.error("oms.webhooks", { message: `${LOG_PREFIX} JSON parse failed:`, error: err });
       res.status(200).send("ok");
       return null;
     }
@@ -748,9 +745,7 @@ export function registerOmsWebhooks(
       const result = await rollupModule.handleAddressChangeOnShipment(db, shipment.id, { now });
       if (result.mode !== "can_repush") {
         if (result.mode === "requires_review") anyRequiresReview = true;
-        console.log(
-          `${LOG_PREFIX} address change for ${label} shipment ${shipment.id}: ${result.mode}`,
-        );
+        logger.info("oms.webhooks", { message: `${LOG_PREFIX} address change for ${label} shipment ${shipment.id}: ${result.mode}` });
         continue;
       }
 
@@ -772,9 +767,7 @@ export function registerOmsWebhooks(
           } else {
             await shipStationService!.pushShipment!(shipment.id);
           }
-          console.log(
-            `${LOG_PREFIX} re-pushed shipment ${shipment.id} after address change for ${label}`,
-          );
+          logger.info("oms.webhooks", { message: `${LOG_PREFIX} re-pushed shipment ${shipment.id} after address change for ${label}` });
         } catch (err: any) {
           await enqueueShipStationShipmentPushRetry(
             db,
@@ -808,13 +801,9 @@ export function registerOmsWebhooks(
     if (anyRequiresReview && syncShipToViaEngine) {
       try {
         const sync = await syncShipToViaEngine(wmsOrderId);
-        console.log(
-          `${LOG_PREFIX} address change for ${label}: shipping engine ship-to sync updated=${sync.updated} skipped=${sync.skipped}`,
-        );
+        logger.info("oms.webhooks", { message: `${LOG_PREFIX} address change for ${label}: shipping engine ship-to sync updated=${sync.updated} skipped=${sync.skipped}` });
       } catch (err: any) {
-        console.warn(
-          `${LOG_PREFIX} address change for ${label}: shipping engine ship-to sync failed (requires_review flag remains): ${err?.message ?? err}`,
-        );
+        logger.warn("oms.webhooks", { message: `${LOG_PREFIX} address change for ${label}: shipping engine ship-to sync failed (requires_review flag remains): ${err?.message ?? err}` });
       }
     }
   }
@@ -832,17 +821,17 @@ export function registerOmsWebhooks(
       );
 
       if (!receipt.inserted && receipt.status === "succeeded" && !isInternalRetry(req)) {
-        console.log(`${LOG_PREFIX} ${topic} duplicate already succeeded (inbox=${receipt.id}), skipping`);
+        logger.info("oms.webhooks", { message: `${LOG_PREFIX} ${topic} duplicate already succeeded (inbox=${receipt.id}), skipping` });
         acknowledgeProcessed(req, res);
         return { receipt, shouldProcess: false };
       }
 
       if (!receipt.inserted && receipt.status === "succeeded" && isInternalRetry(req)) {
-        console.log(`${LOG_PREFIX} ${topic} internal retry replaying succeeded inbox row (inbox=${receipt.id})`);
+        logger.info("oms.webhooks", { message: `${LOG_PREFIX} ${topic} internal retry replaying succeeded inbox row (inbox=${receipt.id})` });
       }
 
       if (!receipt.inserted && receipt.status === "processing" && !isInternalRetry(req)) {
-        console.log(`${LOG_PREFIX} ${topic} duplicate already processing (inbox=${receipt.id}), skipping`);
+        logger.info("oms.webhooks", { message: `${LOG_PREFIX} ${topic} duplicate already processing (inbox=${receipt.id}), skipping` });
         acknowledgeProcessed(req, res);
         return { receipt, shouldProcess: false };
       }
@@ -850,7 +839,7 @@ export function registerOmsWebhooks(
       await markWebhookProcessing(db, receipt.id);
       return { receipt, shouldProcess: true };
     } catch (err: any) {
-      console.error(`${LOG_PREFIX} ${topic} inbox write failed: ${err?.message ?? String(err)}`);
+      logger.error("oms.webhooks", { message: `${LOG_PREFIX} ${topic} inbox write failed: ${err?.message ?? String(err)}` });
       if (!res.headersSent) {
         res.status(500).send("webhook inbox unavailable");
       }
@@ -864,14 +853,12 @@ export function registerOmsWebhooks(
 
   async function markInboxFailed(receipt: WebhookInboxReceipt, err: any): Promise<void> {
     if (err instanceof CountryCodeValidationError) {
-      console.error(JSON.stringify({ event: "oms_country_validation_failed", operation: "shopify_webhook", inboxId: receipt.id, code: err.code }));
+      logger.error("oms_country_validation_failed", { event: "oms_country_validation_failed", operation: "shopify_webhook", inboxId: receipt.id, code: err.code });
     }
     try {
       await markWebhookFailed(db, receipt.id, err);
     } catch (markErr: any) {
-      console.error(
-        `${LOG_PREFIX} failed to mark webhook inbox ${receipt.id} failed: ${markErr?.message ?? String(markErr)}`,
-      );
+      logger.error("oms.webhooks", { message: `${LOG_PREFIX} failed to mark webhook inbox ${receipt.id} failed: ${markErr?.message ?? String(markErr)}` });
     }
   }
 
@@ -905,7 +892,7 @@ export function registerOmsWebhooks(
     acknowledgeAccepted(req, res);
 
     const externalOrderId = getExternalOrderId(shopifyOrder);
-    console.log(`${LOG_PREFIX} orders/paid → ${shopifyOrder.name || externalOrderId}`);
+    logger.info("oms.webhooks", { message: `${LOG_PREFIX} orders/paid → ${shopifyOrder.name || externalOrderId}` });
 
     try {
       const channelId = await getChannelId(req, shopifyOrder);
@@ -935,7 +922,7 @@ export function registerOmsWebhooks(
           }
           if (isNew) {
             enrichOrderWithMemberTier(omsOrder.id, omsOrder.customerEmail || "").catch((err) => {
-              console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
+              logger.error("oms.webhooks", { message: `${LOG_PREFIX} Member tier enrichment failed:`, error: err });
             });
           }
           if (!wmsSyncService) {
@@ -954,19 +941,13 @@ export function registerOmsWebhooks(
               getShopifyAdminClient(),
             );
             if (summary) {
-              console.log(
-                `${LOG_PREFIX} FO IDs populated for ${shopifyOrder.name}: matched=${summary.matched} unmatched=${summary.unmatched} updates=${summary.updates}`,
-              );
+              logger.info("oms.webhooks", { message: `${LOG_PREFIX} FO IDs populated for ${shopifyOrder.name}: matched=${summary.matched} unmatched=${summary.unmatched} updates=${summary.updates}` });
             }
           } catch (err: any) {
-            console.error(
-              `${LOG_PREFIX} populateShopifyFulfillmentOrderIds failed for ${shopifyOrder.name}: ${err?.message ?? String(err)} (non-fatal; Path B fallback will retry at push)`,
-            );
+            logger.error("oms.webhooks", { message: `${LOG_PREFIX} populateShopifyFulfillmentOrderIds failed for ${shopifyOrder.name}: ${err?.message ?? String(err)} (non-fatal; Path B fallback will retry at push)` });
           }
 
-          console.log(
-            `${LOG_PREFIX} ✅ Processed ${isNew ? "new" : "existing"} order ${shopifyOrder.name} (OMS id=${omsOrder.id})`,
-          );
+          logger.info("oms.webhooks", { message: `${LOG_PREFIX} ✅ Processed ${isNew ? "new" : "existing"} order ${shopifyOrder.name} (OMS id=${omsOrder.id})` });
           if (isNew) {
             pushToMissionControl(omsOrder.id, "order.created");
           }
@@ -984,7 +965,7 @@ export function registerOmsWebhooks(
       await markInboxSucceeded(inbox.receipt);
       acknowledgeProcessed(req, res);
     } catch (err: any) {
-      console.error(`${LOG_PREFIX} orders/paid error for ${shopifyOrder.name}: ${err.message}`);
+      logger.error("oms.webhooks", { message: `${LOG_PREFIX} orders/paid error for ${shopifyOrder.name}: ${err.message}` });
       await markInboxFailed(inbox.receipt, err);
       await handleProcessingFailure(req, res, {
         provider: "shopify",
@@ -1009,7 +990,7 @@ export function registerOmsWebhooks(
     acknowledgeAccepted(req, res);
 
     const externalOrderId = getExternalOrderId(shopifyOrder);
-    console.log(`${LOG_PREFIX} orders/updated → ${shopifyOrder.name || externalOrderId}`);
+    logger.info("oms.webhooks", { message: `${LOG_PREFIX} orders/updated → ${shopifyOrder.name || externalOrderId}` });
 
     try {
       const channelId = await getChannelId(req, shopifyOrder);
@@ -1431,9 +1412,7 @@ export function registerOmsWebhooks(
                   authority,
                 });
               });
-              console.log(
-                `${LOG_PREFIX} Zeroed removed OMS line ${existingLine.externalLineItemId} (SKU: ${existingLine.sku}) for order ${shopifyOrder.name || externalOrderId}`,
-              );
+              logger.info("oms.webhooks", { message: `${LOG_PREFIX} Zeroed removed OMS line ${existingLine.externalLineItemId} (SKU: ${existingLine.sku}) for order ${shopifyOrder.name || externalOrderId}` });
             }
           }
         }
@@ -1451,9 +1430,7 @@ export function registerOmsWebhooks(
         // Update WMS order items if they exist
         if (wmsOrderRows.length > 0) {
           if (isFinalOmsState) {
-            console.log(
-              `${LOG_PREFIX} orders/updated skipped WMS reconcile for final order ${shopifyOrder.name || externalOrderId}`,
-            );
+            logger.info("oms.webhooks", { message: `${LOG_PREFIX} orders/updated skipped WMS reconcile for final order ${shopifyOrder.name || externalOrderId}` });
           } else if (wmsSyncService) {
             await ensureOmsOrderQueuedForWmsSync(
               wmsSyncService,
@@ -1468,24 +1445,17 @@ export function registerOmsWebhooks(
                 orderData.sourceEventId,
               );
               if (propagation.updated > 0 || propagation.added > 0 || propagation.removed > 0) {
-                console.log(
-                  `${LOG_PREFIX} Propagated edits to WMS order ${wmsOrderRows[0].id}: ` +
-                  `${propagation.updated} updated, ${propagation.added} added, ${propagation.removed} removed`,
-                );
+                logger.info("oms.webhooks", { detail: `${LOG_PREFIX} Propagated edits to WMS order ${wmsOrderRows[0].id}: ` +
+                  `${propagation.updated} updated, ${propagation.added} added, ${propagation.removed} removed` });
               }
               if (propagation.flaggedForReview.length > 0) {
-                console.warn(
-                  `${LOG_PREFIX} Order ${shopifyOrder.name || externalOrderId} has items needing manual review:`,
-                  propagation.flaggedForReview,
-                );
+                logger.warn("oms.webhooks", { message: `${LOG_PREFIX} Order ${shopifyOrder.name || externalOrderId} has items needing manual review:`, detail: propagation.flaggedForReview });
               }
             } catch (propErr: any) {
               if (propErr?.code === "CANONICAL_DEMAND_RECONCILIATION_FAILED") {
                 throw propErr;
               }
-              console.error(
-                `${LOG_PREFIX} WMS edit propagation failed for order ${shopifyOrder.name || externalOrderId}: ${propErr.message}`,
-              );
+              logger.error("oms.webhooks", { message: `${LOG_PREFIX} WMS edit propagation failed for order ${shopifyOrder.name || externalOrderId}: ${propErr.message}` });
               await enqueueOmsWmsSyncRetry(
                 db,
                 existing.id,
@@ -1541,7 +1511,7 @@ export function registerOmsWebhooks(
         },
       });
 
-      console.log(`${LOG_PREFIX} ✅ Updated order ${shopifyOrder.name} (OMS id=${existing.id})`);
+      logger.info("oms.webhooks", { message: `${LOG_PREFIX} ✅ Updated order ${shopifyOrder.name} (OMS id=${existing.id})` });
       pushToMissionControl(existing.id, "order.updated");
 
       // M18: Trigger real-time backfill bridge
@@ -1549,7 +1519,7 @@ export function registerOmsWebhooks(
       await markInboxSucceeded(inbox.receipt);
       acknowledgeProcessed(req, res);
     } catch (err: any) {
-      console.error(`${LOG_PREFIX} orders/updated error for ${shopifyOrder.name}: ${err.message}`);
+      logger.error("oms.webhooks", { message: `${LOG_PREFIX} orders/updated error for ${shopifyOrder.name}: ${err.message}` });
       await markInboxFailed(inbox.receipt, err);
       await handleProcessingFailure(req, res, {
         provider: "shopify",
@@ -1574,7 +1544,7 @@ export function registerOmsWebhooks(
     acknowledgeAccepted(req, res);
 
     const externalOrderId = getExternalOrderId(shopifyOrder);
-    console.log(`${LOG_PREFIX} orders/cancelled → ${shopifyOrder.name || externalOrderId}`);
+    logger.info("oms.webhooks", { message: `${LOG_PREFIX} orders/cancelled → ${shopifyOrder.name || externalOrderId}` });
 
     try {
       const channelId = await getChannelId(req, shopifyOrder);
@@ -1621,14 +1591,12 @@ export function registerOmsWebhooks(
           LIMIT 1
         `);
         if ((cascadeDone?.rows?.length ?? 0) > 0) {
-          console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already cancelled (cascade complete)`);
+          logger.info("oms.webhooks", { message: `${LOG_PREFIX} Order ${shopifyOrder.name} already cancelled (cascade complete)` });
           await markInboxSucceeded(inbox.receipt);
           acknowledgeProcessed(req, res);
           return;
         }
-        console.warn(
-          `${LOG_PREFIX} Order ${shopifyOrder.name} is cancelled but the cascade never completed — re-running cascade`,
-        );
+        logger.warn("oms.webhooks", { message: `${LOG_PREFIX} Order ${shopifyOrder.name} is cancelled but the cascade never completed — re-running cascade` });
         await cancelOrderCascade(db, existing.id, {
           wmsServices,
           shipStationService,
@@ -1661,9 +1629,7 @@ export function registerOmsWebhooks(
             .set({ financialStatus: nextFinancialStatus, updatedAt: now })
             .where(eq(omsOrders.id, existing.id));
         }
-        console.warn(
-          `${LOG_PREFIX} Blocked orders/cancelled regression on OMS order ${existing.id} (${shopifyOrder.name}): ${cancelVerdict.reason}`,
-        );
+        logger.warn("oms.webhooks", { message: `${LOG_PREFIX} Blocked orders/cancelled regression on OMS order ${existing.id} (${shopifyOrder.name}): ${cancelVerdict.reason}` });
         await markInboxSucceeded(inbox.receipt);
         acknowledgeProcessed(req, res);
         return;
@@ -1678,7 +1644,7 @@ export function registerOmsWebhooks(
         logPrefix: LOG_PREFIX,
       });
 
-      console.log(`${LOG_PREFIX} ✅ Cancelled order ${shopifyOrder.name} (OMS id=${existing.id})`);
+      logger.info("oms.webhooks", { message: `${LOG_PREFIX} ✅ Cancelled order ${shopifyOrder.name} (OMS id=${existing.id})` });
       pushToMissionControl(existing.id, "order.cancelled");
 
       // M18: Trigger real-time backfill bridge
@@ -1686,7 +1652,7 @@ export function registerOmsWebhooks(
       await markInboxSucceeded(inbox.receipt);
       acknowledgeProcessed(req, res);
     } catch (err: any) {
-      console.error(`${LOG_PREFIX} orders/cancelled error for ${shopifyOrder.name}: ${err.message}`);
+      logger.error("oms.webhooks", { message: `${LOG_PREFIX} orders/cancelled error for ${shopifyOrder.name}: ${err.message}` });
       await markInboxFailed(inbox.receipt, err);
       await handleProcessingFailure(req, res, {
         provider: "shopify",
@@ -1711,7 +1677,7 @@ export function registerOmsWebhooks(
     acknowledgeAccepted(req, res);
 
     const externalOrderId = getExternalOrderId(shopifyOrder);
-    console.log(`${LOG_PREFIX} orders/fulfilled → ${shopifyOrder.name || externalOrderId}`);
+    logger.info("oms.webhooks", { message: `${LOG_PREFIX} orders/fulfilled → ${shopifyOrder.name || externalOrderId}` });
 
     try {
       const channelId = await getChannelId(req, shopifyOrder);
@@ -1775,13 +1741,7 @@ export function registerOmsWebhooks(
         });
       }
 
-      console.log(JSON.stringify({
-        event: "shopify_order_fulfillment_packages_ingested",
-        omsOrderId: existing.id,
-        externalOrderId,
-        packageCount: packageResults.length,
-        packages: packageResults,
-      }));
+      logger.info("shopify_order_fulfillment_packages_ingested", { event: "shopify_order_fulfillment_packages_ingested", omsOrderId: existing.id, externalOrderId, packageCount: packageResults.length, packages: packageResults });
       pushToMissionControl(existing.id, "order.fulfilled");
 
       // M18: Trigger real-time backfill bridge
@@ -1789,7 +1749,7 @@ export function registerOmsWebhooks(
       await markInboxSucceeded(inbox.receipt);
       acknowledgeProcessed(req, res);
     } catch (err: any) {
-      console.error(`${LOG_PREFIX} orders/fulfilled error for ${shopifyOrder.name}: ${err.message}`);
+      logger.error("oms.webhooks", { message: `${LOG_PREFIX} orders/fulfilled error for ${shopifyOrder.name}: ${err.message}` });
       await markInboxFailed(inbox.receipt, err);
       await handleProcessingFailure(req, res, {
         provider: "shopify",
@@ -1816,7 +1776,7 @@ export function registerOmsWebhooks(
     // Shopify refund payload has order_id at top level
     const shopifyOrderId = refundPayload.order_id;
     const shopifyOrderGid = `gid://shopify/Order/${shopifyOrderId}`;
-    console.log(`${LOG_PREFIX} refunds/create → order ${shopifyOrderId}`);
+    logger.info("oms.webhooks", { message: `${LOG_PREFIX} refunds/create → order ${shopifyOrderId}` });
 
     try {
       const channelId = await getChannelId(req, refundPayload);
@@ -1865,7 +1825,7 @@ export function registerOmsWebhooks(
       }
 
       if (!existing) {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrderId} not in OMS, skipping refund`);
+        logger.info("oms.webhooks", { message: `${LOG_PREFIX} Order ${shopifyOrderId} not in OMS, skipping refund` });
         await markInboxSucceeded(inbox.receipt);
         acknowledgeProcessed(req, res);
         return;
@@ -1960,9 +1920,7 @@ export function registerOmsWebhooks(
       });
 
       if (refundSkippedAsReplay) {
-        console.log(
-          `${LOG_PREFIX} refund ${refundPayload.id} already applied to order ${existing.externalOrderNumber} — skipping financial update, re-running cascade only`,
-        );
+        logger.info("oms.webhooks", { message: `${LOG_PREFIX} refund ${refundPayload.id} already applied to order ${existing.externalOrderNumber} — skipping financial update, re-running cascade only` });
       }
 
       // The line cascade owns commercial authority, WMS work reduction,
@@ -2032,24 +1990,20 @@ export function registerOmsWebhooks(
           logPrefix: LOG_PREFIX,
         },
       );
-      console.log(
-        `${LOG_PREFIX} refunds/create cascade for order ${existing.externalOrderNumber}: ` +
+      logger.info("oms.webhooks", { detail: `${LOG_PREFIX} refunds/create cascade for order ${existing.externalOrderNumber}: ` +
           `outcome=${cascade.outcome} returnExpected=${cascade.returnExpected} ` +
           `returnId=${cascade.returnId ?? "null"} adjustedLines=${cascade.adjustedLines} ` +
           `releasedReservations=${cascade.releasedReservationQuantity} ` +
           `cancelled=${cascade.cancelledShipments} repushed=${cascade.repushedShipments} ` +
-          `flagged=${cascade.flaggedShipments} warnings=${cascade.warnings.length}`,
-      );
+          `flagged=${cascade.flaggedShipments} warnings=${cascade.warnings.length}` });
 
-      console.log(
-        `${LOG_PREFIX} ✅ Processed refund for order ${existing.externalOrderNumber} → ` +
-          `${refundSkippedAsReplay ? "replay (financials unchanged)" : `${cumulative.financialStatus} (cumulative ${cumulative.refundAmountCents}¢)`}`,
-      );
+      logger.info("oms.webhooks", { detail: `${LOG_PREFIX} ✅ Processed refund for order ${existing.externalOrderNumber} → ` +
+          `${refundSkippedAsReplay ? "replay (financials unchanged)" : `${cumulative.financialStatus} (cumulative ${cumulative.refundAmountCents}¢)`}` });
       pushToMissionControl(existing.id, "order.refunded");
       await markInboxSucceeded(inbox.receipt);
       acknowledgeProcessed(req, res);
     } catch (err: any) {
-      console.error(`${LOG_PREFIX} refunds/create error for order ${shopifyOrderId}: ${err.message}`);
+      logger.error("oms.webhooks", { message: `${LOG_PREFIX} refunds/create error for order ${shopifyOrderId}: ${err.message}` });
       await markInboxFailed(inbox.receipt, err);
       await handleProcessingFailure(req, res, {
         provider: "shopify",
@@ -2061,5 +2015,5 @@ export function registerOmsWebhooks(
     }
   });
 
-  console.log(`${LOG_PREFIX} Registered 5 webhook endpoints`);
+  logger.info("oms.webhooks", { message: `${LOG_PREFIX} Registered 5 webhook endpoints` });
 }

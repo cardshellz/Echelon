@@ -20,6 +20,7 @@ import {
   catalogOriginalCreationSchema,
   createCatalogImageOriginalsService,
 } from "../../application/catalog-image-originals.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const idSchema = z
   .string()
@@ -42,13 +43,7 @@ function sendAssetError(
     return;
   }
   const known = error instanceof ProductAssetError;
-  console.error(
-    JSON.stringify({
-      event: `catalog.assets.${operation}_failed`,
-      id,
-      code: known ? error.code : "ASSET_OPERATION_FAILED",
-    }),
-  );
+  logger.error("catalog.product_asset_routes", { event: `catalog.assets.${operation}_failed`, id, code: known ? error.code : "ASSET_OPERATION_FAILED" });
   res.status(known ? error.status : 500).json({
     code: known ? error.code : "ASSET_OPERATION_FAILED",
     error: known
@@ -68,12 +63,7 @@ export function registerProductAssetRoutes(app: Express): void {
       if (!error) return next();
       const tooLarge =
         error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE";
-      console.warn(
-        JSON.stringify({
-          event: "catalog.assets.upload_refused",
-          code: tooLarge ? "IMAGE_TOO_LARGE" : "ASSET_UPLOAD_INVALID",
-        }),
-      );
+      logger.warn("catalog.assets.upload_refused", { event: "catalog.assets.upload_refused", code: tooLarge ? "IMAGE_TOO_LARGE" : "ASSET_UPLOAD_INVALID" });
       return res
         .status(tooLarge ? 413 : 400)
         .json({
@@ -290,14 +280,7 @@ export function registerProductAssetRoutes(app: Express): void {
       }
       try {
         await reorderCatalogAssets(db, productId.data, command.data);
-        console.info(
-          JSON.stringify({
-            event: "catalog.assets.reordered",
-            actor: req.session.user?.id,
-            productId: productId.data,
-            orderedIds: command.data.orderedIds,
-          }),
-        );
+        logger.info("catalog.assets.reordered", { event: "catalog.assets.reordered", actor: req.session.user?.id, productId: productId.data, orderedIds: command.data.orderedIds });
         return res.json({ success: true });
       } catch (error) {
         sendAssetError(res, error, "reorder", productId.data);

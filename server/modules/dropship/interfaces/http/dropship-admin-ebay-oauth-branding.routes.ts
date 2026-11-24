@@ -6,6 +6,7 @@ import {
 } from "../../application/dropship-ebay-oauth-branding-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipEbayOAuthBrandingServiceFromEnv } from "../../infrastructure/dropship-ebay-oauth-branding.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 const BRANDING_URL =
   "/api/dropship/admin/integrations/ebay/oauth-branding";
@@ -129,10 +130,7 @@ function sendEbayOAuthBrandingError(
     });
   }
 
-  console.error(
-    "[DropshipAdminEbayOAuthBrandingRoutes] Unexpected connection-branding error:",
-    error,
-  );
+  logger.error("dropship.admin_ebay_oauth_branding_routes", { message: "[DropshipAdminEbayOAuthBrandingRoutes] Unexpected connection-branding error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_EBAY_OAUTH_BRANDING_INTERNAL_ERROR",

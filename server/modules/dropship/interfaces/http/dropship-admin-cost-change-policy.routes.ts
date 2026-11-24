@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipCostChangePolicyService } from "../../application/dropship-cost-change-policy-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipCostChangePolicyServiceFromEnv } from "../../infrastructure/dropship-cost-change-policy.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 /**
  * Admin surface for the staff-set .ops cost change policy (migration 0710,
@@ -55,12 +56,7 @@ function sendCostChangePolicyError(res: Response, error: unknown): Response {
       error: { code: error.code, message: error.message, context: error.context },
     });
   }
-  console.error(JSON.stringify({
-    level: "error",
-    code: "DROPSHIP_COST_CHANGE_POLICY_INTERNAL_ERROR",
-    message: "Unexpected cost change policy request error.",
-    context: { error: error instanceof Error ? error.message : String(error) },
-  }));
+  logger.error("DROPSHIP_COST_CHANGE_POLICY_INTERNAL_ERROR", { code: "DROPSHIP_COST_CHANGE_POLICY_INTERNAL_ERROR", message: "Unexpected cost change policy request error.", context: { error: error instanceof Error ? error.message : String(error) } });
   return res.status(500).json({
     error: { code: "DROPSHIP_COST_CHANGE_POLICY_INTERNAL_ERROR", message: "Dropship cost change policy request failed." },
   });

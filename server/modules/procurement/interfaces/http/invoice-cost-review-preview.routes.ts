@@ -6,6 +6,7 @@ import { CostEvidenceError } from "../../../inventory/cost-evidence-values.api";
 import { PoQuantityAmendmentError } from "../../domain/po-quantity-amendment.policy";
 import { MoneyInputError } from "@shared/money-read";
 import type { previewInvoiceCostReview } from "../../application/invoice-cost-review-preview.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerInvoiceCostReviewPreviewRoute(app: Express, preview: typeof previewInvoiceCostReview) {
   const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647));
@@ -20,7 +21,7 @@ export function registerInvoiceCostReviewPreviewRoute(app: Express, preview: typ
       if (error instanceof ApLedgerError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       if (error instanceof CostEvidenceError || error instanceof PoQuantityAmendmentError || error instanceof MoneyInputError)
         return res.status(error instanceof PoQuantityAmendmentError ? error.statusCode : 409).json({ error: error.message, details: { code: error.code } });
-      console.error(JSON.stringify({ event: "procurement.invoice.cost_preview_failed", lineId: parsed.data, actorId, errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.invoice.cost_preview_failed", { event: "procurement.invoice.cost_preview_failed", lineId: parsed.data, actorId, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(503).json({ error: "The cost changes could not be loaded. Reload the review and try again." });
     }
   });

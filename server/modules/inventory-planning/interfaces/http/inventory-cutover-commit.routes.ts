@@ -7,6 +7,7 @@ import { InventoryCutoverManifestError } from "../../domain/inventory-cutover-ma
 import { CutoverReconstructionError } from "../../infrastructure/inventory-cutover-reconstruction.repository";
 import { InventoryAvailabilityActivationRepositoryError } from "../../infrastructure/inventory-availability-activation.repository";
 import { InventoryCutoverCaptureError } from "../../infrastructure/inventory-cutover-capture-stage";
+import { logger } from "../../../../platform/observability/logger";
 
 const noStore: RequestHandler = (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); };
 
@@ -33,8 +34,7 @@ export function registerInventoryCutoverCommitRoutes(app: Express,
 
 export function sendInventoryCutoverError(res: Response, error: unknown): Response {
   if (error instanceof InventoryCutoverCaptureError) {
-    console.error(JSON.stringify({ event: "inventory_cutover_capture_failed", code: error.code,
-      stage: error.stage, postgresCode: error.postgresCode }));
+    logger.error("inventory_cutover_capture_failed", { event: "inventory_cutover_capture_failed", code: error.code, stage: error.stage, postgresCode: error.postgresCode });
     return res.status(error.status).json({ error: { code: error.code, message: error.message, context: { stage: error.stage } } });
   }
   if (error instanceof InventoryCutoverCommitError && error.status >= 400 && error.status < 500) {
@@ -62,7 +62,6 @@ export function sendInventoryCutoverError(res: Response, error: unknown): Respon
   if (["40001", "40P01", "55P03", "57014", "INVENTORY_PUBLICATION_TARGET_BUSY", "QUANTITY_PUBLICATION_DRAIN_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY"].includes(code ?? "")) {
     return res.status(409).json({ error: { code: "CUTOVER_CONCURRENT_CHANGE", message: "Another inventory operation was in flight. Retry the complete command with the same key; stale review evidence must be refreshed." } });
   }
-  console.error(JSON.stringify({ event: "inventory_cutover_command_failed", code: code && /^[A-Z0-9_]{1,100}$/.test(code) ? code : "UNKNOWN",
-    errorType: error instanceof Error ? error.name : "UnknownError" }));
+  logger.error("inventory_cutover_command_failed", { event: "inventory_cutover_command_failed", code: code && /^[A-Z0-9_]{1,100}$/.test(code) ? code : "UNKNOWN", errorType: error instanceof Error ? error.name : "UnknownError" });
   return res.status(500).json({ error: { code: "CUTOVER_COMMAND_FAILED", message: "The cutover command failed. No success is being reported; check the durable run status before retrying with the same key." } });
 }

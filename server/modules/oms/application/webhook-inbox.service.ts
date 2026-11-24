@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import type { Request } from "express";
 import { sql } from "drizzle-orm";
+import { logger } from "../../../platform/observability/logger";
 
 export type WebhookInboxStatus = "received" | "processing" | "succeeded" | "failed" | "dead";
 
@@ -356,9 +357,7 @@ export async function enqueueWebhookInboxReplay(
     ? await db.transaction(runReplay)
     : await runReplay(db);
 
-  console.warn(
-    `[OMS Webhook Inbox] queued replay retry=${retry.id} inbox=${inboxId} topic=${inbox.topic} operator=${operator || "unknown"}`,
-  );
+  logger.warn("oms.webhook_inbox_service", { message: `[OMS Webhook Inbox] queued replay retry=${retry.id} inbox=${inboxId} topic=${inbox.topic} operator=${operator || "unknown"}` });
 
   return {
     inboxId,

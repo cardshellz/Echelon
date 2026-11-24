@@ -5,6 +5,7 @@ import {
   summarizeChannelAuthorityGap,
   type ChannelAuthorityGap,
 } from "../domain/channel-payment-settlement";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * Serializes gap recording per OMS order so concurrent webhooks and the
@@ -103,8 +104,8 @@ export async function recordChannelAuthorityGap(
       channel_event_id: input.sourceEventId,
       lines: outcome.gap.lines,
     });
-    if (outcome.gap.code === OMS_PAID_QUANTITY_BELOW_CHANNEL) console.error(line);
-    else console.log(line);
+    if (outcome.gap.code === OMS_PAID_QUANTITY_BELOW_CHANNEL) logger.error("oms.channel_authority_gap_repository", { error: line });
+    else logger.info("oms.channel_authority_gap_repository", { detail: line });
   }
   return outcome.gap;
 }

@@ -2,6 +2,7 @@ import {
   registerScheduledJob,
   type RegisteredJobHandle,
 } from "../../../infrastructure/job-registry";
+import { logger } from "../../../platform/observability/logger";
 
 export const SHOPIFY_MAPPING_RECONCILE_LOCK_ID = 918505;
 
@@ -15,7 +16,7 @@ export function startShopifyMappingReconcileScheduler(deps: {
       );
       await runShopifyMappingReconciliation();
     } catch (err: any) {
-      console.warn("[mapping-reconciler] sweep error:", err?.message);
+      logger.warn("channels.shopify_mapping_reconcile_scheduler", { message: "[mapping-reconciler] sweep error:", error: err?.message });
     }
   };
 

@@ -12,6 +12,7 @@ import {
   rateProgramCloneCommand,
   type CopyRateProgramCommandInput,
 } from "../../application/rate-program-clone.command";
+import { logger } from "../../../../platform/observability/logger";
 
 const RATE_PROGRAM_COPY_ROUTE =
   "/api/shipping/admin/rate-books/:targetRateBookId/copy-rates";
@@ -104,13 +105,9 @@ function sendCloneError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error(JSON.stringify({
-    code: "SHIPPING_ADMIN_COPY_REQUEST_FAILED",
-    message: "Shipping rate program copy request failed.",
-    context: {
+  logger.error("SHIPPING_ADMIN_COPY_REQUEST_FAILED", { code: "SHIPPING_ADMIN_COPY_REQUEST_FAILED", message: "Shipping rate program copy request failed.", context: {
       error: error instanceof Error ? error.message : String(error),
-    },
-  }));
+    } });
   return res.status(500).json({
     error: {
       code: "SHIPPING_ADMIN_COPY_REQUEST_FAILED",

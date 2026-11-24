@@ -14,6 +14,7 @@ import {
   requireShipStationCountryCode,
   type ShipStationRuntimeContext,
 } from "./shipstation-contracts";
+import { logger } from "../../../platform/observability/logger";
 
 export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
   const { db, dependencies, apiRequest, isConfigured, withShipmentPushLock, getOrderById } = ctx;
@@ -34,9 +35,9 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
         orderId: shipstationOrderId,
         holdUntilDate: "2099-12-31",
       }, { replaySafe: true });
-      console.log(`[ShipStation] Order ${shipstationOrderId} placed on hold`);
+      logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Order ${shipstationOrderId} placed on hold` });
     } catch (err: any) {
-      console.error(`[ShipStation] Failed to hold order ${shipstationOrderId}:`, err.message);
+      logger.error("oms.shipstation_order_controls", { message: `[ShipStation] Failed to hold order ${shipstationOrderId}:`, error: err.message });
       throw err;
     }
   }
@@ -52,9 +53,9 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
           orderId: shipstationOrderId,
         }, { replaySafe: true });
       });
-      console.log(`[ShipStation] Order ${shipstationOrderId} released from hold`);
+      logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Order ${shipstationOrderId} released from hold` });
     } catch (err: any) {
-      console.error(`[ShipStation] Failed to release order ${shipstationOrderId} from hold:`, err.message);
+      logger.error("oms.shipstation_order_controls", { message: `[ShipStation] Failed to release order ${shipstationOrderId} from hold:`, error: err.message });
       throw err;
     }
   }
@@ -370,7 +371,7 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
     if (!isConfigured()) return { alreadyInState: false };
     const existing = await getOrderById(shipstationOrderId);
     if (!existing) {
-      console.warn(`[ShipStation] markAsShipped skipped — order ${shipstationOrderId} not found`);
+      logger.warn("oms.shipstation_order_controls", { message: `[ShipStation] markAsShipped skipped — order ${shipstationOrderId} not found` });
       return { alreadyInState: false };
     }
 
@@ -378,11 +379,11 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
     // be updated via createorder. If the order is already shipped, treat
     // as success (it's in the correct state) and let caller stamp reconciled_at.
     if (existing.orderStatus === "shipped") {
-      console.log(`[ShipStation] Order ${shipstationOrderId} already shipped — no-op`);
+      logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Order ${shipstationOrderId} already shipped — no-op` });
       return { alreadyInState: true };
     }
     if (existing.orderStatus === "cancelled") {
-      console.log(`[ShipStation] Order ${shipstationOrderId} is cancelled — cannot mark shipped`);
+      logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Order ${shipstationOrderId} is cancelled — cannot mark shipped` });
       return { alreadyInState: true };
     }
 
@@ -404,20 +405,14 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
       try {
         // Idempotent by orderId: a replay re-asserts the same shipped state.
         await apiRequest("POST", "/orders/markasshipped", payload, { replaySafe: true });
-        console.log(`[ShipStation] Order ${shipstationOrderId} marked shipped via markasshipped endpoint`);
+        logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Order ${shipstationOrderId} marked shipped via markasshipped endpoint` });
         return { alreadyInState: false };
       } catch (postErr: any) {
-        console.error(
-          `[ShipStation] markAsShipped payload that failed for order ${shipstationOrderId}:`,
-          JSON.stringify(payload).slice(0, 800),
-        );
+        logger.error("oms.shipstation_order_controls", { message: `[ShipStation] markAsShipped payload that failed for order ${shipstationOrderId}:`, error: JSON.stringify(payload).slice(0, 800) });
         throw postErr;
       }
     } catch (err: any) {
-      console.error(
-        `[ShipStation] Failed to mark order ${shipstationOrderId} shipped:`,
-        err.message,
-      );
+      logger.error("oms.shipstation_order_controls", { message: `[ShipStation] Failed to mark order ${shipstationOrderId} shipped:`, error: err.message });
       throw err;
     }
   }
@@ -434,7 +429,7 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
     if (!isConfigured()) return { alreadyInState: false, state: "not_found" };
     const existing = await getOrderById(shipstationOrderId);
     if (!existing) {
-      console.warn(`[ShipStation] cancelOrder skipped — order ${shipstationOrderId} not found`);
+      logger.warn("oms.shipstation_order_controls", { message: `[ShipStation] cancelOrder skipped — order ${shipstationOrderId} not found` });
       return { alreadyInState: false, state: "not_found" };
     }
 
@@ -442,11 +437,11 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
     // P0.3: these are OPPOSITE outcomes — discriminate them. Recording an
     // already-CANCELLED engine order as shipped resurrects dead orders.
     if (existing.orderStatus === "cancelled") {
-      console.log(`[ShipStation] Order ${shipstationOrderId} already cancelled — no-op`);
+      logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Order ${shipstationOrderId} already cancelled — no-op` });
       return { alreadyInState: true, state: "already_cancelled" };
     }
     if (existing.orderStatus === "shipped") {
-      console.log(`[ShipStation] Order ${shipstationOrderId} already shipped — cannot cancel`);
+      logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Order ${shipstationOrderId} already shipped — cannot cancel` });
       return { alreadyInState: true, state: "already_shipped" };
     }
 
@@ -456,13 +451,10 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
         orderStatus: "cancelled",
       }, { replaySafe: true });
 
-      console.log(`[ShipStation] Order ${shipstationOrderId} cancelled via createorder upsert`);
+      logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Order ${shipstationOrderId} cancelled via createorder upsert` });
       return { alreadyInState: false, state: "cancelled" };
     } catch (err: any) {
-      console.error(
-        `[ShipStation] Failed to cancel order ${shipstationOrderId}:`,
-        err.message,
-      );
+      logger.error("oms.shipstation_order_controls", { message: `[ShipStation] Failed to cancel order ${shipstationOrderId}:`, error: err.message });
       throw err;
     }
   }
@@ -545,10 +537,7 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
     try {
       await updateSortRankForShipmentRows(wmsOrderId, shipmentRows);
     } catch (err: any) {
-      console.error(
-        `[ShipStation] ${context} sort-rank refresh failed for WMS order ${wmsOrderId}:`,
-        err.message,
-      );
+      logger.error("oms.shipstation_order_controls", { message: `[ShipStation] ${context} sort-rank refresh failed for WMS order ${wmsOrderId}:`, error: err.message });
     }
   }
 
@@ -685,9 +674,7 @@ export function createShipStationOrderControls(ctx: ShipStationRuntimeContext) {
         },
       }, { replaySafe: true }));
       updated += 1;
-      console.log(
-        `[ShipStation] Ship-to address updated on SS order ${ssOrderId} (WMS order ${wmsOrderId}, shipment ${row.id}) after address change`,
-      );
+      logger.info("oms.shipstation_order_controls", { message: `[ShipStation] Ship-to address updated on SS order ${ssOrderId} (WMS order ${wmsOrderId}, shipment ${row.id}) after address change` });
 
       // The address is now correct in ShipStation — the advisory flag for
       // THIS reason is resolved. Other review reasons must survive.

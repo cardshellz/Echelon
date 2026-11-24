@@ -9,6 +9,7 @@ import {
   registerDropshipAdminCostChangeActivityRoutes,
   statusForCostChangeActivityError,
 } from "../../interfaces/http/dropship-admin-cost-change-activity.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 
@@ -80,7 +81,7 @@ describe("dropship admin cost change activity routes", () => {
     service.fail = new DropshipError("DROPSHIP_COST_SCHEDULE_TABLE_MISSING", "not yet", { classification: "transient" });
     expect((await jsonRequest(`${server.url}${DETECTION_URL}`)).status).toBe(503);
     service.fail = new Error("boom");
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const errorSpy = spyLoggerJson("error");
     const response = await jsonRequest(`${server.url}${DETECTION_URL}`);
     expect(response.status).toBe(500);
     expect(response.body).toEqual({

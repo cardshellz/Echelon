@@ -41,6 +41,7 @@ import {
   type DropshipSensitiveAction,
   type DropshipSessionPrincipal,
 } from "../../domain/auth";
+import { logger as platformLogger } from "../../../../platform/observability/logger";
 
 declare module "express-session" {
   interface SessionData {
@@ -540,7 +541,7 @@ function sendDropshipAuthError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[DropshipAuth] Unhandled auth error", error);
+  platformLogger.error("dropship.auth_routes", { message: "[DropshipAuth] Unhandled auth error", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_AUTH_INTERNAL_ERROR",

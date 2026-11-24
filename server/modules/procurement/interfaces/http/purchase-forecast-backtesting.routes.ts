@@ -6,6 +6,7 @@ import {
   createPurchaseForecastBacktestingService,
   type PurchaseForecastBacktestingService,
 } from "../../application/purchase-forecast-backtesting.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const evaluateBodySchema = z.object({
   horizons: z.array(z.union([z.literal(7), z.literal(30), z.literal(90)])).min(1).max(3).optional(),
@@ -51,7 +52,7 @@ export function registerPurchaseForecastBacktestingRoutes(
         res.json(await service.getReport(query));
       } catch (error) {
         if (sendBoundaryError(res, error)) return;
-        console.error("[PurchaseForecastBacktesting] Report failed", { error });
+        logger.error("procurement.purchase_forecast_backtesting_routes", { message: "[PurchaseForecastBacktesting] Report failed", error });
         res.status(500).json({ error: "Failed to load purchase forecast backtests" });
       }
     },
@@ -67,10 +68,7 @@ export function registerPurchaseForecastBacktestingRoutes(
         res.status(201).json(result);
       } catch (error) {
         if (sendBoundaryError(res, error)) return;
-        console.error("[PurchaseForecastBacktesting] Evaluation failed", {
-          actor: requestActor(req),
-          error,
-        });
+        logger.error("procurement.purchase_forecast_backtesting_routes", { message: "[PurchaseForecastBacktesting] Evaluation failed", actor: requestActor(req), error });
         res.status(500).json({ error: "Failed to evaluate mature purchase forecasts" });
       }
     },

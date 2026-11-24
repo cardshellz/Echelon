@@ -4,6 +4,7 @@ import { retryCostReportSchema } from "@shared/procurement/cost-report-delivery"
 import { requirePermission } from "../../../../routes/middleware";
 import { CostReportingError } from "../../domain/cost-reporting.domain";
 import type { CostReportingService } from "../../application/cost-reporting.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const purchaseId = z.string().regex(/^[1-9][0-9]*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647));
 const deliveryId = z.string().uuid();
@@ -12,7 +13,7 @@ export function registerCostReportingRoutes(app: Express, service: CostReporting
   function failure(error: unknown, res: Response): void {
     if (error instanceof z.ZodError) { res.status(400).json({code:"COST_REPORT_REQUEST_INVALID",error:"The reporting request is invalid."}); return; }
     if (error instanceof CostReportingError) { res.status(error.statusCode).json({code:error.code,error:error.message}); return; }
-    console.error(JSON.stringify({event:"cost_reporting_request_failed",code:"COST_REPORT_DATABASE_UNAVAILABLE"}));
+    logger.error("cost_reporting_request_failed", { event:"cost_reporting_request_failed", code:"COST_REPORT_DATABASE_UNAVAILABLE" });
     res.status(503).json({code:"COST_REPORT_DATABASE_UNAVAILABLE",error:"Reporting status could not be saved or verified. Retry the same request safely."});
   }
   app.get("/api/purchase-orders/:purchaseOrderId/cost-reporting",requirePermission("inventory","view"),async (req,res) => {

@@ -6,6 +6,7 @@ import {
   type FulfillmentProviderConnectionCatalogState,
   type FulfillmentProviderCredentialRecord,
 } from "../../application/connected-fulfillment-method-catalog.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const METHOD_CAPABILITIES = {
   supportsMultiPackage: true,
@@ -159,7 +160,7 @@ describe("ConnectedFulfillmentMethodCatalogService", () => {
   });
 
   it("contains an unexpected adapter exception to the affected connection", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     const adapter = fakeAdapter(async (input) => {
       if (input.credential === "bad") throw new Error("unexpected sensitive bad");
       return { status: "available", methods: [method(input.connectionId, input.connectionName)] };

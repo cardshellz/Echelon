@@ -24,19 +24,20 @@ import {
 } from "../../../inventory-planning/legacy-admin-control.api";
 
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
+import { logger } from "../../../../platform/observability/logger";
 
 type WarehouseRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
 function sendWarehouseSettingsWriteError(res: Response, error: unknown): boolean {
   if (!(error instanceof WarehouseSettingsWriteError)) return false;
-  console.warn(JSON.stringify({ event: "warehouse_settings_write_rejected", code: error.code, context: error.context }));
+  logger.warn("warehouse_settings_write_rejected", { event: "warehouse_settings_write_rejected", code: error.code, context: error.context });
   res.status(error.statusCode).json({ error: error.message, details: { code: error.code, context: error.context } });
   return true;
 }
 
 function sendWarehouseLocationWriteError(res: Response, error: unknown): boolean {
   if (!(error instanceof WarehouseLocationWriteError)) return false;
-  console.warn(JSON.stringify({ event: "warehouse_location_write_rejected", code: error.code, context: error.context }));
+  logger.warn("warehouse_location_write_rejected", { event: "warehouse_location_write_rejected", code: error.code, context: error.context });
   res.status(error.statusCode).json({ error: error.message, details: { code: error.code, context: error.context } });
   return true;
 }
@@ -101,7 +102,7 @@ export function registerWarehouseRoutes(app: Express) {
       const warehouses = await storage.getAllWarehouses();
       res.json(warehouses.filter((warehouse) => warehouse.warehouseType !== "system_transit"));
     } catch (error) {
-      console.error("Error fetching warehouses:", error);
+      logger.error("warehouse.routes", { message: "Error fetching warehouses:", error: error });
       res.status(500).json({ error: "Failed to fetch warehouses" });
     }
   });
@@ -115,7 +116,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json(warehouse);
     } catch (error) {
-      console.error("Error fetching warehouse:", error);
+      logger.error("warehouse.routes", { message: "Error fetching warehouse:", error: error });
       res.status(500).json({ error: "Failed to fetch warehouse" });
     }
   });
@@ -137,7 +138,7 @@ export function registerWarehouseRoutes(app: Express) {
       const warehouse = await storage.createWarehouse(parsed.data as any);
       res.status(201).json(warehouse);
     } catch (error: any) {
-      console.error("Error creating warehouse:", error);
+      logger.error("warehouse.routes", { message: "Error creating warehouse:", error: error });
       if (error.code === "23505") {
         return res.status(409).json({ error: "Warehouse code already exists" });
       }
@@ -169,7 +170,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json(warehouse);
     } catch (error: any) {
-      console.error("Error updating warehouse:", error);
+      logger.error("warehouse.routes", { message: "Error updating warehouse:", error: error });
       if (error.code === "23505") {
         return res.status(409).json({ error: "Warehouse code already exists" });
       }
@@ -186,7 +187,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error deleting warehouse:", error);
+      logger.error("warehouse.routes", { message: "Error deleting warehouse:", error: error });
       if (error.code === "23503") {
         return res.status(409).json({ error: "Cannot delete warehouse - locations are assigned to it" });
       }
@@ -201,7 +202,7 @@ export function registerWarehouseRoutes(app: Express) {
       const rules = await storage.getAllFulfillmentRoutingRules();
       res.json(rules);
     } catch (error) {
-      console.error("Error fetching routing rules:", error);
+      logger.error("warehouse.routes", { message: "Error fetching routing rules:", error: error });
       res.status(500).json({ error: "Failed to fetch routing rules" });
     }
   });
@@ -222,7 +223,7 @@ export function registerWarehouseRoutes(app: Express) {
       const rule = await storage.createFulfillmentRoutingRule(data as any);
       res.status(201).json(rule);
     } catch (error) {
-      console.error("Error creating routing rule:", error);
+      logger.error("warehouse.routes", { message: "Error creating routing rule:", error: error });
       res.status(500).json({ error: "Failed to create routing rule" });
     }
   });
@@ -240,7 +241,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json(rule);
     } catch (error) {
-      console.error("Error updating routing rule:", error);
+      logger.error("warehouse.routes", { message: "Error updating routing rule:", error: error });
       res.status(500).json({ error: "Failed to update routing rule" });
     }
   });
@@ -254,7 +255,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting routing rule:", error);
+      logger.error("warehouse.routes", { message: "Error deleting routing rule:", error: error });
       res.status(500).json({ error: "Failed to delete routing rule" });
     }
   });
@@ -265,7 +266,7 @@ export function registerWarehouseRoutes(app: Express) {
       const zones = await storage.getAllWarehouseZones();
       res.json(zones);
     } catch (error) {
-      console.error("Error fetching warehouse zones:", error);
+      logger.error("warehouse.routes", { message: "Error fetching warehouse zones:", error: error });
       res.status(500).json({ error: "Failed to fetch zones" });
     }
   });
@@ -279,7 +280,7 @@ export function registerWarehouseRoutes(app: Express) {
       const zone = await storage.createWarehouseZone(parsed.data);
       res.status(201).json(zone);
     } catch (error: any) {
-      console.error("Error creating warehouse zone:", error);
+      logger.error("warehouse.routes", { message: "Error creating warehouse zone:", error: error });
       if (error.code === '23505') {
         return res.status(400).json({ error: "Zone code already exists" });
       }
@@ -296,7 +297,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json(zone);
     } catch (error) {
-      console.error("Error updating warehouse zone:", error);
+      logger.error("warehouse.routes", { message: "Error updating warehouse zone:", error: error });
       res.status(500).json({ error: "Failed to update zone" });
     }
   });
@@ -310,7 +311,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting warehouse zone:", error);
+      logger.error("warehouse.routes", { message: "Error deleting warehouse zone:", error: error });
       res.status(500).json({ error: "Failed to delete zone" });
     }
   });
@@ -322,7 +323,7 @@ export function registerWarehouseRoutes(app: Express) {
       const settings = await storage.getAllWarehouseSettings();
       res.json(settings);
     } catch (error) {
-      console.error("Error fetching warehouse settings:", error);
+      logger.error("warehouse.routes", { message: "Error fetching warehouse settings:", error: error });
       res.status(500).json({ error: "Failed to fetch warehouse settings" });
     }
   });
@@ -338,7 +339,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json(settings);
     } catch (error) {
-      console.error("Error fetching default warehouse settings:", error);
+      logger.error("warehouse.routes", { message: "Error fetching default warehouse settings:", error: error });
       res.status(500).json({ error: "Failed to fetch default warehouse settings" });
     }
   });
@@ -352,7 +353,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json(settings);
     } catch (error) {
-      console.error("Error fetching warehouse settings:", error);
+      logger.error("warehouse.routes", { message: "Error fetching warehouse settings:", error: error });
       res.status(500).json({ error: "Failed to fetch warehouse settings" });
     }
   });
@@ -372,7 +373,7 @@ export function registerWarehouseRoutes(app: Express) {
       res.status(201).json(settings);
     } catch (error) {
       if (sendWarehouseSettingsWriteError(res, error)) return;
-      console.error("Error creating warehouse settings:", error);
+      logger.error("warehouse.routes", { message: "Error creating warehouse settings:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to create warehouse settings" });
     }
@@ -401,7 +402,7 @@ export function registerWarehouseRoutes(app: Express) {
       res.json(settings);
     } catch (error) {
       if (sendWarehouseSettingsWriteError(res, error)) return;
-      console.error("Error updating warehouse settings:", error);
+      logger.error("warehouse.routes", { message: "Error updating warehouse settings:", error: error });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to update warehouse settings" });
     }
@@ -417,7 +418,7 @@ export function registerWarehouseRoutes(app: Express) {
       res.json({ success: true });
     } catch (error) {
       if (sendWarehouseSettingsWriteError(res, error)) return;
-      console.error("Error deleting warehouse settings:", error);
+      logger.error("warehouse.routes", { message: "Error deleting warehouse settings:", error: error });
       res.status(500).json({ error: "Failed to delete warehouse settings" });
     }
   });
@@ -450,7 +451,7 @@ export function registerWarehouseRoutes(app: Express) {
         effective: { orderCutoffLocal: effective.cutoffLocal, timezone: effective.timezone },
       });
     } catch (error) {
-      console.error("Error fetching warehouse SLA cutoff:", error);
+      logger.error("warehouse.routes", { message: "Error fetching warehouse SLA cutoff:", error: error });
       res.status(500).json({ error: "Failed to fetch SLA cutoff" });
     }
   });
@@ -489,7 +490,7 @@ export function registerWarehouseRoutes(app: Express) {
         timezone: (saved as any)?.timezone ?? null,
       });
     } catch (error) {
-      console.error("Error setting warehouse SLA cutoff:", error);
+      logger.error("warehouse.routes", { message: "Error setting warehouse SLA cutoff:", error: error });
       res.status(500).json({ error: "Failed to set SLA cutoff" });
     }
   });
@@ -508,7 +509,7 @@ export function registerWarehouseRoutes(app: Express) {
 
       res.json(enriched);
     } catch (error) {
-      console.error("Error fetching warehouse locations:", error);
+      logger.error("warehouse.routes", { message: "Error fetching warehouse locations:", error: error });
       res.status(500).json({ error: "Failed to fetch locations" });
     }
   });
@@ -542,7 +543,7 @@ export function registerWarehouseRoutes(app: Express) {
       res.setHeader("Content-Disposition", "attachment; filename=bin_locations.csv");
       res.send(csvRows.join("\n"));
     } catch (error) {
-      console.error("Error exporting warehouse locations:", error);
+      logger.error("warehouse.routes", { message: "Error exporting warehouse locations:", error: error });
       res.status(500).json({ error: "Failed to export locations" });
     }
   });
@@ -556,7 +557,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json(location);
     } catch (error) {
-      console.error("Error fetching warehouse location:", error);
+      logger.error("warehouse.routes", { message: "Error fetching warehouse location:", error: error });
       res.status(500).json({ error: "Failed to fetch location" });
     }
   });
@@ -566,7 +567,7 @@ export function registerWarehouseRoutes(app: Express) {
       const location = await storage.createWarehouseLocation(req.body);
       res.status(201).json(location);
     } catch (error: any) {
-      console.error("Error creating warehouse location:", error);
+      logger.error("warehouse.routes", { message: "Error creating warehouse location:", error: error });
       res.status(400).json({ error: error.message || "Failed to create location" });
     }
   });
@@ -582,7 +583,7 @@ export function registerWarehouseRoutes(app: Express) {
       res.json(location);
     } catch (error: any) {
       if (sendWarehouseLocationWriteError(res, error)) return;
-      console.error("Error updating warehouse location:", error);
+      logger.error("warehouse.routes", { message: "Error updating warehouse location:", error: error });
       res.status(400).json({ error: error.message || "Failed to update location" });
     }
   });
@@ -596,7 +597,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error deleting warehouse location:", error);
+      logger.error("warehouse.routes", { message: "Error deleting warehouse location:", error: error });
       if (error.code === "23503") {
         return res.status(409).json({
           error: getLocationDeleteConflictMessage(error),
@@ -637,7 +638,7 @@ export function registerWarehouseRoutes(app: Express) {
           const result = await storage.deleteWarehouseLocation(id);
           if (result) deleted++;
         } catch (err: any) {
-          console.error(`Error deleting location ${id}:`, err);
+          logger.error("warehouse.routes", { message: `Error deleting location ${id}:`, error: err });
           errors.push(`Location ${id}: ${err.detail || err.message || err.code || 'Unknown error'}`);
         }
       }
@@ -648,7 +649,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       res.json({ success: true, deleted });
     } catch (error) {
-      console.error("Error bulk deleting warehouse locations:", error);
+      logger.error("warehouse.routes", { message: "Error bulk deleting warehouse locations:", error: error });
       res.status(500).json({ error: "Failed to delete locations" });
     }
   });
@@ -684,7 +685,7 @@ export function registerWarehouseRoutes(app: Express) {
       );
       res.json({ success: true, reassigned });
     } catch (error: any) {
-      console.error("Error bulk reassigning products:", error);
+      logger.error("warehouse.routes", { message: "Error bulk reassigning products:", error: error });
       res.status(500).json({ error: error.message || "Failed to reassign products" });
     }
   });
@@ -783,7 +784,7 @@ export function registerWarehouseRoutes(app: Express) {
 
       res.json(results);
     } catch (error: any) {
-      console.error("Error bulk importing warehouse locations:", error);
+      logger.error("warehouse.routes", { message: "Error bulk importing warehouse locations:", error: error });
       res.status(500).json({ error: error.message || "Failed to import locations" });
     }
   });
@@ -799,7 +800,7 @@ export function registerWarehouseRoutes(app: Express) {
 
       res.json(inventory);
     } catch (error: any) {
-      console.error("Error fetching inventory for location:", error);
+      logger.error("warehouse.routes", { message: "Error fetching inventory for location:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch inventory" });
     }
   });
@@ -807,15 +808,15 @@ export function registerWarehouseRoutes(app: Express) {
   app.get("/api/warehouse/locations/:id/products", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const warehouseLocationId = parseInt(req.params.id);
-      console.log(`[DEBUG] Fetching products for warehouse_location_id: ${warehouseLocationId}`);
+      logger.info("warehouse.routes", { message: `[DEBUG] Fetching products for warehouse_location_id: ${warehouseLocationId}` });
       if (isNaN(warehouseLocationId)) {
         return res.status(400).json({ error: "Invalid location ID" });
       }
       const products = await storage.getProductLocationsByWarehouseLocationId(warehouseLocationId);
-      console.log(`[DEBUG] Found ${products.length} products for location ${warehouseLocationId}`);
+      logger.info("warehouse.routes", { message: `[DEBUG] Found ${products.length} products for location ${warehouseLocationId}` });
       res.json(products);
     } catch (error: any) {
-      console.error("Error fetching products for location:", error);
+      logger.error("warehouse.routes", { message: "Error fetching products for location:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch products" });
     }
   });
@@ -846,7 +847,7 @@ export function registerWarehouseRoutes(app: Express) {
       if (error instanceof BinAssignmentValidationError) {
         return res.status(400).json({ error: error.message, code: error.code });
       }
-      console.error("Error assigning product to location:", error);
+      logger.error("warehouse.routes", { message: "Error assigning product to location:", error: error });
       const message = error.message || "Failed to assign product";
       const status = /not found/i.test(message)
         ? 404
@@ -869,13 +870,13 @@ export function registerWarehouseRoutes(app: Express) {
       res.json({ status: "started", message: "Inventory sync started" });
       inventorySource.syncWarehouse(warehouseId)
         .then((result: any) => {
-          console.log(`[InventorySource] Sync complete for warehouse ${result.warehouseCode}: ${result.synced} synced, ${result.skipped} skipped, ${result.errors.length} errors`);
+          logger.info("warehouse.routes", { message: `[InventorySource] Sync complete for warehouse ${result.warehouseCode}: ${result.synced} synced, ${result.skipped} skipped, ${result.errors.length} errors` });
         })
         .catch((err: any) => {
-          console.error("[InventorySource] Sync failed:", err);
+          logger.error("warehouse.routes", { message: "[InventorySource] Sync failed:", error: err });
         });
     } catch (error: any) {
-      console.error("Error starting inventory source sync:", error);
+      logger.error("warehouse.routes", { message: "Error starting inventory source sync:", error: error });
       res.status(500).json({ error: error.message || "Failed to start sync" });
     }
   });
@@ -892,7 +893,7 @@ export function registerWarehouseRoutes(app: Express) {
 
       res.json({ enabled: val === 'true' });
     } catch (error) {
-      console.error("Error fetching FIFO mode:", error);
+      logger.error("warehouse.routes", { message: "Error fetching FIFO mode:", error: error });
       res.status(500).json({ error: "Failed to fetch FIFO mode" });
     }
   });
@@ -908,7 +909,7 @@ export function registerWarehouseRoutes(app: Express) {
       await storage.upsertSetting(key, isEnabled, "picking");
       res.json({ success: true, enabled: isEnabled === 'true' });
     } catch (error) {
-      console.error("Error updating FIFO mode:", error);
+      logger.error("warehouse.routes", { message: "Error updating FIFO mode:", error: error });
       res.status(500).json({ error: "Failed to update FIFO mode" });
     }
   });

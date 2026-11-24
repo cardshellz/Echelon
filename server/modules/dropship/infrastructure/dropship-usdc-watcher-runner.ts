@@ -6,6 +6,7 @@ import type {
   DropshipUsdcScanResult,
   DropshipUsdcSettlementResult,
 } from "../application/dropship-usdc-deposit-service";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * USDC chain watcher (funding design phase 6): every tick scans the next
@@ -61,19 +62,11 @@ export function startDropshipUsdcWatcherWorker(): void {
           || settlement.voidedCount > 0
           || settlement.failedCount > 0
         ) {
-          console.info(JSON.stringify({
-            code: "DROPSHIP_USDC_WATCHER_TICK_COMPLETED",
-            message: "Dropship USDC watcher tick completed.",
-            context: { scan, settlement },
-          }));
+          logger.info("DROPSHIP_USDC_WATCHER_TICK_COMPLETED", { code: "DROPSHIP_USDC_WATCHER_TICK_COMPLETED", message: "Dropship USDC watcher tick completed.", context: { scan, settlement } });
         }
       });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "DROPSHIP_USDC_WATCHER_TICK_FAILED",
-        message: "Dropship USDC watcher tick failed.",
-        context: buildSchedulerFailureContext(error),
-      }));
+      logger.error("DROPSHIP_USDC_WATCHER_TICK_FAILED", { code: "DROPSHIP_USDC_WATCHER_TICK_FAILED", message: "Dropship USDC watcher tick failed.", context: buildSchedulerFailureContext(error) });
     }
   };
 
@@ -82,11 +75,7 @@ export function startDropshipUsdcWatcherWorker(): void {
     intervalMs,
     run: runLockedSweep,
   });
-  console.info(JSON.stringify({
-    code: "DROPSHIP_USDC_WATCHER_STARTED",
-    message: "Dropship USDC watcher started.",
-    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
-  }));
+  logger.info("DROPSHIP_USDC_WATCHER_STARTED", { code: "DROPSHIP_USDC_WATCHER_STARTED", message: "Dropship USDC watcher started.", context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" } });
 }
 
 function defaultWorkerId(): string {

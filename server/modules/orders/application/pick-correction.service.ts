@@ -13,6 +13,7 @@ import type { PickingUseCases } from "./picking.use-cases";
 import { confirmedShipmentHoldRelease } from "../../wms/pick-corrections-and-holds.api";
 import { releaseLineHoldInTransaction } from "../../wms/pick-corrections-and-holds.api";
 import { releaseWmsOrderHoldIfHeldInWms } from "../../wms/wms-order-mutations.api";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * Recording what already shipped is never blocked by a hold; a hold only
@@ -240,10 +241,8 @@ export class PickCorrectionService {
         // Expected while the books still lack the stock: the reason is saved on
         // the correction and listed in Control Tower; the next sweep retries.
         totals.waiting += 1;
-        console.debug(JSON.stringify({ level: "debug", action: "pick_correction_retry", outcome: "waiting",
-          correction_id: id, error_code: error instanceof PickCorrectionError ? error.code
-            : (error as { code?: unknown })?.code ?? null,
-          error: error instanceof Error ? error.message : String(error) }));
+        logger.debug("pick_correction_retry", { outcome: "waiting", correction_id: id, error_code: error instanceof PickCorrectionError ? error.code
+            : (error as { code?: unknown })?.code ?? null, error: error instanceof Error ? error.message : String(error) });
       }
     }
     return totals;

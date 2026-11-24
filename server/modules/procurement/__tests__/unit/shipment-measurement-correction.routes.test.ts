@@ -11,6 +11,7 @@ vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: 
 import { registerShipmentMeasurementRoutes } from "../../interfaces/http/shipment-measurement-correction.routes";
 import { ShipmentMeasurementCorrectionError } from "../../infrastructure/shipment-measurement-correction.repository";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 describe("shipment measurement review HTTP boundary", () => {
   let server: http.Server, base: string;
@@ -49,7 +50,7 @@ describe("shipment measurement review HTTP boundary", () => {
     service.preview.mockRejectedValueOnce(new ShipmentMeasurementCorrectionError("Reload and review the changed shipment.", "SHIPMENT_MEASUREMENTS_STALE"));
     const conflict = await call("POST"); expect(conflict.status).toBe(409);
     expect(await conflict.json()).toEqual({ code: "SHIPMENT_MEASUREMENTS_STALE", error: "Reload and review the changed shipment." });
-    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logged = spyLoggerJson("error");
     service.context.mockRejectedValueOnce(new Error("private database connection"));
     const failed = await call("GET"); expect(failed.status).toBe(503);
     expect(await failed.text()).not.toContain("private database"); expect(logged).toHaveBeenCalledWith(expect.not.stringContaining("private database"));

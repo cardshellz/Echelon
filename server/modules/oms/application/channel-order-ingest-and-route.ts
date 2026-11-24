@@ -29,6 +29,7 @@ import type {
 } from "./oms.service";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 import { enrichContext } from "../../../platform/observability";
+import { logger } from "../../../platform/observability/logger";
 
 export interface WmsOrderSyncPort {
   syncOmsOrderToWms(omsOrderId: number): Promise<number | null | undefined>;
@@ -70,17 +71,15 @@ export async function ensureChannelOrderQueuedForWmsSync(
     if (!wmsOrderId) {
       // `null` = sync intentionally skipped (order already final/fulfilled out-of-band) —
       // a no-op, not a failure. Do NOT re-queue it.
-      console.log(
-        `${logPrefix} WMS sync skipped for ${label} (omsOrder ${omsOrderId}) — already fulfilled out-of-band; no-op`,
-      );
+      logger.info("oms.channel_order_ingest_and_route", { message: `${logPrefix} WMS sync skipped for ${label} (omsOrder ${omsOrderId}) — already fulfilled out-of-band; no-op` });
       return null;
     }
-    console.log(`${logPrefix} Synced ${label} to WMS (wms=${wmsOrderId})`);
+    logger.info("oms.channel_order_ingest_and_route", { message: `${logPrefix} Synced ${label} to WMS (wms=${wmsOrderId})` });
     return wmsOrderId;
   } catch (error: any) {
     const err =
       error instanceof Error ? error : new Error(error?.message ?? String(error));
-    console.error(`${logPrefix} WMS sync failed for ${label}: ${err.message}`);
+    logger.error("oms.channel_order_ingest_and_route", { message: `${logPrefix} WMS sync failed for ${label}: ${err.message}` });
     await enqueueOmsWmsSyncRetry(db, omsOrderId, err);
     return null;
   }
@@ -279,9 +278,7 @@ export async function ingestAndRoute(
     !omsOrder.warehouseId;
 
   if (!isNew && shouldRoute) {
-    console.log(
-      `${logPrefix} Order ${label} already exists in OMS (id=${omsOrder.id}), ensuring routing`,
-    );
+    logger.info("oms.channel_order_ingest_and_route", { message: `${logPrefix} Order ${label} already exists in OMS (id=${omsOrder.id}), ensuring routing` });
   }
 
   if (shouldRoute) {
@@ -299,14 +296,10 @@ export async function ingestAndRoute(
         await input.omsService.reserveInventory(omsOrder.id);
         await input.omsService.assignWarehouse(omsOrder.id);
       } catch (err: any) {
-        console.error(
-          `${logPrefix} Post-ingest processing failed for ${label}: ${err?.message ?? err}`,
-        );
+        logger.error("oms.channel_order_ingest_and_route", { message: `${logPrefix} Post-ingest processing failed for ${label}: ${err?.message ?? err}` });
       }
     } else {
-      console.log(
-        `${logPrefix} Order ${label} already has warehouse_id=${omsOrder.warehouseId}`,
-      );
+      logger.info("oms.channel_order_ingest_and_route", { message: `${logPrefix} Order ${label} already has warehouse_id=${omsOrder.warehouseId}` });
     }
 
     await ensureChannelOrderQueuedForWmsSync({

@@ -13,6 +13,7 @@ vi.mock("../../../wms/infrastructure/picking-progress.repository", async (origin
 import { readWmsPickingBlockers } from "../../../wms/infrastructure/picking-progress.repository";
 import { PickingUseCases } from "../../application/picking.use-cases";
 import { releaseClearedPickExceptions } from "../../../oms/application/oms-flow-reconciliation.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // 2026-10-03, #63721: every line was picked, but the unmapped graded card
 // (SKU "UNKNOWN", no bin) kept the order in exception. Only another pick
@@ -79,7 +80,7 @@ describe("releaseClearedPickExceptions", () => {
 
   it("runs the pick projection under a guarded lock and counts a released order", async () => {
     const { service, db, tx } = harness();
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
 
     await expect(service.releaseClearedPickExceptions(100))
       .resolves.toEqual({ checked: 1, released: 1, stillBlocked: 0, failed: 0 });
@@ -115,8 +116,8 @@ describe("releaseClearedPickExceptions", () => {
   it("keeps going when one order fails, and counts it", async () => {
     const { service, db } = harness({ candidates: [{ id: 63720, warehouse_id: 1 }, { id: 63721, warehouse_id: 1 }] });
     db.transaction.mockRejectedValueOnce(Object.assign(new Error("could not serialize access"), { code: "40001" }));
-    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = spyLoggerJson("error");
+    const log = spyLoggerJson("log");
     await expect(service.releaseClearedPickExceptions(100))
       .resolves.toEqual({ checked: 2, released: 1, stillBlocked: 0, failed: 1 });
     expect(error).toHaveBeenCalledWith(expect.stringContaining("\"error_code\":\"40001\""));
@@ -126,8 +127,8 @@ describe("releaseClearedPickExceptions", () => {
 
   it("warns when the batch is full so delayed orders are visible", async () => {
     const { service } = harness({ candidates: [{ id: 63720, warehouse_id: 1 }, { id: 63721, warehouse_id: 1 }] });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const warn = spyLoggerJson("warn");
+    const log = spyLoggerJson("log");
     await service.releaseClearedPickExceptions(2);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("\"outcome\":\"batch_full\""));
     warn.mockRestore();
@@ -150,7 +151,7 @@ describe("scheduled exception re-check", () => {
 
   it("delegates one bounded pass to the picking owner", async () => {
     const owner = vi.fn(async () => ({ checked: 3, released: 1, stillBlocked: 2, failed: 0 }));
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
     await expect(releaseClearedPickExceptions({ ...deps, pickExceptions: { releaseClearedPickExceptions: owner } }))
       .resolves.toEqual({ checked: 3, released: 1, stillBlocked: 2, failed: 0 });
     expect(owner).toHaveBeenCalledWith(100);
@@ -159,7 +160,7 @@ describe("scheduled exception re-check", () => {
 
   it("reports failed orders on the run so they are not silent", async () => {
     const owner = vi.fn(async () => ({ checked: 2, released: 1, stillBlocked: 0, failed: 1 }));
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
     await expect(releaseClearedPickExceptions({ ...deps, pickExceptions: { releaseClearedPickExceptions: owner } }))
       .rejects.toThrow("exception re-check failed for 1 order(s)");
     log.mockRestore();

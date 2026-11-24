@@ -3,6 +3,7 @@ import { db } from "../../../../db";
 import { requireAuth, requirePermission } from "../../../../routes/middleware";
 import { limitPageRead } from "../../../../platform/http/page-read-limit";
 import { PickingHistoryRepository, pickingHistoryQuerySchema } from "../../infrastructure/picking-history.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerPickingHistoryRoutes(
   app: Express,
@@ -16,7 +17,7 @@ export function registerPickingHistoryRoutes(
       // The repository validates independently for non-HTTP callers, too.
       return res.json(await repository.page(parsed.data));
     } catch (error) {
-      console.error("Picking history read failed", { code: "PICKING_HISTORY_READ_FAILED", error });
+      logger.error("orders.picking_history_routes", { message: "Picking history read failed", code: "PICKING_HISTORY_READ_FAILED", error });
       return res.status(500).json({ code: "PICKING_HISTORY_READ_FAILED", error: "Failed to load picking history. Please retry." });
     }
   }));

@@ -18,6 +18,7 @@ import {
   readFinancialExceptionEvidence,
   retireFinancialAlert,
 } from "../infrastructure/po-financial-exceptions.repository";
+import { logger } from "../../../platform/observability/logger";
 
 function payload(row: PoException): Record<string, unknown> {
   return row.payload !== null &&
@@ -85,14 +86,7 @@ export function createPoFinancialExceptionService(
             evidence = await readFinancialExceptionEvidence(tx, poId);
           } catch (error) {
             if (!(error instanceof PoFinancialEvidenceSourceError)) throw error;
-            console.error(
-              JSON.stringify({
-                code: error.code,
-                purchaseOrderId: poId,
-                action: "financial_alerts_preserved",
-                asOf: now.toISOString(),
-              }),
-            );
+            logger.error("financial_alerts_preserved", { code: error.code, purchaseOrderId: poId, asOf: now.toISOString() });
             return;
           }
           const evaluation = evaluatePoFinancialExceptions(
@@ -101,15 +95,7 @@ export function createPoFinancialExceptionService(
             now,
           );
           if (evaluation.diagnostics.length)
-            console.warn(
-              JSON.stringify({
-                code: "PO_FINANCIAL_ALERT_EVIDENCE_UNKNOWN",
-                purchaseOrderId: poId,
-                diagnostics: evaluation.diagnostics,
-                preservedKinds: evaluation.unknownKinds,
-                asOf: now.toISOString(),
-              }),
-            );
+            logger.warn("PO_FINANCIAL_ALERT_EVIDENCE_UNKNOWN", { code: "PO_FINANCIAL_ALERT_EVIDENCE_UNKNOWN", purchaseOrderId: poId, diagnostics: evaluation.diagnostics, preservedKinds: evaluation.unknownKinds, asOf: now.toISOString() });
           for (const kind of kinds) {
             if (evaluation.unknownKinds.includes(kind)) continue;
             const desired = evaluation.alerts.filter(

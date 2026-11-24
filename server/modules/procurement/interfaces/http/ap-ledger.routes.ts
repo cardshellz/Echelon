@@ -26,6 +26,7 @@ import { apInvoiceReplacementCommands } from "../../application/ap-invoice-repla
 import { invoiceReplacementInputSchema } from "@shared/procurement/invoice-replacement";
 import { registerInvoiceTransitionPreviewRoutes } from "./ap-invoice-transition.routes";
 import { invoiceTransitionIdSchema } from "../../application/ap-invoice-transition.service";
+import { logger } from "../../../../platform/observability/logger";
 
 function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
   if (err?.name === "ApLedgerError" || err instanceof SupplierCreditEvidenceError) {
@@ -75,7 +76,7 @@ export function registerApLedgerRoutes(app: Express) {
     try {
       res.json(await apLedger.listInvoiceWorkList(query.data, new Date()));
     } catch (error) {
-      console.error("AP invoice work list failed", { code: "AP_WORK_LIST_READ_FAILED", error });
+      logger.error("procurement.ap_ledger_routes", { message: "AP invoice work list failed", code: "AP_WORK_LIST_READ_FAILED", error });
       res.status(500).json({ error: "Unable to load invoices. Retry the list.", details: { code: "AP_WORK_LIST_READ_FAILED" } });
     }
   });
@@ -89,7 +90,7 @@ export function registerApLedgerRoutes(app: Express) {
     try {
       res.json(await apLedger.listPaymentWorkList(query.data));
     } catch (error) {
-      console.error("AP payment work list failed", { code: "AP_WORK_LIST_READ_FAILED", error });
+      logger.error("procurement.ap_ledger_routes", { message: "AP payment work list failed", code: "AP_WORK_LIST_READ_FAILED", error });
       res.status(500).json({ error: "Unable to load payments. Retry the list.", details: { code: "AP_WORK_LIST_READ_FAILED" } });
     }
   });
@@ -121,7 +122,7 @@ export function registerApLedgerRoutes(app: Express) {
         res.status(error.statusCode).json({ error: error.message, details: { code: error.code } });
         return;
       }
-      console.error("AP invoice number suggestion failed", { code: "AP_INVOICE_NUMBER_SUGGESTION_FAILED", error });
+      logger.error("procurement.ap_ledger_routes", { message: "AP invoice number suggestion failed", code: "AP_INVOICE_NUMBER_SUGGESTION_FAILED", error });
       res.status(500).json({ error: "Unable to suggest an invoice number. Retry or enter the supplier invoice reference.", details: { code: "AP_INVOICE_NUMBER_SUGGESTION_FAILED" } });
     }
   });
@@ -432,11 +433,7 @@ export function registerApLedgerRoutes(app: Express) {
           fs.unlinkSync(attachment.filePath);
         } catch (error: any) {
           if (error?.code !== "ENOENT") {
-            console.error("[AP Ledger] Failed to delete invoice attachment file after database removal", {
-              attachmentId: attachment.id,
-              filePath: attachment.filePath,
-              error: error?.message,
-            });
+            logger.error("procurement.ap_ledger_routes", { message: "[AP Ledger] Failed to delete invoice attachment file after database removal", attachmentId: attachment.id, filePath: attachment.filePath, error: error?.message });
           }
         }
       }

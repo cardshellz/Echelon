@@ -26,6 +26,7 @@ import type {
   ListingLifecycleSession,
   StoredListingLifecycle,
 } from "./listing-lifecycle-ports";
+import { logger } from "../../../platform/observability/logger";
 
 const channelIdSchema = z.number().int().positive().max(2_147_483_647);
 const actorSchema = z.string().trim().min(1).max(100);
@@ -204,7 +205,7 @@ export class ListingLifecycleService {
           else if (result) processed++;
         } catch (error) {
           failed++;
-          console.error(JSON.stringify({ operation: "listing_member_worker", operationId: id, code: "LISTING_MEMBER_WORKER_FAILED" }));
+          logger.error("LISTING_MEMBER_WORKER_FAILED", { operation: "listing_member_worker", operationId: id, code: "LISTING_MEMBER_WORKER_FAILED" });
         }
       }
     }
@@ -227,16 +228,10 @@ export class ListingLifecycleService {
         else if (result) processed++;
       } catch (error) {
         failed++;
-        console.error(
-          JSON.stringify({
-            operation: "listing_lifecycle_worker",
-            id: candidate.view.id,
-            code:
+        logger.error("marketplace-listings.listing_lifecycle_service", { operation: "listing_lifecycle_worker", id: candidate.view.id, code:
               error instanceof ListingPublicationError
                 ? error.code
-                : "LISTING_LIFECYCLE_WORKER_FAILED",
-          }),
-        );
+                : "LISTING_LIFECYCLE_WORKER_FAILED" });
       }
     }
     return { processed, failed };
@@ -302,13 +297,7 @@ export class ListingLifecycleService {
         typeof error.code === "string"
           ? error.code
           : "LISTING_LIFECYCLE_FAILED";
-      console.error(
-        JSON.stringify({
-          operation: "listing_lifecycle",
-          id: record.view.id,
-          code,
-        }),
-      );
+      logger.error("marketplace-listings.listing_lifecycle_service", { operation: "listing_lifecycle", id: record.view.id, code });
       // Keep the durable publication stop even when the provider or stock hold
       // fails. The worker and the operator can safely retry the same request.
       return session.progress(

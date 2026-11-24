@@ -96,6 +96,7 @@ vi.mock("../../application/ap-invoice-replacement.commands", () => ({
 }));
 
 import { registerApLedgerRoutes } from "../../interfaces/http/ap-ledger.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 function buildApp(): Express {
   const app = express();
@@ -163,7 +164,7 @@ describe("AP ledger routes", () => {
   });
   it("reports failed work-list reads as unavailable without exposing database messages", async () => {
     mocks.apLedger.listInvoiceWorkList.mockRejectedValue(new Error("Internal connection detail"));
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("error");
     try {
       server = await startServer(buildApp());
       const response = await requestJson(server.url, "GET", "/api/vendor-invoices/work-list");

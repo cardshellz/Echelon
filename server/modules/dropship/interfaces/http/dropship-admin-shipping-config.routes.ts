@@ -4,6 +4,7 @@ import type { DropshipShippingConfigService } from "../../application/dropship-s
 import { shippingConfigValidationError } from "../../application/dropship-shipping-config-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipShippingConfigServiceFromEnv } from "../../infrastructure/dropship-shipping-config.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -223,7 +224,7 @@ function sendDropshipShippingConfigError(res: Response, error: unknown): Respons
     });
   }
 
-  console.error("[DropshipAdminShippingConfigRoutes] Unexpected shipping config error:", error);
+  logger.error("dropship.admin_shipping_config_routes", { message: "[DropshipAdminShippingConfigRoutes] Unexpected shipping config error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_SHIPPING_CONFIG_INTERNAL_ERROR",

@@ -33,6 +33,7 @@ import {
 import type {
   ChannelFulfillmentProjector,
 } from "../infrastructure/channel-fulfillment-projection.repository";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 const DEFAULT_BATCH_SIZE = 25;
 const DEFAULT_LEASE_DURATION_MS = 120_000;
@@ -125,9 +126,9 @@ class UnsupportedChannelProviderError extends Error {
 
 function defaultLogger(): ChannelFulfillmentAuthorityLogger {
   return {
-    info: (event) => console.log(JSON.stringify(event)),
-    warn: (event) => console.warn(JSON.stringify(event)),
-    error: (event) => console.error(JSON.stringify(event)),
+    info: (event) => platformLogger.info("oms.channel_fulfillment_authority_service", { detail: JSON.stringify(event) }),
+    warn: (event) => platformLogger.warn("oms.channel_fulfillment_authority_service", { detail: JSON.stringify(event) }),
+    error: (event) => platformLogger.error("oms.channel_fulfillment_authority_service", { error: JSON.stringify(event) }),
   };
 }
 

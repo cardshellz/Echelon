@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { apInvoiceTransitionActionSchema } from "@shared/procurement/ap-invoice-transition";
 import { classifyApInvoiceCommandFailure } from "../../application/ap-invoice-commands";
 import { getInvoiceTransitionHistory, invoiceTransitionIdSchema, previewInvoiceTransition } from "../../application/ap-invoice-transition.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerInvoiceTransitionPreviewRoutes(app: Express, preview = previewInvoiceTransition, history = getInvoiceTransitionHistory) {
   app.get("/api/vendor-invoices/:id/transition-history", requirePermission("purchasing", "view"), async (req, res) => {
@@ -10,8 +11,7 @@ export function registerInvoiceTransitionPreviewRoutes(app: Express, preview = p
     catch (error) {
       const failure = classifyApInvoiceCommandFailure(error);
       if (failure.kind === "rejected") return res.status(failure.httpStatus).json(failure.body);
-      console.error(JSON.stringify({ event: "procurement.invoice.transition_history_failed", invoiceId: req.params.id,
-        errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.invoice.transition_history_failed", { event: "procurement.invoice.transition_history_failed", invoiceId: req.params.id, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(503).json({ error: "Invoice approval history is unavailable. Reload and try again." });
     }
   });
@@ -25,8 +25,7 @@ export function registerInvoiceTransitionPreviewRoutes(app: Express, preview = p
       } catch (error) {
         const failure = classifyApInvoiceCommandFailure(error);
         if (failure.kind === "rejected") return res.status(failure.httpStatus).json(failure.body);
-        console.error(JSON.stringify({ event: "procurement.invoice.transition_preview_failed", action, invoiceId: req.params.id,
-          errorType: error instanceof Error ? error.name : typeof error }));
+        logger.error("procurement.invoice.transition_preview_failed", { event: "procurement.invoice.transition_preview_failed", invoiceId: req.params.id, errorType: error instanceof Error ? error.name : typeof error });
         return res.status(503).json({ error: "The invoice changes could not be loaded. Reload and try again." });
       }
     });

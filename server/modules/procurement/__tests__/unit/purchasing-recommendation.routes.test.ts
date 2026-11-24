@@ -102,6 +102,7 @@ import {
   registerPurchasingRecommendationAdminRoutes,
   registerPurchasingRecommendationRoutes,
 } from "../../interfaces/http/purchasing-recommendation.routes";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 function buildApp(): Express {
   const app = express();
@@ -570,7 +571,7 @@ describe("purchasing recommendation routes", () => {
       planningPolicy: { ...defaultPurchasePlanningPolicy(), growthPercent: "50" },
       planningPolicyRevision: 7,
     });
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const errorLog = spyLoggerJson("error");
     try {
       server = await startServer(buildApp());
       const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");

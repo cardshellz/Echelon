@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { exchangeShopifyStaffOAuthCode } from "../../adapters/shopify/shopify-staff-oauth.provider";
 import { ShopifyStaffOAuthError, type ShopifyStaffOAuthConfig } from "../../domain/shopify-staff-oauth.types";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 const config: ShopifyStaffOAuthConfig = {
   shopDomain: "test-store.myshopify.com",
@@ -226,9 +227,9 @@ describe("staff Shopify OAuth token exchange boundary", () => {
   });
 
   it("does not log credentials, callback code, token or provider diagnostics", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
+    const warn = spyLoggerJson("warn");
+    const error = spyLoggerJson("error");
     await exchangeShopifyStaffOAuthCode(config, code, { fetch: transport() });
     await failure(exchangeShopifyStaffOAuthCode(config, code, {
       fetch: vi.fn<typeof fetch>(async () => new Response("provider-private-diagnostic", { status: 500 })),

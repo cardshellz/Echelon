@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipReturnPolicyService } from "../../application/dropship-return-policy-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipReturnPolicyServiceFromEnv } from "../../infrastructure/dropship-return-policy.factory";
+import { logger } from "../../../../platform/observability/logger";
 
 type SessionUser = {
   id: string;
@@ -211,10 +212,7 @@ function sendDropshipReturnPolicyError(
     });
   }
 
-  console.error(
-    "[DropshipAdminReturnPolicyRoutes] Unexpected return policy error:",
-    error,
-  );
+  logger.error("dropship.admin_return_policy_routes", { message: "[DropshipAdminReturnPolicyRoutes] Unexpected return policy error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_RETURN_POLICY_INTERNAL_ERROR",

@@ -35,6 +35,7 @@ import {
   type PurchasingRecommendationItem,
   type PurchasingRecommendationRunPoMutation,
 } from "../modules/procurement/planning-and-pipeline-jobs.api";
+import { logger } from "../platform/observability/logger";
 
 export interface AutoDraftOptions {
   triggeredBy: "scheduler" | "manual";
@@ -745,21 +746,19 @@ async function executeAutoDraftJob(
       });
     }
 
-    console.log(
-      `[Auto-draft] Complete: ${itemsAnalyzed} analyzed, ${posCreated} created, ${linesAdded} lines added, ` +
+    logger.info("jobs.auto_draft_job", { detail: `[Auto-draft] Complete: ${itemsAnalyzed} analyzed, ${posCreated} created, ${linesAdded} lines added, ` +
       `${handoffResult.skipped.length} sourcing or snapshot reviews required, ${skippedNoVendor} skipped (no vendor), ` +
-      `${skippedExcluded} excluded`,
-    );
+      `${skippedExcluded} excluded` });
 
     try {
       const escalation = await runStaleAutoDraftPoEscalationCheck({
         thresholds: settings.stalePoThresholds,
       });
       if (escalation.sent) {
-        console.warn(`[Auto-draft] Sent critical stale PO escalation for ${escalation.criticalCount} PO(s)`);
+        logger.warn("jobs.auto_draft_job", { message: `[Auto-draft] Sent critical stale PO escalation for ${escalation.criticalCount} PO(s)` });
       }
     } catch (error: any) {
-      console.error("[Auto-draft] Stale PO escalation check failed:", error?.message ?? error);
+      logger.error("jobs.auto_draft_job", { message: "[Auto-draft] Stale PO escalation check failed:", error: error?.message ?? error });
     }
 
     return {
@@ -789,7 +788,7 @@ async function executeAutoDraftJob(
       } : {}),
     };
   } catch (error: any) {
-    console.error("[Auto-draft] Failed:", error);
+    logger.error("jobs.auto_draft_job", { message: "[Auto-draft] Failed:", error: error });
     try {
       const failure = await lifecycle.failRun({
         runId: runRecord.id,
@@ -803,12 +802,10 @@ async function executeAutoDraftJob(
         },
       });
       if (!failure.transitioned) {
-        console.error(
-          `[Auto-draft] Run ${runRecord.id} failure did not replace terminal status ${failure.run?.status ?? "missing"}`,
-        );
+        logger.error("jobs.auto_draft_job", { message: `[Auto-draft] Run ${runRecord.id} failure did not replace terminal status ${failure.run?.status ?? "missing"}` });
       }
     } catch (statusError) {
-      console.error(`[Auto-draft] Failed to persist run ${runRecord.id} error status:`, statusError);
+      logger.error("jobs.auto_draft_job", { message: `[Auto-draft] Failed to persist run ${runRecord.id} error status:`, error: statusError });
       throw new AggregateError(
         [error, statusError],
         `Auto-draft failed and its run status could not be persisted: ${error?.message || "Unknown error"}`,

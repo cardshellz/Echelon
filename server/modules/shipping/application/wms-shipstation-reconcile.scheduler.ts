@@ -18,6 +18,7 @@ import {
 import { engineRefFromRow } from "../adapters/shipstation.adapter";
 import type { ShippingEngine } from "../domain/engine";
 import { deriveReconcileEvent } from "../domain/reconcile-derive";
+import { logger } from "../../../platform/observability/logger";
 
 export const WMS_SHIPSTATION_RECONCILE_LOCK_ID = 918506;
 
@@ -85,9 +86,7 @@ export function startWmsShipStationReconcileScheduler(
         const ref = engineRefFromRow(row);
         try {
           if (!ref) {
-            console.warn(
-              `[Reconcile V2] No engine ref for shipment ${shipmentId} — skipping`,
-            );
+            logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] No engine ref for shipment ${shipmentId} — skipping` });
             continue;
           }
 
@@ -138,9 +137,7 @@ export function startWmsShipStationReconcileScheduler(
               new Date(row.created_at).getTime() <
                 Date.now() - 2 * 60 * 60 * 1000;
             if (stranded) {
-              console.warn(
-                `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}, status=${row.wms_shipment_status}) — flagging stranded shipment for review`,
-              );
+              logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}, status=${row.wms_shipment_status}) — flagging stranded shipment for review` });
               const already: any = await db.execute(sql`
                 SELECT COALESCE(requires_review, false) AS rr
                 FROM wms.outbound_shipments WHERE id = ${shipmentId}
@@ -168,16 +165,11 @@ export function startWmsShipStationReconcileScheduler(
                     },
                   );
                 } catch (auditErr: any) {
-                  console.warn(
-                    `[Reconcile V2] not-found audit insert failed for shipment ${shipmentId}:`,
-                    auditErr?.message,
-                  );
+                  logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] not-found audit insert failed for shipment ${shipmentId}:`, detail: auditErr?.message });
                 }
               }
             } else {
-              console.warn(
-                `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}) — skipping`,
-              );
+              logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}) — skipping` });
               await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
             }
             continue;
@@ -206,14 +198,7 @@ export function startWmsShipStationReconcileScheduler(
                 ? "shipping_engine_missing_inbound_package_authority"
                 : "shipping_engine_inbound_package_missing_order_number";
               await flagOutboundShipmentPhysicalAuthorityRequiredInWms(db, shipmentId, reason);
-              console.error(JSON.stringify({
-                code: "SHIPPING_RECONCILE_PHYSICAL_AUTHORITY_REQUIRED",
-                shipmentId,
-                orderNumber: orderNumber || null,
-                engine: engine.engineName,
-                eventKind: event.kind,
-                reason,
-              }));
+              logger.error("SHIPPING_RECONCILE_PHYSICAL_AUTHORITY_REQUIRED", { code: "SHIPPING_RECONCILE_PHYSICAL_AUTHORITY_REQUIRED", shipmentId, orderNumber: orderNumber || null, engine: engine.engineName, eventKind: event.kind, reason });
               continue;
             }
             const processed = await engine.applyInboundShipmentAuthority({
@@ -238,7 +223,7 @@ export function startWmsShipStationReconcileScheduler(
                 carrierCode: row.carrier || "other",
                 notifyCustomer: false,
               });
-              console.log(`[Reconcile V2] Outbound sync: marked engine order ${ref.engineOrderRef} shipped`);
+              logger.info("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] Outbound sync: marked engine order ${ref.engineOrderRef} shipped` });
               markedShipped++;
 
               await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
@@ -255,10 +240,10 @@ export function startWmsShipStationReconcileScheduler(
                 await recordOutboundShipmentAlreadyShippedInEngineInWms(db, shipmentId, {
                   stampReconciled: true,
                 });
-                console.log(`[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already shipped — recorded shipped`);
+                logger.info("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already shipped — recorded shipped` });
                 markedShipped++;
               } else {
-                console.log(`[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef} (${cancelResult?.state ?? "cancelled"})`);
+                logger.info("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef} (${cancelResult?.state ?? "cancelled"})` });
                 markedCancelled++;
                 await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
               }
@@ -291,10 +276,10 @@ export function startWmsShipStationReconcileScheduler(
                   },
                 );
               } catch (auditErr: any) {
-                console.warn(`[Reconcile V2] review audit insert failed for shipment ${shipmentId}:`, auditErr?.message);
+                logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] review audit insert failed for shipment ${shipmentId}:`, detail: auditErr?.message });
               }
             }
-            console.log(`[Reconcile V2] shipment=${shipmentId} flagged for review (${event.reason}) — ShipStation cancelled but the order is live`);
+            logger.info("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] shipment=${shipmentId} flagged for review (${event.reason}) — ShipStation cancelled but the order is live` });
             continue;
           }
 
@@ -314,10 +299,8 @@ export function startWmsShipStationReconcileScheduler(
               db,
               wmsOrderId,
             );
-            console.log(
-              `[ShipStation Reconcile V2] shipment=${shipmentId} → ${event.kind}, ` +
-                `order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus}`,
-            );
+            logger.info("shipping.wms_shipstation_reconcile_scheduler", { detail: `[ShipStation Reconcile V2] shipment=${shipmentId} → ${event.kind}, ` +
+                `order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus}` });
 
             // 6. Track operational cancellation repair counts. Shipped/voided
             //    fulfillment is projected by the canonical authority above.
@@ -338,10 +321,7 @@ export function startWmsShipStationReconcileScheduler(
                   },
                 );
               } catch (auditErr: any) {
-                console.warn(
-                  `[ShipStation Reconcile V2] audit insert failed for order ${omsId}:`,
-                  auditErr?.message,
-                );
+                logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: `[ShipStation Reconcile V2] audit insert failed for order ${omsId}:`, detail: auditErr?.message });
               }
             }
           }
@@ -352,10 +332,7 @@ export function startWmsShipStationReconcileScheduler(
           // Rate limit — ShipStation allows ~40 req/min
           await new Promise((r) => setTimeout(r, 1000));
         } catch (err: any) {
-          console.warn(
-            `[Reconcile V2] Failed to reconcile order ${row.order_id} / engineRef ${ref?.engineOrderRef}:`,
-            err?.message,
-          );
+          logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: `[Reconcile V2] Failed to reconcile order ${row.order_id} / engineRef ${ref?.engineOrderRef}:`, error: err?.message });
           const errMsg = String(err?.message || err).slice(0, 255);
           // A transient DB connection/pool timeout means we couldn't CHECK this shipment
           // this run — it's infra, not a shipment problem. Don't flag it for human review
@@ -369,13 +346,11 @@ export function startWmsShipStationReconcileScheduler(
       }
 
       if (markedShipped || markedCancelled || markedVoided) {
-        console.warn(
-          `[ShipStation Reconcile V2] Swept ${rows.rows.length} candidate(s): ` +
-            `${markedShipped} shipped, ${markedCancelled} cancelled, ${markedVoided} voided`,
-        );
+        logger.warn("shipping.wms_shipstation_reconcile_scheduler", { detail: `[ShipStation Reconcile V2] Swept ${rows.rows.length} candidate(s): ` +
+            `${markedShipped} shipped, ${markedCancelled} cancelled, ${markedVoided} voided` });
       }
     } catch (err: any) {
-      console.warn("[ShipStation Reconcile V2] Sweep error:", err?.message);
+      logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: "[ShipStation Reconcile V2] Sweep error:", error: err?.message });
     }
   };
 
@@ -387,7 +362,7 @@ export function startWmsShipStationReconcileScheduler(
 
     // Run the engine queue sweeper (review-only — flags stranded orders).
     const engine = services.shippingEngine;
-    await engine?.sweepQueue?.().catch((e: any) => console.warn("[Engine Sweeper] error:", e.message));
+    await engine?.sweepQueue?.().catch((e: any) => logger.warn("shipping.wms_shipstation_reconcile_scheduler", { message: "[Engine Sweeper] error:", error: e.message }));
   };
 
   return registerScheduledJob({

@@ -23,6 +23,7 @@ import type {
   DropshipRewardsExpiryResult,
   RunDropshipRewardsExpiryInput,
 } from "../application/dropship-wallet-rewards-expiry-service";
+import { logger } from "../../../platform/observability/logger";
 
 /**
  * Dropship maintenance runner: an hourly tick covering the jobs that share a
@@ -162,10 +163,7 @@ export function startDropshipReturnsMaintenanceWorker(): void {
           || result.rewardsExpiry.expiredLotCount > 0
           || result.rewardsExpiry.failedCount > 0
         ) {
-          console.info(JSON.stringify({
-            code: "DROPSHIP_RETURNS_MAINTENANCE_SWEEP_COMPLETED",
-            message: "Dropship maintenance sweep completed.",
-            context: {
+          logger.info("DROPSHIP_RETURNS_MAINTENANCE_SWEEP_COMPLETED", { code: "DROPSHIP_RETURNS_MAINTENANCE_SWEEP_COMPLETED", message: "Dropship maintenance sweep completed.", context: {
               walletMaintenance: {
                 runDate: wallet.runDate,
                 scannedCount: wallet.scannedCount,
@@ -185,16 +183,11 @@ export function startDropshipReturnsMaintenanceWorker(): void {
                 skippedCount: result.noInspection.skippedCount,
               },
               rewardsExpiry: result.rewardsExpiry,
-            },
-          }));
+            } });
         }
       });
     } catch (error) {
-      console.error(JSON.stringify({
-        code: "DROPSHIP_RETURNS_MAINTENANCE_SWEEP_FAILED",
-        message: "Dropship maintenance sweep failed.",
-        context: buildSchedulerFailureContext(error),
-      }));
+      logger.error("DROPSHIP_RETURNS_MAINTENANCE_SWEEP_FAILED", { code: "DROPSHIP_RETURNS_MAINTENANCE_SWEEP_FAILED", message: "Dropship maintenance sweep failed.", context: buildSchedulerFailureContext(error) });
     }
   };
 
@@ -203,11 +196,7 @@ export function startDropshipReturnsMaintenanceWorker(): void {
     intervalMs,
     run: runLockedSweep,
   });
-  console.info(JSON.stringify({
-    code: "DROPSHIP_RETURNS_MAINTENANCE_WORKER_STARTED",
-    message: "Dropship maintenance worker started.",
-    context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
-  }));
+  logger.info("DROPSHIP_RETURNS_MAINTENANCE_WORKER_STARTED", { code: "DROPSHIP_RETURNS_MAINTENANCE_WORKER_STARTED", message: "Dropship maintenance worker started.", context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" } });
 }
 
 function defaultWorkerId(): string {

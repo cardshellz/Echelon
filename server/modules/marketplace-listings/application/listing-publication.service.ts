@@ -40,6 +40,7 @@ import {
   type ListingSnapshot,
   type StoredListingOperation,
 } from "../domain/listing-publication";
+import { logger } from "../../../platform/observability/logger";
 
 export interface ListingPublicationCatalog {
   catalog(
@@ -494,13 +495,7 @@ export class ListingPublicationService {
         processed++;
       } catch (error) {
         failed++;
-        console.error(
-          JSON.stringify({
-            operation: "listing_publication_worker",
-            id: operation.id,
-            code: safeCode(error),
-          }),
-        );
+        logger.error("marketplace-listings.listing_publication_service", { operation: "listing_publication_worker", id: operation.id, code: safeCode(error) });
       }
     }
     return { processed, failed };
@@ -798,8 +793,7 @@ export class ListingPublicationService {
               item.stockState = "blocked";
               item.stockErrorCode = safeCode(error);
               item.error = safeMessage(error);
-              console.error(JSON.stringify({ operation: "listing_recreation_stock", operationId: operation.id,
-                variantId: item.variantId, code: safeCode(error) }));
+              logger.error("marketplace-listings.listing_publication_service", { operation: "listing_recreation_stock", operationId: operation.id, variantId: item.variantId, code: safeCode(error) });
               await persist();
               continue;
             }

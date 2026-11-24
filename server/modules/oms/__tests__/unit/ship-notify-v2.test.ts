@@ -54,6 +54,7 @@ import {
   type ManualShipmentContentsAuthority,
   type ManualShipmentNotificationInput,
 } from "../../application/shipstation.service";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 
 // ─── Mock helpers ────────────────────────────────────────────────────
 
@@ -1733,9 +1734,9 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    spyLoggerJson("log");
+    spyLoggerJson("warn");
+    spyLoggerJson("error");
   });
 
   afterEach(() => {
@@ -2022,7 +2023,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
     rows.splice(5, 0, { rows: [mappedSource, unmappedSource] }, { rows: [] });
     const mock = makeDb(rows);
     const inventoryCore = { recordShipment: vi.fn().mockResolvedValue(undefined) };
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
     globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
 
     await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
@@ -2040,7 +2041,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
     rows.splice(5, 0, { rows: [unmappedSource] }, { rows: [] });
     const mock = makeDb(rows);
     const inventoryCore = { recordShipment: vi.fn() };
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const log = spyLoggerJson("log");
     globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
 
     await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
@@ -2241,9 +2242,9 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    spyLoggerJson("log");
+    spyLoggerJson("warn");
+    spyLoggerJson("error");
   });
 
   afterEach(() => {

@@ -2,6 +2,7 @@ import { readIntegerCents } from "@shared/money-read";
 import type { Express } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { procurementStorage } from "../..";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerProcurementReportRoutes(app: Express) {
   app.get("/api/reports/order-profitability", requirePermission("inventory", "view"), async (req, res) => {
@@ -11,7 +12,7 @@ export function registerProcurementReportRoutes(app: Express) {
       const rows = await procurementStorage.getOrderProfitabilityReport(limit, offset);
       res.json({ orders: rows });
     } catch (error: any) {
-      console.error("Error fetching order profitability:", error);
+      logger.error("procurement.report_routes", { message: "Error fetching order profitability:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch order profitability" });
     }
   });
@@ -23,7 +24,7 @@ export function registerProcurementReportRoutes(app: Express) {
       const rows = await procurementStorage.getProductProfitabilityReport(limit, offset);
       res.json({ products: rows });
     } catch (error: any) {
-      console.error("Error fetching product profitability:", error);
+      logger.error("procurement.report_routes", { message: "Error fetching product profitability:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch product profitability" });
     }
   });
@@ -34,7 +35,7 @@ export function registerProcurementReportRoutes(app: Express) {
       const valuation = await inventoryLots.getInventoryValuation();
       res.json(valuation);
     } catch (error: any) {
-      console.error("Error computing inventory valuation:", error);
+      logger.error("procurement.report_routes", { message: "Error computing inventory valuation:", error: error });
       res.status(500).json({ error: error.message || "Failed to compute inventory valuation" });
     }
   });
@@ -44,7 +45,7 @@ export function registerProcurementReportRoutes(app: Express) {
       const rows = await procurementStorage.getVendorSpendReport();
       res.json({ vendors: rows });
     } catch (error: any) {
-      console.error("Error fetching vendor spend:", error);
+      logger.error("procurement.report_routes", { message: "Error fetching vendor spend:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch vendor spend" });
     }
   });
@@ -54,7 +55,7 @@ export function registerProcurementReportRoutes(app: Express) {
       const rows = await procurementStorage.getCostVarianceReport();
       res.json({ variances: rows });
     } catch (error: any) {
-      console.error("Error fetching cost variance:", error);
+      logger.error("procurement.report_routes", { message: "Error fetching cost variance:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch cost variance" });
     }
   });
@@ -71,7 +72,7 @@ export function registerProcurementReportRoutes(app: Express) {
       );
       res.json({ byStatus: rows, total });
     } catch (error: any) {
-      console.error("Error fetching open PO summary:", error);
+      logger.error("procurement.report_routes", { message: "Error fetching open PO summary:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch open PO summary" });
     }
   });
@@ -81,7 +82,7 @@ export function registerProcurementReportRoutes(app: Express) {
       const rows = await procurementStorage.getPoAgingReport();
       res.json({ orders: rows });
     } catch (error: any) {
-      console.error("Error fetching PO aging:", error);
+      logger.error("procurement.report_routes", { message: "Error fetching PO aging:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch PO aging" });
     }
   });
@@ -91,7 +92,7 @@ export function registerProcurementReportRoutes(app: Express) {
       const rows = await procurementStorage.getExpectedReceiptsReport();
       res.json({ receipts: rows });
     } catch (error: any) {
-      console.error("Error fetching expected receipts:", error);
+      logger.error("procurement.report_routes", { message: "Error fetching expected receipts:", error: error });
       res.status(500).json({ error: error.message || "Failed to fetch expected receipts" });
     }
   });

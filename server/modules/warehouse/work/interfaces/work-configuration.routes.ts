@@ -6,6 +6,7 @@ import { WorkConfigurationService } from "../application/work-configuration.serv
 import { WorkConfigurationRepository } from "../infrastructure/work-configuration.repository";
 import { WarehouseWorkError } from "../domain/work-configuration";
 import { workContextPreviewSchema, workRevisionSchema, workSetupSchema } from "@shared/warehouse-work";
+import { logger } from "../../../../platform/observability/logger";
 
 const idParameterSchema = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().max(2_147_483_647));
 const defaultHistoryCursor = 2_147_483_647;
@@ -24,19 +25,17 @@ export function registerWorkConfigurationRoutes(
     return async (req: Request, res: Response) => {
       try { res.json(await operation(req)); } catch (error) {
         if (error instanceof ZodError) {
-          console.warn(JSON.stringify({ event: "warehouse_work_request_rejected", code: "WORK_INPUT_INVALID", actorId: req.session.user?.id, warehouseId: req.params.warehouseId }));
+          logger.warn("warehouse_work_request_rejected", { event: "warehouse_work_request_rejected", code: "WORK_INPUT_INVALID", actorId: req.session.user?.id, warehouseId: req.params.warehouseId });
           res.status(400).json({ code: "WORK_INPUT_INVALID", message: "Invalid warehouse work request", context: { issues: error.issues } });
           return;
         }
         if (error instanceof WarehouseWorkError) {
-          console.warn(JSON.stringify({ event: "warehouse_work_request_rejected", code: error.code, actorId: req.session.user?.id, warehouseId: req.params.warehouseId, context: error.context }));
+          logger.warn("warehouse_work_request_rejected", { event: "warehouse_work_request_rejected", code: error.code, actorId: req.session.user?.id, warehouseId: req.params.warehouseId, context: error.context });
           res.status(error.status).json({ code: error.code, message: error.message, context: error.context });
           return;
         }
         const sqlState = error && typeof error === "object" && "code" in error ? String(error.code) : null;
-        console.error(JSON.stringify({ event: "warehouse_work_request_failed", actorId: req.session.user?.id,
-          warehouseId: req.params.warehouseId, method: req.method, sqlState,
-          message: error instanceof Error ? error.message : "Unknown failure" }));
+        logger.error("warehouse_work_request_failed", { event: "warehouse_work_request_failed", actorId: req.session.user?.id, warehouseId: req.params.warehouseId, method: req.method, sqlState, message: error instanceof Error ? error.message : "Unknown failure" });
         const transient = sqlState === "40001" || sqlState === "40P01" || sqlState === "55P03";
         res.status(transient ? 503 : 500).json({
           code: transient ? "WORK_RETRY_REQUIRED" : "WORK_REQUEST_FAILED",

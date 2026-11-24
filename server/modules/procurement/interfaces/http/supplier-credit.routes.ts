@@ -7,6 +7,7 @@ import { supplierCreditIdSchema, type SupplierCreditCommand } from "@shared/proc
 import { supplierCreditReader, previewSupplierCreditCosts } from "../../application/supplier-credit.service";
 import { supplierCreditCommands, classifySupplierCreditFailure } from "../../application/supplier-credit.commands";
 import { SupplierCreditError } from "../../infrastructure/supplier-credit.repository";
+import { logger } from "../../../../platform/observability/logger";
 const actor = (req: Request): string => String((req as Request & {
   user?: {
     id: string;
@@ -49,10 +50,7 @@ function failure(res: Response, error: unknown) {
   });
   const classified = classifySupplierCreditFailure(error);
   if (classified.kind === "rejected") return res.status(classified.httpStatus).json(classified.body);
-  console.error("Supplier credit operation failed", {
-    code: "SUPPLIER_CREDIT_OPERATION_FAILED",
-    error
-  });
+  logger.error("procurement.supplier_credit_routes", { message: "Supplier credit operation failed", code: "SUPPLIER_CREDIT_OPERATION_FAILED", error });
   return res.status(500).json({
     error: "Unable to complete the credit operation. Retain the request key and retry.",
     details: {

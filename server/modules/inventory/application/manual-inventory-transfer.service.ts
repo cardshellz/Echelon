@@ -9,6 +9,7 @@ import { hashHttpFinancialCommand } from "../../../platform/commands/http-comman
 import { runTransactionalFinancialCommand } from "../../../platform/commands/transactional-command.service";
 import type { db } from "../../../db";
 import type { InventoryUseCases } from "./inventory.use-cases";
+import { logger } from "../../../platform/observability/logger";
 
 type Database = Pick<typeof db, "transaction" | "execute">;
 type TransferFollowup = {
@@ -200,13 +201,7 @@ export class ManualInventoryTransferService {
       await this.database.execute(
         sql`UPDATE inventory.transfer_followups SET last_error=${message.slice(0, 2000)} WHERE transfer_id=${transferId} AND completed_at IS NULL`,
       );
-      console.error(
-        JSON.stringify({
-          event: "inventory_transfer_followup_pending",
-          transferId,
-          message,
-        }),
-      );
+      logger.error("inventory_transfer_followup_pending", { event: "inventory_transfer_followup_pending", transferId, message });
       return false;
     }
   }

@@ -222,7 +222,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
     try { res.json(await getPurchaseOrderWorkList(req.query)); }
     catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "PO_WORK_LIST_QUERY_INVALID", error: "Invalid purchase order selection filters or page." });
-      console.error(JSON.stringify({ event: "procurement.po_work_list.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.po_work_list.failed", { event: "procurement.po_work_list.failed", errorType: error instanceof Error ? error.name : typeof error });
       res.status(500).json({ code: "PO_WORK_LIST_UNAVAILABLE", error: "Purchase order selection could not be verified. Retry the list." });
     }
   });
@@ -267,14 +267,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       const databaseCode = databaseError && typeof databaseError === "object" && "code" in databaseError
         && typeof databaseError.code === "string" && /^[A-Z0-9]{5}$/.test(databaseError.code)
         ? databaseError.code : null;
-      console.error(JSON.stringify({
-        event: "procurement.purchase_workspace.read_failed",
-        code,
-        purchaseOrderId: parsedId.data,
-        errorType: error instanceof Error ? error.name : typeof error,
-        databaseCode,
-        message: error instanceof PurchaseWorkspaceError ? error.message : "Unexpected workspace read failure.",
-      }));
+      logger.error("procurement.purchase_workspace.read_failed", { event: "procurement.purchase_workspace.read_failed", code, purchaseOrderId: parsedId.data, errorType: error instanceof Error ? error.name : typeof error, databaseCode, message: error instanceof PurchaseWorkspaceError ? error.message : "Unexpected workspace read failure." });
       res.status(statusCode).json({
         code,
         error: error instanceof PurchaseWorkspaceError ? error.message : "Unable to load the purchase workspace.",
@@ -290,8 +283,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       if (!summary) return res.status(404).json({error:"Purchase order not found"});
       res.json(summary);
     } catch (error:unknown) {
-      console.error(JSON.stringify({event:"procurement.po_shipment_cost_summary_failed",poId:parsed.data,
-        errorType:error instanceof Error?error.name:"unknown"}));
+      logger.error("procurement.po_shipment_cost_summary_failed", { event:"procurement.po_shipment_cost_summary_failed", poId:parsed.data, errorType:error instanceof Error?error.name:"unknown" });
       res.status(500).json({error:"Shipment costs could not be loaded. Retry to load the latest costs."});
     }
   });
@@ -306,8 +298,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       res.vary("X-Purchase-Order-Line-Cost-Version");
       res.json(shipmentCostReviewResponse(costs,req.get("X-Shipment-Cost-Review-Version"),req.get("X-Purchase-Order-Line-Cost-Version") === "1"));
     } catch (error: unknown) {
-      console.error(JSON.stringify({ event: "procurement.po_shipment_costs_failed", poId: parsed.data,
-        errorType: error instanceof Error ? error.name : "unknown" }));
+      logger.error("procurement.po_shipment_costs_failed", { event: "procurement.po_shipment_costs_failed", poId: parsed.data, errorType: error instanceof Error ? error.name : "unknown" });
       res.status(500).json({ code: "SHIPMENT_COSTS_UNAVAILABLE", error: "Shipment costs and review details could not be loaded. Retry to load the latest records." });
     }
   });
@@ -402,7 +393,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
         if (error instanceof PurchasingError) {
           return res.status(error.statusCode).json({ error: error.message, details: error.details });
         }
-        console.error(JSON.stringify({ event: "procurement.settings.read_failed", errorType: error instanceof Error ? error.name : typeof error }));
+        logger.error("procurement.settings.read_failed", { event: "procurement.settings.read_failed", errorType: error instanceof Error ? error.name : typeof error });
         return res.status(500).json({ error: "Procurement settings could not be loaded.", code: "PROCUREMENT_SETTINGS_READ_FAILED" });
       }
     },
@@ -421,7 +412,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
         return sendFinancialCommandResult(res, result);
       } catch (error: unknown) {
         if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
-        console.error(JSON.stringify({ event: "procurement.settings.command_failed", actorId: req.session.user?.id, errorType: error instanceof Error ? error.name : typeof error }));
+        logger.error("procurement.settings.command_failed", { event: "procurement.settings.command_failed", actorId: req.session.user?.id, errorType: error instanceof Error ? error.name : typeof error });
         return res.status(500).json({ error: "Procurement settings could not be saved. Retry the same command.", code: "PROCUREMENT_SETTINGS_COMMAND_FAILED" });
       }
     },
@@ -537,7 +528,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_LINE_SOURCE_IDS_INVALID", error: "Purchase order ID must be a positive PostgreSQL integer." });
       if (error instanceof ShipmentSourceCapacityError) return res.status(error.statusCode).json({ code: error.details.code, error: error.message, details: error.details });
-      console.error(JSON.stringify({ event: "procurement.shipment_source.read_failed", purchaseOrderId: req.params.id, errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.shipment_source.read_failed", { event: "procurement.shipment_source.read_failed", purchaseOrderId: req.params.id, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(500).json({ code: "SHIPMENT_LINE_SOURCE_READ_FAILED", error: "Shipment source quantities could not be loaded. Refresh and try again." });
     }
   });
@@ -658,7 +649,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
     } catch (error) {
       if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
-      console.error(JSON.stringify({ event: "procurement.approval.command_failed", purchaseOrderId: req.params.id, errorType: error instanceof Error ? error.name : typeof error }));
+      logger.error("procurement.approval.command_failed", { event: "procurement.approval.command_failed", purchaseOrderId: req.params.id, errorType: error instanceof Error ? error.name : typeof error });
       return res.status(500).json({ code: "PO_APPROVAL_TRANSIENT_FAILURE", error: "Purchase approval could not be confirmed. Recover the saved request." });
     }
   });
@@ -941,8 +932,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       res.json({ html: renderPoHtml(document), purpose: document.purpose, sourceRevision: document.sourceRevision });
     } catch (error) {
       if (error instanceof SupplierPoDocumentError) {
-        console.warn(JSON.stringify({ event: "supplier_po_document_rejected", code: error.code,
-          purchaseOrderId: req.params.id, actorId: req.session.user?.id ?? null, context: error.context }));
+        logger.warn("supplier_po_document_rejected", { event: "supplier_po_document_rejected", code: error.code, purchaseOrderId: req.params.id, actorId: req.session.user?.id ?? null, context: error.context });
       }
       sendPoEmailOutboxError(res, error);
     }

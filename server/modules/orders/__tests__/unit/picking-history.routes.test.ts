@@ -21,6 +21,7 @@ vi.mock("../../../../routes/middleware", () => ({
 import { registerPickingHistoryRoutes } from "../../interfaces/http/picking-history.routes";
 import { PickingHistoryRepository } from "../../infrastructure/picking-history.repository";
 import { db } from "../../../../db";
+import { spyLoggerJson, getLoggerJsonSpy } from "../../../../__tests__/helpers/logger-spy";
 
 describe("bounded all-date picking history HTTP contract", () => {
   const page = vi.fn<PickingHistoryRepository["page"]>();
@@ -28,7 +29,7 @@ describe("bounded all-date picking history HTTP contract", () => {
   let url: string;
   beforeEach(async () => {
     page.mockReset().mockResolvedValue({ orders: [], total: 0, limit: 50, offset: 0 });
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    spyLoggerJson("error");
     const app = express();
     registerPickingHistoryRoutes(app, { page });
     server = createServer(app);
@@ -72,7 +73,7 @@ describe("bounded all-date picking history HTTP contract", () => {
     const response = await get();
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ code: "PICKING_HISTORY_READ_FAILED", error: "Failed to load picking history. Please retry." });
-    expect(console.error).toHaveBeenCalledOnce();
+    expect(getLoggerJsonSpy("error")).toHaveBeenCalledOnce();
   });
   it("also rejects invalid internal reads without touching the database", async () => {
     const repository = new PickingHistoryRepository(db);

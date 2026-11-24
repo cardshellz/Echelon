@@ -11,6 +11,7 @@ import {
   ProductRatePolicyAdminError,
   updateRateTableProductRule,
 } from "../../application/product-rate-policy-admin.service";
+import { logger } from "../../../../platform/observability/logger";
 
 const idSchema = z.coerce.number().int().positive();
 const destinationScopeSchema = z.object({
@@ -291,11 +292,7 @@ function sendPolicyError(res: Response, error: unknown, action: string): Respons
       error: { code: error.code, message: error.message, details: error.details },
     });
   }
-  console.error(JSON.stringify({
-    code: "SHIPPING_PRODUCT_POLICY_ADMIN_FAILED",
-    action,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  logger.error("SHIPPING_PRODUCT_POLICY_ADMIN_FAILED", { code: "SHIPPING_PRODUCT_POLICY_ADMIN_FAILED", error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({
     error: {
       code: "SHIPPING_PRODUCT_POLICY_ADMIN_FAILED",

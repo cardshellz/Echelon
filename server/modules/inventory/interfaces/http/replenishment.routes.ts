@@ -4,6 +4,7 @@ import { warehouseStorage } from "../../../warehouse";
 import { inventoryStorage } from "../..";
 import { requirePermission } from "../../../../routes/middleware";
 import { UPLOAD_MAX_BYTES } from "../../../../routes/middleware";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerReplenishmentRoutes(app: Express) {
   // Compose `storage` at CALL time, not at module-init. This module is re-exported
@@ -15,18 +16,18 @@ export function registerReplenishmentRoutes(app: Express) {
   // (app startup) the barrel is fully initialized.
   const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage };
   // ===== REPLENISHMENT API =====
-  
+
   // Tier Defaults - default rules by UOM hierarchy level
   app.get("/api/replen/tier-defaults", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const tierDefaults = await storage.getAllReplenTierDefaults();
       res.json(tierDefaults);
     } catch (error) {
-      console.error("Error fetching tier defaults:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error fetching tier defaults:", error: error });
       res.status(500).json({ error: "Failed to fetch tier defaults" });
     }
   });
-  
+
   app.get("/api/replen/tier-defaults/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -36,11 +37,11 @@ export function registerReplenishmentRoutes(app: Express) {
       }
       res.json(tierDefault);
     } catch (error) {
-      console.error("Error fetching tier default:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error fetching tier default:", error: error });
       res.status(500).json({ error: "Failed to fetch tier default" });
     }
   });
-  
+
   app.post("/api/replen/tier-defaults", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const data = req.body;
@@ -59,11 +60,11 @@ export function registerReplenishmentRoutes(app: Express) {
       });
       res.status(201).json(tierDefault);
     } catch (error) {
-      console.error("Error creating tier default:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error creating tier default:", error: error });
       res.status(500).json({ error: "Failed to create tier default" });
     }
   });
-  
+
   app.patch("/api/replen/tier-defaults/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -74,11 +75,11 @@ export function registerReplenishmentRoutes(app: Express) {
       }
       res.json(tierDefault);
     } catch (error) {
-      console.error("Error updating tier default:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error updating tier default:", error: error });
       res.status(500).json({ error: "Failed to update tier default" });
     }
   });
-  
+
   app.delete("/api/replen/tier-defaults/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -88,7 +89,7 @@ export function registerReplenishmentRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting tier default:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error deleting tier default:", error: error });
       res.status(500).json({ error: "Failed to delete tier default" });
     }
   });
@@ -97,7 +98,7 @@ export function registerReplenishmentRoutes(app: Express) {
   app.get("/api/replen/rules", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const rules = await storage.getAllReplenRules();
-      
+
       const productIds = new Set<number>();
       const variantIds = new Set<number>();
       for (const rule of rules) {
@@ -123,7 +124,7 @@ export function registerReplenishmentRoutes(app: Express) {
 
       res.json(enriched);
     } catch (error) {
-      console.error("Error fetching replen rules:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error fetching replen rules:", error: error });
       res.status(500).json({ error: "Failed to fetch replen rules" });
     }
   });
@@ -150,14 +151,14 @@ export function registerReplenishmentRoutes(app: Express) {
         pickVariant: rule.pickProductVariantId ? variantMap.get(rule.pickProductVariantId) : null,
         sourceVariant: rule.sourceProductVariantId ? variantMap.get(rule.sourceProductVariantId) : null,
       };
-      
+
       res.json(enriched);
     } catch (error) {
-      console.error("Error fetching replen rule:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error fetching replen rule:", error: error });
       res.status(500).json({ error: "Failed to fetch replen rule" });
     }
   });
-  
+
   app.post("/api/replen/rules", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { productId, pickVariantId, sourceVariantId, pickLocationType, sourceLocationType, sourcePriority, triggerValue, maxQty, replenMethod, priority, autoReplen } = req.body;
@@ -205,14 +206,14 @@ export function registerReplenishmentRoutes(app: Express) {
         autoReplen: autoReplen ?? null,
         isActive: 1,
       });
-      
+
       res.status(201).json(rule);
     } catch (error) {
-      console.error("Error creating replen rule:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error creating replen rule:", error: error });
       res.status(500).json({ error: "Failed to create replen rule" });
     }
   });
-  
+
   app.patch("/api/replen/rules/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -223,11 +224,11 @@ export function registerReplenishmentRoutes(app: Express) {
       }
       res.json(rule);
     } catch (error) {
-      console.error("Error updating replen rule:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error updating replen rule:", error: error });
       res.status(500).json({ error: "Failed to update replen rule" });
     }
   });
-  
+
   app.delete("/api/replen/rules/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -237,11 +238,11 @@ export function registerReplenishmentRoutes(app: Express) {
       }
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting replen rule:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error deleting replen rule:", error: error });
       res.status(500).json({ error: "Failed to delete replen rule" });
     }
   });
-  
+
   // CSV upload for replen rules
   app.post("/api/replen/rules/upload-csv", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
@@ -253,39 +254,39 @@ export function registerReplenishmentRoutes(app: Express) {
         storage: multer.default.memoryStorage(),
         limits: { fileSize: UPLOAD_MAX_BYTES, files: 1 },
       });
-      
+
       // Handle the file upload
       upload.single("file")(req, res, async (err: any) => {
         if (err) {
           return res.status(400).json({ error: "Failed to upload file" });
         }
-        
+
         const file = (req as any).file;
         if (!file) {
           return res.status(400).json({ error: "No file provided" });
         }
-        
+
         const csvContent = file.buffer.toString("utf-8");
-        
+
         // Use Papaparse for robust CSV parsing (handles quoted fields, etc.)
         const parseResult = Papa.default.parse(csvContent, {
           header: true,
           skipEmptyLines: true,
           transformHeader: (h: string) => h.trim().toLowerCase(),
         });
-        
+
         if (parseResult.errors.length > 0) {
-          return res.status(400).json({ 
-            error: "CSV parsing error", 
+          return res.status(400).json({
+            error: "CSV parsing error",
             details: parseResult.errors.slice(0, 5).map((e: any) => e.message)
           });
         }
-        
+
         const rows = parseResult.data as Record<string, string>[];
         if (rows.length === 0) {
           return res.status(400).json({ error: "CSV must have at least one data row" });
         }
-        
+
         // Validate required headers
         const expectedHeaders = ["product_sku", "pick_variant_sku", "source_variant_sku"];
         const actualHeaders = parseResult.meta.fields || [];
@@ -293,7 +294,7 @@ export function registerReplenishmentRoutes(app: Express) {
         if (missingHeaders.length > 0) {
           return res.status(400).json({ error: `Missing required headers: ${missingHeaders.join(", ")}` });
         }
-        
+
         // Get lookup data
         const [allProducts, variants] = await Promise.all([
           storage.getAllProducts(),
@@ -310,14 +311,14 @@ export function registerReplenishmentRoutes(app: Express) {
         const getProductForVariant = (variant: typeof variants[0]) => {
           return productById.get(variant.productId);
         };
-        
+
         const results = { created: 0, skipped: 0, errors: [] as string[] };
-        
+
         // Process data rows
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i];
           const rowNum = i + 2; // Account for header row
-          
+
           // Lookup product
           const productSku = (row.product_sku || "").trim();
           if (!productSku) {
@@ -325,14 +326,14 @@ export function registerReplenishmentRoutes(app: Express) {
             results.skipped++;
             continue;
           }
-          
+
           const product = productBySku.get(productSku.toLowerCase());
           if (!product) {
             results.errors.push(`Row ${rowNum}: Product SKU '${productSku}' not found`);
             results.skipped++;
             continue;
           }
-          
+
           // Lookup and validate pick variant
           const pickVariantSku = (row.pick_variant_sku || "").trim();
           if (!pickVariantSku) {
@@ -340,14 +341,14 @@ export function registerReplenishmentRoutes(app: Express) {
             results.skipped++;
             continue;
           }
-          
+
           const pickVariant = variantBySku.get(pickVariantSku.toLowerCase());
           if (!pickVariant) {
             results.errors.push(`Row ${rowNum}: Pick variant SKU '${pickVariantSku}' not found`);
             results.skipped++;
             continue;
           }
-          
+
           // Validate pick variant belongs to product
           const pickVariantProduct = getProductForVariant(pickVariant);
           if (!pickVariantProduct || pickVariantProduct.id !== product.id) {
@@ -355,7 +356,7 @@ export function registerReplenishmentRoutes(app: Express) {
             results.skipped++;
             continue;
           }
-          
+
           // Lookup and validate source variant
           const sourceVariantSku = (row.source_variant_sku || "").trim();
           if (!sourceVariantSku) {
@@ -363,14 +364,14 @@ export function registerReplenishmentRoutes(app: Express) {
             results.skipped++;
             continue;
           }
-          
+
           const sourceVariant = variantBySku.get(sourceVariantSku.toLowerCase());
           if (!sourceVariant) {
             results.errors.push(`Row ${rowNum}: Source variant SKU '${sourceVariantSku}' not found`);
             results.skipped++;
             continue;
           }
-          
+
           // Validate source variant belongs to product
           const sourceVariantProduct = getProductForVariant(sourceVariant);
           if (!sourceVariantProduct || sourceVariantProduct.id !== product.id) {
@@ -378,7 +379,7 @@ export function registerReplenishmentRoutes(app: Express) {
             results.skipped++;
             continue;
           }
-          
+
           try {
             await storage.createReplenRule({
               productId: product.id,
@@ -399,15 +400,15 @@ export function registerReplenishmentRoutes(app: Express) {
             results.skipped++;
           }
         }
-        
+
         res.json(results);
       });
     } catch (error) {
-      console.error("Error uploading replen rules CSV:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error uploading replen rules CSV:", error: error });
       res.status(500).json({ error: "Failed to upload CSV" });
     }
   });
-  
+
   // Location Replen Config — per-location threshold overrides
   app.get("/api/replen/location-configs", requirePermission("inventory", "view"), async (req, res) => {
     try {
@@ -430,7 +431,7 @@ export function registerReplenishmentRoutes(app: Express) {
 
       res.json(enriched);
     } catch (error) {
-      console.error("Error fetching location replen configs:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error fetching location replen configs:", error: error });
       res.status(500).json({ error: "Failed to fetch location replen configs" });
     }
   });
@@ -449,7 +450,7 @@ export function registerReplenishmentRoutes(app: Express) {
       if (!config) return res.status(404).json({ error: "Location replen config not found" });
       res.json(config);
     } catch (error) {
-      console.error("Error fetching location replen config:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error fetching location replen config:", error: error });
       res.status(500).json({ error: "Failed to fetch location replen config" });
     }
   });
@@ -470,7 +471,7 @@ export function registerReplenishmentRoutes(app: Express) {
       });
       res.json(config);
     } catch (error) {
-      console.error("Error creating location replen config:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error creating location replen config:", error: error });
       res.status(500).json({ error: "Failed to create location replen config" });
     }
   });
@@ -489,7 +490,7 @@ export function registerReplenishmentRoutes(app: Express) {
       if (!config) return res.status(404).json({ error: "Location replen config not found" });
       res.json(config);
     } catch (error) {
-      console.error("Error updating location replen config:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error updating location replen config:", error: error });
       res.status(500).json({ error: "Failed to update location replen config" });
     }
   });
@@ -500,7 +501,7 @@ export function registerReplenishmentRoutes(app: Express) {
       if (!deleted) return res.status(404).json({ error: "Location replen config not found" });
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting location replen config:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error deleting location replen config:", error: error });
       res.status(500).json({ error: "Failed to delete location replen config" });
     }
   });
@@ -598,7 +599,7 @@ export function registerReplenishmentRoutes(app: Express) {
         res.json(results);
       });
     } catch (error) {
-      console.error("Error uploading location replen config CSV:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error uploading location replen config CSV:", error: error });
       res.status(500).json({ error: "Failed to upload CSV" });
     }
   });
@@ -623,7 +624,7 @@ export function registerReplenishmentRoutes(app: Express) {
         const filterVal = parseInt(autoReplenFilter);
         tasks = tasks.filter((t: any) => (t.autoReplen ?? 0) === filterVal);
       }
-      
+
       const locationIds = new Set<number>();
       const productIds = new Set<number>();
       const variantIds = new Set<number>();
@@ -653,14 +654,14 @@ export function registerReplenishmentRoutes(app: Express) {
         sourceVariant: task.sourceProductVariantId ? variantMap.get(task.sourceProductVariantId) : null,
         pickVariant: task.pickProductVariantId ? variantMap.get(task.pickProductVariantId) : null,
       }));
-      
+
       res.json(enriched);
     } catch (error) {
-      console.error("Error fetching replen tasks:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error fetching replen tasks:", error: error });
       res.status(500).json({ error: "Failed to fetch replen tasks" });
     }
   });
-  
+
   app.get("/api/replen/tasks/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -668,7 +669,7 @@ export function registerReplenishmentRoutes(app: Express) {
       if (!task) {
         return res.status(404).json({ error: "Replen task not found" });
       }
-      
+
       const [allLocations, allProducts, allVariants] = await Promise.all([
         storage.getAllWarehouseLocations(),
         storage.getAllProducts(),
@@ -687,35 +688,35 @@ export function registerReplenishmentRoutes(app: Express) {
         sourceVariant: task.sourceProductVariantId ? variantMap.get(task.sourceProductVariantId) : null,
         pickVariant: task.pickProductVariantId ? variantMap.get(task.pickProductVariantId) : null,
       };
-      
+
       res.json(enriched);
     } catch (error) {
-      console.error("Error fetching replen task:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error fetching replen task:", error: error });
       res.status(500).json({ error: "Failed to fetch replen task" });
     }
   });
-  
+
   app.post("/api/replen/tasks", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const task = await req.app.locals.services.replenishment.createManualTask(req.body, req.session.user!.id);
       res.status(201).json(task);
     } catch (error: any) {
-      console.error("Error creating replen task:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error creating replen task:", error: error });
       res.status(error.statusCode ?? (error.name === "ZodError" ? 400 : 500)).json({ error: error.message || "Failed to create replen task", code: error.code });
     }
   });
-  
+
   app.patch("/api/replen/tasks/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = Number(req.params.id);
       const task = await req.app.locals.services.replenishment.changeTask(id, req.body, req.session.user!.id);
       res.json(task);
     } catch (error: any) {
-      console.error("Error updating replen task:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error updating replen task:", error: error });
       res.status(error.statusCode ?? (error.name === "ZodError" ? 400 : 500)).json({ error: error.message || "Failed to update replen task", code: error.code });
     }
   });
-  
+
   // Execute a replen task (actually move inventory from source to pick location)
   app.post("/api/replen/tasks/:id/execute", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
@@ -724,7 +725,7 @@ export function registerReplenishmentRoutes(app: Express) {
       const result = await replenishment.executeTask(id, req.session.user?.id);
       res.json(result);
     } catch (error: any) {
-      console.error("Error executing replen task:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error executing replen task:", error: error });
       res.status(400).json({ error: error.message || "Failed to execute replen task" });
     }
   });
@@ -739,7 +740,7 @@ export function registerReplenishmentRoutes(app: Express) {
       const result = await replenishment.reportException(Number(req.params.id), req.body, req.session.user!.id);
       res.json(result);
     } catch (error: any) {
-      console.error("Error reporting replen exception:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error reporting replen exception:", error: error });
       res.status(error.statusCode ?? (error.name === "ZodError" ? 400 : 500)).json({ error: error.message || "Failed to report exception", code: error.code });
     }
   });
@@ -753,7 +754,7 @@ export function registerReplenishmentRoutes(app: Express) {
       const result = await replenishment.markTaskDone(id, req.session.user?.id, notes, req.body?.transferReceiptId);
       res.json(result);
     } catch (error: any) {
-      console.error("Error marking replen task done:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error marking replen task done:", error: error });
       res.status(400).json({ error: error.message || "Failed to mark task done" });
     }
   });
@@ -764,9 +765,9 @@ export function registerReplenishmentRoutes(app: Express) {
       await req.app.locals.services.replenishment.changeTask(id, { ...req.body, status: "cancelled" }, req.session.user!.id);
       res.json({ success: true });
     } catch (error) {
-      console.error("Error deleting replen task:", error);
+      logger.error("inventory.replenishment_routes", { message: "Error deleting replen task:", error: error });
       res.status(500).json({ error: "Failed to delete replen task" });
     }
   });
-  
+
 }

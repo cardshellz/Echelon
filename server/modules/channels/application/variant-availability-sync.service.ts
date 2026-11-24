@@ -20,6 +20,7 @@ import {
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import type { AuthorityAwareInventoryPublicationService } from "../../inventory-planning/inventory-availability-runtime-publication.service.api";
+import { logger } from "../../../platform/observability/logger";
 
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_LEASE_SECONDS = 120;
@@ -112,25 +113,12 @@ async function processClaim(
       trackInventory: context.catalogTrackInventory,
     })) {
       const completed = await markVariantAvailabilityNotApplicable(dependencies.dbPool, claim);
-      console.info(`${LOG_PREFIX} Skipped quantity publication for unmanaged variant`, {
-        channelId: context.channelId,
-        productVariantId: context.productVariantId,
-        requiresShipping: context.catalogRequiresShipping,
-        trackInventory: context.catalogTrackInventory,
-        revision: claim.revision,
-        completed,
-      });
+      logger.info("channels.variant_availability_sync_service", { message: `${LOG_PREFIX} Skipped quantity publication for unmanaged variant`, channelId: context.channelId, productVariantId: context.productVariantId, requiresShipping: context.catalogRequiresShipping, trackInventory: context.catalogTrackInventory, revision: claim.revision, completed });
       return completed ? "synced" : "superseded";
     }
     if (!isCustomerSellableVariant({ salesEligibility: context.catalogSalesEligibility })) {
       const completed = await markVariantAvailabilityNotApplicable(dependencies.dbPool, claim);
-      console.info(`${LOG_PREFIX} Skipped quantity publication for internal-only variant`, {
-        channelId: context.channelId,
-        productVariantId: context.productVariantId,
-        salesEligibility: context.catalogSalesEligibility,
-        revision: claim.revision,
-        completed,
-      });
+      logger.info("channels.variant_availability_sync_service", { message: `${LOG_PREFIX} Skipped quantity publication for internal-only variant`, channelId: context.channelId, productVariantId: context.productVariantId, salesEligibility: context.catalogSalesEligibility, revision: claim.revision, completed });
       return completed ? "synced" : "superseded";
     }
 
@@ -146,28 +134,11 @@ async function processClaim(
       : await markVariantAvailabilityDelegated(dependencies.dbPool, claim);
     if (!completed) return "superseded";
 
-    console.info(`${LOG_PREFIX} Synchronized variant availability`, {
-      channelId: context.channelId,
-      productVariantId: context.productVariantId,
-      sku: context.externalSku ?? context.catalogSku,
-      desiredActive: claim.desiredActive,
-      publicationAuthority: routed.authority === "legacy" ? "legacy_direct" : "canonical_outbox",
-      quantity: routed.authority === "legacy" ? routed.legacyResult.quantity : null,
-      canonicalRows: routed.authority === "canonical" ? routed.publication.rows.length : 0,
-      revision: claim.revision,
-    });
+    logger.info("channels.variant_availability_sync_service", { message: `${LOG_PREFIX} Synchronized variant availability`, channelId: context.channelId, productVariantId: context.productVariantId, sku: context.externalSku ?? context.catalogSku, desiredActive: claim.desiredActive, publicationAuthority: routed.authority === "legacy" ? "legacy_direct" : "canonical_outbox", quantity: routed.authority === "legacy" ? routed.legacyResult.quantity : null, canonicalRows: routed.authority === "canonical" ? routed.publication.rows.length : 0, revision: claim.revision });
     return "synced";
   } catch (error) {
     const disposition = await markVariantAvailabilityFailed(dependencies.dbPool, claim, error);
-    console.error(`${LOG_PREFIX} Failed to synchronize variant availability`, {
-      channelId: claim.channelId,
-      productVariantId: claim.productVariantId,
-      desiredActive: claim.desiredActive,
-      revision: claim.revision,
-      attemptCount: claim.attemptCount,
-      disposition,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    logger.error("channels.variant_availability_sync_service", { message: `${LOG_PREFIX} Failed to synchronize variant availability`, channelId: claim.channelId, productVariantId: claim.productVariantId, desiredActive: claim.desiredActive, revision: claim.revision, attemptCount: claim.attemptCount, disposition, error: error instanceof Error ? error.message : String(error) });
     return disposition;
   }
 }

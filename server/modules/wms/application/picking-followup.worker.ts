@@ -1,3 +1,4 @@
+import { logger } from "../../../platform/observability/logger";
 const FOLLOWUP_INTERVAL_MS = 15_000;
 export const FOLLOWUP_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -52,13 +53,7 @@ export function startPickingFollowupWorker(
         try {
           await withOperationTimeout(service[operation](), operation, timeoutMs);
         } catch (error) {
-          console.error(
-            JSON.stringify({
-              event: "warehouse_followup_worker_failed",
-              operation,
-              message: error instanceof Error ? error.message : String(error),
-            }),
-          );
+          logger.error("warehouse_followup_worker_failed", { event: "warehouse_followup_worker_failed", operation, message: error instanceof Error ? error.message : String(error) });
         }
       }
     } finally {

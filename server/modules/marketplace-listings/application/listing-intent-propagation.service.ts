@@ -4,6 +4,7 @@ import {
   type IntentDelivery,
   type IntentHandoff,
 } from "../domain/listing-intent-propagation";
+import { logger } from "../../../platform/observability/logger";
 
 export interface ListingIntentRetryCommand {
   id: string;
@@ -116,13 +117,7 @@ export class ListingIntentPropagationService {
         // Adapters return normalized attention outcomes. A thrown error has no
         // confirmed handoff outcome, so retain the command for receipt-first retry.
         await this.deps.store.defer(delivery, code, this.deps.now());
-        console.error(
-          JSON.stringify({
-            event: "listing_intent_handoff_deferred",
-            deliveryId: delivery.id,
-            code,
-          }),
-        );
+        logger.error("listing_intent_handoff_deferred", { event: "listing_intent_handoff_deferred", deliveryId: delivery.id, code });
         result.failed++;
       }
     }

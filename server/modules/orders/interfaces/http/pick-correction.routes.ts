@@ -5,13 +5,13 @@ import { hasPermission } from "../../../identity";
 import { pickCorrectionListSchema, pickCorrectionSchema } from "@shared/pick-corrections";
 import { PickCorrectionError } from "../../../wms/pick-corrections-and-holds.api";
 import type { PickCorrectionService } from "../../application/pick-correction.service";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerPickCorrectionRoutes(app: Express, service: PickCorrectionService): void {
   const failure = (res: Response, error: unknown) => {
     if (error instanceof ZodError) return res.status(400).json({ code: "INVALID_INPUT", error: "Invalid correction command." });
     if (error instanceof PickCorrectionError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
-    console.error(JSON.stringify({ event: "pick_correction_failed", code: "CORRECTIVE_PICK_NOT_SAVED",
-      message: error instanceof Error ? error.message : "Unknown correction failure" }));
+    logger.error("pick_correction_failed", { event: "pick_correction_failed", code: "CORRECTIVE_PICK_NOT_SAVED", message: error instanceof Error ? error.message : "Unknown correction failure" });
     return res.status(500).json({ code: "CORRECTIVE_PICK_NOT_SAVED", error: "The correction remains open. Refresh it to see the inventory review details." });
   };
   app.get("/api/picking/corrections", requireAuth, requirePermission("picking", "view"), async (_req, res) => {

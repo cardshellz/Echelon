@@ -25,6 +25,7 @@ import type {
   Order,
   OrderItem,
 } from "@shared/schema";
+import { logger } from "../../../platform/observability/logger";
 
 // ---------------------------------------------------------------------------
 // Type for the Drizzle `db` handle (matches other services)
@@ -340,10 +341,7 @@ class OrderCombiningService {
       `);
     } catch (columnError: any) {
       if (columnError?.code === "42703") {
-        console.warn(
-          "[combining] retrying without combined_group_id after a missing-column error:",
-          columnError?.message ?? columnError,
-        );
+        logger.warn("orders.combining_service", { message: "[combining] retrying without combined_group_id after a missing-column error:", detail: columnError?.message ?? columnError });
         result = await this.db.execute(sql`
           SELECT o.id, o.order_number, o.warehouse_id,
                  o.customer_name, o.customer_email,

@@ -6,6 +6,7 @@ import {
   sanitizePurchasePipelineJobError,
   type PurchasePipelineJobRunLifecycleService,
 } from "../modules/procurement/planning-and-pipeline-jobs.api";
+import { logger } from "../platform/observability/logger";
 
 type ForecastBacktestingService = Pick<
   ReturnType<typeof createPurchaseForecastBacktestingService>,
@@ -108,10 +109,10 @@ export async function runPurchaseForecastBacktestingJob(options: {
         resultJson: { asOf: asOf.toISOString(), maxBatches, batches },
       });
     } catch (lifecycleError) {
-      console.error("[PurchaseForecastBacktesting] Failed to persist job failure", {
+      logger.error("jobs.purchase_forecast_backtesting_job", { message: "[PurchaseForecastBacktesting] Failed to persist job failure", context: {
         jobRunId: jobRun.run.id,
         ...sanitizePurchasePipelineJobError(lifecycleError),
-      });
+      } });
     }
     throw error;
   }

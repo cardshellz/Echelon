@@ -32,6 +32,7 @@ import {
   replaceRateBookAssignmentsInTx,
   updateRateBookRecordIfStatusInTx,
 } from "../../infrastructure/rate-book-admin.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const assignmentSchema = z.object({
   pricingChannel: z.string().trim().min(1).max(40).toLowerCase(),
@@ -438,7 +439,7 @@ function sendRateBookAdminError(res: Response, error: unknown, action: string): 
       },
     });
   }
-  console.error(`[RateBookAdminRoutes] Failed to ${action}:`, error);
+  logger.error("shipping-engine.rate_book_admin_routes", { message: `[RateBookAdminRoutes] Failed to ${action}:`, error: error });
   return res.status(500).json({
     error: { code: "SHIPPING_ADMIN_INTERNAL_ERROR", message: `Failed to ${action}.` },
   });

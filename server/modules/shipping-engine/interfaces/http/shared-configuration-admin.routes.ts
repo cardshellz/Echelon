@@ -11,6 +11,7 @@ import {
 import { ChannelPackagingService } from "../../application/channel-packaging.service";
 import { ChannelPackagingRepository } from "../../infrastructure/channel-packaging.repository";
 import { pool } from "../../../../db";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerSharedConfigurationAdminRoutes(
   app: Express,
@@ -56,13 +57,7 @@ export function registerSharedConfigurationAdminRoutes(
           });
           return;
         }
-        console.error(
-          JSON.stringify({
-            event: "shipping.configuration.failed",
-            path: req.path,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
+        logger.error("shipping.configuration.failed", { event: "shipping.configuration.failed", path: req.path, error: error instanceof Error ? error.message : String(error) });
         res.status(500).json({
           error: {
             code: "SHIPPING_CONFIG_FAILED",

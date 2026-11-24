@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { spyLoggerJson } from "../../../../__tests__/helpers/logger-spy";
 import { transitionOrderStatus } from "../../../orders/application/order-status-core";
 import { createOrderCombiningService } from "../../../orders/application/combining.service";
 import { startPickingFollowupWorker } from "../../application/picking-followup.worker";
@@ -165,7 +166,7 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
   describe("PK-08 / REC-01 / REC-02: followup worker timeout and retry fairness", () => {
     it("times out a hung followup operation and still executes remaining recovery families", async () => {
       const calls: string[] = [];
-      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const errSpy = spyLoggerJson("error");
 
       const worker = startPickingFollowupWorker(
         {

@@ -6,6 +6,7 @@ import {
   runBootCatchUpIfBehind,
 } from "../../infrastructure/scheduler-run-registry";
 import { purgeExpiredFinancialCommandResults } from "./financial-command-operations.service";
+import { logger } from "../observability/logger";
 
 const DEFAULT_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_BATCH_SIZE = 500;
@@ -18,7 +19,7 @@ let inFlight = false;
 
 export function startFinancialCommandRetentionWorker(): void {
   if (timer) {
-    console.warn(`${LOG_PREFIX} Worker already started; ignoring duplicate start`);
+    logger.warn("platform.financial_command_retention_worker", { message: `${LOG_PREFIX} Worker already started; ignoring duplicate start` });
     return;
   }
   const intervalMs = positiveIntegerEnv("FINANCIAL_COMMAND_RETENTION_INTERVAL_MS", DEFAULT_INTERVAL_MS);
@@ -26,7 +27,7 @@ export function startFinancialCommandRetentionWorker(): void {
   // genuinely missed run from an ordinary redeploy.
   const run = () => void runFinancialCommandRetentionTick().then(async ({ status }) => {
     if (status === "success") await recordRunCompleted(db, JOB_KEY);
-  }).catch((error) => console.error(`${LOG_PREFIX} Could not record run`, error));
+  }).catch((error) => logger.error("platform.financial_command_retention_worker", { message: `${LOG_PREFIX} Could not record run`, error: error }));
 
   // Boot pass only when a scheduled run was actually missed. This purges up to
   // maxBatches x batchSize rows, and replaying that on every deploy of a 6h job
@@ -45,11 +46,11 @@ export function startFinancialCommandRetentionWorker(): void {
           throw new Error(`retention tick did not complete (${status})`);
         }
       },
-    }).catch((error) => console.error(`${LOG_PREFIX} Boot catch-up failed`, error));
+    }).catch((error) => logger.error("platform.financial_command_retention_worker", { message: `${LOG_PREFIX} Boot catch-up failed`, error: error }));
   }, Math.min(intervalMs, 10_000));
 
   timer = setInterval(run, intervalMs);
-  console.info(`${LOG_PREFIX} Started cleanup worker (interval ${intervalMs}ms)`);
+  logger.info("platform.financial_command_retention_worker", { message: `${LOG_PREFIX} Started cleanup worker (interval ${intervalMs}ms)` });
 }
 
 export async function runFinancialCommandRetentionTick(
@@ -73,10 +74,10 @@ export async function runFinancialCommandRetentionTick(
       deleted += batchDeleted;
       if (batchDeleted < batchSize) break;
     }
-    if (deleted > 0) console.info(`${LOG_PREFIX} Deleted ${deleted} expired terminal results`);
+    if (deleted > 0) logger.info("platform.financial_command_retention_worker", { message: `${LOG_PREFIX} Deleted ${deleted} expired terminal results` });
     return { status: "success", deleted };
   } catch (error) {
-    console.error(`${LOG_PREFIX} Cleanup tick failed`, error);
+    logger.error("platform.financial_command_retention_worker", { message: `${LOG_PREFIX} Cleanup tick failed`, error: error });
     return { status: "error", deleted };
   } finally {
     inFlight = false;

@@ -7,6 +7,7 @@ import { inspectCatalogImage } from "../domain/catalog-image-inspection";
 import { prepareCatalogPublicationRendition, prepareOptionalCatalogRendition, type CatalogPublicationRendition } from "../domain/catalog-publication-rendition";
 import type { DownloadableProductImage } from "./product-image-download.service";
 import { ProductAssetError } from "../domain/product-asset-errors";
+import { logger } from "../../../platform/observability/logger";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -349,7 +350,7 @@ export function createCatalogImageOriginalsService(
       const data = Buffer.from(image.data),
         measured = inspectCatalogImage({ data, mimeType: image.mimeType });
       const { rendition, warning } = await prepareOptionalCatalogRendition({ data, mimeType: measured.mimeType });
-      if (warning) console.warn(JSON.stringify({event:"catalog.image_rendition.unavailable",productId:command.productId,code:warning.code}));
+      if (warning) logger.warn("catalog.image_rendition.unavailable", { event:"catalog.image_rendition.unavailable", productId:command.productId, code:warning.code });
       const now = clock();
       return database.transaction(async (tx) => {
         const [product] = await tx

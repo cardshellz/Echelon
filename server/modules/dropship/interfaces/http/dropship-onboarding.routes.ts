@@ -3,6 +3,7 @@ import { DropshipVendorProvisioningService } from "../../application/dropship-ve
 import { DropshipError } from "../../domain/errors";
 import { createDropshipVendorProvisioningServiceFromEnv } from "../../infrastructure/dropship-vendor-provisioning.factory";
 import { requireDropshipAuth, requireDropshipSensitiveActionProof } from "./dropship-auth.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 export function registerDropshipOnboardingRoutes(
   app: Express,
@@ -43,7 +44,7 @@ function sendDropshipOnboardingError(res: Response, error: unknown): Response {
     });
   }
 
-  console.error("[DropshipOnboarding] Unexpected onboarding error:", error);
+  logger.error("dropship.onboarding_routes", { message: "[DropshipOnboarding] Unexpected onboarding error:", error: error });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_ONBOARDING_INTERNAL_ERROR",

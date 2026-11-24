@@ -37,6 +37,7 @@ import {
 import {
   PostgresInventoryPromiseSafetyAdminStore,
 } from "../../infrastructure/inventory-promise-safety-admin.repository";
+import { logger } from "../../../../platform/observability/logger";
 
 const positiveDatabaseIntegerSchema = z.number().int().positive().max(2_147_483_647);
 const positiveIdSchema = z.coerce.number().pipe(positiveDatabaseIntegerSchema);
@@ -315,11 +316,7 @@ function sendAdminError(
       },
     });
   }
-  console.error(JSON.stringify({
-    code: "INVENTORY_AVAILABILITY_ADMIN_FAILED",
-    action,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  logger.error("INVENTORY_AVAILABILITY_ADMIN_FAILED", { code: "INVENTORY_AVAILABILITY_ADMIN_FAILED", error: error instanceof Error ? error.message : String(error) });
   return res.status(500).json({
     error: {
       code: "INVENTORY_AVAILABILITY_ADMIN_FAILED",
