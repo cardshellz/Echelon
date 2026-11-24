@@ -125,6 +125,7 @@ export class InventoryLotService {
     notes?: string;
     quantityPosting?: OperationalQuantityPosting | null;
     exactTotals?: LotCosts;
+    initialReservedQty?: number;
   }): Promise<InventoryLot> {
     const now = captureDocumentNumberTime(this.clock());
     if (this.transactionBound) return this.createLotInsideTransaction(params, now);
@@ -139,6 +140,13 @@ export class InventoryLotService {
     now: Date,
   ): Promise<InventoryLot> {
     const lotNumber = await this.generateLotNumber(now);
+    const initialReservedQty = params.initialReservedQty ?? 0;
+    if (!Number.isSafeInteger(initialReservedQty) || initialReservedQty < 0 || initialReservedQty > params.qty) {
+      throw new IntegrityError("initialReservedQty must be between 0 and qty", {
+        initialReservedQty,
+        qty: params.qty,
+      });
+    }
 
     // Cost is tracked in MILLS (1/100 cent) as the source of truth: total = product
     // (po) + packaging + landed. Carrying mills means per-unit × qty (FIFO/valuation)
@@ -198,7 +206,7 @@ export class InventoryLotService {
         costSource: params.costSource ?? ((params.poLineId || params.purchaseOrderId) ? "po" : "manual"),
         poLineId: params.poLineId ?? null,
         qtyOnHand: params.quantityPosting ? 0 : params.qty,
-        qtyReserved: 0,
+        qtyReserved: params.quantityPosting ? 0 : initialReservedQty,
         qtyPicked: 0,
         receivedAt: params.receivedAt ?? now,
         receivingOrderId: params.receivingOrderId ?? null,
@@ -215,6 +223,54 @@ export class InventoryLotService {
     });
 
     return lot as InventoryLot;
+  }
+
+  /**
+   * Resolve inherited FIFO receipt timestamp and unambiguous PO/receipt/shipment
+   * lineage from consumed parent lots so package conversions never reset FIFO age.
+   */
+  async resolveConversionLineage(
+    sourceLotIds: readonly number[],
+    fallbackReceivedAt: Date,
+  ): Promise<{
+    receivedAt: Date;
+    purchaseOrderId?: number;
+    receivingOrderId?: number;
+    inboundShipmentId?: number;
+    poLineId?: number;
+  }> {
+    const uniqueIds = [...new Set(sourceLotIds.filter((id) => Number.isSafeInteger(id) && id > 0))];
+    if (uniqueIds.length === 0) {
+      return { receivedAt: fallbackReceivedAt };
+    }
+    const idSql = sql.join(uniqueIds.map((id) => sql`${id}`), sql`, `);
+    const res = await this.db.execute(sql`
+      SELECT id, received_at, purchase_order_id, receiving_order_id, inbound_shipment_id, po_line_id
+      FROM inventory.inventory_lots
+      WHERE id IN (${idSql})
+      ORDER BY received_at ASC, id ASC
+    `);
+    const rows = Array.isArray(res?.rows) ? res.rows : [];
+    if (rows.length === 0) {
+      return { receivedAt: fallbackReceivedAt };
+    }
+    const firstDate = rows[0].received_at ? new Date(rows[0].received_at) : null;
+    const receivedAt = firstDate && Number.isFinite(firstDate.getTime()) ? firstDate : fallbackReceivedAt;
+
+    const uniformPositiveInt = (key: string): number | undefined => {
+      const vals: Array<number | null> = rows.map((r: any) => (r[key] == null ? null : Number(r[key])));
+      if (vals.some((v) => v === null || !Number.isSafeInteger(v) || v <= 0)) return undefined;
+      const distinct = new Set(vals);
+      return distinct.size === 1 ? (vals[0] as number) : undefined;
+    };
+
+    return {
+      receivedAt,
+      purchaseOrderId: uniformPositiveInt("purchase_order_id"),
+      receivingOrderId: uniformPositiveInt("receiving_order_id"),
+      inboundShipmentId: uniformPositiveInt("inbound_shipment_id"),
+      poLineId: uniformPositiveInt("po_line_id"),
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -1090,6 +1146,7 @@ export class InventoryLotService {
     operationKey?: string;
     quantityPosting?: OperationalQuantityPosting | null;
     reservedLots?: readonly { inventoryLotId: number; quantity: number }[];
+    reservedQtyToMove?: number;
   }): Promise<readonly { sourceLotId: number; destinationLotId: number; quantity: number; reservedQuantity: number }[]> {
     for (const field of ["productVariantId", "fromLocationId", "toLocationId", "qty"] as const) {
       if (!Number.isInteger(params[field]) || params[field] <= 0 || params[field] > 2_147_483_647) {
@@ -1101,6 +1158,10 @@ export class InventoryLotService {
     }
     if (params.fromLocationId === params.toLocationId || (params.operationKey !== undefined && !params.operationKey.trim())) {
       throw new CostEvidenceError("COST_TRANSFER_INPUT_INVALID", "A lot transfer requires distinct locations and a nonblank operation key when supplied.");
+    }
+    const legacyReservedGoal = !params.quantityPosting ? (params.reservedQtyToMove ?? 0) : 0;
+    if (!Number.isSafeInteger(legacyReservedGoal) || legacyReservedGoal < 0 || legacyReservedGoal > params.qty) {
+      throw new IntegrityError("reservedQtyToMove must be between 0 and transfer qty");
     }
     // The physical use-case takes the same graph lock before location locks;
     // repeat it here to protect direct transactional callers before cost reads.
@@ -1117,7 +1178,8 @@ export class InventoryLotService {
       || reservedTotal > params.qty || [...reservedByLot.keys()].some(id => !lots.some(lot => lot.id === id))) {
       throw new IntegrityError("Reserved lot movements require exact canonical claim allocation evidence");
     }
-    let freeRemaining = params.qty - reservedTotal;
+    let freeRemaining = params.qty - (params.quantityPosting ? reservedTotal : legacyReservedGoal);
+    let legacyReservedRemaining = legacyReservedGoal;
     let remaining = params.qty;
     const layers: Array<{
       lotId: number;
@@ -1140,13 +1202,28 @@ export class InventoryLotService {
     for (const lot of lots) {
       if (remaining <= 0) break;
 
-      const reservedQuantity = reservedByLot.get(lot.id) ?? 0;
-      if (reservedQuantity > lot.qtyReserved || reservedQuantity > lot.qtyOnHand) throw new IntegrityError("A reserved source lot no longer covers its claim");
       const available = Math.max(0, calculateUnreservedLotOnHand(lot));
       const freeTake = Math.min(available, freeRemaining);
+      let reservedQuantity = 0;
+      if (params.quantityPosting) {
+        reservedQuantity = reservedByLot.get(lot.id) ?? 0;
+        if (reservedQuantity > lot.qtyReserved || reservedQuantity > lot.qtyOnHand) {
+          throw new IntegrityError("A reserved source lot no longer covers its claim");
+        }
+      } else if (legacyReservedRemaining > 0) {
+        reservedQuantity = Math.min(
+          Math.max(0, lot.qtyReserved),
+          Math.max(0, lot.qtyOnHand - freeTake),
+          remaining - freeTake,
+          legacyReservedRemaining,
+        );
+      }
       const take = freeTake + reservedQuantity;
       if (take === 0) continue;
       freeRemaining -= freeTake;
+      if (!params.quantityPosting) {
+        legacyReservedRemaining -= reservedQuantity;
+      }
       const normalizedCosts = normalizeBuildLotCosts(lotCostRecord(lot));
       const exactAllocation = hasExactLotCostTotals(lotCostRecord(lot))
         ? await allocateLotQuantityCost(this.db, lot.id, take, params.actorId, params.occurredAt,
@@ -1171,10 +1248,10 @@ export class InventoryLotService {
       remaining -= take;
     }
 
-    if (remaining !== 0) {
+    if (remaining !== 0 || (!params.quantityPosting && legacyReservedRemaining !== 0)) {
       throw new LotInventoryConflictError(
         "LOT_TRANSFER_SHORTFALL",
-        `FIFO lot inventory cannot satisfy transfer of ${params.qty} unreserved unit(s).`,
+        `FIFO lot inventory cannot satisfy transfer of ${params.qty} unit(s).`,
         {
           productVariantId: params.productVariantId,
           fromLocationId: params.fromLocationId,
@@ -1194,20 +1271,23 @@ export class InventoryLotService {
     } else {
       const updated = await this.db.execute(sql`
       WITH updates AS (
-        SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int, "reservedQuantity" int)
       )
       UPDATE inventory.inventory_lots AS il
       SET qty_on_hand = il.qty_on_hand - u.take,
-          status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+          qty_reserved = il.qty_reserved - u."reservedQuantity",
+          status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedQuantity") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
       FROM updates u
       WHERE il.id = u."lotId"
-        AND il.qty_on_hand - il.qty_reserved >= u.take
+        AND il.qty_on_hand >= u.take
+        AND il.qty_reserved >= u."reservedQuantity"
+        AND il.qty_on_hand - il.qty_reserved >= u.take - u."reservedQuantity"
       RETURNING il.id
     `);
       if ((updated.rows ?? []).length !== transferUpdates.length) {
         throw new LotInventoryConflictError(
           "LOT_TRANSFER_CONFLICT",
-          "A FIFO lot changed while its unreserved stock was being transferred.",
+          "A FIFO lot changed while its stock was being transferred.",
           {
             productVariantId: params.productVariantId,
             fromLocationId: params.fromLocationId,
@@ -1238,8 +1318,9 @@ export class InventoryLotService {
         notes: params.notes ?? "Transfer",
         quantityPosting: params.quantityPosting,
         exactTotals: layer.exactAllocation?.costs,
+        initialReservedQty: params.quantityPosting ? 0 : layer.reservedQuantity,
       });
-      if (layer.reservedQuantity > 0) await params.quantityPosting!.addLot(outputLot.id, {
+      if (params.quantityPosting && layer.reservedQuantity > 0) await params.quantityPosting.addLot(outputLot.id, {
         onHand: 0, reserved: layer.reservedQuantity, picked: 0, packed: 0,
       });
       transferredLots.push({ sourceLotId: layer.lotId, destinationLotId: outputLot.id, quantity: layer.take, reservedQuantity: layer.reservedQuantity });

@@ -271,7 +271,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
       WHERE variant.product_id=${productId}
         AND variant.requires_shipping=true
         AND COALESCE(variant.track_inventory,true)=true
-        AND location.location_type <> 'in_transit'
+        AND location.location_type NOT IN ('in_transit', 'receiving', 'quarantine', 'staging')
     `);
     return Number(result.rows[0]?.atp ?? 0);
   }
@@ -303,7 +303,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
       WHERE pv.product_id = ${productId}
         AND pv.requires_shipping = true
         AND COALESCE(pv.track_inventory, true) = true
-        AND wl.location_type <> 'in_transit'
+        AND wl.location_type NOT IN ('in_transit', 'receiving', 'quarantine', 'staging')
         AND (
         wl.warehouse_id = ${warehouseId}
         OR wl.warehouse_id IN (
@@ -359,7 +359,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
       WHERE il.product_variant_id IN (${idList})
         AND pv.requires_shipping = true
         AND COALESCE(pv.track_inventory, true) = true
-        AND wl.location_type <> 'in_transit'
+        AND wl.location_type NOT IN ('in_transit', 'receiving', 'quarantine', 'staging')
         AND (
           wl.warehouse_id = ${warehouseId}
           OR wl.warehouse_id IN (
@@ -401,7 +401,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
         inArray(inventoryLevels.productVariantId, variantIds),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
-        sql`${warehouseLocations.locationType} <> 'in_transit'`,
+        sql`${warehouseLocations.locationType} NOT IN ('in_transit', 'receiving', 'quarantine', 'staging')`,
       ))
       .groupBy(inventoryLevels.productVariantId);
     const result = new Map<number, number>();
@@ -817,7 +817,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
         inArray(productVariants.productId, productIds),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
-        sql`${warehouseLocations.locationType} <> 'in_transit'`,
+        sql`${warehouseLocations.locationType} NOT IN ('in_transit', 'receiving', 'quarantine', 'staging')`,
       ))
       .groupBy(productVariants.productId);
 

@@ -56,34 +56,73 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/inventory/adjust", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
-      const { inventoryItemId, productVariantId: pvId, warehouseLocationId, baseUnitsDelta, qtyDelta: bodyQtyDelta, reason } = req.body;
+      const {
+        inventoryItemId,
+        productVariantId: pvId,
+        warehouseLocationId,
+        baseUnitsDelta,
+        qtyDelta: bodyQtyDelta,
+        reason,
+        reasonId,
+        notes,
+        unitCostCents,
+      } = req.body;
       const userId = req.session.user?.id;
-      const adjustVariantId = pvId || inventoryItemId; // Support both old and new param names
-      const qtyDelta = bodyQtyDelta ?? baseUnitsDelta; // Accept both param names
+      const adjustVariantId = Number(pvId || inventoryItemId);
+      const locId = Number(warehouseLocationId);
+      const rawDelta = bodyQtyDelta ?? baseUnitsDelta;
+      const qtyDelta = typeof rawDelta === "number" ? rawDelta : Number(rawDelta);
+      const trimmedReason = typeof reason === "string" ? reason.trim() : "";
 
-      if (!adjustVariantId || !warehouseLocationId || qtyDelta === undefined || !reason) {
-        return res.status(400).json({ error: "Missing required fields" });
+      if (
+        !Number.isSafeInteger(adjustVariantId) || adjustVariantId <= 0 ||
+        !Number.isSafeInteger(locId) || locId <= 0 ||
+        !Number.isSafeInteger(qtyDelta) || qtyDelta === 0 ||
+        !trimmedReason
+      ) {
+        return res.status(400).json({ error: "Missing or invalid required fields: productVariantId, warehouseLocationId, non-zero qtyDelta, reason" });
       }
+      if (unitCostCents !== undefined && (!Number.isSafeInteger(unitCostCents) || unitCostCents < 0)) {
+        return res.status(400).json({ error: "unitCostCents must be a non-negative integer when provided" });
+      }
+      if (reasonId !== undefined && (!Number.isSafeInteger(Number(reasonId)) || Number(reasonId) <= 0)) {
+        return res.status(400).json({ error: "reasonId must be a positive integer when provided" });
+      }
+
+      const variant = await storage.getProductVariantById(adjustVariantId);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      if (!variant.isActive) {
+        return res.status(400).json({ error: "Cannot adjust stock for an inactive variant" });
+      }
+      const location = await storage.getWarehouseLocationById(locId);
+      if (!location) {
+        return res.status(404).json({ error: "Warehouse location not found" });
+      }
+      if (location.isActive !== 1 || location.locationType === "in_transit" || location.locationType === "3pl_virtual") {
+        return res.status(400).json({ error: "Adjustments require an active physical warehouse location" });
+      }
+
+      const combinedNotes = typeof notes === "string" && notes.trim().length > 0
+        ? `${trimmedReason}: ${notes.trim()}`
+        : trimmedReason;
 
       await inventoryCore.adjustInventory({
         commandKey: req.body.commandKey,
         productVariantId: adjustVariantId,
-        warehouseLocationId,
+        warehouseLocationId: locId,
         qtyDelta,
-        reason,
+        reason: combinedNotes,
+        reasonId: reasonId !== undefined ? Number(reasonId) : undefined,
+        unitCostCents,
         userId,
       });
 
-      // Sync to sales channels after adjustment (fire-and-forget)
-      const { channelSync: adjSync, replenishment: adjReplen } = req.app.locals.services;
-      if (adjSync) {
-        adjSync.queueSyncAfterInventoryChange(adjustVariantId).catch((err: any) =>
-          logger.warn("inventory.routes", { message: `[ChannelSync] Post-adjust sync failed for variant ${adjustVariantId}:`, error: err })
-        );
-      }
+      const { replenishment: adjReplen } = req.app.locals.services;
       if (adjReplen) {
-        adjReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          logger.warn("inventory.routes", { message: `[Replen] Post-adjust check failed for loc ${warehouseLocationId}:`, error: err })
+        adjReplen.checkReplenForLocation(locId).catch((err: any) =>
+          logger.warn("inventory.routes", { message: `[Replen] Post-adjust check failed for loc ${locId}:`, error: err })
         );
       }
 
@@ -91,6 +130,9 @@ export function registerInventoryRoutes(app: Express) {
     } catch (error) {
       logger.error("inventory.routes", { message: "Error adjusting inventory:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof AppError) {
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
+      }
       res.status(500).json({ error: "Failed to adjust inventory" });
     }
   });
@@ -327,15 +369,27 @@ export function registerInventoryRoutes(app: Express) {
 
   app.post("/api/inventory/transfer/:id/undo", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { inventoryCore } = req.app.locals.services;
-      const transactionId = parseInt(req.params.id);
+      const { inventoryCore, replenishment: undoReplen } = req.app.locals.services;
+      const transactionId = parseInt(req.params.id, 10);
+      if (!Number.isSafeInteger(transactionId) || transactionId <= 0) {
+        return res.status(400).json({ error: "Invalid transfer transaction ID" });
+      }
       const userId = req.session.user?.id || "system";
 
       const transaction = await inventoryCore.undoTransfer(transactionId, userId);
+      if (undoReplen && transaction.fromLocationId) {
+        undoReplen.checkReplenForLocation(transaction.fromLocationId).catch((err: any) =>
+          logger.warn("inventory.routes", { message: `[Replen] Post-reverse-transfer check failed for loc ${transaction.fromLocationId}:`, error: err })
+        );
+      }
       res.json({ success: true, transaction });
     } catch (error) {
       logger.error("inventory.routes", { message: "Undo transfer error:", error: error });
-      res.status(400).json({ error: String(error) });
+      if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof AppError) {
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
+      }
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -494,53 +548,29 @@ export function registerInventoryRoutes(app: Express) {
             continue;
           }
 
-          // M6 fix: the level mutation and its ledger row must be atomic — a
-          // failure between them would leave a level change with no audit row
-          // (silent on-hand drift). Wrap both in one transaction.
+          const postCommitEffects: Array<() => Promise<void>> = [];
           await db.transaction(async (tx: any) => {
             const { inventoryCore } = req.app.locals.services;
-            await inventoryCore.withTx(tx).assertCountableCustody({
+            const csvAdjCore = inventoryCore.withTx(tx);
+            await csvAdjCore.assertCountableCustody({
               productVariantId: variant.id, warehouseLocationId: warehouseLocation.id,
             });
             const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocation.id, variant.id, tx);
             const variantQtyBefore = existingLevel ? (existingLevel.variantQty || 0) : 0;
             const variantQtyDelta = targetQty - variantQtyBefore;
-            if (existingLevel) {
-              await storage.adjustInventoryLevel(existingLevel.id, {
-                variantQty: variantQtyDelta,
-              }, tx);
-            } else {
-              await storage.upsertInventoryLevel({
-                warehouseLocationId: warehouseLocation.id,
+            if (variantQtyDelta !== 0) {
+              await csvAdjCore.adjustInventory({
                 productVariantId: variant.id,
-                variantQty: targetQty,
-                reservedQty: 0,
-                pickedQty: 0,
-                packedQty: 0,
-                backorderQty: 0,
-              }, tx);
+                warehouseLocationId: warehouseLocation.id,
+                qtyDelta: variantQtyDelta,
+                reason: `CSV import (${batchId}): Set ${sku} at ${locationCode} to ${targetQty} units (was ${variantQtyBefore})`,
+                reasonId: csvReason?.id,
+                userId,
+                deferUntilCommit: (effect: () => Promise<void>) => postCommitEffects.push(effect),
+              });
             }
-
-            // Log with Full WMS fields
-            await storage.createInventoryTransaction({
-              productVariantId: variant?.id,
-              fromLocationId: null,
-              toLocationId: warehouseLocation.id, // CSV import = TO location (adding/setting inventory)
-              transactionType: "csv_upload",
-              reasonId: csvReason?.id,
-              variantQtyDelta,
-              variantQtyBefore,
-              variantQtyAfter: targetQty,
-              batchId,
-              sourceState: "external",
-              targetState: "on_hand",
-              referenceType: "csv_import",
-              referenceId: batchId,
-              notes: `CSV import: Set ${sku} at ${locationCode} to ${targetQty} units (was ${variantQtyBefore})`,
-              userId,
-              isImplicit: 0,
-            }, tx);
           });
+          for (const effect of postCommitEffects) await effect();
 
           results.push({ row: rowNum, sku, location: locationCode, status: "success", message: `Updated to ${targetQty} units` });
           successCount++;
@@ -591,57 +621,64 @@ export function registerInventoryRoutes(app: Express) {
 
     try {
       const { inventoryCore } = req.app.locals.services;
-      const { variantId, warehouseLocationId, quantity, referenceId, notes } = req.body;
+      const { variantId, warehouseLocationId, quantity, referenceId, reason, notes, unitCostCents, unitCostMills } = req.body;
       const userId = req.session.user.id;
+      const parsedVariantId = Number(variantId);
+      const parsedLocationId = Number(warehouseLocationId);
+      const parsedQty = Number(quantity);
+      const reasonText = String(reason ?? notes ?? "").trim();
 
-      if (!variantId || !warehouseLocationId || !quantity) {
-        return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, quantity" });
+      if (
+        !Number.isSafeInteger(parsedVariantId) || parsedVariantId <= 0 ||
+        !Number.isSafeInteger(parsedLocationId) || parsedLocationId <= 0 ||
+        !Number.isSafeInteger(parsedQty) || parsedQty <= 0 ||
+        !reasonText
+      ) {
+        return res.status(400).json({ error: "Missing or invalid required fields: variantId, warehouseLocationId, positive quantity, and reason/notes" });
+      }
+      const hasValidCents = unitCostCents !== undefined && Number.isSafeInteger(unitCostCents) && unitCostCents >= 0;
+      const hasValidMills = unitCostMills !== undefined && Number.isSafeInteger(unitCostMills) && unitCostMills >= 0;
+      if (!hasValidCents && !hasValidMills) {
+        return res.status(400).json({ error: "Ad-hoc stock intake requires unitCostCents or unitCostMills" });
       }
 
-      // Get the variant by ID directly (more efficient than getting all)
-      const targetVariant = await storage.getProductVariantById(variantId);
-
+      const targetVariant = await storage.getProductVariantById(parsedVariantId);
       if (!targetVariant) {
         return res.status(404).json({ error: "Variant not found" });
       }
-
       if (!targetVariant.isActive) {
         return res.status(400).json({ error: "Cannot receive stock for inactive variant" });
       }
 
-      // Verify warehouse location exists
-      const location = await storage.getWarehouseLocationById(warehouseLocationId);
+      const location = await storage.getWarehouseLocationById(parsedLocationId);
       if (!location) {
         return res.status(404).json({ error: "Warehouse location not found" });
       }
+      if (location.isActive !== 1 || location.locationType === "in_transit" || location.locationType === "3pl_virtual") {
+        return res.status(400).json({ error: "Stock intake requires an active physical warehouse location" });
+      }
 
-      const variantQty = quantity;
-
-      // Generate a reference ID if not provided
       const refId = referenceId || (req.body.commandKey ? `RCV-${req.body.commandKey}` : `RCV-${Date.now()}`);
 
       await inventoryCore.receiveInventory({
         commandKey: req.body.commandKey,
-        productVariantId: variantId,
-        warehouseLocationId,
-        qty: variantQty,
+        productVariantId: parsedVariantId,
+        warehouseLocationId: parsedLocationId,
+        qty: parsedQty,
         referenceId: refId,
-        notes: notes || "Stock received via UI",
+        notes: reasonText,
+        unitCostCents: hasValidCents ? unitCostCents : undefined,
+        unitCostMills: hasValidMills ? unitCostMills : undefined,
         userId,
       });
 
-      // Sync to sales channels after receive (fire-and-forget)
-      const { channelSync: rcvSync } = req.app.locals.services;
-      if (rcvSync) {
-        rcvSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-          logger.warn("inventory.routes", { message: `[ChannelSync] Post-receive sync failed for variant ${variantId}:`, error: err })
-        );
-      }
-
-      res.json({ success: true, variantQtyReceived: variantQty });
+      res.json({ success: true, variantQtyReceived: parsedQty });
     } catch (error) {
       logger.error("inventory.routes", { message: "Error receiving inventory:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof AppError) {
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
+      }
       res.status(500).json({ error: "Failed to receive inventory" });
     }
   });
@@ -2476,44 +2513,68 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/inventory/add-stock", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
-      const { variantId, warehouseLocationId, variantQty, notes } = req.body;
+      const { variantId, warehouseLocationId, variantQty, reason, notes, unitCostCents, unitCostMills } = req.body;
       const userId = req.session.user?.id;
+      const parsedVariantId = Number(variantId);
+      const parsedLocationId = Number(warehouseLocationId);
+      const parsedQty = Number(variantQty);
+      const reasonText = String(reason ?? notes ?? "").trim();
 
-      if (!variantId || !warehouseLocationId || variantQty === undefined) {
-        return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, variantQty" });
+      if (
+        !Number.isSafeInteger(parsedVariantId) || parsedVariantId <= 0 ||
+        !Number.isSafeInteger(parsedLocationId) || parsedLocationId <= 0 ||
+        !Number.isSafeInteger(parsedQty) || parsedQty <= 0 ||
+        !reasonText
+      ) {
+        return res.status(400).json({ error: "Missing or invalid required fields: variantId, warehouseLocationId, positive variantQty, and reason/notes" });
+      }
+      const hasValidCents = unitCostCents !== undefined && Number.isSafeInteger(unitCostCents) && unitCostCents >= 0;
+      const hasValidMills = unitCostMills !== undefined && Number.isSafeInteger(unitCostMills) && unitCostMills >= 0;
+      if (!hasValidCents && !hasValidMills) {
+        return res.status(400).json({ error: "Ad-hoc stock addition requires unitCostCents or unitCostMills" });
       }
 
-      const variant = await storage.getProductVariantById(variantId);
+      const variant = await storage.getProductVariantById(parsedVariantId);
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
+      }
+      if (!variant.isActive) {
+        return res.status(400).json({ error: "Cannot add stock for an inactive variant" });
+      }
+      const location = await storage.getWarehouseLocationById(parsedLocationId);
+      if (!location) {
+        return res.status(404).json({ error: "Warehouse location not found" });
+      }
+      if (location.isActive !== 1 || location.locationType === "in_transit" || location.locationType === "3pl_virtual") {
+        return res.status(400).json({ error: "Stock addition requires an active physical warehouse location" });
       }
 
       await inventoryCore.receiveInventory({
         commandKey: req.body.commandKey,
-        productVariantId: variantId,
-        warehouseLocationId,
-        qty: variantQty,
+        productVariantId: parsedVariantId,
+        warehouseLocationId: parsedLocationId,
+        qty: parsedQty,
         referenceId: req.body.commandKey ? `ADD-${req.body.commandKey}` : `ADD-${Date.now()}`,
-        notes: notes || "Stock added via inventory page",
+        notes: reasonText,
+        unitCostCents: hasValidCents ? unitCostCents : undefined,
+        unitCostMills: hasValidMills ? unitCostMills : undefined,
         userId,
       });
 
-      const { channelSync: addSync, replenishment: addReplen } = req.app.locals.services;
-      if (addSync) {
-        addSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-          logger.warn("inventory.routes", { message: `[ChannelSync] Post-add-stock sync failed for variant ${variantId}:`, error: err })
-        );
-      }
+      const { replenishment: addReplen } = req.app.locals.services;
       if (addReplen) {
-        addReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          logger.warn("inventory.routes", { message: `[Replen] Post-add-stock check failed for loc ${warehouseLocationId}:`, error: err })
+        addReplen.checkReplenForLocation(parsedLocationId).catch((err: any) =>
+          logger.warn("inventory.routes", { message: `[Replen] Post-add-stock check failed for loc ${parsedLocationId}:`, error: err })
         );
       }
 
-      res.json({ success: true, variantQtyAdded: variantQty });
+      res.json({ success: true, variantQtyAdded: parsedQty });
     } catch (error) {
       logger.error("inventory.routes", { message: "Error adding stock:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof AppError) {
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
+      }
       res.status(500).json({ error: "Failed to add stock" });
     }
   });
@@ -2521,43 +2582,69 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/inventory/adjust-stock", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
-      const { variantId, warehouseLocationId, variantQtyDelta, reasonCode, notes } = req.body;
+      const { variantId, warehouseLocationId, variantQtyDelta, reasonCode, reasonId, notes, unitCostCents } = req.body;
       const userId = req.session.user?.id;
+      const parsedVariantId = Number(variantId);
+      const parsedLocationId = Number(warehouseLocationId);
+      const parsedDelta = Number(variantQtyDelta);
+      const trimmedReason = typeof reasonCode === "string" ? reasonCode.trim() : "";
 
-      if (!variantId || !warehouseLocationId || variantQtyDelta === undefined || !reasonCode) {
-        return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, variantQtyDelta, reasonCode" });
+      if (
+        !Number.isSafeInteger(parsedVariantId) || parsedVariantId <= 0 ||
+        !Number.isSafeInteger(parsedLocationId) || parsedLocationId <= 0 ||
+        !Number.isSafeInteger(parsedDelta) || parsedDelta === 0 ||
+        !trimmedReason
+      ) {
+        return res.status(400).json({ error: "Missing or invalid required fields: variantId, warehouseLocationId, non-zero variantQtyDelta, reasonCode" });
+      }
+      if (unitCostCents !== undefined && (!Number.isSafeInteger(unitCostCents) || unitCostCents < 0)) {
+        return res.status(400).json({ error: "unitCostCents must be a non-negative integer when provided" });
       }
 
-      const variant = await storage.getProductVariantById(variantId);
+      const variant = await storage.getProductVariantById(parsedVariantId);
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
       }
+      if (!variant.isActive) {
+        return res.status(400).json({ error: "Cannot adjust stock for an inactive variant" });
+      }
+      const location = await storage.getWarehouseLocationById(parsedLocationId);
+      if (!location) {
+        return res.status(404).json({ error: "Warehouse location not found" });
+      }
+      if (location.isActive !== 1 || location.locationType === "in_transit" || location.locationType === "3pl_virtual") {
+        return res.status(400).json({ error: "Adjustments require an active physical warehouse location" });
+      }
+
+      const combinedNotes = typeof notes === "string" && notes.trim().length > 0
+        ? `${trimmedReason}: ${notes.trim()}`
+        : trimmedReason;
 
       await inventoryCore.adjustInventory({
         commandKey: req.body.commandKey,
-        productVariantId: variantId,
-        warehouseLocationId,
-        qtyDelta: variantQtyDelta,
-        reason: reasonCode,
+        productVariantId: parsedVariantId,
+        warehouseLocationId: parsedLocationId,
+        qtyDelta: parsedDelta,
+        reason: combinedNotes,
+        reasonId: reasonId !== undefined ? Number(reasonId) : undefined,
+        unitCostCents,
         userId,
       });
 
-      const { channelSync: adjStockSync, replenishment: adjStockReplen } = req.app.locals.services;
-      if (adjStockSync) {
-        adjStockSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-          logger.warn("inventory.routes", { message: `[ChannelSync] Post-adjust-stock sync failed for variant ${variantId}:`, error: err })
-        );
-      }
+      const { replenishment: adjStockReplen } = req.app.locals.services;
       if (adjStockReplen) {
-        adjStockReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          logger.warn("inventory.routes", { message: `[Replen] Post-adjust-stock check failed for loc ${warehouseLocationId}:`, error: err })
+        adjStockReplen.checkReplenForLocation(parsedLocationId).catch((err: any) =>
+          logger.warn("inventory.routes", { message: `[Replen] Post-adjust-stock check failed for loc ${parsedLocationId}:`, error: err })
         );
       }
 
-      res.json({ success: true, variantQtyDelta });
+      res.json({ success: true, variantQtyDelta: parsedDelta });
     } catch (error) {
       logger.error("inventory.routes", { message: "Error adjusting stock:", error: error });
       if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof AppError) {
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
+      }
       res.status(500).json({ error: "Failed to adjust stock" });
     }
   });
@@ -2592,7 +2679,7 @@ export function registerInventoryRoutes(app: Express) {
           const locationCode = row.location_code?.trim();
           const variantQty = parseInt(row.quantity, 10);
 
-          if (!sku || !locationCode || isNaN(variantQty)) {
+          if (!sku || !locationCode || isNaN(variantQty) || variantQty < 0) {
             csvResults.errors.push(`Invalid row: SKU=${sku}, Location=${locationCode}, Qty=${row.quantity}`);
             continue;
           }
@@ -2634,24 +2721,18 @@ export function registerInventoryRoutes(app: Express) {
               }
               return "unchanged" as const;
             } else {
-              await storage.createInventoryLevel({
-                productVariantId: variant.id,
-                warehouseLocationId: location.id,
-                variantQty: variantQty,
-                reservedQty: 0,
-              }, tx);
-
-              await storage.createInventoryTransaction({
-                productVariantId: variant.id,
-                toLocationId: location.id,
-                transactionType: "csv_upload",
-                variantQtyDelta: variantQty,
-                sourceState: "external",
-                targetState: "on_hand",
-                notes: "Initial inventory from CSV import",
-                userId,
-              }, tx);
-              return "created" as const;
+              if (variantQty > 0) {
+                await csvAdjCore.adjustInventory({
+                  productVariantId: variant.id,
+                  warehouseLocationId: location.id,
+                  qtyDelta: variantQty,
+                  reason: "CSV_UPLOAD",
+                  userId,
+                  deferUntilCommit: (effect: () => Promise<void>) => effects.push(effect),
+                });
+                return "created" as const;
+              }
+              return "unchanged" as const;
             }
           });
           if (rowOutcome === "created") csvResults.created++;

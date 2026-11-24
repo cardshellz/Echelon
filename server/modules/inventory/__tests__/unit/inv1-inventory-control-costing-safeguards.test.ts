@@ -23,7 +23,7 @@ describe("Priority 4 (INV-1): Inventory Control and Costing Safeguards", () => {
         sku: "CASE-10",
         unitsPerVariant: 10,
         isActive: true,
-        parentVariantId: 2,
+        parentVariantId: null,
       };
       const targetVariant = {
         id: 2,
@@ -32,7 +32,7 @@ describe("Priority 4 (INV-1): Inventory Control and Costing Safeguards", () => {
         sku: "PACK-1",
         unitsPerVariant: 1,
         isActive: true,
-        parentVariantId: null,
+        parentVariantId: 1,
       };
 
       const fetchSequence = [

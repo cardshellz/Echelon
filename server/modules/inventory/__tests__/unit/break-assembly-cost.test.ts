@@ -54,11 +54,11 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
 
     const sourceVariant = {
       id: 1, productId: 100, name: "Case of 10", sku: "CASE-10",
-      unitsPerVariant: 10, isActive: true, parentVariantId: 2,
+      unitsPerVariant: 10, isActive: true, parentVariantId: null,
     };
     const targetVariant = {
       id: 2, productId: 100, name: "Single Pack", sku: "PACK-1",
-      unitsPerVariant: 1, isActive: true, parentVariantId: null,
+      unitsPerVariant: 1, isActive: true, parentVariantId: 1,
     };
 
     const adjustCalls: any[] = [];
@@ -149,11 +149,11 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
       );
       const sourceVariant = {
         id: 1, productId: 100, name: "Case of 10", sku: "CASE-10",
-        unitsPerVariant: 10, isActive: true, parentVariantId: 2,
+        unitsPerVariant: 10, isActive: true, parentVariantId: null,
       };
       const targetVariant = {
         id: 2, productId: 100, name: "Single Pack", sku: "PACK-1",
-        unitsPerVariant: 1, isActive: true, parentVariantId: null,
+        unitsPerVariant: 1, isActive: true, parentVariantId: 1,
       };
       const inventoryUseCases = {
         adjustInventory: vi.fn(),

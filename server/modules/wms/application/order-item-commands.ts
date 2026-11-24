@@ -859,9 +859,58 @@ export async function repointPendingWmsOrderItemsForInventoryTransfer(
     fromLocationCode: string;
     toLocationCode: string;
     toZone: string;
+    maxUnitsToRepoint?: number;
+    warehouseId?: number | null;
   },
 ): Promise<number> {
   assertPositiveInteger(args.productVariantId, "productVariantId");
+  const warehouseFilter =
+    args.warehouseId != null
+      ? sql`AND (o.warehouse_id = ${args.warehouseId} OR o.warehouse_id IS NULL)`
+      : sql``;
+
+  if (args.maxUnitsToRepoint !== undefined) {
+    if (!Number.isSafeInteger(args.maxUnitsToRepoint) || args.maxUnitsToRepoint < 0) {
+      throw new WmsOrderItemCommandError(
+        "INVALID_INPUT",
+        "maxUnitsToRepoint must be a non-negative integer",
+        { maxUnitsToRepoint: args.maxUnitsToRepoint },
+      );
+    }
+    if (args.maxUnitsToRepoint === 0) return 0;
+
+    const boundedResult = await executor.execute(sql`
+      WITH candidates AS (
+        SELECT
+          pending_line.id,
+          SUM(pending_line.quantity) OVER (
+            ORDER BY
+              (pending_line.quantity <= ${args.maxUnitsToRepoint}) DESC,
+              COALESCE(o.priority, 0) DESC,
+              pending_line.id ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          ) AS cumulative_qty
+        FROM wms.order_items AS pending_line
+        JOIN wms.orders o ON o.id = pending_line.order_id
+        JOIN catalog.product_variants pv ON UPPER(pv.sku) = UPPER(pending_line.sku)
+        WHERE pv.id = ${args.productVariantId}
+          AND UPPER(pending_line.location) = UPPER(${args.fromLocationCode})
+          AND pending_line.requires_shipping = 1
+          AND pending_line.status = 'pending'
+          AND pending_line.picked_quantity = 0
+          AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
+          ${warehouseFilter}
+      )
+      UPDATE wms.order_items AS oi
+      SET location = ${args.toLocationCode}, zone = ${args.toZone}
+      FROM candidates c
+      WHERE oi.id = c.id
+        AND c.cumulative_qty <= ${args.maxUnitsToRepoint}
+      RETURNING oi.id
+    `);
+    return affectedRowCount(boundedResult);
+  }
+
   const result = await executor.execute(sql`
     UPDATE wms.order_items AS oi
     SET location = ${args.toLocationCode}, zone = ${args.toZone}
@@ -874,6 +923,7 @@ export async function repointPendingWmsOrderItemsForInventoryTransfer(
       AND oi.status = 'pending'
       AND oi.picked_quantity = 0
       AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
+      ${warehouseFilter}
     RETURNING oi.id
   `);
   return affectedRowCount(result);

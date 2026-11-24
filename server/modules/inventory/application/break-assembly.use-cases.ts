@@ -151,7 +151,7 @@ export class BreakAssemblyUseCases {
       }
 
       // Enforce direct parent-child: target's parentVariantId must point to source
-      if (authorization.runtime.authority === "legacy" && sourceVariant.parentVariantId !== targetVariant.id) {
+      if (authorization.runtime.authority === "legacy" && targetVariant.parentVariantId !== sourceVariant.id) {
         throw new Error(
           `Cannot break: "${sourceVariant.sku ?? sourceVariant.name}" does not break directly into ` +
           `"${targetVariant.sku ?? targetVariant.name}". Only direct parent→child breaks are allowed.`
@@ -204,11 +204,12 @@ export class BreakAssemblyUseCases {
       const inventoryTx = this.inventoryUseCases.withTx(tx);
       const [sourceLevel] = await tx.select().from(inventoryLevels)
         .where(and(eq(inventoryLevels.productVariantId, sourceVariantId), eq(inventoryLevels.warehouseLocationId, warehouseLocationId))).limit(1);
-      if (!sourceLevel || sourceLevel.variantQty < sourceQty) {
-        const available = sourceLevel?.variantQty ?? 0;
+      const unreservedSourceQty = (sourceLevel?.variantQty ?? 0) - (sourceLevel?.reservedQty ?? 0);
+      if (!sourceLevel || unreservedSourceQty < sourceQty) {
+        const reservedSuffix = (sourceLevel?.reservedQty ?? 0) > 0 ? ` (${sourceLevel.reservedQty} reserved)` : "";
         throw new Error(
           `Insufficient stock: need ${sourceQty} of "${sourceVariant.sku ?? sourceVariant.name}" ` +
-          `at location but only ${available} available.`
+          `at location but only ${Math.max(0, unreservedSourceQty)} available${reservedSuffix}.`
         );
       }
 
@@ -333,11 +334,12 @@ export class BreakAssemblyUseCases {
       const inventoryTx = this.inventoryUseCases.withTx(tx);
       const [sourceLevel] = await tx.select().from(inventoryLevels)
         .where(and(eq(inventoryLevels.productVariantId, sourceVariantId), eq(inventoryLevels.warehouseLocationId, warehouseLocationId))).limit(1);
-      if (!sourceLevel || sourceLevel.variantQty < sourceQtyNeeded) {
-        const available = sourceLevel?.variantQty ?? 0;
+      const unreservedSourceQty = (sourceLevel?.variantQty ?? 0) - (sourceLevel?.reservedQty ?? 0);
+      if (!sourceLevel || unreservedSourceQty < sourceQtyNeeded) {
+        const reservedSuffix = (sourceLevel?.reservedQty ?? 0) > 0 ? ` (${sourceLevel.reservedQty} reserved)` : "";
         throw new Error(
           `Insufficient stock: need ${sourceQtyNeeded} of "${sourceVariant.sku ?? sourceVariant.name}" ` +
-          `at location but only ${available} available.`
+          `at location but only ${Math.max(0, unreservedSourceQty)} available${reservedSuffix}.`
         );
       }
 
@@ -690,6 +692,10 @@ export class BreakAssemblyUseCases {
           reason: params.notes ?? `${kind} exact physical package units`, occurredAt: this.clock().toISOString(),
           reference: { type: "package_conversion", id: converted.batchId }
         });
+        const targetId = typeof params.targetVariantId === "number" ? params.targetVariantId : undefined;
+        if (targetId && typeof (this.inventoryUseCases as any).withTx === "function") {
+          await (this.inventoryUseCases.withTx(tx) as any).refreshVariantCostRollup?.(targetId, 0);
+        }
         await posting.finishOperation({ ...converted });
       }
       return converted;
