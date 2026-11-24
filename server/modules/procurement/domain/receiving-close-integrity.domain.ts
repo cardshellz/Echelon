@@ -126,6 +126,7 @@ export function resolveReceivingSources(input: {
 }
 
 const DISALLOWED_RECEIVING_LOCATION_TYPES = new Set(["in_transit", "3pl_virtual", "quarantine"]);
+const DISALLOWED_HOLDING_LOCATION_TYPES = new Set(["in_transit", "3pl_virtual"]);
 
 export interface ReceivingLocationEvidence {
   id: number;
@@ -139,6 +140,7 @@ export function assertReceivingLocations(input: {
   warehouseActive: number | null;
   references: readonly { receivingLineId?: number; locationId: number }[];
   locations: readonly ReceivingLocationEvidence[];
+  allowQuarantine?: boolean;
 }): void {
   if (!input.warehouseId) throw new ReceivingCloseIntegrityError(input.receivingOrderId, [{
     code: "RECEIVING_WAREHOUSE_REQUIRED", message: "Select the receiving warehouse before assigning locations or closing this receipt.",
@@ -147,6 +149,9 @@ export function assertReceivingLocations(input: {
   if (input.warehouseActive !== 1) issues.push({ warehouseId: input.warehouseId,
     code: "RECEIVING_WAREHOUSE_UNAVAILABLE", message: "The receiving warehouse is missing or inactive. Select an active warehouse." });
   const byId = new Map(input.locations.map((location) => [location.id, location]));
+  const disallowedTypes = input.allowQuarantine
+    ? DISALLOWED_HOLDING_LOCATION_TYPES
+    : DISALLOWED_RECEIVING_LOCATION_TYPES;
   for (const reference of input.references) {
     const location = byId.get(reference.locationId);
     const context = { ...reference, warehouseId: input.warehouseId };
@@ -154,10 +159,12 @@ export function assertReceivingLocations(input: {
       message: "A receipt location is missing or inactive. Review the affected line or default location." });
     else if (location.warehouseId !== input.warehouseId) issues.push({ ...context, code: "RECEIVING_LOCATION_WAREHOUSE_MISMATCH",
       message: "A receipt location belongs to another warehouse. Review existing line locations before changing the warehouse or closing." });
-    else if (location.locationType && DISALLOWED_RECEIVING_LOCATION_TYPES.has(location.locationType)) issues.push({
+    else if (location.locationType && disallowedTypes.has(location.locationType)) issues.push({
       ...context,
       code: "RECEIVING_LOCATION_UNAVAILABLE",
-      message: "A receipt location cannot be a virtual, transit, or quarantine holding location.",
+      message: input.allowQuarantine
+        ? "A quarantine holding location cannot be a virtual or transit location."
+        : "A receipt location cannot be a virtual, transit, or quarantine holding location.",
     });
   }
   if (issues.length) throw new ReceivingCloseIntegrityError(input.receivingOrderId, issues);

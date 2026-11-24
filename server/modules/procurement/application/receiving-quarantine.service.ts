@@ -63,7 +63,7 @@ export async function executeReceivingCustodyCommand(tx: CustodyTransaction, rec
     const receipt = await readCustodyReceipt(tx, input.resourceId, true);
     if (receipt.status === "cancelled") throw new ReceivingQuarantineError("RECEIVING_CUSTODY_SOURCE_CANCELLED", "Cannot record custody against a cancelled receipt.");
     await validateReceivingLocations(tx, { receivingOrderId: receipt.id, warehouseId: receipt.warehouseId,
-      references: [{ locationId: command.holdingLocationId }] });
+      references: [{ locationId: command.holdingLocationId }], allowQuarantine: true });
     await assertPhysicalHoldingLocation(tx, command.holdingLocationId);
     if (!receipt.warehouseId) throw new ReceivingQuarantineError("RECEIVING_WAREHOUSE_REQUIRED", "Select the receiving warehouse first.");
     const common = { receivingOrderId: receipt.id, warehouseId: receipt.warehouseId, holdingLocationId: command.holdingLocationId,

@@ -31,6 +31,7 @@ export async function readReceivingSourceResolution(tx: ReceivingIntegrityTransa
 export async function validateReceivingLocations(tx: ReceivingIntegrityTransaction, input: {
   receivingOrderId: number; warehouseId: number | null;
   references: readonly { receivingLineId?: number; locationId: number }[];
+  allowQuarantine?: boolean;
 }): Promise<void> {
   const warehouses = input.warehouseId ? z.array(z.object({ isActive: z.number().int() })).max(1).parse((await tx.execute(sql`
     SELECT is_active AS "isActive" FROM warehouse.warehouses WHERE id=${input.warehouseId} FOR SHARE`)).rows) : [];

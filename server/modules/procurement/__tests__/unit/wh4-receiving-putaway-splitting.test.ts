@@ -31,6 +31,30 @@ describe("WH-4: Two-Step Receive-to-Dock, Directed Putaway & Uneven Case+Remaind
         }),
       ).not.toThrow();
     }
+
+    // Quarantine custody intake explicitly permits quarantine holding locations, while still blocking virtual/transit
+    expect(() =>
+      assertReceivingLocations({
+        receivingOrderId: 50,
+        warehouseId: 1,
+        warehouseActive: 1,
+        references: [{ locationId: 99 }],
+        locations: [{ id: 99, warehouseId: 1, isActive: 1, locationType: "quarantine" }],
+        allowQuarantine: true,
+      }),
+    ).not.toThrow();
+    for (const badHoldingType of ["3pl_virtual", "in_transit"]) {
+      expect(() =>
+        assertReceivingLocations({
+          receivingOrderId: 50,
+          warehouseId: 1,
+          warehouseActive: 1,
+          references: [{ locationId: 99 }],
+          locations: [{ id: 99, warehouseId: 1, isActive: 1, locationType: badHoldingType }],
+          allowQuarantine: true,
+        }),
+      ).toThrow(/cannot be a virtual or transit/);
+    }
   });
 
   it("closes unassigned receipt lines onto default RCV-DOCK with putawayComplete = 0, and express Pick/Reserve lines with putawayComplete = 1", async () => {

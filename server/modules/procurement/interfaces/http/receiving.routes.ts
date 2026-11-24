@@ -129,7 +129,7 @@ export function registerReceivingRoutes(app: Express) {
     try {
       const { putaway: putawayService } = req.app.locals.services;
       if (!putawayService) {
-        return res.status(503).json({ error: "Putaway service is unavailable" });
+        return res.json([]);
       }
       const warehouseIdRaw = req.query.warehouseId;
       const warehouseId =
@@ -248,14 +248,29 @@ export function registerReceivingRoutes(app: Express) {
         data: { receivingOrderId: parseInt(req.params.id) },
       }).catch(() => {});
       const { replenishment: rcvReplen, picking: rcvPicking } = req.app.locals.services;
-      if (rcvReplen && Array.isArray((result as any).expressPutawayProductIds)) {
+      if (rcvReplen && result.putawayLocationIds?.length && typeof rcvReplen.checkReplenForLocation === "function") {
+        for (const locId of result.putawayLocationIds) {
+          rcvReplen.checkReplenForLocation(locId).catch((err: any) =>
+            logger.warn("procurement.receiving_routes", { message: `[Replen] Post-receiving check failed for loc ${locId}:`, error: err }),
+          );
+        }
+      }
+      if (
+        rcvReplen &&
+        typeof rcvReplen.reevaluateReplenForProduct === "function" &&
+        Array.isArray((result as any).expressPutawayProductIds)
+      ) {
         for (const productId of (result as any).expressPutawayProductIds as number[]) {
           rcvReplen.reevaluateReplenForProduct(productId).catch((err: any) =>
             logger.warn("procurement.receiving_routes", { message: `[Replen] Post-receiving reevaluate failed for product ${productId}:`, error: err }),
           );
         }
       }
-      if (rcvPicking && Array.isArray((result as any).expressPutawayVariantIds)) {
+      if (
+        rcvPicking &&
+        typeof rcvPicking.wakeShortedExceptionOrdersForVariant === "function" &&
+        Array.isArray((result as any).expressPutawayVariantIds)
+      ) {
         for (const variantId of (result as any).expressPutawayVariantIds as number[]) {
           rcvPicking.wakeShortedExceptionOrdersForVariant(variantId, "receive_express").catch((err: any) =>
             logger.warn("procurement.receiving_routes", { message: `[Picking] Post-receiving order wakeup failed for variant ${variantId}:`, error: err }),

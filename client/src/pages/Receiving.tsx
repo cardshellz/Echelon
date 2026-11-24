@@ -884,7 +884,7 @@ DEF-456,25,,,5.00,,Location TBD`;
       const data = await res.json().catch(() => []);
       return Array.isArray(data) ? data : [];
     },
-    enabled: !showReceiptDetail,
+    enabled: activeTab === "putaway" && !showReceiptDetail,
   });
 
   const updateLineMutation = useMutation({
