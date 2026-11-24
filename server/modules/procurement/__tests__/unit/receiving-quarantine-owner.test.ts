@@ -136,6 +136,22 @@ describe("quarantine intake through receiving owner", () => {
     expect(test.db.transaction).not.toHaveBeenCalled();
     expect(test.events).toEqual(["audit"]);
   });
+  it("allows holdingLocationId with location_type='quarantine' during quarantine intake while rejecting quarantine for normal acceptance putaway", async () => {
+    const test = harness();
+    const baseExecute = test.tx.execute.getMockImplementation()!;
+    test.tx.execute.mockImplementation(async (query: any) => {
+      const { sql } = new PgDialect().sqlToQuery(query);
+      if (sql.includes("FROM warehouse.warehouse_locations")) {
+        return { rows: [{ id: 99, warehouseId: 1, isActive: 1, locationType: "quarantine" }] };
+      }
+      return baseExecute(query);
+    });
+    const result = await test.service.reviewQuarantineIntakeInTransaction(test.tx, intake(test), ACTOR, NOW);
+    expect(result.lineAfter).toMatchObject({ receivedQty: 1, damagedQty: 0 });
+    await expect(
+      test.service.prepareQuarantineAcceptanceInTransaction(test.tx, acceptance(test), ACTOR, NOW),
+    ).rejects.toThrow(/cannot be a virtual, transit, or quarantine/);
+  });
   it.each([0, 1])("resolves a unique legacy purchase source before freezing custody with %i accepted", async acceptedQty => {
     const test = harness(); test.orders[0].purchaseOrderId = 4; test.orders[0].sourceType = "po";
     const result = await test.service.reviewQuarantineIntakeInTransaction(test.tx, { ...intake(test), acceptedQty }, ACTOR, NOW);

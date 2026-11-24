@@ -561,12 +561,24 @@ export class ReceivingService {
     });
   }
 
-  private async validateLocations(tx: ReceivingIntegrityTransaction, order: { id: number; warehouseId?: number | null; receivingLocationId?: number | null },
-    lines: readonly { id?: number; putawayLocationId?: number | null }[]): Promise<void> {
+  private async validateLocations(
+    tx: ReceivingIntegrityTransaction,
+    order: { id: number; warehouseId?: number | null; receivingLocationId?: number | null },
+    lines: readonly { id?: number; putawayLocationId?: number | null }[],
+    options?: { allowQuarantine?: boolean; includeOrderReceivingLocation?: boolean },
+  ): Promise<void> {
     const references = lines.filter((line) => line.putawayLocationId != null)
       .map((line) => ({ receivingLineId: line.id, locationId: line.putawayLocationId! }));
-    await validateReceivingLocations(tx, { receivingOrderId: order.id, warehouseId: order.warehouseId ?? null,
-      references: [...references, ...(order.receivingLocationId ? [{ locationId: order.receivingLocationId }] : [])] });
+    const includeOrderLoc = options?.includeOrderReceivingLocation !== false;
+    await validateReceivingLocations(tx, {
+      receivingOrderId: order.id,
+      warehouseId: order.warehouseId ?? null,
+      references: [
+        ...references,
+        ...(includeOrderLoc && order.receivingLocationId ? [{ locationId: order.receivingLocationId }] : []),
+      ],
+      allowQuarantine: options?.allowQuarantine,
+    });
   }
 
   private buildCloseResult(
@@ -887,7 +899,12 @@ export class ReceivingService {
     if (variant.unitsPerVariant !== line.unitsPerVariantSnapshot) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_UNIT_CHANGED",
       "The catalog pack changed. Review the receive unit before recording quarantine.");
     this.validateReceiptBaseCounts({ ...line, receivedQty: input.acceptedQty, damagedQty: input.heldQty }, variant.unitsPerVariant);
-    await this.validateLocations(tx, order, [{ putawayLocationId: input.holdingLocationId }]);
+    await this.validateLocations(
+      tx,
+      order,
+      [{ putawayLocationId: input.holdingLocationId }],
+      { allowQuarantine: true, includeOrderReceivingLocation: false },
+    );
     await this.assertReceiptSourceProduct(tx, line, order, variant.productId);
     const sources = await readReceivingSourceResolution(tx, { receivingOrderId: order.id,
       purchaseOrderId: order.purchaseOrderId ?? null, inboundShipmentId: order.inboundShipmentId ?? null,
