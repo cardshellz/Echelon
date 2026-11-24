@@ -16,8 +16,11 @@ import type {
   CanonicalClaimPickerObservationReviewPort,
 } from "../../application/canonical-claim-picker-observation-review.port";
 import {
+  remoteConversionScope,
   selectRemoteConversionsToReplace,
   type RemoteConversionCandidate,
+  type RemoteConversionPick,
+  type RemoteConversionScope,
 } from "../../domain/claim-remote-conversion-replacement";
 import { requirePickableLocation } from "./claim-order-and-locks";
 import {
@@ -323,6 +326,8 @@ type PlannedRemoteConversionReplacement = {
     operationId: bigint;
     operationKey: string;
     warehouseId: number;
+    outputLocationId: number | null;
+    scope: RemoteConversionScope;
     operationType: string;
     committedOutputQty: bigint;
   }[];
@@ -339,13 +344,13 @@ async function planRemoteConversionReplacement(
   client: PoolClient,
   claim: FulfillmentClaim,
   line: FulfillmentClaimLine,
-  pickWarehouseId: number,
+  pick: RemoteConversionPick,
   requiredQty: bigint,
 ): Promise<PlannedRemoteConversionReplacement | null> {
   const operationRows = rows(await client.query(
-    `SELECT id, operation_key, parent_operation_key, warehouse_id, operation_type, status,
-            destination_variant_id, planned_executions, executed_executions,
-            released_executions, committed_output_qty
+    `SELECT id, operation_key, parent_operation_key, warehouse_id, output_location_id,
+            operation_type, status, destination_variant_id, planned_executions,
+            executed_executions, released_executions, committed_output_qty
      FROM inventory.availability_claim_operations
      WHERE claim_id = $1 AND claim_line_id = $2
      ORDER BY operation_key, id
@@ -396,6 +401,9 @@ async function planRemoteConversionReplacement(
       operationKey,
       parentOperationKey: row.parent_operation_key == null ? null : String(row.parent_operation_key),
       warehouseId: positiveInteger(row.warehouse_id, "claimOperation.warehouseId"),
+      outputLocationId: row.output_location_id == null
+        ? null
+        : positiveInteger(row.output_location_id, "claimOperation.outputLocationId"),
       operationType: String(row.operation_type),
       status: String(row.status),
       destinationVariantId: positiveInteger(row.destination_variant_id, "claimOperation.destinationVariantId"),
@@ -418,7 +426,7 @@ async function planRemoteConversionReplacement(
   });
   const selection = selectRemoteConversionsToReplace({
     candidates,
-    pickWarehouseId,
+    pick,
     targetVariantId: line.targetVariantId,
     requiredQty,
   });
@@ -468,15 +476,20 @@ async function planRemoteConversionReplacement(
       allocations: allocations.map(({ allocationId, releaseQty: qty }) => ({ allocationId, releaseQty: qty })),
     };
   });
-  const operations = operationRows
-    .filter((row) => selectedKeys.has(String(row.operation_key)))
-    .map((row) => ({
+  // candidates[index] was built from operationRows[index].
+  const operations = operationRows.flatMap((row, index) => {
+    const candidate = candidates[index];
+    if (!selectedKeys.has(candidate.operationKey)) return [];
+    return [{
       operationId: positiveBigInt(row.id, "claimOperation.id"),
-      operationKey: String(row.operation_key),
-      warehouseId: positiveInteger(row.warehouse_id, "claimOperation.warehouseId"),
-      operationType: String(row.operation_type),
+      operationKey: candidate.operationKey,
+      warehouseId: candidate.warehouseId,
+      outputLocationId: candidate.outputLocationId,
+      scope: remoteConversionScope(candidate, pick),
+      operationType: candidate.operationType,
       committedOutputQty: positiveBigInt(row.committed_output_qty, "claimOperation.committedOutputQty"),
-    }));
+    }];
+  });
   return { operations, releases, replacedTargetQty: selection.replacedTargetQty };
 }
 
@@ -687,8 +700,10 @@ async function replaceRemoteConversionsAtPickLocation(
     }
   }
 
+  // v2 adds each released operation's scope and output bin. Every v1 event
+  // (written before same-warehouse replacement existed) is other_warehouse.
   const evidence = {
-    schemaVersion: "inventory_availability_claim_remote_conversion_replacement_event_v1",
+    schemaVersion: "inventory_availability_claim_remote_conversion_replacement_event_v2",
     eventType: "claim_remote_conversion_replaced",
     claimId: input.claim.id.toString(),
     claimLineId: input.line.id.toString(),
@@ -701,6 +716,8 @@ async function replaceRemoteConversionsAtPickLocation(
     releasedOperations: replacement.operations.map((operation) => ({
       operationKey: operation.operationKey,
       warehouseId: operation.warehouseId,
+      scope: operation.scope,
+      outputLocationId: operation.outputLocationId,
       operationType: operation.operationType,
       committedOutputQty: operation.committedOutputQty.toString(),
     })),
@@ -760,9 +777,10 @@ export async function reconcilePickLocation(
     input.warehouseLocationId,
     input.orderWarehouseId,
   );
-  // A line whose only remaining supply is a conversion in another warehouse has
-  // no finished units to move here. Replace that conversion with the finished
-  // units picked from this bin (see claim-remote-conversion-replacement.ts).
+  // A line whose only remaining supply is a conversion that cannot produce into
+  // this bin (planned in another warehouse, or in this one without this bin as
+  // its output) has no finished units to move here. Replace that conversion with
+  // the finished units picked from this bin (see claim-remote-conversion-replacement.ts).
   // Mixed lines keep the existing rebind and its shortfall error.
   const directOpenElsewhere = input.line.resources
     .filter((resource) => resource.warehouseLocationId !== input.warehouseLocationId)
@@ -772,7 +790,7 @@ export async function reconcilePickLocation(
       client,
       input.claim,
       input.line,
-      targetWarehouseId,
+      { warehouseId: targetWarehouseId, warehouseLocationId: input.warehouseLocationId },
       input.quantity,
     );
     if (replacement) {
