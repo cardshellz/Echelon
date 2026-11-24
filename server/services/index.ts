@@ -79,6 +79,7 @@ import { AssemblyPackingRepository } from "../modules/warehouse/work/infrastruct
 import { createOrderCombiningService } from "../modules/orders/runtime-services.api";
 import { createOperationsDashboardService } from "../modules/orders/runtime-services.api";
 import {
+  createPutawayService,
   createReceiptReversalService,
   createReceiveValidationService,
   createReceivingService,
@@ -648,6 +649,14 @@ export function createServices(
       await inventoryCore.publishInventoryChange(transfer.productVariantId, "transfer");
     },
   }, () => new Date());
+  const putaway = createPutawayService(
+    db,
+    procurementStorage,
+    inventoryCore,
+    channelSync,
+    replenishment,
+    picking,
+  );
   const interwarehouseTransfers = new InterwarehouseTransferService(db, inventoryCore, {
     deliver: async event => {
       await inventoryCore.publishInventoryChange(event.productVariantId, `interwarehouse-transfer:${event.eventType}`);
@@ -875,6 +884,7 @@ export function createServices(
     cycleCount,
     operationsDashboard,
     receiving,
+    putaway,
     receiptReversal,
     receiveValidation,
     productImport,

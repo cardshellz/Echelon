@@ -125,6 +125,28 @@ export function registerReceivingRoutes(app: Express) {
     }
   });
 
+  app.get("/api/receiving/putaway-queue", requireReceivingRead, async (req, res) => {
+    try {
+      const { putaway: putawayService } = req.app.locals.services;
+      if (!putawayService) {
+        return res.status(503).json({ error: "Putaway service is unavailable" });
+      }
+      const warehouseIdRaw = req.query.warehouseId;
+      const warehouseId =
+        warehouseIdRaw !== undefined && warehouseIdRaw !== "" && warehouseIdRaw !== "all"
+          ? parseInt(String(warehouseIdRaw), 10)
+          : null;
+      const items = await putawayService.listPendingPutawayQueue(
+        warehouseId !== null && Number.isFinite(warehouseId) && warehouseId > 0 ? warehouseId : null,
+      );
+      res.json(items);
+    } catch (error: any) {
+      if (error?.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
+      logger.error("procurement.receiving_routes", { message: "Error fetching putaway queue:", error });
+      res.status(500).json({ error: "Failed to fetch putaway queue" });
+    }
+  });
+
   app.get("/api/receiving/:id", requireReceivingRead, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -225,11 +247,18 @@ export function registerReceivingRoutes(app: Express) {
         message: result.unitsReceived ? `${result.unitsReceived} units received` : undefined,
         data: { receivingOrderId: parseInt(req.params.id) },
       }).catch(() => {});
-      const { replenishment: rcvReplen } = req.app.locals.services;
-      if (rcvReplen && result.putawayLocationIds?.length) {
-        for (const locId of result.putawayLocationIds) {
-          rcvReplen.checkReplenForLocation(locId).catch((err: any) =>
-            logger.warn("procurement.receiving_routes", { message: `[Replen] Post-receiving check failed for loc ${locId}:`, error: err })
+      const { replenishment: rcvReplen, picking: rcvPicking } = req.app.locals.services;
+      if (rcvReplen && Array.isArray((result as any).expressPutawayProductIds)) {
+        for (const productId of (result as any).expressPutawayProductIds as number[]) {
+          rcvReplen.reevaluateReplenForProduct(productId).catch((err: any) =>
+            logger.warn("procurement.receiving_routes", { message: `[Replen] Post-receiving reevaluate failed for product ${productId}:`, error: err }),
+          );
+        }
+      }
+      if (rcvPicking && Array.isArray((result as any).expressPutawayVariantIds)) {
+        for (const variantId of (result as any).expressPutawayVariantIds as number[]) {
+          rcvPicking.wakeShortedExceptionOrdersForVariant(variantId, "receive_express").catch((err: any) =>
+            logger.warn("procurement.receiving_routes", { message: `[Picking] Post-receiving order wakeup failed for variant ${variantId}:`, error: err }),
           );
         }
       }
@@ -290,6 +319,46 @@ export function registerReceivingRoutes(app: Express) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       logger.error("procurement.receiving_routes", { message: "Error updating receiving line:", error: error });
       res.status(500).json({ error: "Failed to update receiving line" });
+    }
+  });
+
+  app.post("/api/receiving/lines/:lineId/split", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.lineId, 10);
+      const { receiving: rcvService } = req.app.locals.services;
+      const result = await rcvService.splitLine(lineId, req.body ?? {}, req.session.user?.id ?? null);
+      res.json(result);
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
+      logger.error("procurement.receiving_routes", { message: "Error splitting receiving line:", error });
+      res.status(500).json({ error: "Failed to split receiving line" });
+    }
+  });
+
+  app.post("/api/receiving/lines/:lineId/putaway", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.lineId, 10);
+      const { putaway: putawayService } = req.app.locals.services;
+      if (!putawayService) {
+        return res.status(503).json({ error: "Putaway service is unavailable" });
+      }
+      const headerKey = req.header("Idempotency-Key")?.trim();
+      const result = await putawayService.executeLinePutaway({
+        receivingLineId: lineId,
+        toLocationId: Number(req.body?.toLocationId),
+        qty: req.body?.qty !== undefined ? Number(req.body.qty) : undefined,
+        method: req.body?.method === "scan" ? "scan" : "manual",
+        userId: req.session.user?.id ?? null,
+        commandKey: typeof req.body?.commandKey === "string" && req.body.commandKey.trim()
+          ? req.body.commandKey.trim()
+          : headerKey || undefined,
+        reconcileAlreadyMoved: req.body?.reconcileAlreadyMoved === true,
+      });
+      res.json(result);
+    } catch (error: any) {
+      if (error?.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
+      logger.error("procurement.receiving_routes", { message: "Error executing line putaway:", error });
+      res.status(500).json({ error: error?.message || "Failed to execute putaway" });
     }
   });
 

@@ -125,7 +125,14 @@ export function resolveReceivingSources(input: {
   return resolved;
 }
 
-export interface ReceivingLocationEvidence { id: number; warehouseId: number; isActive: number }
+const DISALLOWED_RECEIVING_LOCATION_TYPES = new Set(["in_transit", "3pl_virtual", "quarantine"]);
+
+export interface ReceivingLocationEvidence {
+  id: number;
+  warehouseId: number;
+  isActive: number;
+  locationType?: string | null;
+}
 export function assertReceivingLocations(input: {
   receivingOrderId: number;
   warehouseId: number | null;
@@ -147,6 +154,11 @@ export function assertReceivingLocations(input: {
       message: "A receipt location is missing or inactive. Review the affected line or default location." });
     else if (location.warehouseId !== input.warehouseId) issues.push({ ...context, code: "RECEIVING_LOCATION_WAREHOUSE_MISMATCH",
       message: "A receipt location belongs to another warehouse. Review existing line locations before changing the warehouse or closing." });
+    else if (location.locationType && DISALLOWED_RECEIVING_LOCATION_TYPES.has(location.locationType)) issues.push({
+      ...context,
+      code: "RECEIVING_LOCATION_UNAVAILABLE",
+      message: "A receipt location cannot be a virtual, transit, or quarantine holding location.",
+    });
   }
   if (issues.length) throw new ReceivingCloseIntegrityError(input.receivingOrderId, issues);
 }

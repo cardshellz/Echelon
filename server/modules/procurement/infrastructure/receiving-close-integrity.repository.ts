@@ -35,10 +35,81 @@ export async function validateReceivingLocations(tx: ReceivingIntegrityTransacti
   const warehouses = input.warehouseId ? z.array(z.object({ isActive: z.number().int() })).max(1).parse((await tx.execute(sql`
     SELECT is_active AS "isActive" FROM warehouse.warehouses WHERE id=${input.warehouseId} FOR SHARE`)).rows) : [];
   const ids = [...new Set(input.references.map((reference) => reference.locationId))].sort((a, b) => a-b);
-  const locations = ids.length ? z.array(z.object({ id, warehouseId: id, isActive: z.number().int() })).parse((await tx.execute(sql`
-    SELECT id,warehouse_id AS "warehouseId",is_active AS "isActive" FROM warehouse.warehouse_locations
+  const locations = ids.length ? z.array(z.object({
+    id,
+    warehouseId: id,
+    isActive: z.number().int(),
+    locationType: z.string().nullable().optional(),
+  })).parse((await tx.execute(sql`
+    SELECT id,warehouse_id AS "warehouseId",is_active AS "isActive",location_type AS "locationType" FROM warehouse.warehouse_locations
     WHERE id IN (${sql.join(ids.map((value) => sql`${value}`), sql`,`)}) ORDER BY id FOR SHARE`)).rows) : [];
   assertReceivingLocations({ ...input, warehouseActive: warehouses[0]?.isActive ?? null, locations });
+}
+
+export async function readDefaultWarehouseReceivingDock(
+  tx: ReceivingIntegrityTransaction,
+  warehouseId: number | null | undefined,
+  lock = false,
+): Promise<number | null> {
+  if (!warehouseId) return null;
+  const query = lock
+    ? sql`
+        SELECT id
+        FROM warehouse.warehouse_locations
+        WHERE warehouse_id = ${warehouseId}
+          AND is_active = 1
+          AND location_type = 'receiving'
+        ORDER BY
+          CASE
+            WHEN UPPER(code) = 'RCV-DOCK' THEN 0
+            WHEN UPPER(code) LIKE 'RCV%' OR UPPER(code) LIKE 'DOCK%' THEN 1
+            ELSE 2
+          END,
+          id ASC
+        LIMIT 1
+        FOR SHARE
+      `
+    : sql`
+        SELECT id
+        FROM warehouse.warehouse_locations
+        WHERE warehouse_id = ${warehouseId}
+          AND is_active = 1
+          AND location_type = 'receiving'
+        ORDER BY
+          CASE
+            WHEN UPPER(code) = 'RCV-DOCK' THEN 0
+            WHEN UPPER(code) LIKE 'RCV%' OR UPPER(code) LIKE 'DOCK%' THEN 1
+            ELSE 2
+          END,
+          id ASC
+        LIMIT 1
+      `;
+  const result = await tx.execute(query);
+  const first = result.rows?.[0] as { id?: unknown } | undefined;
+  const parsed = Number(first?.id);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+export async function readReceivingLocationTypes(
+  tx: ReceivingIntegrityTransaction,
+  locationIds: readonly number[],
+): Promise<Map<number, string | null>> {
+  const ids = [...new Set(locationIds.filter((val) => Number.isInteger(val) && val > 0))].sort((a, b) => a - b);
+  if (ids.length === 0) return new Map();
+  const result = await tx.execute(sql`
+    SELECT id, location_type AS "locationType"
+    FROM warehouse.warehouse_locations
+    WHERE id IN (${sql.join(ids.map((val) => sql`${val}`), sql`,`)})
+  `);
+  const map = new Map<number, string | null>();
+  for (const row of result.rows ?? []) {
+    const typed = row as { id?: unknown; locationType?: unknown };
+    const locId = Number(typed.id);
+    if (Number.isInteger(locId) && locId > 0) {
+      map.set(locId, typeof typed.locationType === "string" ? typed.locationType : null);
+    }
+  }
+  return map;
 }
 
 /** Location defaults are advisory, but their variant and destination must be

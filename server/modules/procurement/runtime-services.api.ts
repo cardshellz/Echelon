@@ -41,6 +41,13 @@ export {
   createReceivingService,
 } from "./application/receiving.service";
 export {
+  PutawayError,
+  PutawayService,
+  createPutawayService,
+  type PutawayQueueItem,
+  type PutawaySuggestionReason,
+} from "./application/putaway.service";
+export {
   ReceiptReversalService,
   createReceiptReversalService,
 } from "./application/receipt-reversal.service";

@@ -8,7 +8,14 @@ import { receivingEntryLineFields } from "@shared/procurement/receiving-entry-co
 import { enqueueReceiptCostRequests, processReceiptCostRequests } from "./receipt-cost-queue.service";
 import { RECEIPT_COST_RECOVERY_ACTOR } from "../domain/receipt-cost-recovery.domain";
 import { lockInventoryCostGraph } from "../../inventory/cost-evidence.repository.api";
-import { readReceivingSourceResolution, validateReceivingLocations, type ReceivingIntegrityTransaction } from "../infrastructure/receiving-close-integrity.repository";
+import {
+  readDefaultWarehouseReceivingDock,
+  readPrimaryReceivingLocations,
+  readReceivingLocationTypes,
+  readReceivingSourceResolution,
+  validateReceivingLocations,
+  type ReceivingIntegrityTransaction,
+} from "../infrastructure/receiving-close-integrity.repository";
 import {
   assertNoReceivingCustodyHistory, assertReceivingQuarantineLineEditable,
   readReceiptCustodyPresence, completeReceivingQuarantineAcceptances,
@@ -567,6 +574,11 @@ export class ReceivingService {
     lines: any[],
     putawayLocationIds?: number[],
     poReconciliation?: ReceivingCloseReconciliation,
+    extra?: {
+      dockStagedCount?: number;
+      expressPutawayVariantIds?: number[];
+      expressPutawayProductIds?: number[];
+    },
   ) {
     const receivedLines = lines.filter((line: any) => (line.receivedQty || 0) > 0);
     const locationIds = putawayLocationIds ?? Array.from(new Set(
@@ -574,6 +586,9 @@ export class ReceivingService {
         .map((line: any) => line.putawayLocationId)
         .filter((id: any) => typeof id === "number"),
     ));
+    const dockStagedCount =
+      extra?.dockStagedCount ??
+      receivedLines.filter((line: any) => (Number(line.putawayComplete) || 0) === 0).length;
 
     return {
       success: true,
@@ -584,6 +599,9 @@ export class ReceivingService {
         0,
       ),
       putawayLocationIds: locationIds,
+      dockStagedCount,
+      expressPutawayVariantIds: extra?.expressPutawayVariantIds ?? [],
+      expressPutawayProductIds: extra?.expressPutawayProductIds ?? [],
       poReconciliation,
     };
   }
@@ -1464,6 +1482,256 @@ export class ReceivingService {
     return { ...updated, lines: lines.map(withReceivingUnitVersion), vendor };
   }
 
+  // ─── Split Uneven Case + Loose Remainder Line ─────────────────
+
+  async splitLine(
+    lineId: number,
+    input: {
+      packVariantId: number;
+      packCount: number;
+      remainderVariantId: number;
+      remainderReceivedQty?: number;
+      packPutawayLocationId?: number | null;
+      remainderPutawayLocationId?: number | null;
+      expectedUnitVersion: string;
+    },
+    actorId: string | null,
+  ) {
+    if (!actorId?.trim()) {
+      throw new ReceivingError("An authenticated actor is required to split a receipt line.", 401);
+    }
+    const packVariantId = receiptInteger(input?.packVariantId, "Pack variant ID", true);
+    const packCount = receiptInteger(input?.packCount, "Pack count", true);
+    const remainderVariantId = receiptInteger(input?.remainderVariantId, "Remainder variant ID", true);
+    if (packVariantId === remainderVariantId) {
+      throw new ReceivingError("Select two different pack sizes when splitting Cases + Loose Remainder.", 400, {
+        code: "INVALID_RECEIVING_SPLIT_VARIANTS",
+      });
+    }
+    const expectedUnitVersion = input?.expectedUnitVersion;
+    if (typeof expectedUnitVersion !== "string" || !/^[a-f0-9]{64}$/.test(expectedUnitVersion)) {
+      throw new ReceivingError("Refresh and review the current receipt units before splitting.", 409, {
+        code: "RECEIVING_UNIT_VERSION_REQUIRED",
+      });
+    }
+
+    const result = await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
+      const { line, order } = await this.lockReceivingLineAndOrder(tx, lineId);
+      this.assertReceivingOrderMutable(order);
+      await assertNoReceivingCustodyHistory(tx, { receivingLineId: lineId });
+      if (line.putawayComplete === 1) {
+        throw new ReceivingError("A put-away receiving line cannot be split.", 409, {
+          code: "PUTAWAY_RECEIVING_LINE_IMMUTABLE",
+          receivingLineId: lineId,
+        });
+      }
+      if (receivingUnitVersion(line) !== expectedUnitVersion) {
+        throw new ReceivingError(
+          "Receipt counts or units changed. Refresh, review the current line, and split again.",
+          409,
+          { code: "RECEIVING_UNIT_VERSION_CONFLICT", receivingLineId: lineId },
+        );
+      }
+      if (Number(line.damagedQty) > 0) {
+        throw new ReceivingError(
+          "Resolve or clear damaged counts before splitting this receipt line.",
+          409,
+          { code: "RECEIVING_SPLIT_DAMAGED_CONFLICT", receivingLineId: lineId },
+        );
+      }
+      if (line.unitsPerVariantSnapshot == null) {
+        throw new ReceivingError(
+          "Confirm the receive unit on this legacy line before splitting.",
+          409,
+          { code: "RECEIVING_UNIT_CONFIRMATION_REQUIRED", receivingLineId: lineId },
+        );
+      }
+
+      const packVariant = await this.loadReceiveVariant(tx, packVariantId, line.productId);
+      const remainderVariant = await this.loadReceiveVariant(tx, remainderVariantId, packVariant.productId);
+      await this.assertReceiptSourceProduct(tx, line, order, packVariant.productId);
+
+      if (packVariant.unitsPerVariant <= remainderVariant.unitsPerVariant) {
+        throw new ReceivingError(
+          "The case/pack configuration must hold more pieces than the loose remainder configuration.",
+          400,
+          {
+            code: "INVALID_RECEIVING_SPLIT_HIERARCHY",
+            packUnits: packVariant.unitsPerVariant,
+            remainderUnits: remainderVariant.unitsPerVariant,
+          },
+        );
+      }
+
+      const currentFactor = receiptInteger(line.unitsPerVariantSnapshot, "Current receive pack size", true);
+      const totalExpectedBase = receiptInteger(Number(line.expectedQty || 0) * currentFactor, "Expected pieces");
+      const totalCurrentReceivedBase = receiptInteger(Number(line.receivedQty || 0) * currentFactor, "Received pieces");
+      const packPieces = receiptInteger(packCount * packVariant.unitsPerVariant, "Case pieces", true);
+
+      let packExpectedQty = 0;
+      let remainderExpectedQty = 0;
+      if (totalExpectedBase > 0) {
+        if (packPieces > totalExpectedBase) {
+          throw new ReceivingError(
+            `Splitting ${packCount} × ${packVariant.unitsPerVariant} (${packPieces} pieces) exceeds the line's expected ${totalExpectedBase} pieces.`,
+            400,
+            {
+              code: "RECEIVING_SPLIT_EXCEEDS_EXPECTED",
+              packPieces,
+              totalExpectedBase,
+            },
+          );
+        }
+        const remainderExpectedBase = totalExpectedBase - packPieces;
+        if (remainderExpectedBase % remainderVariant.unitsPerVariant !== 0) {
+          throw new ReceivingError(
+            `Remaining ${remainderExpectedBase} expected pieces cannot be represented in packs of ${remainderVariant.unitsPerVariant}.`,
+            409,
+            {
+              code: "RECEIVING_UNIT_CONVERSION_INEXACT",
+              remainderExpectedBase,
+              remainderUnits: remainderVariant.unitsPerVariant,
+            },
+          );
+        }
+        packExpectedQty = packCount;
+        remainderExpectedQty = remainderExpectedBase / remainderVariant.unitsPerVariant;
+      }
+
+      let remainderReceivedQty: number;
+      if (input.remainderReceivedQty !== undefined) {
+        remainderReceivedQty = receiptInteger(input.remainderReceivedQty, "Remainder received count");
+      } else if (totalCurrentReceivedBase > packPieces) {
+        const leftoverReceivedBase = totalCurrentReceivedBase - packPieces;
+        if (leftoverReceivedBase % remainderVariant.unitsPerVariant !== 0) {
+          throw new ReceivingError(
+            "Provide an explicit remainder received count for the loose configuration.",
+            400,
+            { code: "RECEIVING_SPLIT_REMAINDER_REQUIRED" },
+          );
+        }
+        remainderReceivedQty = leftoverReceivedBase / remainderVariant.unitsPerVariant;
+      } else {
+        remainderReceivedQty = remainderExpectedQty;
+      }
+
+      this.validateReceiptBaseCounts(
+        { expectedQty: packExpectedQty, receivedQty: packCount, damagedQty: 0 },
+        packVariant.unitsPerVariant,
+      );
+      this.validateReceiptBaseCounts(
+        { expectedQty: remainderExpectedQty, receivedQty: remainderReceivedQty, damagedQty: 0 },
+        remainderVariant.unitsPerVariant,
+      );
+
+      const primaryLocations = await readPrimaryReceivingLocations(tx, order.warehouseId, [
+        packVariant.id,
+        remainderVariant.id,
+      ]);
+      const resolvedPackLocationId =
+        input.packPutawayLocationId !== undefined
+          ? normalizeOptionalPositiveId(input.packPutawayLocationId, "packPutawayLocationId")
+          : (line.putawayLocationId ?? primaryLocations.get(packVariant.id) ?? order.receivingLocationId ?? null);
+      const resolvedRemainderLocationId =
+        input.remainderPutawayLocationId !== undefined
+          ? normalizeOptionalPositiveId(input.remainderPutawayLocationId, "remainderPutawayLocationId")
+          : (primaryLocations.get(remainderVariant.id) ?? line.putawayLocationId ?? order.receivingLocationId ?? null);
+
+      const locationsToValidate = [resolvedPackLocationId, resolvedRemainderLocationId]
+        .filter((locId): locId is number => typeof locId === "number" && locId > 0)
+        .map((locationId) => ({ putawayLocationId: locationId }));
+      if (locationsToValidate.length > 0) {
+        await this.validateLocations(tx, order, locationsToValidate);
+      }
+
+      const packCatalogVariant = await this.storage.getProductVariantById?.(packVariant.id, tx);
+      const remainderCatalogVariant = await this.storage.getProductVariantById?.(remainderVariant.id, tx);
+      const now = this.clock();
+
+      const updatedPackLine = await this.storage.updateReceivingLine(
+        lineId,
+        {
+          productId: packVariant.productId,
+          productVariantId: packVariant.id,
+          sku: packVariant.sku ?? packCatalogVariant?.sku ?? line.sku,
+          productName: packCatalogVariant?.name ? `${line.productName || packCatalogVariant.name}` : line.productName,
+          barcode: packCatalogVariant?.barcode ?? line.barcode ?? null,
+          unitsPerVariantSnapshot: packVariant.unitsPerVariant,
+          expectedQty: packExpectedQty,
+          receivedQty: packCount,
+          damagedQty: 0,
+          putawayLocationId: resolvedPackLocationId,
+          status: this.receivingLineStatus(packCount, packExpectedQty),
+          updatedAt: now,
+        },
+        tx,
+      );
+
+      const createdRemainderLine = await this.storage.createReceivingLine(
+        {
+          receivingOrderId: order.id,
+          productId: remainderVariant.productId,
+          productVariantId: remainderVariant.id,
+          sku: remainderVariant.sku ?? remainderCatalogVariant?.sku ?? line.sku,
+          productName: line.productName ?? remainderCatalogVariant?.name ?? null,
+          barcode: remainderCatalogVariant?.barcode ?? null,
+          unitsPerVariantSnapshot: remainderVariant.unitsPerVariant,
+          expectedQty: remainderExpectedQty,
+          receivedQty: remainderReceivedQty,
+          damagedQty: 0,
+          purchaseOrderLineId: line.purchaseOrderLineId ?? null,
+          inboundShipmentLineId: line.inboundShipmentLineId ?? null,
+          unitCost: line.unitCost ?? null,
+          unitCostMills: line.unitCostMills ?? null,
+          costSourceKind: line.costSourceKind ?? null,
+          costSourceEvidence: line.costSourceEvidence ?? null,
+          putawayLocationId: resolvedRemainderLocationId,
+          putawayComplete: 0,
+          status: this.receivingLineStatus(remainderReceivedQty, remainderExpectedQty),
+          notes: line.notes
+            ? `${line.notes} (Split remainder from line #${lineId})`
+            : `Split remainder from line #${lineId}`,
+          createdAt: now,
+          updatedAt: now,
+        },
+        tx,
+      );
+
+      const allLines = await this.updateReceivingOrderTotals(order.id, tx);
+      const updatedOrder = await this.storage.getReceivingOrderById(order.id, tx);
+      await insertAuditEventSql(tx, {
+        timestamp: now,
+        actor: actorId,
+        action: "procurement.receiving.line_split",
+        target: `receiving-line:${lineId}`,
+        changesJson: JSON.stringify({
+          before: line,
+          after: { packLine: updatedPackLine, remainderLine: createdRemainderLine },
+        }),
+        contextJson: JSON.stringify({
+          receivingOrderId: order.id,
+          sourceReceivingLineId: lineId,
+          remainderReceivingLineId: createdRemainderLine.id,
+        }),
+      });
+
+      return {
+        order: updatedOrder,
+        lines: allLines,
+        packLine: updatedPackLine,
+        remainderLine: createdRemainderLine,
+      };
+    });
+
+    const vendor = result.order?.vendorId ? await this.storage.getVendorById(result.order.vendorId) : null;
+    return {
+      order: { ...result.order, lines: result.lines.map(withReceivingUnitVersion), vendor },
+      packLine: withReceivingUnitVersion(result.packLine),
+      remainderLine: withReceivingUnitVersion(result.remainderLine),
+    };
+  }
+
   // ─── Close ────────────────────────────────────────────────────
 
   async close(orderId: number, userId: string | null, options: { allowOverReceipt?: boolean } = {}) {
@@ -1512,16 +1780,54 @@ export class ReceivingService {
     // shipment, or the PO quantity itself was entered wrong. Warn-with-override:
     // the client shows the discrepancy and retries with allowOverReceipt once
     // the operator confirms. Blind/PO-direct receipts are exempt — their
-    // expected quantities are advisory.
+    // expected quantities are advisory. When a shipment line was split across
+    // Case + Loose Remainder receipt lines, compare summed base pieces across
+    // the shared inboundShipmentLineId so exact splits never false-positive.
     if (order.sourceType === "shipment" && !options.allowOverReceipt) {
-      const overLines = lines
-        .filter((line: any) => (Number(line.receivedQty) || 0) > (Number(line.expectedQty) || 0))
-        .map((line: any) => ({
-          lineId: line.id,
-          sku: line.sku ?? null,
-          expectedQty: Number(line.expectedQty) || 0,
-          receivedQty: Number(line.receivedQty) || 0,
-        }));
+      const sharedShipmentCounts = new Map<number, number>();
+      for (const line of lines) {
+        if (line.inboundShipmentLineId != null) {
+          sharedShipmentCounts.set(
+            Number(line.inboundShipmentLineId),
+            (sharedShipmentCounts.get(Number(line.inboundShipmentLineId)) ?? 0) + 1,
+          );
+        }
+      }
+      const overLines: Array<{ lineId: number; sku: string | null; expectedQty: number; receivedQty: number }> = [];
+      const checkedSharedIds = new Set<number>();
+      for (const line of lines) {
+        const shipLineId = line.inboundShipmentLineId != null ? Number(line.inboundShipmentLineId) : null;
+        if (shipLineId !== null && (sharedShipmentCounts.get(shipLineId) ?? 0) > 1) {
+          if (checkedSharedIds.has(shipLineId)) continue;
+          checkedSharedIds.add(shipLineId);
+          const group = lines.filter((candidate: any) => Number(candidate.inboundShipmentLineId) === shipLineId);
+          const expectedBase = group.reduce(
+            (sum: number, candidate: any) =>
+              sum + (Number(candidate.expectedQty) || 0) * (Number(candidate.unitsPerVariantSnapshot) || 1),
+            0,
+          );
+          const receivedBase = group.reduce(
+            (sum: number, candidate: any) =>
+              sum + (Number(candidate.receivedQty) || 0) * (Number(candidate.unitsPerVariantSnapshot) || 1),
+            0,
+          );
+          if (receivedBase > expectedBase) {
+            overLines.push({
+              lineId: line.id,
+              sku: line.sku ?? null,
+              expectedQty: expectedBase,
+              receivedQty: receivedBase,
+            });
+          }
+        } else if ((Number(line.receivedQty) || 0) > (Number(line.expectedQty) || 0)) {
+          overLines.push({
+            lineId: line.id,
+            sku: line.sku ?? null,
+            expectedQty: Number(line.expectedQty) || 0,
+            receivedQty: Number(line.receivedQty) || 0,
+          });
+        }
+      }
       if (overLines.length > 0) {
         throw new ReceivingError(
           "Received quantity exceeds what this shipment expects for this PO. The overage may belong to another PO on this shipment, or the PO quantity is wrong. Confirm to close anyway.",
@@ -1535,19 +1841,27 @@ export class ReceivingService {
       }
     }
 
+    // Resolve default receiving dock (`RCV-DOCK`) if any counted line omitted putawayLocationId
+    const needsDockFallback = lines.some((l: any) => l.receivedQty > 0 && !l.putawayLocationId);
+    const preCloseDockFallbackId = needsDockFallback
+      ? (order.receivingLocationId ?? await readDefaultWarehouseReceivingDock(this.db, order.warehouseId))
+      : null;
+
     // Block close if any received lines are still missing required data
-    const unresolvable = lines.filter((l: any) => l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId));
+    const unresolvable = lines.filter(
+      (l: any) => l.receivedQty > 0 && (!l.productVariantId || (!l.putawayLocationId && !preCloseDockFallbackId)),
+    );
     if (unresolvable.length > 0) {
       const issues = unresolvable.map((l: any) => ({
         lineId: l.id,
         sku: l.sku || "(no SKU)",
         missingVariant: !l.productVariantId,
-        missingLocation: !l.putawayLocationId,
+        missingLocation: !l.putawayLocationId && !preCloseDockFallbackId,
       }));
       throw new ReceivingError(
         `${unresolvable.length} received line(s) cannot be processed`,
         400,
-        { issues, hint: "Link SKUs to product variants and assign putaway locations before closing." },
+        { issues, hint: "Link SKUs to product variants and assign putaway locations (or configure a warehouse receiving dock) before closing." },
       );
     }
 
@@ -1556,7 +1870,10 @@ export class ReceivingService {
     const batchId = `RCV-${orderId}-${closeAt.getTime()}`;
     let totalReceived = 0;
     let linesReceived = 0;
+    let dockStagedCount = 0;
     const receivedVariantIds = new Set<number>();
+    const expressPutawayVariantIds = new Set<number>();
+    const expressPutawayProductIds = new Set<number>();
     const putawayLocationIds = new Set<number>();
     const postCommitInventoryEffects: Array<() => Promise<void>> = [];
     const receivedPurchaseOrderLineIds = new Set<number>();
@@ -1593,6 +1910,24 @@ export class ReceivingService {
         );
       }
       lines = lockedLines;
+      // Assign verified warehouse receiving dock (`RCV-DOCK`) to any counted line without putawayLocationId
+      if (lines.some((line: any) => (Number(line.receivedQty) || 0) > 0 && !line.putawayLocationId)) {
+        const txDockFallbackId =
+          order.receivingLocationId ?? await readDefaultWarehouseReceivingDock(tx, order.warehouseId, true);
+        if (!txDockFallbackId) {
+          throw new ReceivingError(
+            "Received line(s) require a putaway location or an active warehouse receiving dock.",
+            400,
+            { code: "RECEIVING_LOCATION_REQUIRED", receivingOrderId: orderId },
+          );
+        }
+        for (const line of lines) {
+          if ((Number(line.receivedQty) || 0) > 0 && !line.putawayLocationId) {
+            await this.storage.updateReceivingLine(line.id, { putawayLocationId: txDockFallbackId }, tx);
+            line.putawayLocationId = txDockFallbackId;
+          }
+        }
+      }
       // Match the receiving/reversal order before taking inventory locks.
       // Source evidence and physical receipt links use these PO rows.
       if (order.purchaseOrderId) {
@@ -1620,6 +1955,20 @@ export class ReceivingService {
         await this.assertReceiptSourceProduct(tx, line, order, variant.productId);
       }
       await this.validateLocations(tx, order, lines);
+      const locationTypes = await readReceivingLocationTypes(
+        tx,
+        lines
+          .filter((line: any) => (Number(line.receivedQty) || 0) > 0 && line.putawayLocationId)
+          .map((line: any) => Number(line.putawayLocationId)),
+      );
+      const acceptanceRows = await tx.execute(
+        sql`SELECT receiving_line_id FROM procurement.receiving_quarantine_acceptances WHERE receiving_order_id = ${orderId}`,
+      );
+      const quarantineAcceptanceLineIds = new Set<number>(
+        (acceptanceRows.rows ?? [])
+          .map((row: any) => Number(row.receiving_line_id))
+          .filter((val: number) => Number.isInteger(val) && val > 0),
+      );
       const sources = await readReceivingSourceResolution(tx, {
         receivingOrderId: orderId, purchaseOrderId: order.purchaseOrderId ?? null, inboundShipmentId: order.inboundShipmentId ?? null,
         lines: lines.map((line: any) => ({ id: line.id, productId: receiveVariants.get(line.productVariantId)?.productId ?? line.productId ?? null,
@@ -1778,14 +2127,15 @@ export class ReceivingService {
           receivedPurchaseOrderLineIds.add(Number(line.purchaseOrderLineId));
         }
 
-        // Mark line as put away and persist the resolved PER-PIECE (base-unit) cost
-        // on the receiving_line — that's the PO/AP unit, so the line still reconciles
-        // against the PO line cost (unchanged from before this fix). The LOT above is
-        // stamped per VARIANT unit (× units_per_variant) for valuation/COGS; line and
-        // lot are intentionally in different units. Only write when resolved
-        // (don't overwrite null → 0 on a costless receipt).
+        // Mark line as put away only when posted directly to a non-receiving bin
+        // (1-step express shortcut) or when governed by a quarantine acceptance.
+        // Lines posted to a `receiving` dock bin (`RCV-DOCK`) stay `putawayComplete = 0`
+        // so they populate the Directed Putaway Queue until physically transferred.
+        const isDockStaging =
+          locationTypes.get(Number(line.putawayLocationId)) === "receiving" &&
+          !quarantineAcceptanceLineIds.has(Number(line.id));
         const lineUpdates: Record<string, unknown> = {
-          putawayComplete: 1,
+          putawayComplete: isDockStaging ? 0 : 1,
           status: this.getClosedReceivingLineStatus(line),
         };
         if (typeof unitCostCents === "number") {
@@ -1800,6 +2150,15 @@ export class ReceivingService {
         linesReceived++;
         receivedVariantIds.add(line.productVariantId);
         putawayLocationIds.add(line.putawayLocationId);
+        if (isDockStaging) {
+          dockStagedCount++;
+        } else {
+          expressPutawayVariantIds.add(Number(line.productVariantId));
+          const resolvedProductId = receiveVariants.get(Number(line.productVariantId))?.productId ?? line.productId;
+          if (resolvedProductId != null && Number.isInteger(Number(resolvedProductId))) {
+            expressPutawayProductIds.add(Number(resolvedProductId));
+          }
+        }
       }
     }
 
@@ -1882,7 +2241,14 @@ export class ReceivingService {
     }
 
     const costReconciliation = await this.retryCosts(orderId, userId);
-    return { ...this.buildCloseResult(updated, closedLines, Array.from(putawayLocationIds), poReconciliation), costReconciliation };
+    return {
+      ...this.buildCloseResult(updated, closedLines, Array.from(putawayLocationIds), poReconciliation, {
+        dockStagedCount,
+        expressPutawayVariantIds: Array.from(expressPutawayVariantIds),
+        expressPutawayProductIds: Array.from(expressPutawayProductIds),
+      }),
+      costReconciliation,
+    };
   }
 
   async retryCosts(orderId: number, userId: string | null) {

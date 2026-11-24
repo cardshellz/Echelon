@@ -29,6 +29,7 @@ import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitContr
 import { ReceivingCountControl } from "@/components/purchasing/ReceivingCountControl";
 import { ReceivingQuarantineRecoveryNotice } from "@/components/purchasing/ReceivingQuarantineRecoveryNotice";
 import { ReceivingQuarantinePanel } from "@/components/purchasing/ReceivingQuarantinePanel";
+import { PutawayQueuePanel, type PutawayQueueItemDto } from "@/components/purchasing/PutawayQueuePanel";
 import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, receivingBaseQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
 import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -98,7 +99,9 @@ import {
   MapPin,
   Building2,
   ChevronsUpDown,
-  ArrowLeft
+  ArrowLeft,
+  ScanBarcode,
+  Split
 } from "lucide-react";
 
 interface Vendor {
@@ -306,6 +309,15 @@ export default function Receiving() {
   // Resolution UI state
   const [resolvingLine, setResolvingLine] = useState<ReceivingLine | null>(null);
   const [countDrafts, setCountDrafts] = useState<Record<number, { value: string; line: ReceivingLine }>>({});
+  const [savingLineIds, setSavingLineIds] = useState<Record<number, boolean>>({});
+  const [receiptScanInput, setReceiptScanInput] = useState("");
+  const [splitTarget, setSplitTarget] = useState<{
+    line: ReceivingLine;
+    packVariantId: string;
+    packCount: string;
+    remainderVariantId: string;
+    remainderReceivedQty: string;
+  } | null>(null);
   const [unitErrors, setUnitErrors] = useState<Record<number, { message: string; needsRefresh: boolean }>>({});
   const [reloadingUnits, setReloadingUnits] = useState(false);
   const [legacyResolveVariant, setLegacyResolveVariant] = useState<number | null>(null);
@@ -648,6 +660,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
     onSuccess: (result, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving/putaway-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       if (!isCurrentReceiptNavigation(context)) return;
@@ -655,7 +668,11 @@ DEF-456,25,,,5.00,,Location TBD`;
       const costMessage = receivingCostOutcomeMessage(result.costReconciliation);
       toast({
         title: costMessage ? "Inventory received — costs unfinished" : "Receipt closed — inventory updated",
-        description: costMessage ?? `${result.unitsReceived} units received across ${result.linesProcessed} lines`
+        description:
+          costMessage ??
+          `${result.unitsReceived} units received across ${result.linesProcessed} lines${
+            result.dockStagedCount ? ` (${result.dockStagedCount} staged on dock for putaway)` : ""
+          }`,
       });
       setShowReceiptDetail(false);
       const closedPoId = selectedReceipt?.purchaseOrderId;
@@ -859,8 +876,22 @@ DEF-456,25,,,5.00,,Location TBD`;
     error={showAddLineDialog && !receivingEntry.recovery ? null : entryError} pending={entryMutation.isPending} allowed={receivingEntry.allowed}
     onRetry={saved => submitEntry(saved.body, saved)} onRead={receivingEntry.refresh} />;
 
+  const putawayQueueCountQuery = useQuery<PutawayQueueItemDto[]>({
+    queryKey: ["/api/receiving/putaway-queue", "all"],
+    queryFn: async () => {
+      const res = await fetch("/api/receiving/putaway-queue");
+      if (!res.ok) return [];
+      const data = await res.json().catch(() => []);
+      return Array.isArray(data) ? data : [];
+    },
+    enabled: !showReceiptDetail,
+  });
+
   const updateLineMutation = useMutation({
-    onMutate: captureReceiptNavigation,
+    onMutate: (variables) => {
+      setSavingLineIds((prev) => ({ ...prev, [variables.lineId]: true }));
+      return captureReceiptNavigation();
+    },
     retry: false,
     mutationFn: async ({ lineId, updates }: { lineId: number; updates: Record<string, unknown> }) => {
       assertReceiptAdjustmentAllowed();
@@ -906,7 +937,149 @@ DEF-456,25,,,5.00,,Location TBD`;
       setUnitErrors((current) => ({ ...current, [variables.lineId]: { message: cause.message, needsRefresh } }));
       toast({ title: "Line change needs review", description: cause.message, variant: "destructive" });
     },
+    onSettled: (_data, _error, variables) => {
+      setSavingLineIds((prev) => {
+        const next = { ...prev };
+        delete next[variables.lineId];
+        return next;
+      });
+    },
   });
+
+  const splitLineMutation = useMutation({
+    onMutate: captureReceiptNavigation,
+    retry: false,
+    mutationFn: async (vars: {
+      lineId: number;
+      packVariantId: number;
+      packCount: number;
+      remainderVariantId: number;
+      remainderReceivedQty: number;
+      expectedUnitVersion: string;
+    }) => {
+      assertReceiptAdjustmentAllowed();
+      assertReceiptSettingsConfirmed();
+      const res = await fetch(`/api/receiving/lines/${vars.lineId}/split`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          packVariantId: vars.packVariantId,
+          packCount: vars.packCount,
+          remainderVariantId: vars.remainderVariantId,
+          remainderReceivedQty: vars.remainderReceivedQty,
+          expectedUnitVersion: vars.expectedUnitVersion,
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(body?.error || "Failed to split receipt line");
+      }
+      return body as { order: ReceivingOrder };
+    },
+    onSuccess: (data, _vars, context) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!isCurrentReceiptNavigation(context)) return;
+      setSplitTarget(null);
+      if (data?.order?.id === selectedReceipt?.id && Array.isArray(data.order.lines)) {
+        setSelectedReceipt(data.order);
+      } else {
+        setReceiptLoadAttempt((a) => a + 1);
+      }
+      toast({
+        title: "Line split into Cases + Loose Remainder",
+        description: "Sealed cases and loose units are now tracked on separate receipt lines.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Cannot split line",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  function openSplitDialog(line: ReceivingLine) {
+    if (!line.productId || !hasReceivingUnitVersion(line)) return;
+    const productVariants = variants
+      .filter((v) => v.productId === line.productId && (v as { isActive?: boolean }).isActive !== false && Number(v.unitsPerVariant) > 0)
+      .sort((a, b) => Number(b.unitsPerVariant) - Number(a.unitsPerVariant));
+    if (productVariants.length < 2) return;
+    const largestPack = productVariants[0];
+    const smallestPack = productVariants[productVariants.length - 1];
+    const currentFactor = recordedReceivingFactor(line) ?? 1;
+    const basePieces = (line.receivedQty > 0 ? line.receivedQty : line.expectedQty) * currentFactor;
+    const suggestedCases = Math.max(1, Math.floor(basePieces / Number(largestPack.unitsPerVariant)));
+    const leftoverPieces = Math.max(0, basePieces - suggestedCases * Number(largestPack.unitsPerVariant));
+    const suggestedRemainder = Math.floor(leftoverPieces / Math.max(1, Number(smallestPack.unitsPerVariant)));
+    setSplitTarget({
+      line,
+      packVariantId: String(largestPack.id),
+      packCount: String(suggestedCases),
+      remainderVariantId: String(smallestPack.id),
+      remainderReceivedQty: String(suggestedRemainder),
+    });
+  }
+
+  function handleReceiptBarcodeScan(raw: string) {
+    const token = raw.trim();
+    if (!token || !selectedReceipt?.lines) return;
+    setReceiptScanInput("");
+    const upper = token.toUpperCase();
+    const matched =
+      selectedReceipt.lines.find((l) => (l as any).barcode && String((l as any).barcode).toUpperCase() === upper) ??
+      selectedReceipt.lines.find((l) => l.sku && l.sku.toUpperCase() === upper);
+    if (!matched) {
+      toast({
+        title: "Item not on receipt",
+        description: `No line on this receipt matched "${token}".`,
+        variant: "destructive",
+      });
+      return;
+    }
+    const el = document.querySelector(`[data-testid="receipt-line-${matched.id}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (
+      recordedReceivingFactor(matched) === null ||
+      !hasReceivingUnitVersion(matched) ||
+      !!savingLineIds[matched.id] ||
+      !!unitErrors[matched.id]?.needsRefresh
+    ) {
+      toast({
+        title: "Confirm unit before scanning",
+        description: `${matched.sku || "Line"} needs unit review or refresh first.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    const draftBase = countDrafts[matched.id]?.value;
+    const currentCount = draftBase !== undefined && /^\d+$/.test(draftBase.trim())
+      ? Number(draftBase.trim())
+      : matched.receivedQty;
+    const nextCount = currentCount + 1;
+    try {
+      updateLineMutation.mutate({
+        lineId: matched.id,
+        updates: receivingCountChange(countDrafts[matched.id]?.line ?? matched, String(nextCount)),
+      });
+    } catch (cause) {
+      reportUnitError(matched.id, cause);
+    }
+  }
+
+  function saveAllCountDrafts() {
+    for (const entry of Object.values(countDrafts)) {
+      if (savingLineIds[entry.line.id]) continue;
+      try {
+        updateLineMutation.mutate({
+          lineId: entry.line.id,
+          updates: receivingCountChange(entry.line, entry.value),
+        });
+      } catch (cause) {
+        reportUnitError(entry.line.id, cause);
+      }
+    }
+  }
 
   function reportUnitError(lineId: number, cause: unknown, needsRefresh = false) {
     const message = cause instanceof Error ? cause.message : "The receive unit could not be changed.";
@@ -927,7 +1100,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   }
 
   function applyVariant(line: ReceivingLine, variantId: number, confirmLegacyUnit = false, expectedUnitsPerVariant?: number) {
-    if (quarantineCommandPending || updateReceiptMutation.isPending || receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
+    if (quarantineCommandPending || updateReceiptMutation.isPending || receiptSettingsError || !!savingLineIds[line.id] || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
     try {
       if (countDrafts[line.id]) throw new Error("Save or discard the received-count draft before changing its unit.");
       const updates = receivingVariantChange(line, variantId, confirmLegacyUnit, expectedUnitsPerVariant);
@@ -946,7 +1119,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   }
 
   function saveReceivedCount(line: ReceivingLine) {
-    if (quarantineCommandPending || updateReceiptMutation.isPending || receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
+    if (quarantineCommandPending || updateReceiptMutation.isPending || receiptSettingsError || !!savingLineIds[line.id] || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
     try {
       const draft = countDrafts[line.id];
       updateLineMutation.mutate({ lineId: line.id, updates: receivingCountChange(draft?.line ?? line, draft?.value) });
@@ -1000,8 +1173,8 @@ DEF-456,25,,,5.00,,Location TBD`;
       // A stale or ambiguous response must not leave a green confirmation on
       // the previous count after its draft is discarded; verify the source first.
       confirmed={line.status === "complete" && !draft && hasReceivingUnitVersion(line) && recordedReceivingFactor(line) !== null && !unitErrors[line.id]}
-      disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
-      discardDisabled={updateLineMutation.isPending}
+      disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || !!savingLineIds[line.id] || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
+      discardDisabled={!!savingLineIds[line.id]}
       compact={false}
       inline
       saveTestId={`btn-complete-line-${line.id}`}
@@ -1025,7 +1198,7 @@ DEF-456,25,,,5.00,,Location TBD`;
         compact
         variants={variants}
         mutable={mutable}
-        pending={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
+        pending={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || !!savingLineIds[line.id] || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
         onChange={(variantId, confirm, factor) => applyVariant(line, variantId, confirm, factor)}
       />
       {selectedReceipt?.status === "closed" && selectedReceipt.inboundShipmentId && <div className="col-span-2"><ReceiptShipmentQuantityCorrection receiptLineId={line.id}
@@ -1285,6 +1458,9 @@ DEF-456,25,,,5.00,,Location TBD`;
     // A browser history change must not carry a pending editor into a different
     // receipt. Persisted receive quantities remain owned by the server.
     setCountDrafts({});
+    setSavingLineIds({});
+    setReceiptScanInput("");
+    setSplitTarget(null);
     setUnitErrors({});
     setReloadingUnits(false);
     setAddLineError(null);
@@ -1437,8 +1613,25 @@ DEF-456,25,,,5.00,,Location TBD`;
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="receipts">Receipts</TabsTrigger>
+          <TabsTrigger value="putaway" data-testid="tab-putaway-queue">
+            Putaway Queue
+            {(putawayQueueCountQuery.data?.length ?? 0) > 0 && (
+              <Badge variant="secondary" className="ml-1.5 text-[10px] px-1.5 py-0">
+                {putawayQueueCountQuery.data!.length}
+              </Badge>
+            )}
+          </TabsTrigger>
           <TabsTrigger value="vendors">Vendors</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="putaway" className="space-y-4">
+          <PutawayQueuePanel
+            warehouses={warehouses}
+            locations={locations}
+            canPutaway={!adjustmentBlocked}
+            onOpenReceipt={(orderId) => navigate(receiptHref(orderId))}
+          />
+        </TabsContent>
 
         <TabsContent value="receipts" className="space-y-4">
           <div className="flex gap-2 items-center">
@@ -1738,6 +1931,68 @@ DEF-456,25,,,5.00,,Location TBD`;
               </Select>
             </div>
 
+            {newReceipt.sourceType === "po" && (
+              <div>
+                <Label className="text-sm">Purchase Order <span className="text-red-500">*</span></Label>
+                <Popover open={poPickerOpen} onOpenChange={setPoPickerOpen}>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" className="w-full justify-between h-11 font-normal" data-testid="select-purchase-order">
+                      {selectedPoId
+                        ? (() => {
+                            const po = openPOs.find(p => p.id === selectedPoId);
+                            return po ? `${po.poNumber} — ${po.vendor?.name || "Unknown"}` : "Select PO...";
+                          })()
+                        : "Select open PO..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                    <Command shouldFilter={false}>
+                      <CommandInput placeholder="Search PO#..." value={poSearch} onValueChange={setPoSearch} />
+                      <CommandList>
+                        <CommandEmpty>No open POs found</CommandEmpty>
+                        <CommandGroup>
+                          {openPOs
+                            .filter(po =>
+                              !poSearch ||
+                              po.poNumber.toLowerCase().includes(poSearch.toLowerCase()) ||
+                              po.vendor?.name?.toLowerCase().includes(poSearch.toLowerCase())
+                            )
+                            .slice(0, 50)
+                            .map(po => (
+                              <CommandItem
+                                key={po.id}
+                                value={po.id.toString()}
+                                onSelect={() => {
+                                  setSelectedPoId(po.id);
+                                  setNewReceipt(prev => ({
+                                    ...prev,
+                                    poNumber: po.poNumber,
+                                    vendorId: po.vendorId?.toString() || prev.vendorId,
+                                    warehouseId: prev.warehouseId || ((po as any).warehouseId ? String((po as any).warehouseId) : prev.warehouseId),
+                                  }));
+                                  setPoPickerOpen(false);
+                                  setPoSearch("");
+                                }}
+                              >
+                                <Check className={`mr-2 h-4 w-4 ${selectedPoId === po.id ? "opacity-100" : "opacity-0"}`} />
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-medium">{po.poNumber}</div>
+                                  <div className="text-xs text-muted-foreground truncate">
+                                    {po.vendor?.name || "No vendor"} — {po.lineCount} lines — ${((po.totalCents || 0) / 100).toFixed(2)}
+                                  </div>
+                                </div>
+                                <Badge variant="outline" className="ml-2 text-xs shrink-0">{po.status}</Badge>
+                              </CommandItem>
+                            ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
+            )}
+
             <details className="group">
               <summary className="text-sm font-medium cursor-pointer list-none flex items-center gap-2">
                 <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
@@ -1758,66 +2013,6 @@ DEF-456,25,,,5.00,,Location TBD`;
                     </SelectContent>
                   </Select>
                 </div>
-                {newReceipt.sourceType === "po" && (
-                  <div>
-                    <Label className="text-sm">Purchase Order</Label>
-                    <Popover open={poPickerOpen} onOpenChange={setPoPickerOpen}>
-                      <PopoverTrigger asChild>
-                        <Button variant="outline" className="w-full justify-between h-11 font-normal">
-                          {selectedPoId
-                            ? (() => {
-                                const po = openPOs.find(p => p.id === selectedPoId);
-                                return po ? `${po.poNumber} — ${po.vendor?.name || "Unknown"}` : "Select PO...";
-                              })()
-                            : "Select open PO..."}
-                          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                        </Button>
-                      </PopoverTrigger>
-                      <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                        <Command shouldFilter={false}>
-                          <CommandInput placeholder="Search PO#..." value={poSearch} onValueChange={setPoSearch} />
-                          <CommandList>
-                            <CommandEmpty>No open POs found</CommandEmpty>
-                            <CommandGroup>
-                              {openPOs
-                                .filter(po =>
-                                  !poSearch ||
-                                  po.poNumber.toLowerCase().includes(poSearch.toLowerCase()) ||
-                                  po.vendor?.name?.toLowerCase().includes(poSearch.toLowerCase())
-                                )
-                                .slice(0, 50)
-                                .map(po => (
-                                  <CommandItem
-                                    key={po.id}
-                                    value={po.id.toString()}
-                                    onSelect={() => {
-                                      setSelectedPoId(po.id);
-                                      setNewReceipt(prev => ({
-                                        ...prev,
-                                        poNumber: po.poNumber,
-                                        vendorId: po.vendorId?.toString() || prev.vendorId,
-                                      }));
-                                      setPoPickerOpen(false);
-                                      setPoSearch("");
-                                    }}
-                                  >
-                                    <Check className={`mr-2 h-4 w-4 ${selectedPoId === po.id ? "opacity-100" : "opacity-0"}`} />
-                                    <div className="flex-1 min-w-0">
-                                      <div className="font-medium">{po.poNumber}</div>
-                                      <div className="text-xs text-muted-foreground truncate">
-                                        {po.vendor?.name || "No vendor"} — {po.lineCount} lines — ${((po.totalCents || 0) / 100).toFixed(2)}
-                                      </div>
-                                    </div>
-                                    <Badge variant="outline" className="ml-2 text-xs shrink-0">{po.status}</Badge>
-                                  </CommandItem>
-                                ))}
-                            </CommandGroup>
-                          </CommandList>
-                        </Command>
-                      </PopoverContent>
-                    </Popover>
-                  </div>
-                )}
                 {newReceipt.sourceType === "asn" && (
                   <div>
                     <Label className="text-sm">PO / Reference Number</Label>
@@ -1864,7 +2059,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   if (!parsed.success) { setEntryError("Review the receipt type, warehouse and reference before creating this receipt."); return; }
                   submitEntry({ action: "create", targetId: null, payload: parsed.data });
                 }}
-                disabled={adjustmentBlocked || entryMutation.isPending || createReceiptMutation.isPending || !newReceipt.warehouseId}
+                disabled={adjustmentBlocked || entryMutation.isPending || createReceiptMutation.isPending || (newReceipt.sourceType === "po" ? !selectedPoId : !newReceipt.warehouseId)}
                 data-testid="btn-create-receipt"
               >
                 Create Receipt
@@ -2147,13 +2342,39 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <Button
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={handlePreCloseValidation}
-                        disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || receiveUnitsNeedReview}
+                        disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || updateLineMutation.isPending || Object.keys(savingLineIds).length > 0 || completeAllMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || receiveUnitsNeedReview}
                         data-testid="btn-close-receipt"
                         aria-label="Finalize and update inventory"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
                         Finish receiving
                       </Button>
+                      {selectedReceipt.sourceType !== "po" && (
+                        <details className="relative">
+                          <summary className="flex min-h-11 cursor-pointer items-center rounded-md border px-3 text-sm">More actions</summary>
+                          <div className="absolute right-0 top-full z-20 mt-1 flex w-56 flex-col gap-1 rounded-md border bg-popover p-2 shadow-md">
+                            <Button
+                              variant="outline"
+                              className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
+                              onClick={downloadTemplate}
+                              data-testid="btn-download-template"
+                            >
+                              <Download className="h-4 w-4 mr-1 md:mr-2" />
+                              <span className="hidden sm:inline">Download</span> Template
+                            </Button>
+                            <Button
+                              variant="outline"
+                              className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
+                              onClick={() => { setCsvImportError(null); setShowCSVImport(true); }}
+                              data-testid="btn-import-csv"
+                              disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending}
+                            >
+                              <Upload className="h-4 w-4 mr-1 md:mr-2" />
+                              <span className="hidden sm:inline">Import</span> CSV
+                            </Button>
+                          </div>
+                        </details>
+                      )}
                     </>
                   )}
                   {selectedReceipt.status === "closed" && (
@@ -2180,9 +2401,56 @@ DEF-456,25,,,5.00,,Location TBD`;
                 {selectedReceipt.status === "closed" && !reversal.allowed && <p className="text-sm text-muted-foreground">Purchasing approval permission is required to reverse a receipt.</p>}
                 {!quarantineAcceptAll.allowed && quarantineAcceptAll.reason && (selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && <p className="text-sm text-muted-foreground">Accept all: {quarantineAcceptAll.reason}</p>}
 
+                {selectedReceipt.status === "closed" &&
+                  selectedReceipt.lines?.some(
+                    (l) => (l.putawayComplete ?? 0) === 0 && (l.receivedQty ?? 0) - (l.reversedQty ?? 0) > 0,
+                  ) && (
+                    <div
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900"
+                      data-testid="closed-receipt-putaway-banner"
+                    >
+                      <span>
+                        <strong>
+                          {
+                            selectedReceipt.lines.filter(
+                              (l) => (l.putawayComplete ?? 0) === 0 && (l.receivedQty ?? 0) - (l.reversedQty ?? 0) > 0,
+                            ).length
+                          }
+                        </strong>{" "}
+                        line(s) on this closed receipt are staged on the receiving dock awaiting putaway.
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="min-h-10 bg-white"
+                        onClick={() => {
+                          setActiveTab("putaway");
+                          closeReceiptDetail();
+                        }}
+                        data-testid="btn-jump-putaway-queue"
+                      >
+                        Open Putaway Queue
+                      </Button>
+                    </div>
+                  )}
+
                 {selectedReceipt.status !== "closed" && (receiveUnitsNeedReview || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0) && (
                   <div className="space-y-2 rounded border border-amber-400/50 p-3 text-sm text-amber-800 dark:text-amber-200">
-                    {Object.keys(countDrafts).length > 0 && <p>You have unsaved received counts. Use Confirm count beside each Received field, or press Enter in the field, before finalizing.</p>}
+                    {Object.keys(countDrafts).length > 0 && (
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p>You have unsaved received counts. Use Confirm count beside each Received field, or press Enter in the field, before finalizing.</p>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="min-h-10"
+                          disabled={adjustmentBlocked || Object.keys(savingLineIds).length > 0}
+                          onClick={saveAllCountDrafts}
+                          data-testid="btn-save-all-drafts"
+                        >
+                          Save all drafts ({Object.keys(countDrafts).length})
+                        </Button>
+                      </div>
+                    )}
                     {(receiveUnitsNeedReview || Object.keys(unitErrors).length > 0) && <p>Confirm receive units and resolve line errors before finalizing. Load the latest receipt when a line requires refresh.</p>}
                   </div>
                 )}
@@ -2277,21 +2545,46 @@ DEF-456,25,,,5.00,,Location TBD`;
 
                 {/* Lines section */}
                 <Card className="min-w-0 max-w-full">
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 px-3 py-1.5">
+                  <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0 px-3 py-1.5">
                     <CardTitle className="text-sm md:text-base">Lines ({selectedReceipt.lines?.length || 0})</CardTitle>
-                    {selectedReceipt.status !== "closed" && (
-                      <Button 
-                        variant="outline" 
-                        size="sm"
-                        className="min-h-[44px]"
-                        onClick={() => setShowAddLineDialog(true)}
-                        disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending}
-                        data-testid="btn-add-line"
-                      >
-                        <Plus className="h-4 w-4 mr-1" />
-                        Add Line
-                      </Button>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (
+                        <form
+                          className="hidden sm:flex items-center gap-1.5"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            handleReceiptBarcodeScan(receiptScanInput);
+                          }}
+                        >
+                          <div className="relative">
+                            <ScanBarcode className="h-3.5 w-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2" />
+                            <Input
+                              value={receiptScanInput}
+                              onChange={(e) => setReceiptScanInput(e.target.value)}
+                              placeholder="Scan SKU / barcode (+1)..."
+                              aria-label="Scan barcode or SKU to count"
+                              className="h-9 w-48 pl-8 text-xs"
+                              autoComplete="off"
+                              disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending}
+                              data-testid="input-receiving-scan"
+                            />
+                          </div>
+                        </form>
+                      )}
+                      {selectedReceipt.status !== "closed" && (
+                        <Button 
+                          variant="outline" 
+                          size="sm"
+                          className="min-h-[44px]"
+                          onClick={() => setShowAddLineDialog(true)}
+                          disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending}
+                          data-testid="btn-add-line"
+                        >
+                          <Plus className="h-4 w-4 mr-1" />
+                          Add Line
+                        </Button>
+                      )}
+                    </div>
                   </CardHeader>
                   {/* Issue summary banner */}
                   {selectedReceipt.status !== "closed" && issueLines.length > 0 && (
@@ -2341,14 +2634,31 @@ DEF-456,25,,,5.00,,Location TBD`;
                                   <div className="grid gap-3 rounded-md bg-muted/30 p-3 text-xs sm:grid-cols-2">
                                     <div>
                                       <Label className="mb-1 block text-xs">Putaway location</Label>
-                                      {active ? <>
+                                      {selectedReceipt.status !== "closed" && selectedReceipt.status !== "cancelled" ? <>
                                         <LocationTypeahead ariaLabel={`Location for line ${line.id}`} locations={selectedReceipt.warehouseId ? locations.filter((item) => item.warehouseId === selectedReceipt.warehouseId) : locations}
                                           value={line.putawayLocationId}
                                           onChange={(locationId) => updateLineMutation.mutate({ lineId: line.id, updates: { putawayLocationId: locationId } })}
-                                          disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError} />
-                                        {selectedReceipt.receivingLocationId && !line.putawayLocationId && <Button variant="ghost" size="sm" className="min-h-11" disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
+                                          disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!savingLineIds[line.id] || closeReceiptMutation.isPending || !!receiptSettingsError} />
+                                        {selectedReceipt.receivingLocationId && !line.putawayLocationId && <Button variant="ghost" size="sm" className="min-h-11" disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!savingLineIds[line.id] || closeReceiptMutation.isPending || !!receiptSettingsError}
                                           onClick={() => updateLineMutation.mutate({ lineId: line.id, updates: { putawayLocationId: selectedReceipt.receivingLocationId } })}>Use default ({locations.find((item) => item.id === selectedReceipt.receivingLocationId)?.code})</Button>}
                                       </> : <p>{locationCode}</p>}
+                                      {selectedReceipt.status !== "closed" &&
+                                        selectedReceipt.status !== "cancelled" &&
+                                        line.productId != null &&
+                                        variants.filter((v) => v.productId === line.productId && (v as { isActive?: boolean }).isActive !== false && Number(v.unitsPerVariant) > 0).length >= 2 && (
+                                          <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            className="mt-2 min-h-10"
+                                            disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || !!savingLineIds[line.id] || !!countDrafts[line.id] || !hasReceivingUnitVersion(line) || recordedReceivingFactor(line) === null}
+                                            onClick={() => openSplitDialog(line)}
+                                            data-testid={`btn-split-line-${line.id}`}
+                                          >
+                                            <Split className="h-3.5 w-3.5 mr-1.5" />
+                                            Split Cases + Loose
+                                          </Button>
+                                        )}
                                     </div>
                                     <div className="space-y-1 text-muted-foreground">
                                       <p className="break-all">{line.sku || "SKU not recorded"}</p>
@@ -3131,6 +3441,156 @@ DEF-456,25,,,5.00,,Location TBD`;
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Split Uneven Case + Loose Remainder Dialog */}
+      <Dialog open={!!splitTarget} onOpenChange={(open) => { if (!open && !splitLineMutation.isPending) setSplitTarget(null); }}>
+        <DialogContent className="max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle>Split into Cases + Loose Remainder</DialogTitle>
+            <DialogDescription>
+              Keep sealed cartons recorded as Cases and record loose units on a separate line ({splitTarget?.line.productName || splitTarget?.line.sku}).
+            </DialogDescription>
+          </DialogHeader>
+          {splitTarget && (() => {
+            const siblingVariants = variants
+              .filter((v) => v.productId === splitTarget.line.productId && (v as { isActive?: boolean }).isActive !== false && Number(v.unitsPerVariant) > 0)
+              .sort((a, b) => Number(b.unitsPerVariant) - Number(a.unitsPerVariant));
+            const packOptions = siblingVariants.filter((v) => Number(v.unitsPerVariant) > 1);
+            const selectedPack = siblingVariants.find((v) => String(v.id) === splitTarget.packVariantId);
+            const remainderOptions = siblingVariants.filter(
+              (v) => !selectedPack || Number(v.unitsPerVariant) < Number(selectedPack.unitsPerVariant),
+            );
+            const currentFactor = recordedReceivingFactor(splitTarget.line) ?? 1;
+            const expectedBase = splitTarget.line.expectedQty * currentFactor;
+            const packUnits = Number(selectedPack?.unitsPerVariant ?? 1);
+            const enteredPacks = Math.max(0, parseInt(splitTarget.packCount || "0", 10) || 0);
+            const selectedRem = siblingVariants.find((v) => String(v.id) === splitTarget.remainderVariantId);
+            const remUnits = Number(selectedRem?.unitsPerVariant ?? 1);
+            const enteredRem = Math.max(0, parseInt(splitTarget.remainderReceivedQty || "0", 10) || 0);
+            const totalEnteredPieces = enteredPacks * packUnits + enteredRem * remUnits;
+
+            return (
+              <div className="space-y-4">
+                {expectedBase > 0 && (
+                  <p className="text-xs text-muted-foreground rounded bg-muted p-2">
+                    Expected on source line: <strong>{expectedBase.toLocaleString()}</strong> base pieces • Split total:{" "}
+                    <strong>{totalEnteredPieces.toLocaleString()}</strong> base pieces
+                  </p>
+                )}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs">Case / Pack Unit</Label>
+                    <Select
+                      value={splitTarget.packVariantId}
+                      onValueChange={(val) => setSplitTarget({ ...splitTarget, packVariantId: val })}
+                    >
+                      <SelectTrigger className="h-10 mt-1" data-testid="select-split-pack-variant">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {packOptions.map((v) => (
+                          <SelectItem key={v.id} value={String(v.id)}>
+                            {v.sku} ({v.unitsPerVariant} pcs)
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label className="text-xs">Sealed Cases Counted</Label>
+                    <Input
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      value={splitTarget.packCount}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        const nextPacks = Math.max(0, parseInt(val || "0", 10) || 0);
+                        const autoRem = expectedBase > 0 && remUnits > 0
+                          ? Math.max(0, Math.floor((expectedBase - nextPacks * packUnits) / remUnits))
+                          : enteredRem;
+                        setSplitTarget({
+                          ...splitTarget,
+                          packCount: val,
+                          remainderReceivedQty: String(autoRem),
+                        });
+                      }}
+                      className="h-10 mt-1 tabular-nums"
+                      data-testid="input-split-pack-count"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs">Loose Remainder Unit</Label>
+                    <Select
+                      value={splitTarget.remainderVariantId}
+                      onValueChange={(val) => setSplitTarget({ ...splitTarget, remainderVariantId: val })}
+                    >
+                      <SelectTrigger className="h-10 mt-1" data-testid="select-split-remainder-variant">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {remainderOptions.map((v) => (
+                          <SelectItem key={v.id} value={String(v.id)}>
+                            {v.sku} ({v.unitsPerVariant === 1 ? "Each" : `${v.unitsPerVariant} pcs`})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label className="text-xs">Loose Units Counted</Label>
+                    <Input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      value={splitTarget.remainderReceivedQty}
+                      onChange={(e) => setSplitTarget({ ...splitTarget, remainderReceivedQty: e.target.value })}
+                      className="h-10 mt-1 tabular-nums"
+                      data-testid="input-split-remainder-count"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button
+                    variant="outline"
+                    className="min-h-11"
+                    disabled={splitLineMutation.isPending}
+                    onClick={() => setSplitTarget(null)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    className="min-h-11"
+                    disabled={
+                      splitLineMutation.isPending ||
+                      !splitTarget.packVariantId ||
+                      !splitTarget.remainderVariantId ||
+                      enteredPacks <= 0 ||
+                      !splitTarget.line.unitVersion
+                    }
+                    onClick={() => {
+                      if (!splitTarget.line.unitVersion) return;
+                      splitLineMutation.mutate({
+                        lineId: splitTarget.line.id,
+                        packVariantId: Number(splitTarget.packVariantId),
+                        packCount: enteredPacks,
+                        remainderVariantId: Number(splitTarget.remainderVariantId),
+                        remainderReceivedQty: enteredRem,
+                        expectedUnitVersion: splitTarget.line.unitVersion,
+                      });
+                    }}
+                    data-testid="btn-confirm-split-line"
+                  >
+                    {splitLineMutation.isPending ? "Splitting…" : "Split Line"}
+                  </Button>
+                </div>
+              </div>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
