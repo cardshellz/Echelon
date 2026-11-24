@@ -200,7 +200,7 @@ describe("Batch R-1 — P3.1 Cancel/Refund Adapter Wiring, P0.8 3PL Shortfall Cl
   });
 
   describe("P1.5 — Full Runtime Background Job Catalog Convergence", () => {
-    it("registers all 43 external runtime jobs + 7 loop-managed reconcilers without advisoryLockId collisions and maps persistedRunKey telemetry", async () => {
+    it("registers all 44 external runtime jobs + 7 loop-managed reconcilers without advisoryLockId collisions and maps persistedRunKey telemetry", async () => {
       registerExternalRuntimeJobs();
 
       // Also register the 7 loop-managed reconciler lock IDs (autoStartLoop: false for test)
@@ -232,8 +232,8 @@ describe("Batch R-1 — P3.1 Cancel/Refund Adapter Wiring, P0.8 3PL Shortfall Cl
         }),
       });
 
-      expect(EXTERNAL_RUNTIME_JOBS.length).toBe(43);
-      expect(snapshot.length).toBe(50);
+      expect(EXTERNAL_RUNTIME_JOBS.length).toBe(44);
+      expect(snapshot.length).toBe(51);
 
       const uniqueLocks = new Set(snapshot.map((j) => j.advisoryLockId));
       expect(uniqueLocks.size).toBe(snapshot.length);

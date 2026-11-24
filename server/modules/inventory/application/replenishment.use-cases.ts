@@ -498,7 +498,6 @@ export class ReplenishmentUseCases {
 
   private isRecoverableBlockedTask(task: ReplenTask): boolean {
     if (task.status !== "blocked") return false;
-    if (task.blocksShipment === true) return false;
     if (task.dependsOnTaskId != null) return false;
     return RECOVERABLE_BLOCKED_REPLEN_REASONS.has(task.exceptionReason ?? null);
   }
@@ -524,8 +523,8 @@ export class ReplenishmentUseCases {
     if (task.replenMethod === "pallet_drop") {
       return !isPickable || locationType === "reserve" || locationType === "pallet";
     }
-    if (task.replenMethod === "case_break") {
-      return isPickable || locationType === "pick";
+    if (task.replenMethod === "case_break" || task.replenMethod === "package_conversion" || task.replenMethod === "full_case") {
+      return locationType === "reserve" || locationType === "pallet" || isPickable || locationType === "pick";
     }
     return true;
   }
@@ -534,12 +533,34 @@ export class ReplenishmentUseCases {
     const sourceVariantId = task.sourceProductVariantId ?? task.pickProductVariantId;
     if (!sourceVariantId) return false;
 
+    const allowConvertibleSiblings =
+      task.sourceProductVariantId == null || task.sourceProductVariantId === task.pickProductVariantId;
+    const taskWarehouseId = (task as any).warehouseId ?? null;
+
     const result = await this.db.execute(sql`
       SELECT wl.is_pickable, wl.location_type
       FROM inventory.inventory_levels il
       JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
-      WHERE il.product_variant_id = ${sourceVariantId}
+      WHERE (
+        il.product_variant_id = ${sourceVariantId}
+        OR (
+          ${allowConvertibleSiblings}
+          AND EXISTS (
+            SELECT 1
+            FROM catalog.product_variants pv_src
+            JOIN catalog.product_variants pv_pick ON pv_pick.product_id = pv_src.product_id
+            WHERE pv_src.id = il.product_variant_id
+              AND pv_pick.id = ${task.pickProductVariantId ?? sourceVariantId}
+              AND pv_src.is_active = true
+              AND COALESCE(pv_src.units_per_variant, 1) > COALESCE(pv_pick.units_per_variant, 1)
+          )
+        )
+      )
         AND il.variant_qty - il.reserved_qty > 0
+        AND wl.is_active = 1
+        AND wl.cycle_count_freeze_id IS NULL
+        AND wl.location_type NOT IN ('in_transit', 'receiving', 'quarantine', 'staging')
+        AND (${taskWarehouseId}::int IS NULL OR wl.warehouse_id = ${taskWarehouseId})
     `);
 
     return (result.rows ?? []).some((row: any) => this.blockedTaskSourceMatches(task, {
@@ -832,7 +853,31 @@ export class ReplenishmentUseCases {
     }
 
     const effectiveLevel = (level ?? this.buildImplicitZeroLevel(productVariantId, warehouseLocationId)) as InventoryLevel;
-    const evaluatedQty = options?.currentQtyOverride ?? effectiveLevel.variantQty;
+    let openDemandUnits = Math.max(0, Number(effectiveLevel.reservedQty ?? 0));
+    if (options?.currentQtyOverride === undefined && typeof this.db.execute === "function") {
+      try {
+        const demandRes = await this.db.execute(sql`
+          SELECT CASE WHEN to_regclass('wms.order_items') IS NULL THEN 0 ELSE COALESCE((
+            SELECT SUM(GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0))::int
+            FROM wms.order_items oi
+            JOIN wms.orders o ON o.id = oi.order_id
+            WHERE (oi.product_id = ${productVariantId} OR UPPER(oi.sku) = UPPER(${variant.sku ?? ""}))
+              AND UPPER(oi.location) = UPPER(${location.code})
+              AND oi.status IN ('pending', 'in_progress')
+              AND COALESCE(oi.requires_shipping, 1) = 1
+              AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled', 'completed')
+              AND (${location.warehouseId ?? null}::int IS NULL OR o.warehouse_id = ${location.warehouseId ?? null} OR o.warehouse_id IS NULL)
+          ), 0) END AS pending_order_units
+        `);
+        const pendingOrderUnits = Number((demandRes?.rows?.[0] as any)?.pending_order_units ?? 0);
+        if (Number.isFinite(pendingOrderUnits) && pendingOrderUnits > openDemandUnits) {
+          openDemandUnits = pendingOrderUnits;
+        }
+      } catch {
+        // Best-effort demand read; fall back to reservedQty on level
+      }
+    }
+    const evaluatedQty = options?.currentQtyOverride ?? (effectiveLevel.variantQty - openDemandUnits);
 
     return {
       status: "ready",
@@ -1284,9 +1329,29 @@ export class ReplenishmentUseCases {
         .set({
           status: "cancelled",
           exceptionReason: task.exceptionReason ?? "no_source_stock",
+          ...(task.blocksShipment === true ? { blocksShipment: false } : {}),
           notes: `${task.notes || ""}\nCancelled to re-evaluate due to inventory change.`.trim()
         })
         .where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
+
+      if (task.blocksShipment === true && task.pickProductVariantId != null) {
+        try {
+          await this.checkAndTriggerAfterPick(
+            task.pickProductVariantId,
+            task.toLocationId,
+            "stock_arrival_recovery",
+            {
+              orderId: task.orderId ?? null,
+              orderItemId: task.orderItemId ?? null,
+              orderNumber: task.orderNumber ?? null,
+              blocksShipment: true,
+              forceWhenAtOrBelowZero: true,
+            },
+          );
+        } catch (err: any) {
+          logger.warn("inventory.replenishment_use_cases", { message: `[Replen] Failed to re-trigger shipment-blocking task #${task.id}:`, error: err?.message });
+        }
+      }
 
       // Also call checkReplenForLocation on the target destination, because we just cancelled a task for it
       try {
@@ -1311,6 +1376,120 @@ export class ReplenishmentUseCases {
          logger.warn("inventory.replenishment_use_cases", { message: `[Replen] Failed to re-evaluate product pick loc ${locId}:`, error: err?.message });
       }
     }
+  }
+
+  /**
+   * Proactive demand-driven replenishment sweep.
+   * Scans active unfrozen primary pick bins where projected quantity
+   * `(on_hand - GREATEST(reserved_qty, open_order_demand))` is at or below
+   * `trigger_value` so replenishment triggers BEFORE the picker runs dry.
+   */
+  async runProactiveReplenSweep(limit = 100): Promise<{ scanned: number; triggered: number; taskIds: number[] }> {
+    const safeLimit = Math.min(500, Math.max(1, Math.trunc(limit)));
+    const candidatesRes = await this.db.execute(sql`
+      SELECT
+        pv.id AS variant_id,
+        wl.id AS location_id,
+        COALESCE(demand.pending_demand_units, 0)::int AS pending_demand_units
+      FROM warehouse.product_locations pl
+      JOIN catalog.product_variants pv ON pv.id = pl.product_variant_id AND pv.is_active = true
+      JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+      LEFT JOIN inventory.inventory_levels il
+        ON il.product_variant_id = pv.id
+       AND il.warehouse_location_id = wl.id
+      LEFT JOIN LATERAL (
+        SELECT lrc.trigger_value, lrc.replen_method, lrc.is_active
+        FROM inventory.location_replen_config lrc
+        WHERE lrc.warehouse_location_id = wl.id
+          AND (lrc.product_variant_id = pv.id OR lrc.product_variant_id IS NULL)
+          AND lrc.is_active = 1
+        ORDER BY CASE WHEN lrc.product_variant_id = pv.id THEN 0 ELSE 1 END
+        LIMIT 1
+      ) loc_cfg ON true
+      LEFT JOIN LATERAL (
+        SELECT rr.trigger_value, rr.replen_method
+        FROM inventory.replen_rules rr
+        WHERE rr.pick_product_variant_id = pv.id AND rr.is_active = 1
+        LIMIT 1
+      ) rule_cfg ON true
+      LEFT JOIN LATERAL (
+        SELECT rtd.trigger_value, rtd.replen_method
+        FROM inventory.replen_tier_defaults rtd
+        WHERE rtd.hierarchy_level = pv.hierarchy_level
+          AND (rtd.warehouse_id = wl.warehouse_id OR rtd.warehouse_id IS NULL)
+          AND rtd.is_active = 1
+        ORDER BY CASE WHEN rtd.warehouse_id = wl.warehouse_id THEN 0 ELSE 1 END
+        LIMIT 1
+      ) tier_cfg ON true
+      LEFT JOIN LATERAL (
+        SELECT CASE WHEN to_regclass('wms.order_items') IS NULL THEN 0 ELSE COALESCE((
+          SELECT SUM(GREATEST(oi.quantity - COALESCE(oi.picked_quantity, 0), 0))::int
+          FROM wms.order_items oi
+          JOIN wms.orders o ON o.id = oi.order_id
+          WHERE (oi.product_id = pv.id OR UPPER(oi.sku) = UPPER(pv.sku))
+            AND UPPER(oi.location) = UPPER(wl.code)
+            AND oi.status IN ('pending', 'in_progress')
+            AND COALESCE(oi.requires_shipping, 1) = 1
+            AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled', 'completed')
+            AND (wl.warehouse_id IS NULL OR o.warehouse_id = wl.warehouse_id OR o.warehouse_id IS NULL)
+        ), 0) END AS pending_demand_units
+      ) demand ON true
+      WHERE pl.status = 'active'
+        AND pl.is_primary = 1
+        AND wl.is_active = 1
+        AND wl.is_pickable = 1
+        AND wl.location_type = 'pick'
+        AND wl.cycle_count_freeze_id IS NULL
+        AND COALESCE(loc_cfg.trigger_value::numeric, rule_cfg.trigger_value::numeric, tier_cfg.trigger_value::numeric) IS NOT NULL
+        AND (
+          COALESCE(il.variant_qty, 0) - GREATEST(COALESCE(il.reserved_qty, 0), COALESCE(demand.pending_demand_units, 0))
+        ) <= COALESCE(loc_cfg.trigger_value::numeric, rule_cfg.trigger_value::numeric, tier_cfg.trigger_value::numeric)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM inventory.replen_tasks rt
+          WHERE rt.to_location_id = wl.id
+            AND rt.pick_product_variant_id = pv.id
+            AND rt.status IN ('pending', 'assigned', 'in_progress', 'blocked')
+            AND NOT (
+              rt.status = 'blocked'
+              AND rt.blocks_shipment = false
+              AND rt.depends_on_task_id IS NULL
+              AND COALESCE(rt.qty_source_units, 0) = 0
+              AND COALESCE(rt.qty_target_units, 0) = 0
+              AND COALESCE(rt.exception_reason, 'no_source_stock') IN ('no_source_stock', 'no_source_variant')
+            )
+        )
+      ORDER BY (
+        COALESCE(il.variant_qty, 0) - GREATEST(COALESCE(il.reserved_qty, 0), COALESCE(demand.pending_demand_units, 0))
+      ) ASC, wl.id ASC
+      LIMIT ${safeLimit}
+    `);
+
+    const rows = (candidatesRes?.rows ?? []) as Array<{
+      variant_id: number | string;
+      location_id: number | string;
+      pending_demand_units?: number | string | null;
+    }>;
+    const taskIds: number[] = [];
+    for (const row of rows) {
+      const variantId = Number(row.variant_id);
+      const locationId = Number(row.location_id);
+      if (!Number.isInteger(variantId) || !Number.isInteger(locationId)) continue;
+      try {
+        const task = await this.checkAndTriggerAfterPick(variantId, locationId, "proactive_sweep", {
+          blocksShipment: false,
+          forceWhenAtOrBelowZero: Number(row.pending_demand_units ?? 0) > 0,
+          triggeredBy: "proactive_sweep",
+        });
+        if (task?.id) taskIds.push(Number(task.id));
+      } catch (err: any) {
+        logger.warn("inventory.replenishment_use_cases", {
+          message: `[Replen] Proactive sweep failed for variant=${variantId} loc=${locationId}`,
+          error: err?.message,
+        });
+      }
+    }
+    return { scanned: rows.length, triggered: taskIds.length, taskIds };
   }
 
   // ---------------------------------------------------------------------------
@@ -3878,6 +4057,44 @@ export class ReplenishmentUseCases {
       throw new ReplenishmentExecutionDomainError("INVALID_REPLENISHMENT_SOURCE_QUANTITY",
         "Source selection requires a positive exact SKU quantity.", { requiredSourceQuantity });
     }
+    const allocatedByLocation = new Map<number, number>();
+    const oldestLotMsByLocation = new Map<number, number>();
+    if (typeof this.db.execute === "function") {
+      try {
+        const openAllocRes = await this.db.execute(sql`
+          SELECT from_location_id, COALESCE(SUM(qty_source_units), 0)::int AS allocated_qty
+          FROM inventory.replen_tasks
+          WHERE status IN ('pending', 'assigned', 'in_progress')
+            AND from_location_id IS NOT NULL
+            AND COALESCE(source_product_variant_id, pick_product_variant_id) = ${productVariantId}
+          GROUP BY from_location_id
+        `);
+        for (const r of (openAllocRes?.rows ?? []) as Array<{ from_location_id: unknown; allocated_qty: unknown }>) {
+          const locId = Number(r.from_location_id);
+          const qty = Number(r.allocated_qty ?? 0);
+          if (Number.isInteger(locId) && qty > 0) allocatedByLocation.set(locId, qty);
+        }
+
+        const lotFifoRes = await this.db.execute(sql`
+          SELECT warehouse_location_id, MIN(received_at) AS oldest_received_at
+          FROM inventory.inventory_lots
+          WHERE product_variant_id = ${productVariantId}
+            AND status = 'active'
+            AND (qty_on_hand - COALESCE(qty_reserved, 0)) > 0
+          GROUP BY warehouse_location_id
+        `);
+        for (const r of (lotFifoRes?.rows ?? []) as Array<{ warehouse_location_id: unknown; oldest_received_at: unknown }>) {
+          const locId = Number(r.warehouse_location_id);
+          if (Number.isInteger(locId) && r.oldest_received_at) {
+            const ts = new Date(String(r.oldest_received_at)).getTime();
+            if (Number.isFinite(ts)) oldestLotMsByLocation.set(locId, ts);
+          }
+        }
+      } catch {
+        // Best-effort source allocation & lot-FIFO enrichment
+      }
+    }
+
     // --- 1. Try dedicated parent location first ---
     if (parentLocationId) {
       const [parentLevel] = await this.db.select().from(inventoryLevels).where(
@@ -3886,7 +4103,8 @@ export class ReplenishmentUseCases {
           eq(inventoryLevels.warehouseLocationId, parentLocationId)
         )
       ).limit(1);
-      if (parentLevel && parentLevel.variantQty - parentLevel.reservedQty >= requiredSourceQuantity) {
+      const parentAllocated = allocatedByLocation.get(parentLocationId) ?? 0;
+      if (parentLevel && parentLevel.variantQty - parentLevel.reservedQty - parentAllocated >= requiredSourceQuantity) {
         const [parentLoc] = await this.db
           .select()
           .from(warehouseLocations)
@@ -3935,14 +4153,27 @@ export class ReplenishmentUseCases {
       .orderBy(
         sourcePriority === "smallest_first"
           ? sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty}` // ascending = smallest available first
-          : inventoryLevels.updatedAt        // ascending = FIFO (oldest first)
+          : inventoryLevels.updatedAt        // ascending = fallback when lot timestamps absent
       );
 
-    if (levelsWithStock.length === 0) return null;
+    const eligible = (levelsWithStock as Array<{ level: InventoryLevel; location: WarehouseLocation }>).filter((row) => {
+      const allocated = allocatedByLocation.get(row.location.id) ?? 0;
+      return (row.level.variantQty - row.level.reservedQty - allocated) >= requiredSourceQuantity;
+    });
 
-    // Return the first matching location
-    const first = levelsWithStock[0] as any;
-    return first.location as WarehouseLocation;
+    if (eligible.length === 0) return null;
+
+    if (sourcePriority !== "smallest_first" && oldestLotMsByLocation.size > 0) {
+      eligible.sort((a, b) => {
+        const aLot = oldestLotMsByLocation.get(a.location.id)
+          ?? (a.level.updatedAt ? new Date(a.level.updatedAt as any).getTime() : Number.MAX_SAFE_INTEGER);
+        const bLot = oldestLotMsByLocation.get(b.location.id)
+          ?? (b.level.updatedAt ? new Date(b.level.updatedAt as any).getTime() : Number.MAX_SAFE_INTEGER);
+        return aLot - bLot || a.location.id - b.location.id;
+      });
+    }
+
+    return eligible[0].location as WarehouseLocation;
   }
 }
 

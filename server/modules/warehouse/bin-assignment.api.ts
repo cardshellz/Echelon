@@ -12,6 +12,9 @@ export {
   type BinAssignmentRow,
   type AssignmentFilters,
   type ImportResult,
+  type InventoryTransferOwnerPort,
+  type RelocatePickSlotRequest,
+  type RelocatePickSlotResult,
 } from "./application/bin-assignment.service";
 
 export {

@@ -20,4 +20,5 @@ export {
   insertDefaultOrderCombiningSettingInInventory,
   updateDefaultProcurementPolicySettingsWithCasInTx,
   updateWarehouseAutoDraftAndForecastSettingsInTx,
+  relocateSlotReplenPointersInInventory,
 } from "./infrastructure/cross-module-inventory-mutations.repository";

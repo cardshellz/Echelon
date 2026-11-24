@@ -160,6 +160,7 @@ class ReservationService implements ReservationServiceContract {
     orderItemId: number,
     userId?: string,
     dbOverride?: any,
+    warehouseId?: number | null,
   ): Promise<ReserveForOrderResult> {
     if (orderQty <= 0) {
       return { reserved: 0, promised: 0, shortfall: 0 };
@@ -214,7 +215,7 @@ class ReservationService implements ReservationServiceContract {
         sql`SELECT pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})`,
       );
       return this.reserveForOrderLocked(
-        productId, variantId, orderQty, orderId, orderItemId, userId, tx,
+        productId, variantId, orderQty, orderId, orderItemId, userId, tx, warehouseId,
       );
     };
 
@@ -235,6 +236,7 @@ class ReservationService implements ReservationServiceContract {
     orderItemId: number,
     userId: string | undefined,
     dbh: any,
+    warehouseId?: number | null,
   ): Promise<ReserveForOrderResult> {
     // Step 1: Get strategy-aware ATP for the ordered variant
     const variantAtps = await this.atpService.getAtpPerVariant(productId, dbh);
@@ -268,7 +270,7 @@ class ReservationService implements ReservationServiceContract {
     }
 
     // Step 3: Find the variant's assigned bin from product_locations,
-    // excluding frozen locations (cycle_count_freeze_id IS NOT NULL).
+    // excluding frozen locations (cycle_count_freeze_id IS NOT NULL) and scoping to order warehouse when known.
     const [assignment] = await dbh
       .select({
         warehouseLocationId: productLocations.warehouseLocationId,
@@ -283,6 +285,9 @@ class ReservationService implements ReservationServiceContract {
           eq(productLocations.productVariantId, variantId),
           eq(productLocations.status, "active"),
           isNull(warehouseLocations.cycleCountFreezeId),
+          ...(warehouseId != null
+            ? [sql`(${warehouseLocations.warehouseId} = ${warehouseId} OR ${warehouseLocations.warehouseId} IS NULL)`]
+            : []),
         ),
       )
       .orderBy(sql`${productLocations.isPrimary} DESC`)
@@ -308,6 +313,9 @@ class ReservationService implements ReservationServiceContract {
             eq(inventoryLevels.productVariantId, variantId),
             sql`${inventoryLevels.variantQty} > 0`,
             isNull(warehouseLocations.cycleCountFreezeId),
+            ...(warehouseId != null
+              ? [sql`(${warehouseLocations.warehouseId} = ${warehouseId} OR ${warehouseLocations.warehouseId} IS NULL)`]
+              : []),
           ),
         )
         .orderBy(sql`${inventoryLevels.variantQty} DESC`)
@@ -320,13 +328,104 @@ class ReservationService implements ReservationServiceContract {
       }
     }
 
+    // Step 4: Inspect physical unreserved inventory_levels for this exact variant so a 0-stock
+    // primary pick bin backed by fungible parent/case packs in Reserve NEVER violates
+    // check_reserved_lte_on_hand (reserved_qty <= variant_qty).
+    let candidateLevels: Array<{
+      warehouseLocationId: number;
+      unreservedQty: number;
+      isAssigned: boolean;
+      isPickable: boolean;
+    }> = [];
+    if (typeof dbh.execute === "function") {
+      try {
+        const levelsRes = await dbh.execute(sql`
+          SELECT
+            il.warehouse_location_id,
+            GREATEST(il.variant_qty - il.reserved_qty, 0)::int AS unreserved_qty,
+            wl.is_pickable
+          FROM inventory.inventory_levels il
+          JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+          WHERE il.product_variant_id = ${variantId}
+            AND il.variant_qty - il.reserved_qty > 0
+            AND wl.is_active = 1
+            AND wl.cycle_count_freeze_id IS NULL
+            AND wl.location_type NOT IN ('in_transit', 'receiving', 'quarantine', 'staging')
+            AND (${warehouseId ?? null}::int IS NULL OR wl.warehouse_id = ${warehouseId ?? null} OR wl.warehouse_id IS NULL)
+        `);
+        candidateLevels = ((levelsRes?.rows ?? []) as any[])
+          .map((r) => ({
+            warehouseLocationId: Number(r.warehouse_location_id),
+            unreservedQty: Math.max(0, Number(r.unreserved_qty ?? 0)),
+            isAssigned: Number(r.warehouse_location_id) === reserveLocationId,
+            isPickable: Number(r.is_pickable ?? 0) === 1 || r.is_pickable === true,
+          }))
+          .filter((r) => Number.isInteger(r.warehouseLocationId) && r.unreservedQty > 0)
+          .sort((a, b) =>
+            Number(b.isAssigned) - Number(a.isAssigned)
+            || Number(b.isPickable) - Number(a.isPickable)
+            || b.unreservedQty - a.unreservedQty
+            || a.warehouseLocationId - b.warehouseLocationId,
+          );
+      } catch {
+        candidateLevels = [];
+      }
+    }
+
+    if (candidateLevels.length > 0) {
+      if (
+        reserveLocationId != null &&
+        candidateLevels[0].warehouseLocationId === reserveLocationId &&
+        candidateLevels[0].unreservedQty >= toReserve
+      ) {
+        const success = await this.inventoryCore.reserveForOrder({
+          productVariantId: variantId,
+          warehouseLocationId: reserveLocationId,
+          qty: toReserve,
+          orderId,
+          orderItemId,
+          userId,
+        }, dbh);
+        if (success) {
+          return { reserved: toReserve, promised: 0, shortfall };
+        }
+      } else {
+        let remaining = toReserve;
+        let reservedTotal = 0;
+        for (const cand of candidateLevels) {
+          if (remaining <= 0) break;
+          const chunk = Math.min(remaining, cand.unreservedQty);
+          if (chunk <= 0) continue;
+          const ok = await this.inventoryCore.reserveForOrder({
+            productVariantId: variantId,
+            warehouseLocationId: cand.warehouseLocationId,
+            qty: chunk,
+            orderId,
+            orderItemId,
+            referenceId:
+              cand.warehouseLocationId === reserveLocationId
+                ? String(orderId)
+                : `${orderId}:loc:${cand.warehouseLocationId}`,
+            userId,
+          }, dbh);
+          if (ok) {
+            reservedTotal += chunk;
+            remaining -= chunk;
+          }
+        }
+        // Any remaining ATP-covered demand is backed by fungible parent/case packs
+        // and admitted as promised (keeping the order in Ready to Pick for inline case-break).
+        return { reserved: reservedTotal, promised: remaining, shortfall };
+      }
+    }
+
     if (!reserveLocationId) {
       logger.warn("channels.reservation_service", { detail: `[RESERVATION] No assigned bin or inventory_levels for variant ${variantId} — ` +
           `cannot place reservation for order #${orderId}` });
       return { reserved: 0, promised: 0, shortfall: orderQty };
     }
 
-    // Step 4: Delegate to inventoryCore (atomic: upserts level + increments reserved_qty + logs txn)
+    // Fallback when direct level rows are empty (either unit-test mock OR 0-stock pick bin backed by Case packs in Reserve)
     const success = await this.inventoryCore.reserveForOrder({
       productVariantId: variantId,
       warehouseLocationId: reserveLocationId,
@@ -337,11 +436,12 @@ class ReservationService implements ReservationServiceContract {
     }, dbh);
 
     if (!success) {
-      // Should not happen since core no longer checks bin-level stock,
-      // but handle defensively
-      logger.error("channels.reservation_service", { error: `[RESERVATION] inventoryCore.reserveForOrder returned false unexpectedly ` +
-          `for variant ${variantId} order #${orderId}` });
-      return { reserved: 0, promised: 0, shortfall: orderQty };
+      logger.info("channels.reservation_service", {
+        detail:
+          `[RESERVATION] Assigned bin ${reserveLocationId} has insufficient direct stock for variant ${variantId}; ` +
+          `admitting ${toReserve} fungible ATP-backed unit(s) as promised for order #${orderId} item #${orderItemId}`,
+      });
+      return { reserved: 0, promised: toReserve, shortfall };
     }
 
     return { reserved: toReserve, promised: 0, shortfall };
@@ -373,7 +473,20 @@ class ReservationService implements ReservationServiceContract {
       totalPromisedBaseUnits: 0,
     };
 
-    // Fetch all line items for this order
+    // Fetch order warehouse scope (best-effort) + all line items for this order
+    let orderWarehouseId: number | null = null;
+    if (typeof dbh.execute === "function") {
+      try {
+        const whRes = await dbh.execute(sql`SELECT warehouse_id FROM wms.orders WHERE id = ${orderId} LIMIT 1`);
+        const rawWh = (whRes?.rows?.[0] as any)?.warehouse_id;
+        if (rawWh != null && Number.isInteger(Number(rawWh))) {
+          orderWarehouseId = Number(rawWh);
+        }
+      } catch {
+        orderWarehouseId = null;
+      }
+    }
+
     const items = await dbh
       .select()
       .from(orderItems)
@@ -432,6 +545,7 @@ class ReservationService implements ReservationServiceContract {
           item.id,
           userId,
           dbOverride,
+          orderWarehouseId,
         );
 
         if (res.reserved > 0) {

@@ -8,7 +8,8 @@ import { createBinAssignmentService, warehouseStorage } from "../..";
 import {
   BinAssignmentValidationError,
   parseBinAssignmentWriteRequest,
-} from "../../domain/bin-assignment-contracts";
+  relocatePickSlot,
+} from "../../slotting.api";
 import { catalogStorage } from "../../../catalog";
 import { inventoryStorage } from "../../../inventory";
 import { db } from "../../../../storage/base";
@@ -852,6 +853,49 @@ export function registerWarehouseRoutes(app: Express) {
       const status = /not found/i.test(message)
         ? 404
         : /(cannot assign|not assigned to a warehouse|not a pick face|inactive|required)/i.test(message)
+          ? 400
+          : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  // Atomic "Move Slot & Stock Together" (WH-2 single-owner slotting relocation)
+  app.post("/api/warehouse/slots/relocate", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const toLocationId = Number(req.body?.toLocationId ?? req.body?.targetWarehouseLocationId);
+      if (!Number.isInteger(toLocationId) || toLocationId <= 0) {
+        return res.status(400).json({ error: "toLocationId must be a positive integer" });
+      }
+      const productVariantId = req.body?.productVariantId != null ? Number(req.body.productVariantId) : undefined;
+      const productLocationId = req.body?.productLocationId != null ? Number(req.body.productLocationId) : undefined;
+      const fromLocationId = req.body?.fromLocationId != null ? Number(req.body.fromLocationId) : undefined;
+      const moveStock = req.body?.moveStock !== false;
+      const userId = req.session?.user?.id || "system";
+
+      const result = await relocatePickSlot(binAssignments, {
+        productVariantId,
+        productLocationId,
+        fromLocationId,
+        toLocationId,
+        moveStock,
+        userId,
+        notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+        inventoryOwner: req.app.locals.services?.inventoryCore,
+      });
+
+      res.json({
+        success: true,
+        ...result,
+      });
+    } catch (error: any) {
+      if (error instanceof BinAssignmentValidationError) {
+        return res.status(400).json({ error: error.message, code: error.code });
+      }
+      logger.error("warehouse.routes", { message: "Error relocating pick slot:", error: error });
+      const message = error.message || "Failed to relocate pick slot";
+      const status = /not found/i.test(message)
+        ? 404
+        : /(frozen|cannot|invalid|required|not a pick face|inactive)/i.test(message)
           ? 400
           : 500;
       res.status(status).json({ error: message });

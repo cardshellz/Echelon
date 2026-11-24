@@ -559,7 +559,6 @@ export default function Replenishment() {
   const [settingsForm, setSettingsForm] = useState({
     replenMode: "queue",
     shortPickAction: "partial_pick",
-    inlineReplenMaxUnits: "50",
     velocityLookbackDays: "14",
     replenQaDailyEnabled: true,
     replenQaDailySampleLimit: "2",
@@ -583,7 +582,6 @@ export default function Replenishment() {
       setSettingsForm({
         replenMode: selectedWarehouse.replenMode,
         shortPickAction: selectedWarehouse.shortPickAction,
-        inlineReplenMaxUnits: selectedWarehouse.inlineReplenMaxUnits?.toString() || "50",
         velocityLookbackDays: selectedWarehouse.velocityLookbackDays?.toString() || "14",
         replenQaDailyEnabled: selectedWarehouse.replenQaDailyEnabled !== 0,
         replenQaDailySampleLimit: selectedWarehouse.replenQaDailySampleLimit?.toString() || "2",
@@ -598,7 +596,6 @@ export default function Replenishment() {
     mutationFn: async (data: {
       replenMode: string;
       shortPickAction: string;
-      inlineReplenMaxUnits: number | null;
       velocityLookbackDays: number;
       replenQaDailyEnabled: number;
       replenQaDailySampleLimit: number;
@@ -2298,34 +2295,12 @@ export default function Replenishment() {
                           <div>
                             <div className="font-medium text-sm md:text-base">Hybrid Mode</div>
                             <div className="text-xs md:text-sm text-muted-foreground">
-                              Small replenishments are done inline by pickers, larger ones go to the queue for dedicated workers.
+                              Case breaks and same-SKU reserve moves run inline for pickers, while pallet drops and builds go to the queue.
                             </div>
                           </div>
                         </label>
                       </div>
                     </div>
-
-                    {settingsForm.replenMode === "hybrid" && (
-                      <div className="ml-0 md:ml-8 p-3 md:p-4 bg-muted/30 rounded-lg">
-                        <Label className="text-xs md:text-sm" htmlFor="inlineReplenMaxUnits">Inline Replen Max Units</Label>
-                        <p className="text-xs md:text-sm text-muted-foreground mb-2">
-                          Tasks below this quantity are handled inline, above go to queue
-                        </p>
-                        <Input
-                          id="inlineReplenMaxUnits"
-                          type="number"
-                          className="w-full sm:w-32 h-10"
-                          value={settingsForm.inlineReplenMaxUnits}
-                          onChange={(e) => setSettingsForm({ ...settingsForm, inlineReplenMaxUnits: e.target.value })}
-                          min="1"
-                          autoComplete="off"
-                          autoCorrect="off"
-                          autoCapitalize="off"
-                          spellCheck={false}
-                          data-testid="input-inline-replen-max-units"
-                        />
-                      </div>
-                    )}
 
                     <div className="pt-4 border-t">
                       <Label className="text-sm md:text-base font-semibold">Short Pick Action</Label>
@@ -2464,9 +2439,6 @@ export default function Replenishment() {
                       onClick={() => saveSettingsMutation.mutate({
                         replenMode: settingsForm.replenMode,
                         shortPickAction: settingsForm.shortPickAction,
-                        inlineReplenMaxUnits: settingsForm.replenMode === "hybrid"
-                          ? parseInt(settingsForm.inlineReplenMaxUnits) || 50
-                          : null,
                         velocityLookbackDays: parseInt(settingsForm.velocityLookbackDays) || 14,
                         replenQaDailyEnabled: settingsForm.replenQaDailyEnabled ? 1 : 0,
                         replenQaDailySampleLimit: Math.min(50, Math.max(1, parseInt(settingsForm.replenQaDailySampleLimit) || 2)),

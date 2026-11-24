@@ -126,10 +126,10 @@ describe("shared replenishment execution policy", () => {
     expect(resolveReplenishmentAutoExecution(null, 1, null, 1000).shouldAutoExecute).toBe(true);
     expect(resolveReplenishmentAutoExecution(null, null, null, 1).shouldAutoExecute).toBe(false);
   });
-  it("uses base units for hybrid thresholds and honors inline for same-SKU full-case replenishment", () => {
+  it("honors inline and hybrid modes without artificial base-unit caps while keeping pallet drops queued", () => {
     const settings = { replenMode: "hybrid", inlineReplenMaxUnits: 50 };
     expect(resolveReplenishmentAutoExecution(0, 0, settings, 50).shouldAutoExecute).toBe(true);
-    expect(resolveReplenishmentAutoExecution(0, 0, settings, 51).shouldAutoExecute).toBe(false);
+    expect(resolveReplenishmentAutoExecution(0, 0, settings, 100).shouldAutoExecute).toBe(true);
     expect(resolveReplenishmentAutoExecution(1, 1, settings, 1, "full_case").shouldAutoExecute).toBe(true);
     expect(resolveReplenishmentAutoExecution(1, 1, settings, 1, "pallet_drop").shouldAutoExecute).toBe(false);
   });
@@ -138,7 +138,7 @@ describe("shared replenishment execution policy", () => {
     expect(resolveReplenishmentAutoExecution(1,2,null,5,"package_conversion").shouldAutoExecute).toBe(true);
     expect(resolveReplenishmentAutoExecution(null,1,null,5,"package_conversion").shouldAutoExecute).toBe(true);
     expect(resolveReplenishmentAutoExecution(0,0,{ replenMode:"hybrid",inlineReplenMaxUnits:5 },5,"package_conversion").shouldAutoExecute).toBe(true);
-    expect(resolveReplenishmentAutoExecution(0,0,{ replenMode:"hybrid",inlineReplenMaxUnits:5 },6,"package_conversion").shouldAutoExecute).toBe(false);
+    expect(resolveReplenishmentAutoExecution(0,0,{ replenMode:"hybrid",inlineReplenMaxUnits:5 },100,"package_conversion").shouldAutoExecute).toBe(true);
     expect(resolveReplenishmentAutoExecution(0,0,{ replenMode:"queue",inlineReplenMaxUnits:50 },5,"package_conversion").shouldAutoExecute).toBe(false);
     expect(resolveReplenishmentAutoExecution(1,1,{ replenMode:"inline",inlineReplenMaxUnits:50 },5,"component_build").shouldAutoExecute).toBe(false);
   });

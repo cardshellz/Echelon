@@ -2152,6 +2152,17 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       );
     }
 
+    let oldestSourceReceivedAt: Date | null = null;
+    for (const lot of lotRows) {
+      if (lot.received_at) {
+        const candidate = lot.received_at instanceof Date ? lot.received_at : new Date(String(lot.received_at));
+        if (!Number.isNaN(candidate.getTime()) && (!oldestSourceReceivedAt || candidate < oldestSourceReceivedAt)) {
+          oldestSourceReceivedAt = candidate;
+        }
+      }
+    }
+    const outputLotReceivedAt = build ? input.occurredAt : (oldestSourceReceivedAt ?? input.occurredAt);
+
     const committedLotAllocations: CanonicalClaimProducedLotAllocation[] = [];
     let outputVariantBefore = nonnegativeInteger(outputLevel.variant_qty, "outputInventoryLevel.variantQty");
     let outputCostOffset = 0;
@@ -2213,9 +2224,9 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
                qty_picked, qty_consumed, received_at, status, cost_provisional,
                cost_source, notes, created_at, cost_precision_version
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
-                       $12, $16, $13, 0, 0, $14, 'active', ${outputCostProvisional}, 'transformation', $15, $14, 1)
+                       $12, $16, $13, 0, 0, $17, 'active', ${outputCostProvisional}, 'transformation', $15, $14, 1)
              RETURNING id`,
-        build ? [...lotValues, build.buildOrderId, build.buildRunId] : lotValues,
+        build ? [...lotValues, build.buildOrderId, build.buildRunId] : [...lotValues, outputLotReceivedAt],
       ))[0];
       const outputLotId = positiveInteger(insertedLot?.id, "outputInventoryLot.id");
       quantityPosting?.add({ inventoryLotId: outputLotId, inventoryLevelId: positiveInteger(outputLevel.id, "outputInventoryLevel.id"),
