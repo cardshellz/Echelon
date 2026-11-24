@@ -77,6 +77,7 @@ import {
   assertCouponAdjustmentSupported,
   requiresOrderEditCodeReceipt,
 } from "../domain/order-edit-coupon-boundary";
+import { assertOrderEditCodeMinimumKept } from "../domain/order-edit-code-minimum";
 import { OrderEditError } from "../domain/order-edit-error";
 import {
   priceOrderEditCodes,
@@ -908,6 +909,59 @@ export class ShopifyOrderEditProvider
       this.options.rewards,
     );
   }
+  /**
+   * Owner rule (2026-11-24): refuse an edit that takes the order below the
+   * minimum purchase of a discount code applied at checkout. Shopify keeps
+   * such a code during an edit and will not remove it.
+   *
+   * Both measures are item prices before any discount, as Shopify reports
+   * them: the original order's lines and the staged edit's lines. ASSUMPTION:
+   * Shopify measures a code's minimum before the club discount. That could not
+   * be confirmed (the only minimum-spend codes in use are not accepted by a
+   * trial calculation for another customer), so the more lenient reading is
+   * used: a member's edit is refused only when it is below the minimum on
+   * both readings.
+   */
+  private async assertCheckoutCodeMinimums(
+    snapshot: OrderEditSnapshot,
+    edited: Array<{ originalUnitPriceCents: number; quantity: number }>,
+  ): Promise<void> {
+    const codes = (snapshot.discountRules ?? [])
+      .filter(
+        (rule) =>
+          rule.type === "DiscountCodeApplication" &&
+          rule.targetType === "LINE_ITEM",
+      )
+      .map((rule) => rule.label);
+    if (!codes.length) return;
+    const measure = (
+      lines: Array<{ originalUnitPriceCents: number; quantity: number }>,
+    ) => ({
+      subtotalCents: sum(
+        lines.map((line) =>
+          multiply(line.originalUnitPriceCents, line.quantity),
+        ),
+      ),
+      quantity: sum(lines.map((line) => line.quantity)),
+    });
+    const before = measure(snapshot.lines.filter((line) => line.quantity > 0));
+    const after = measure(edited);
+    // An edit that lowers neither measure cannot take the order below a
+    // minimum, so the code's terms need not be read.
+    if (
+      after.subtotalCents >= before.subtotalCents &&
+      after.quantity >= before.quantity
+    )
+      return;
+    assertOrderEditCodeMinimumKept({
+      codes: await (
+        await this.codes(snapshot.connectionId)
+      ).checkoutCodeMinimums(codes),
+      before,
+      after,
+    });
+  }
+
   private async codePricing(
     snapshot: OrderEditSnapshot,
     plan: OrderEditPlan,
@@ -1233,6 +1287,8 @@ export class ShopifyOrderEditProvider
       };
       phase = "verify_recovery_lineage";
       assertRecoveryLineage(quote);
+      phase = "verify_code_minimum";
+      await this.assertCheckoutCodeMinimums(fresh, quote.lines);
       // Establish financial eligibility while the order is still unchanged. A
       // successful edit must not discover only afterwards that its refund is unsupported.
       phase = "refund_preflight";
