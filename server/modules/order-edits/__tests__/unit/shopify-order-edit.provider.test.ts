@@ -2703,6 +2703,13 @@ describe("ShopifyOrderEditProvider", () => {
         itemsGrossCents: 5000,
         itemsDiscountCents: 1000,
         itemsNetCents: 4000,
+        itemDiscounts: [
+          {
+            key: "code:REWARD20",
+            amountCents: 1000,
+            value: { type: "allocated" },
+          },
+        ],
       },
       evidence: { refundPreflight: { amountCents: 4000 } },
     });
@@ -2890,39 +2897,147 @@ describe("ShopifyOrderEditProvider", () => {
     ).toHaveLength(1);
   });
 
-  it.each(["transferred on removal", "multiplied on growth"])(
-    "blocks a fixed credit %s before commit or financial settlement",
-    async (change) => {
-      const removal = change === "transferred on removal";
-      const h = harness([
-        fixedOrder(),
-        fixedOrder(),
-        ...(!removal ? [{ nodes: [variant(10, "50.00")] }] : []),
-        begin(fixedCalculated()),
-        removal ? quantity(fixedCalculated(0, "0.00", "20.00"))
-          : fixedAddition(fixedCalculated(2, "30.00", "10.00")),
-      ]);
-      const snapshot = await h.provider.readOrder(4, "100");
-      await expect(
-        h.provider.quote(
-          4,
-          snapshot,
+  it("refuses a fixed credit that Shopify would apply beyond its value", async () => {
+    // A $20.00 credit shown as $30.00 + $10.00 after the first item grows.
+    const h = harness([
+      fixedOrder(),
+      fixedOrder(),
+      { nodes: [variant(10, "50.00")] },
+      begin(fixedCalculated()),
+      fixedAddition(fixedCalculated(2, "30.00", "10.00")),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "fixed-edit",
+      ),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_FIXED_DISCOUNT_MISMATCH" });
+    expect(
+      h.requests.some((request) =>
+        /orderEditCommit|refundCreate|orderEditAddLineItemDiscount|suggestedRefund/.test(
+          request.query,
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("uses Shopify's shares of a fixed credit as given when the whole credit stays on the remaining item", async () => {
+    // Not what Shopify did on #65912 (the removed item's share was dropped),
+    // but if it places the credit this way the editor does not second-guess it.
+    const h = harness([
+      fixedOrder(),
+      fixedOrder(),
+      begin(fixedCalculated()),
+      quantity(fixedCalculated(0, "0.00", "20.00")),
+      codeMinimum(),
+      refundCapacity("80.00"),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 0 }], additions: [] },
+      "fixed-edit",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 3000,
+      deltaCents: -5000,
+      outstandingCents: -5000,
+      financials: {
+        itemsGrossCents: 5000,
+        itemsDiscountCents: 2000,
+        itemsNetCents: 3000,
+        itemDiscounts: [
           {
-            changes: [{ lineItemId: "1", quantity: removal ? 0 : 2 }],
-            additions: [],
+            key: "code:REWARD20",
+            amountCents: 2000,
+            value: { type: "fixed", amountCents: 2000 },
           },
-          "fixed-edit",
+        ],
+      },
+      evidence: { refundPreflight: { amountCents: 5000 } },
+    });
+    expect(
+      h.requests.some((request) =>
+        /orderEditCommit|refundCreate|orderEditAddLineItemDiscount/.test(
+          request.query,
         ),
-      ).rejects.toMatchObject({ code: "ORDER_EDIT_PRESERVED_DISCOUNT_MISMATCH" });
-      expect(
-        h.requests.some((request) =>
-          /orderEditCommit|refundCreate|orderEditAddLineItemDiscount|suggestedRefund/.test(
-            request.query,
-          ),
-        ),
-      ).toBe(false);
-    },
-  );
+      ),
+    ).toBe(false);
+  });
+
+  it("lets a previously edited order drop an item that carries part of a fixed credit", async () => {
+    // After an earlier edit Shopify can still list an allocation for removed
+    // quantity, so the order's own per-item shares no longer add up and the
+    // editor has no original shares to compare against. It used to expect the
+    // whole $20.00 on the remaining item and refuse; Shopify keeps $10.00 there.
+    const order = fixedOrder();
+    order.order.lineItems.nodes[0].discountAllocations[0].allocatedAmountSet =
+      bag("15.00");
+    const h = harness([
+      order,
+      order,
+      begin(fixedCalculated()),
+      quantity(fixedCalculated(0, "0.00", "10.00")),
+      codeMinimum(),
+      refundCapacity("80.00"),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    expect(snapshot.nativeDiscountAllocations).toBeUndefined();
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 0 }], additions: [] },
+      "fixed-edit",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 4000,
+      deltaCents: -4000,
+      financials: {
+        itemsDiscountCents: 1000,
+        itemDiscounts: [
+          {
+            key: "code:REWARD20",
+            amountCents: 1000,
+            value: { type: "allocated" },
+          },
+        ],
+      },
+      evidence: { refundPreflight: { amountCents: 4000 } },
+    });
+  });
+
+  it("refuses an order-level code the order did not carry", async () => {
+    const result = fixedCalculated();
+    result.lineItems.nodes[1].calculatedDiscountAllocations.push({
+      allocatedAmountSet: bag("1.00"),
+      discountApplication: {
+        ...result.lineItems.nodes[1].calculatedDiscountAllocations[0]
+          .discountApplication,
+        id: id("CalculatedDiscountApplication", 2),
+        code: "EXTRA",
+        description: "EXTRA",
+      },
+    });
+    const h = harness([fixedOrder(), fixedOrder(), begin(result)]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 0 }], additions: [] },
+        "fixed-edit",
+      ),
+    ).rejects.toMatchObject({ code: "PROMOTION_PARITY_UNVERIFIED" });
+    expect(
+      h.requests.some((request) =>
+        /orderEditSetQuantity|orderEditCommit/.test(request.query),
+      ),
+    ).toBe(false);
+  });
 
   it.each(["value", "type"])(
     "rejects changed fixed code %s even if the revised allocation still totals $20",
@@ -2987,7 +3102,7 @@ describe("ShopifyOrderEditProvider", () => {
     ).toBe(false);
   });
 
-  it("rejects redistribution of a fixed reward from removed merchandise", async () => {
+  it("uses Shopify's shares as given when a larger fixed credit covers the remaining item", async () => {
     const order = fixedOrder();
     const initial = fixedCalculated();
     // Original credit exceeds the remaining $50 item after removal.
@@ -3028,17 +3143,35 @@ describe("ShopifyOrderEditProvider", () => {
       };
     });
     result.totalOutstandingSet = bag("-40.00");
-    const h = harness([order, order, begin(initial), quantity(result)]);
+    const h = harness([
+      order,
+      order,
+      begin(initial),
+      quantity(result),
+      codeMinimum(),
+      refundCapacity("40.00"),
+    ]);
     const snapshot = await h.provider.readOrder(4, "100");
-    await expect(
-      h.provider.quote(
-        4,
-        snapshot,
-        { changes: [{ lineItemId: "1", quantity: 0 }], additions: [] },
-        "fixed-edit",
-      ),
-    ).rejects.toMatchObject({
-      code: "ORDER_EDIT_PRESERVED_DISCOUNT_MISMATCH",
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 0 }], additions: [] },
+      "fixed-edit",
+    );
+    // $50.00 of a $60.00 credit: under its value, so it is shown as what applies.
+    expect(quote).toMatchObject({
+      totalCents: 0,
+      deltaCents: -4000,
+      financials: {
+        itemsDiscountCents: 5000,
+        itemDiscounts: [
+          {
+            key: "code:REWARD20",
+            amountCents: 5000,
+            value: { type: "allocated" },
+          },
+        ],
+      },
     });
     expect(
       h.requests.some((request) =>
@@ -3269,7 +3402,7 @@ describe("ShopifyOrderEditProvider", () => {
         { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
         "edit-1",
       ),
-    ).rejects.toMatchObject({ code: "ORDER_EDIT_DISCOUNT_SUBTOTAL_MISMATCH" });
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_FINANCIAL_MISMATCH" });
     expect(
       h.requests.some((request) => request.query.includes("orderEditCommit")),
     ).toBe(false);
@@ -3372,12 +3505,7 @@ describe("ShopifyOrderEditProvider", () => {
           { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
           "edit-1",
         ),
-      ).rejects.toMatchObject({
-        code:
-          field === "subtotal"
-            ? "ORDER_EDIT_DISCOUNT_SUBTOTAL_MISMATCH"
-            : "ORDER_EDIT_FINANCIAL_MISMATCH",
-      });
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_FINANCIAL_MISMATCH" });
       expect(
         h.requests.some((request) =>
           /orderEditCommit|refundCreate/.test(request.query),

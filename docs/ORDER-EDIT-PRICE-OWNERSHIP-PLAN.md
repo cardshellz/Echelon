@@ -51,22 +51,58 @@ Each step is its own pull request with tests.
 | Step | Change | State |
 | --- | --- | --- |
 | 1a | Use Shopify's per-item share of a percentage code as given | Done in the pull request that adds this file |
-| 1b | Remaining places that recompute Shopify's edit figures and compare: fixed-credit shares, product-discount and subtotal reconciliation, balance arithmetic | Unblocked by step 3: Shopify neither moves nor grows a fixed credit |
+| 1b | Remaining places that recompute Shopify's edit figures and compare: fixed-credit shares, product-discount and subtotal reconciliation, balance arithmetic | Fixed-credit shares and the two reconciliations done 2026-11-24 (below). The balance check stays |
 | 2 | Member price: keep lookup and apply. Remove the "club price changed since the order" refusal and the checks that try to prove which Shopify discount gave the member price | Not started |
 | 3 | Test Shopify's own behaviour during an edit | Done 2026-11-24 on live open orders, nothing submitted (results below) |
 | 4 | Preview shows Shopify's numbers in place of the editor's own pricing (`priceOrderEditPreviewItems`) | Not started; depends on step 3 and on how fast Shopify answers |
 | 5 | Codes and rewards entered during an edit: owner decides whether the feature stays. If it does, the amount must come from Shopify | Not started |
 | 6 | Delete pricing code left unused | Not started |
 
-### Why fixed credits wait (step 1b)
+### Step 1b: what changed (2026-11-24)
 
-The fixed-credit checks are not rounding checks. They refuse an edit where a
-fixed credit (for example a points reward) would move onto other items when an
-item is removed, or grow when a quantity grows. `SHOPIFY-ORDER-EDIT-PILOT.md`
-records that Shopify keeps the original allocation and rejects increasing a line
-that carries a fixed code. If that holds, the checks never fire and can go. If it
-does not hold, removing them would let a customer keep or multiply a credit.
-Step 3 settles which.
+At review the editor used to work out each code's share of every item itself
+and refuse the edit when Shopify's figure differed. It now reads the shares
+from Shopify's calculated order (`readCalculatedOrderDiscounts` in
+`shopify-order-edit.provider.ts`).
+
+Refusals removed from review:
+
+- `ORDER_EDIT_PRESERVED_DISCOUNT_MISMATCH`: a fixed code's share on an item had
+  to equal the original share scaled exactly by quantity.
+- `ORDER_EDIT_FIXED_DISCOUNT_MISMATCH` as an equality: on an order edited
+  before, the whole credit had to land on the remaining items. Shopify drops
+  the share of a removed item (#65912), so removing an item that carried part
+  of a fixed credit was always refused on those orders.
+- `ORDER_EDIT_FIXED_CREDIT_SETTLEMENT_REQUIRED` and
+  `ORDER_EDIT_FIXED_CREDIT_PRIORITY_REQUIRED`, which came from the same
+  full-redistribution assumption.
+- `ORDER_EDIT_DISCOUNT_SUBTOTAL_MISMATCH` and
+  `ORDER_EDIT_PRODUCT_DISCOUNT_MISMATCH`. Shopify's items, discounts, shipping
+  and tax must still add up to its own subtotal and total; a response that does
+  not is refused as `ORDER_EDIT_FINANCIAL_MISMATCH`.
+
+Kept, because they are rules and not price arithmetic:
+
+- An order-level discount that is not one of the order's own codes is refused
+  (`PROMOTION_PARITY_UNVERIFIED`).
+- A fixed code may not be worth more than its face value
+  (`ORDER_EDIT_FIXED_DISCOUNT_MISMATCH`). This is the guard against a credit
+  multiplying, in case Shopify behaves differently from the one order tested.
+- `QUOTE_BALANCE_MISMATCH`: Shopify's amount owed must equal its new total less
+  what was paid. It compares Shopify's figures with each other, never rounds,
+  and protects the refund amount, so it stays.
+
+Not changed here:
+
+- The code-entry path (`stageCodes`) keeps its own comparisons until step 5.
+- The member-price allocation check and the per-item price expectation
+  (`QUOTE_PRICE_MISMATCH`, `DISCOUNT_ROUNDING_UNSUPPORTED`) belong to step 2.
+- The live preview still uses the editor's own discount engine (step 4).
+
+Consequence to know about: when an item carrying part of a fixed credit (for
+example a points reward) is removed, that part of the credit is gone and the
+refund is the item's price less its share. This was already the behaviour on
+an order's first edit; it now also applies to orders edited before.
 
 ### Step 3: questions
 
@@ -109,8 +145,8 @@ step played no part.
 
 What follows:
 
-- **Step 1b can proceed.** The fixed-credit checks guard against a credit moving
-  or multiplying, and Shopify does neither.
+- **Step 1b could proceed** (now done, see above). The fixed-credit checks
+  guarded against a credit moving or multiplying, and Shopify does neither.
 - **Step 2 keeps the member-price step.** Only the checks around it go.
 - **Coupon minimum: refuse the edit (owner, 2026-11-24).** A customer could
   qualify for a minimum-spend code, then remove items and keep the code's share
