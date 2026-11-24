@@ -118,16 +118,6 @@ export const SEARCH_QUERY = `query EchelonEditVariants($query: String!, $skuQuer
 export const VARIANTS_QUERY = `query EchelonEditVariantPrices($ids: [ID!]!) {
   nodes(ids: $ids) { ... on ProductVariant { ${VARIANT_FIELDS} } }
 }`;
-export const PRICING_PROVENANCE_QUERY = `query EchelonEditPricingProvenance {
-  currentAppInstallation { app { id } }
-  shopifyFunctions(first: 100) { nodes { id handle } pageInfo { hasNextPage } }
-  discountNodes(first: 100, query: "method:automatic") { nodes { id discount { __typename
-    ... on DiscountAutomaticApp { title status discountClasses appDiscountType { functionId app { id } } }
-    ... on DiscountAutomaticBasic { title status }
-    ... on DiscountAutomaticBxgy { title status }
-    ... on DiscountAutomaticFreeShipping { title status }
-  } } pageInfo { hasNextPage } }
-}`;
 export const CALCULATED_FIELDS = `id originalOrder { id } totalPriceSet { ${MONEY} } totalOutstandingSet { ${MONEY} }
   subtotalPriceSet { ${MONEY} } taxLines { title ratePercentage priceSet { ${MONEY} } }
   shippingLines { id title price { ${MONEY} } stagedStatus }

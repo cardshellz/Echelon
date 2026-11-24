@@ -784,7 +784,7 @@ export class ShopifyOrderEditProvider
       ),
     ];
     const [promotions, variants] = await Promise.allSettled([
-      this.verifyExistingPromotions(snapshot.connectionId, snapshot),
+      this.verifyExistingPromotions(snapshot),
       this.previewVariants(snapshot, ids),
     ]);
     if (promotions.status === "rejected") throw promotions.reason;
@@ -1234,7 +1234,7 @@ export class ShopifyOrderEditProvider
       phase = "verify_pricing";
       const [promotionCheck, variantCheck] = await Promise.allSettled([
         fresh.discountsPresent
-          ? this.verifyExistingPromotions(connectionId, fresh)
+          ? this.verifyExistingPromotions(fresh)
           : Promise.resolve(null),
         this.variantPricing(connectionId, fresh, plan),
       ]);
@@ -1959,33 +1959,9 @@ export class ShopifyOrderEditProvider
           "CONTEXTUAL_PRICE_CHANGED",
           "The contextual price differs from the approved product price.",
         );
-      if (addition.quantityIncreaseOfLineId) {
-        const original = originalCalculated.get(
-          addition.quantityIncreaseOfLineId,
-        )!;
-        const existingMemberDiscount = sum(
-          original.calculatedDiscountAllocations
-            .filter(
-              (allocation) =>
-                allocation.discountApplication.__typename ===
-                "CalculatedAutomaticDiscountApplication",
-            )
-            .map((allocation) => money(allocation.allocatedAmountSet)),
-        );
-        if (
-          existingMemberDiscount > 0 &&
-          (!baseline.memberPricingEnabled ||
-            !baseline.memberPlan ||
-            member >= retail ||
-            multiply(retail - member, original.quantity) !==
-              existingMemberDiscount)
-        ) {
-          fail(
-            "MEMBER_PRICE_CHANGED",
-            "The current member price cannot reproduce this original item's pricing. No order change was committed.",
-          );
-        }
-      }
+      // Extra units of a member-priced item are a separate line at today's
+      // member price. The original units keep the price they were bought at;
+      // the club price having changed since is not a reason to refuse.
       if (member < retail) {
         calculated = readCalculated(
           (
@@ -2161,7 +2137,6 @@ export class ShopifyOrderEditProvider
   }
 
   private async verifyExistingPromotions(
-    connectionId: number,
     snapshot: OrderEditSnapshot,
   ): Promise<Record<string, unknown>> {
     const applications = parse(
@@ -2208,94 +2183,31 @@ export class ShopifyOrderEditProvider
     const automaticItems = itemApplications.filter(
       (entry) => entry.__typename === "AutomaticDiscountApplication",
     );
-    if (automaticItems.length === 0)
-      return {
-        nativeCodes: nativeCodes.map((entry) => entry.code),
-        preservedShippingDiscounts: applications
-          .filter((entry) => entry.targetType === "SHIPPING_LINE")
-          .map((entry) => entry.title ?? entry.code),
-      };
-    const provenance = parse(
-      z.object({
-        currentAppInstallation: z.object({ app: z.object({ id: TEXT }) }),
-        shopifyFunctions: z.object({
-          nodes: z.array(z.object({ id: TEXT, handle: TEXT })),
-          pageInfo: PAGE,
-        }),
-        discountNodes: z.object({
-          nodes: z.array(
-            z.object({
-              id: TEXT,
-              discount: z.object({
-                __typename: TEXT,
-                title: TEXT,
-                status: TEXT,
-                discountClasses: z.array(TEXT).optional(),
-                appDiscountType: z
-                  .object({ functionId: TEXT, app: z.object({ id: TEXT }) })
-                  .optional(),
-              }),
-            }),
-          ),
-          pageInfo: PAGE,
-        }),
-      }),
-      await this.request(
-        await this.credentials(connectionId),
-        gql.PRICING_PROVENANCE_QUERY,
-        {},
-      ),
-    );
-    complete(provenance.shopifyFunctions);
-    complete(provenance.discountNodes);
-    const functions = provenance.shopifyFunctions.nodes.filter(
-      (entry) => entry.handle === "cardshellz-pricing-discount",
-    );
-    if (functions.length !== 1)
-      fail(
-        "MEMBER_FUNCTION_UNPROVEN",
-        "The installed member-pricing function could not be identified uniquely.",
-      );
-    const discounts = provenance.discountNodes.nodes.map(
-      (entry) => entry.discount,
-    );
-    const matching = discounts.filter(
-      (entry) =>
-        entry.__typename === "DiscountAutomaticApp" &&
-        entry.status === "ACTIVE" &&
-        entry.appDiscountType?.functionId === functions[0].id &&
-        entry.appDiscountType.app.id ===
-          provenance.currentAppInstallation.app.id &&
-        entry.discountClasses?.length === 1 &&
-        entry.discountClasses[0] === "PRODUCT",
-    );
+    // The only automatic item discount this editor supports is the club's
+    // member price, which the checkout labels "Member discount". Any other
+    // automatic item discount (for example buy-one-get-one) has rules an edit
+    // could break, so it still goes to staff. This is read from the order
+    // itself: the editor no longer asks Shopify which installed discount
+    // produced it.
     if (
-      matching.length !== 1 ||
       automaticItems.some(
         (entry) =>
-          ![MEMBER_PRICING_MESSAGE, matching[0].title].includes(
-            entry.title ?? "",
-          ) ||
+          entry.title !== MEMBER_PRICING_MESSAGE ||
           entry.allocationMethod !== "ACROSS" ||
           entry.targetSelection !== "ENTITLED",
-      ) ||
-      discounts.filter((entry) => entry.title === matching[0].title).length !==
-        1
+      )
     ) {
       fail(
         "PROMOTION_PARITY_UNVERIFIED",
-        "The order's promotion cannot be matched uniquely to the installed member-pricing function.",
+        "This order has an automatic discount other than member pricing. It needs staff review before it can be edited.",
       );
     }
     return {
-      appId: provenance.currentAppInstallation.app.id,
-      functionId: functions[0].id,
-      handle: functions[0].handle,
-      title: matching[0].title,
-      orderMessages: automaticItems.map((entry) => entry.title),
-      discountIds: provenance.discountNodes.nodes
-        .filter((entry) => entry.discount === matching[0])
-        .map((entry) => entry.id),
+      nativeCodes: nativeCodes.map((entry) => entry.code),
+      orderMessages: [...new Set(automaticItems.map((entry) => entry.title))],
+      preservedShippingDiscounts: applications
+        .filter((entry) => entry.targetType === "SHIPPING_LINE")
+        .map((entry) => entry.title ?? entry.code),
     };
   }
 
@@ -4013,15 +3925,28 @@ function readPreviewProductDiscounts(
   return result;
 }
 
-/** Shopify reports function PRODUCT allocations as appliedTo ORDER, excluding them from editableSubtotalSet. */
+/**
+ * Shopify reports function PRODUCT allocations as appliedTo ORDER, excluding
+ * them from editableSubtotalSet.
+ *
+ * The amounts are Shopify's and are summed as given. An order can carry
+ * several member discounts with the same label and amount (#65936 has two of
+ * $7.00), so they are not matched one-to-one against the order's rules: that
+ * match refused every such order as soon as an edit was opened. The rule kept
+ * is that the session shows no automatic discount the order did not carry.
+ */
 function automaticProductOrderAmounts(
   calculated: Calculated,
   baseline: OrderEditSnapshot,
 ): Map<string, number> {
-  const rules = (baseline.discountRules ?? []).filter(
-    (rule) =>
-      rule.type === "AutomaticDiscountApplication" &&
-      rule.targetType === "LINE_ITEM",
+  const labels = new Set(
+    (baseline.discountRules ?? [])
+      .filter(
+        (rule) =>
+          rule.type === "AutomaticDiscountApplication" &&
+          rule.targetType === "LINE_ITEM",
+      )
+      .map((rule) => rule.label),
   );
   const amounts = new Map<string, number>();
   for (const line of [
@@ -4033,24 +3958,17 @@ function automaticProductOrderAmounts(
         allocation.discountApplication.__typename ===
         "CalculatedAutomaticDiscountApplication",
     );
-    for (const allocation of automatic) {
-      const application = allocation.discountApplication;
-      const matches = rules.filter(
-        (rule) =>
-          rule.label === application.description &&
-          rule.allocationMethod === application.allocationMethod &&
-          rule.targetSelection === application.targetSelection &&
-          rule.targetType === application.targetType &&
-          rule.value.type === "fixed" &&
-          application.value.__typename === "MoneyV2" &&
-          rule.value.amountCents === cents(application.value.amount),
+    if (
+      automatic.some(
+        (allocation) =>
+          allocation.discountApplication.targetType !== "LINE_ITEM" ||
+          !labels.has(allocation.discountApplication.description ?? ""),
+      )
+    )
+      fail(
+        "PROMOTION_PARITY_UNVERIFIED",
+        "Shopify's edit session shows an automatic discount this order did not carry.",
       );
-      if (matches.length !== 1)
-        fail(
-          "PROMOTION_PARITY_UNVERIFIED",
-          "The calculated member-pricing discount does not match the original promotion.",
-        );
-    }
     amounts.set(
       line.id,
       sum(

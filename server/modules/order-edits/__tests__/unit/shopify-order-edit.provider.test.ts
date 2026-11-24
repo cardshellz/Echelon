@@ -604,7 +604,6 @@ describe("Club automatic price plus a saved reward on an added item", () => {
     const responses: unknown[] = [
       nativeOrder(),
       nativeOrder(),
-      memberProvenance(),
       { nodes: [variants().nodes[1]] },
       variants(),
       lookup(),
@@ -745,7 +744,6 @@ describe("Club automatic price plus a saved reward on an added item", () => {
     const responses: unknown[] = [
       nativeOrder(),
       nativeOrder(),
-      memberProvenance(),
       { nodes: [variants().nodes[0]] },
       lookup(),
       approved,
@@ -5400,7 +5398,6 @@ function memberQuoteResponses() {
   return [
     memberCreditOrder(),
     memberCreditOrder(),
-    memberProvenance(),
     {
       nodes: [
         variant(
@@ -5441,14 +5438,14 @@ async function quoteMemberIncrease() {
 describe("member function pricing on protected quantity increases", () => {
   it("combines a protected increase and an explicit addition without losing quantity lineage", async () => {
     const responses = memberQuoteResponses();
-    responses[5] = {
+    responses[4] = {
       orderEditAddVariant: {
         userErrors: [],
         calculatedLineItem: { id: addedMemberLineId },
         calculatedOrder: memberCreditCalculated(2, false),
       },
     };
-    responses[6] = {
+    responses[5] = {
       orderEditAddLineItemDiscount: {
         userErrors: [],
         calculatedOrder: memberCreditCalculated(2),
@@ -5495,7 +5492,6 @@ describe("member function pricing on protected quantity increases", () => {
     const h = harness([
       raw,
       raw,
-      memberProvenance(),
       {
         nodes: [
           variant(
@@ -5538,22 +5534,17 @@ describe("member function pricing on protected quantity increases", () => {
     ).toBe("conflict");
     expect(h.requests).toHaveLength(1);
   });
-  it("overlaps current product and promotion reads, and waits for both before staging", async () => {
+  it("waits for the product read before staging and asks Shopify nothing about the promotion", async () => {
     const h = harness(memberQuoteResponses());
     const snapshot = await h.provider.readOrder(4, "100");
     const originalFetch = h.fetchImpl.getMockImplementation()!;
-    let releasePromotion!: () => void;
     let releaseVariants!: () => void;
-    const promotion = new Promise<void>((resolve) => {
-      releasePromotion = resolve;
-    });
     const variants = new Promise<void>((resolve) => {
       releaseVariants = resolve;
     });
     h.fetchImpl.mockImplementation(async (url, init) => {
       const response = originalFetch(url, init);
       const query = JSON.parse(String(init?.body)).query as string;
-      if (query.includes("EchelonEditPricingProvenance")) await promotion;
       if (query.includes("EchelonEditVariantPrices")) await variants;
       return response;
     });
@@ -5570,25 +5561,28 @@ describe("member function pricing on protected quantity increases", () => {
         ),
       ).toBe(true),
     );
-    expect(
-      h.requests.some((request) =>
-        request.query.includes("EchelonEditPricingProvenance"),
-      ),
-    ).toBe(true);
-    expect(
-      h.requests.some((request) => request.query.includes("orderEditBegin")),
-    ).toBe(false);
-    releaseVariants();
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(
       h.requests.some((request) => request.query.includes("orderEditBegin")),
     ).toBe(false);
-    releasePromotion();
+    releaseVariants();
     expect((await pending).totalCents).toBe(22098);
+    expect(
+      h.requests.some((request) =>
+        /shopifyFunctions|discountNodes|currentAppInstallation/.test(
+          request.query,
+        ),
+      ),
+    ).toBe(false);
   });
-  it("awaits an outstanding product read after promotion failure and never stages", async () => {
+  it("awaits an outstanding product read after an unsupported promotion and never stages", async () => {
     const responses: unknown[] = memberQuoteResponses();
-    responses[2] = new Error("Promotion read unavailable");
+    const other = memberCreditOrder();
+    Object.assign(other.order.discountApplications.nodes[0], {
+      title: "Other promotion",
+    });
+    responses[0] = other;
+    responses[1] = other;
     const h = harness(responses);
     const snapshot = await h.provider.readOrder(4, "100");
     const originalFetch = h.fetchImpl.getMockImplementation()!;
@@ -5597,11 +5591,10 @@ describe("member function pricing on protected quantity increases", () => {
       releaseVariants = resolve;
     });
     h.fetchImpl.mockImplementation(async (url, init) => {
+      const response = originalFetch(url, init);
       const query = JSON.parse(String(init?.body)).query as string;
-      if (query.includes("EchelonEditVariantPrices")) {
-        await variants;
-      }
-      return originalFetch(url, init);
+      if (query.includes("EchelonEditVariantPrices")) await variants;
+      return response;
     });
     let settled = false;
     const outcome = h.provider
@@ -5624,22 +5617,27 @@ describe("member function pricing on protected quantity increases", () => {
     await vi.waitFor(() =>
       expect(
         h.requests.some((request) =>
-          request.query.includes("EchelonEditPricingProvenance"),
+          request.query.includes("EchelonEditVariantPrices"),
         ),
       ).toBe(true),
     );
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(settled).toBe(false);
     releaseVariants();
-    expect(await outcome).toMatchObject({ code: "SHOPIFY_UNAVAILABLE" });
+    expect(await outcome).toMatchObject({ code: "PROMOTION_PARITY_UNVERIFIED" });
     expect(
       h.requests.some((request) => request.query.includes("mutation")),
     ).toBe(false);
   });
-  it("reports both failed preflight reads without starting an edit", async () => {
+  it("reports both the unsupported promotion and a failed product read without starting an edit", async () => {
     const responses: unknown[] = memberQuoteResponses();
-    responses[2] = new Error("Promotion read unavailable");
-    responses[3] = new Error("Product read unavailable");
+    const other = memberCreditOrder();
+    Object.assign(other.order.discountApplications.nodes[0], {
+      title: "Other promotion",
+    });
+    responses[0] = other;
+    responses[1] = other;
+    responses[2] = new Error("Product read unavailable");
     const h = harness(responses);
     const snapshot = await h.provider.readOrder(4, "100");
     await expect(
@@ -5649,14 +5647,13 @@ describe("member function pricing on protected quantity increases", () => {
         { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
         "edit-1",
       ),
-    ).rejects.toMatchObject({ code: "SHOPIFY_UNAVAILABLE" });
+    ).rejects.toMatchObject({ code: "PROMOTION_PARITY_UNVERIFIED" });
     expect(h.reports).toHaveBeenCalledWith(expect.objectContaining({
       operationId: "edit-1", code: "SHOPIFY_UNAVAILABLE", phase: "variant_pricing",
       error: expect.objectContaining({ cause: expect.objectContaining({ message: "Product read unavailable" }) }),
     }));
     expect(h.reports).toHaveBeenCalledWith(expect.objectContaining({
-      operationId: "edit-1", phase: "verify_promotions",
-      error: expect.objectContaining({ cause: expect.objectContaining({ message: "Promotion read unavailable" }) }),
+      operationId: "edit-1", code: "PROMOTION_PARITY_UNVERIFIED", phase: "verify_promotions",
     }));
     expect(
       h.requests.some((request) => request.query.includes("mutation")),
@@ -5710,26 +5707,142 @@ describe("member function pricing on protected quantity increases", () => {
       variantId: id("ProductVariant", 10),
       quantity: 1,
     });
-    expect(quote.evidence.pricingProvenance).toMatchObject({
-      title: "Cardshellz Member Pricing",
+    expect(quote.evidence.pricingProvenance).toEqual({
+      nativeCodes: ["TEST-REWARD-19"],
       orderMessages: ["Member discount"],
+      preservedShippingDiscounts: ["Member free shipping"],
     });
   });
-  it("does not depend on the editable registration title", async () => {
+  it("edits an order whose member discounts share one label and amount", async () => {
+    // Order #65936: two items each carry a "Member discount" of $7.00. The
+    // editor matched each discount in the session to exactly one on the order,
+    // found two, and refused the edit as soon as it opened.
+    const application = (index: number) => ({
+      __typename: "AutomaticDiscountApplication",
+      index,
+      targetType: "LINE_ITEM",
+      allocationMethod: "ACROSS",
+      targetSelection: "ENTITLED",
+      title: "Member discount",
+      value: { __typename: "MoneyV2", amount: "7.00", currencyCode: "USD" },
+    });
+    const base = rawOrder();
+    const order = {
+      ...base,
+      order: {
+        ...base.order,
+        currentTotalPriceSet: bag("55.80"),
+        currentSubtotalPriceSet: bag("55.80"),
+        netPaymentSet: bag("55.80"),
+        transactions: [tx(1, "55.80")],
+        customer: {
+          id: id("Customer", 1),
+          tags: [],
+          membershipPlan: { value: "test-plan" },
+        },
+        discountApplications: {
+          nodes: [application(0), application(1)],
+          pageInfo: { hasNextPage: false },
+        },
+        lineItems: {
+          nodes: [1, 2].map((value) => ({
+            ...line(value, value * 10, 10, "3.49"),
+            priceAfterAllDiscountsBeforeTaxesSet: bag("27.90"),
+            discountAllocations: [
+              {
+                allocatedAmountSet: bag("7.00"),
+                discountApplication: { index: value - 1 },
+              },
+            ],
+          })),
+          pageInfo: { hasNextPage: false },
+        },
+      },
+    };
+    const session = (secondQuantity: number) =>
+      calculated(
+        secondQuantity ? "55.80" : "27.90",
+        secondQuantity ? "0.00" : "-27.90",
+        [1, 2].map((value) => {
+          const quantity = value === 2 ? secondQuantity : 10;
+          return {
+            ...calcLine(value, value * 10, quantity, "3.49"),
+            calculatedDiscountAllocations: (quantity
+              ? [
+                  {
+                    allocatedAmountSet: bag("7.00"),
+                    discountApplication: {
+                      __typename: "CalculatedAutomaticDiscountApplication",
+                      id: id("CalculatedAutomaticDiscountApplication", value),
+                      allocationMethod: "ACROSS",
+                      appliedTo: "ORDER",
+                      targetType: "LINE_ITEM",
+                      targetSelection: "ENTITLED",
+                      description: "Member discount",
+                      value: {
+                        __typename: "MoneyV2",
+                        amount: "7.0",
+                        currencyCode: "USD",
+                      },
+                    },
+                  },
+                ]
+              : []) as DiscountAllocationFixture[],
+          };
+        }),
+      );
+    const h = harness([
+      order,
+      order,
+      begin(session(10)),
+      quantity(session(0)),
+      refundCapacity("55.80"),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "2", quantity: 0 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 2790,
+      deltaCents: -2790,
+      financials: {
+        itemsGrossCents: 3490,
+        itemsDiscountCents: 700,
+        itemsNetCents: 2790,
+        itemDiscounts: [{ key: "product", amountCents: 700 }],
+      },
+      evidence: { refundPreflight: { amountCents: 2790 } },
+    });
+    expect(
+      h.requests.some((request) =>
+        /orderEditCommit|refundCreate/.test(request.query),
+      ),
+    ).toBe(false);
+  });
+  it("refuses an automatic discount in the session that the order did not carry", async () => {
     const responses = memberQuoteResponses();
-    responses[2] = memberProvenance("Renamed promotion");
+    const changed = memberCreditCalculated();
+    changed.lineItems.nodes[0].calculatedDiscountAllocations[0].discountApplication.description =
+      "Other promotion";
+    responses[3] = begin(changed);
     const h = harness(responses);
     const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "PROMOTION_PARITY_UNVERIFIED" });
     expect(
-      (
-        await h.provider.quote(
-          4,
-          snapshot,
-          { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
-          "edit-1",
-        )
-      ).totalCents,
-    ).toBe(22098);
+      h.requests.some((request) =>
+        /orderEditAddVariant|orderEditCommit/.test(request.query),
+      ),
+    ).toBe(false);
   });
   it("applies a native percentage coupon after both member-priced units", async () => {
     const raw = memberCreditOrder();
@@ -5777,7 +5890,6 @@ describe("member function pricing on protected quantity increases", () => {
     const h = harness([
       raw,
       raw,
-      memberProvenance(),
       {
         nodes: [
           variant(
@@ -5822,7 +5934,7 @@ describe("member function pricing on protected quantity increases", () => {
     Object.assign(raw.order.discountApplications.nodes[0], {
       title: "Other promotion",
     });
-    const h = harness([raw, raw, memberProvenance()]);
+    const h = harness([raw, raw]);
     const snapshot = await h.provider.readOrder(4, "100");
     await expect(
       h.provider.quote(
@@ -5836,9 +5948,11 @@ describe("member function pricing on protected quantity increases", () => {
       h.requests.every((request) => !request.query.startsWith("mutation")),
     ).toBe(true);
   });
-  it("rejects current catalog member pricing that cannot reproduce the original price", async () => {
+  it("adds extra units at today's member price when the club price changed since the order", async () => {
+    // Bought at $119.99 (a $30.00 member discount). The club price is now
+    // $129.99: the original unit keeps its price, the extra unit gets today's.
     const responses = memberQuoteResponses();
-    responses[3] = {
+    responses[2] = {
       nodes: [
         variant(
           10,
@@ -5847,61 +5961,82 @@ describe("member function pricing on protected quantity increases", () => {
         ),
       ],
     };
+    const priced = memberCreditCalculated(1);
+    Object.assign(priced.addedLineItems.nodes[0], {
+      ...calcLine(2, 10, 1, "149.99", "129.99"),
+      id: addedMemberLineId,
+      editableQuantityBeforeChanges: 0,
+    });
+    Object.assign(priced, {
+      subtotalPriceSet: bag("230.98"),
+      totalPriceSet: bag("230.98"),
+      totalOutstandingSet: bag("129.99"),
+    });
+    responses[5] = {
+      orderEditAddLineItemDiscount: { userErrors: [], calculatedOrder: priced },
+    };
     const h = harness(responses);
     const snapshot = await h.provider.readOrder(4, "100");
-    await expect(
-      h.provider.quote(
-        4,
-        snapshot,
-        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
-        "edit-1",
-      ),
-    ).rejects.toMatchObject({ code: "MEMBER_PRICE_CHANGED" });
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 23098,
+      deltaCents: 12999,
+      outstandingCents: 12999,
+    });
+    expect(quote.lines).toEqual([
+      expect.objectContaining({ originalLineId: id("LineItem", 1), quantity: 1 }),
+      expect.objectContaining({
+        originalLineId: null,
+        quantityIncreaseOfLineId: id("LineItem", 1),
+        quantity: 1,
+        discountedUnitPriceCents: 12999,
+      }),
+    ]);
     expect(
-      h.requests.some((request) =>
-        /orderEditCommit|orderEditAddLineItemDiscount/.test(request.query),
-      ),
+      h.requests.find((request) =>
+        request.query.includes("orderEditAddLineItemDiscount"),
+      )?.variables,
+    ).toMatchObject({
+      discount: { fixedValue: { amount: "20.00", currencyCode: "USD" } },
+    });
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
     ).toBe(false);
   });
   it.each([
-    "wrong-app",
-    "wrong-function",
-    "ambiguous",
-    "wrong-class",
-    "truncated",
-  ])("rejects %s promotion provenance before opening an edit", async (mode) => {
-    const provenance = memberProvenance();
-    const discount = provenance.discountNodes.nodes[0].discount;
-    if (mode === "wrong-app") discount.appDiscountType.app.id = id("App", 999);
-    if (mode === "wrong-function")
-      discount.appDiscountType.functionId = "wrong";
-    if (mode === "ambiguous")
-      provenance.discountNodes.nodes.push(
-        structuredClone(provenance.discountNodes.nodes[0]),
-      );
-    if (mode === "wrong-class") discount.discountClasses = ["ORDER"];
-    if (mode === "truncated")
-      provenance.discountNodes.pageInfo.hasNextPage = true;
-    const h = harness([memberCreditOrder(), memberCreditOrder(), provenance]);
-    const snapshot = await h.provider.readOrder(4, "100");
-    await expect(
-      h.provider.quote(
-        4,
-        snapshot,
-        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
-        "edit-1",
-      ),
-    ).rejects.toThrow();
-    expect(
-      h.requests.every((request) => !request.query.startsWith("mutation")),
-    ).toBe(true);
-  });
+    ["allocated to each item", { allocationMethod: "EACH" }],
+    ["applied to all items", { targetSelection: "ALL" }],
+  ])(
+    "refuses an automatic item discount %s before opening an edit",
+    async (_label, change) => {
+      const raw = memberCreditOrder();
+      Object.assign(raw.order.discountApplications.nodes[0], change);
+      const h = harness([raw, raw]);
+      const snapshot = await h.provider.readOrder(4, "100");
+      await expect(
+        h.provider.quote(
+          4,
+          snapshot,
+          { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+          "edit-1",
+        ),
+      ).rejects.toMatchObject({ code: "PROMOTION_PARITY_UNVERIFIED" });
+      expect(
+        h.requests.every((request) => !request.query.startsWith("mutation")),
+      ).toBe(true);
+    },
+  );
   it("rejects a changed original member allocation even when the final total reconciles", async () => {
     const responses = memberQuoteResponses();
     const changed = memberCreditCalculated(1);
     changed.lineItems.nodes[0].calculatedDiscountAllocations[0].allocatedAmountSet =
       bag("29.00");
-    responses[6] = {
+    responses[5] = {
       orderEditAddLineItemDiscount: {
         userErrors: [],
         calculatedOrder: changed,
