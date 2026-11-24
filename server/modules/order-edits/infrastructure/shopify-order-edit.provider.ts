@@ -50,8 +50,6 @@ import {
 } from "../application/order-edit-provider";
 import { buildOrderEditFinancials } from "../domain/order-edit-financials";
 import { presentOrderEditCodeBreakdown } from "../application/order-edit-code-presentation";
-import { priceOrderEditDiscounts } from "../domain/order-edit-discount-engine";
-import { priceRetainedOrderDiscounts } from "../domain/order-edit-preserved-discounts";
 import {
   resolveOrderEditLinePlan,
   orderEditAdditionSourceKey,
@@ -1526,11 +1524,7 @@ export class ShopifyOrderEditProvider
           // Shopify's unit/subtotal fields exclude order-allocated automatic
           // discounts. Compare the reconciled net, while preserving those raw
           // native fields separately for identity and payment recovery.
-          const net = verifyCalculatedFinancials(
-            calculated,
-            baseline,
-            true,
-          )?.lines.find((line) => line.id === calcId)?.netCents;
+          const net = verifyCalculatedFinancials(calculated, baseline)?.lines.find((line) => line.id === calcId)?.netCents;
           if (
             !native ||
             (priced.preserveAutomaticDiscount && !automatic) ||
@@ -1644,7 +1638,7 @@ export class ShopifyOrderEditProvider
     verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
     verifyPreservedMemberAllocations(calculated, originalCalculated, expected);
     // Verify item amounts before asking the current checkout shipping/tax calculator.
-    const nativeItems = verifyCalculatedFinancials(calculated, baseline, true);
+    const nativeItems = verifyCalculatedFinancials(calculated, baseline);
     if (
       !nativeItems ||
       nativeItems.itemsNetCents !== sum(proofLines.map((line) => line.netCents))
@@ -1703,7 +1697,6 @@ export class ShopifyOrderEditProvider
     const rawFinancials = verifyCalculatedFinancials(
       calculated,
       baseline,
-      true,
       shippingFinancials,
     )!;
     if (
@@ -2043,11 +2036,7 @@ export class ShopifyOrderEditProvider
       );
     }
     verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
-    const itemFinancials = verifyCalculatedFinancials(
-      calculated,
-      baseline,
-      true,
-    );
+    const itemFinancials = verifyCalculatedFinancials(calculated, baseline);
     if (!itemFinancials)
       fail(
         "SHIPPING_FINANCIALS_REQUIRED",
@@ -2093,7 +2082,6 @@ export class ShopifyOrderEditProvider
     const financials = verifyCalculatedFinancials(
       calculated,
       baseline,
-      true,
       shippingFinancials,
     );
     const totalCents = money(calculated.totalPriceSet);
@@ -3195,7 +3183,7 @@ export class ShopifyOrderEditProvider
       );
     }
     verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
-    let financials = verifyCalculatedFinancials(calculated, baseline, false, {
+    let financials = verifyCalculatedFinancials(calculated, baseline, {
       grossCents:
         restoredFinancials?.shippingGrossCents ?? baseline.shippingCents,
       netCents: baseline.shippingCents,
@@ -4165,10 +4153,28 @@ function matchesOriginalFixedAllocations(
   return canonicalJson(sorted(expected)) === canonicalJson(sorted(actual));
 }
 
-function priceCalculatedOrderDiscounts(
+/**
+ * Owner ruling (2026-11-19): the sales channel owns the price. This reads the
+ * discount breakdown from Shopify's own allocations on the calculated order; it
+ * does not work out what each share should be and compare.
+ *
+ * Shopify's behaviour, run on live open orders with nothing submitted
+ * (2026-11-24, docs/ORDER-EDIT-PRICE-OWNERSHIP-PLAN.md): a fixed code keeps
+ * its original share on each item, loses the share of a removed item, and
+ * gives none to an added item. The earlier checks assumed either an exact
+ * per-unit share or a full redistribution, and refused edits Shopify had
+ * priced correctly.
+ *
+ * Two rules stay, because they are not price arithmetic:
+ * - an order-level discount that is not one of the order's own codes is refused;
+ * - a fixed code may never be worth more than its face value.
+ * The totals themselves are still required to add up to Shopify's subtotal and
+ * total by buildOrderEditFinancials.
+ */
+function readCalculatedOrderDiscounts(
   calculated: Calculated,
   baseline: OrderEditSnapshot,
-) {
+): OrderEditDiscount[] {
   const rules = (baseline.discountRules ?? []).filter(
     (rule) =>
       rule.type === "DiscountCodeApplication" &&
@@ -4179,145 +4185,68 @@ function priceCalculatedOrderDiscounts(
     ...calculated.addedLineItems.nodes,
   ].filter((line) => line.quantity > 0);
   const automaticProducts = automaticProductOrderAmounts(calculated, baseline);
-  const observations = lines.flatMap((line) =>
-    line.calculatedDiscountAllocations
-      .filter(
-        (allocation) =>
-          allocation.discountApplication.appliedTo === "ORDER" &&
-          allocation.discountApplication.__typename !==
-            "CalculatedAutomaticDiscountApplication",
+  const codeCents = new Map(rules.map((rule) => [discountKey(rule.label), 0]));
+  let productCents = 0;
+  for (const line of lines) {
+    productCents = sum([productCents, automaticProducts.get(line.id) ?? 0]);
+    for (const allocation of line.calculatedDiscountAllocations) {
+      const application = allocation.discountApplication;
+      const amountCents = money(allocation.allocatedAmountSet);
+      if (application.appliedTo === "LINE") {
+        productCents = sum([productCents, amountCents]);
+        continue;
+      }
+      if (
+        application.appliedTo !== "ORDER" ||
+        application.__typename === "CalculatedAutomaticDiscountApplication"
       )
-      .map((allocation) => {
-        const application = allocation.discountApplication;
-        if (
-          application.__typename !== "CalculatedDiscountCodeApplication" ||
-          !application.code
-        )
-          fail(
-            "PROMOTION_PARITY_UNVERIFIED",
-            "An unverified order discount appeared in Shopify's edit session.",
-          );
-        return {
-          lineId: line.id,
-          ruleKey: discountKey(application.code),
-          amountCents: money(allocation.allocatedAmountSet),
-        };
-      }),
-  );
-  const result =
-    baseline.nativeDiscountAllocations &&
-    rules.some((rule) => rule.value.type === "fixed")
-      ? priceRetainedOrderDiscounts({
-          rules: rules.map((rule) => ({
-            key: discountKey(rule.label),
-            label: rule.label,
-            value:
-              rule.value.type === "percentage"
-                ? {
-                    type: "percentage" as const,
-                    percentage: new Decimal(rule.value.percentage).toFixed(),
-                  }
-                : rule.value,
-          })),
-          originals: baseline.lines
-            .filter((line) => line.quantity > 0)
-            .map((line) => ({ id: line.id, quantity: line.quantity })),
-          allocations: baseline.nativeDiscountAllocations,
-          lines: lines.map((line) => {
-            const added = calculated.addedLineItems.nodes.some(
-              (entry) => entry.id === line.id,
-            );
-            let matches = added
-              ? []
-              : baseline.lines.filter(
-                  (original) =>
-                    original.quantity > 0 &&
-                    original.variantId === line.variant?.id &&
-                    original.originalUnitPriceCents ===
-                      money(line.originalUnitPriceSet) &&
-                    original.discountedUnitPriceCents ===
-                      money(line.discountedUnitPriceSet),
-                );
-            if (matches.length > 1)
-              matches = matches.filter((original) =>
-                matchesOriginalFixedAllocations(line, original, baseline),
-              );
-            if (!added && matches.length !== 1)
-              fail(
-                "LINE_IDENTITY_UNPROVEN",
-                "The original discount's item cannot be matched safely.",
-              );
-            return {
-              id: line.id,
-              originalLineId: added ? null : matches[0].id,
-              quantity: line.quantity,
-              subtotalCents: subtract(
-                money(line.editableSubtotalSet),
-                automaticProducts.get(line.id) ?? 0,
-              ),
-            };
-          }),
-          observations,
-        })
-      : priceOrderEditDiscounts({
-          rules: rules.map((rule) => ({
-            key: discountKey(rule.label),
-            label: rule.label,
-            value:
-              rule.value.type === "percentage"
-                ? {
-                    type: "percentage" as const,
-                    percentage: new Decimal(rule.value.percentage).toFixed(),
-                  }
-                : {
-                    type: "fixed" as const,
-                    amountCents: rule.value.amountCents,
-                  },
-          })),
-          lines: lines.map((line) => ({
-            id: line.id,
-            subtotalCents: subtract(
-              money(line.editableSubtotalSet),
-              automaticProducts.get(line.id) ?? 0,
-            ),
-          })),
-          observations,
-        });
-  if (
-    !calculated.subtotalPriceSet ||
-    result.subtotalAfterOrderDiscountsCents !==
-      money(calculated.subtotalPriceSet)
-  )
-    fail(
-      "ORDER_EDIT_DISCOUNT_SUBTOTAL_MISMATCH",
-      "The verified discounts do not reconcile to Shopify's revised item subtotal.",
-    );
-  const productCents = sum(
-    lines.map((line) => {
-      const gross = multiply(money(line.originalUnitPriceSet), line.quantity);
-      const afterProduct = money(line.editableSubtotalSet);
-      const allocations = sum(
-        line.calculatedDiscountAllocations
-          .filter(
-            (allocation) => allocation.discountApplication.appliedTo === "LINE",
-          )
-          .map((allocation) => money(allocation.allocatedAmountSet)),
-      );
-      if (afterProduct > gross || gross - afterProduct !== allocations)
+        continue;
+      const key =
+        application.__typename === "CalculatedDiscountCodeApplication" &&
+        application.code
+          ? discountKey(application.code)
+          : null;
+      if (key === null || !codeCents.has(key))
         fail(
-          "ORDER_EDIT_PRODUCT_DISCOUNT_MISMATCH",
-          "The product discount allocations do not match the eligible item subtotal.",
+          "PROMOTION_PARITY_UNVERIFIED",
+          "An unverified order discount appeared in Shopify's edit session.",
         );
-      return sum([allocations, automaticProducts.get(line.id) ?? 0]);
-    }),
-  );
-  return {
-    ...result,
-    discounts: sortDiscounts([
-      ...result.discounts,
-      ...(productCents > 0 ? [productDiscount(productCents)] : []),
-    ]),
-  };
+      codeCents.set(key, sum([codeCents.get(key)!, amountCents]));
+    }
+  }
+  const discounts = rules.map((rule): OrderEditDiscount => {
+    const key = discountKey(rule.label);
+    const amountCents = codeCents.get(key)!;
+    if (rule.value.type === "percentage")
+      return {
+        key,
+        label: rule.label,
+        amountCents,
+        value: {
+          type: "percentage",
+          percentage: new Decimal(rule.value.percentage).toFixed(),
+        },
+      };
+    if (amountCents > rule.value.amountCents)
+      fail(
+        "ORDER_EDIT_FIXED_DISCOUNT_MISMATCH",
+        `Shopify applied more of the ${rule.label} credit than it is worth. No order change was committed.`,
+      );
+    return {
+      key,
+      label: rule.label,
+      amountCents,
+      // A credit that no longer applies in full is shown as what remains of it.
+      value:
+        amountCents === rule.value.amountCents
+          ? { type: "fixed", amountCents }
+          : { type: "allocated" },
+    };
+  });
+  return sortDiscounts([
+    ...discounts,
+    ...(productCents > 0 ? [productDiscount(productCents)] : []),
+  ]);
 }
 
 function calculatedPromotions(
@@ -4392,7 +4321,6 @@ function verifyNativeOrderDiscounts(
 function verifyCalculatedFinancials(
   calculated: Calculated,
   baseline: OrderEditSnapshot,
-  requireSettledFixedCredit = false,
   shipping = {
     grossCents:
       baseline.financials?.shippingGrossCents ?? baseline.shippingCents,
@@ -4411,12 +4339,7 @@ function verifyCalculatedFinancials(
     ...calculated.lineItems.nodes,
     ...calculated.addedLineItems.nodes,
   ];
-  const discounts = priceCalculatedOrderDiscounts(calculated, baseline);
-  if (requireSettledFixedCredit && discounts.unusedFixedCredits.length > 0)
-    fail(
-      "ORDER_EDIT_FIXED_CREDIT_SETTLEMENT_REQUIRED",
-      "This edit would leave part of a fixed credit unused. Its original redemption must be reconciled before the edit can be applied.",
-    );
+  const itemDiscounts = readCalculatedOrderDiscounts(calculated, baseline);
   // Product allocations and an order-level discount summary have different
   // scopes (shipping is separate). Reconcile every product allocation to
   // subtotalPriceSet, then shipping and tax to totalPriceSet; native discount
@@ -4443,7 +4366,7 @@ function verifyCalculatedFinancials(
       return { id: line.id, grossCents, netCents: grossCents - discountCents };
     }),
     itemsNetCents: money(calculated.subtotalPriceSet),
-    itemDiscounts: discounts.discounts,
+    itemDiscounts,
     itemDiscountLabels: [
       ...baseline.financials.itemDiscountLabels,
       ...calculatedPromotions(calculated)
