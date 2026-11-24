@@ -101,23 +101,34 @@ export interface RecomputeResult {
 }
 
 /**
- * Event emitted by the SHIP_NOTIFY caller. Discriminated union so each
- * kind carries exactly the metadata that mutation needs — no "optional
- * tracking on a cancel" ambiguity.
+ * Canonical rollup event projected directly from `CanonicalShipmentEvent` (`P3.3`).
+ * Eliminates the standalone parallel `ShipmentEvent` definition while keeping
+ * `ShipmentEvent` as a compatible alias for per-shipment rollup callers.
  */
-export type ShipmentEvent =
-  | {
-      kind: "shipped";
-      trackingNumber: string;
+export type CanonicalShipmentRollupEvent =
+  | (Omit<
+      Extract<CanonicalShipmentEvent, { kind: "shipped" }>,
+      | "shipmentId"
+      | "engineRef"
+      | "carrier"
+      | "carrierRaw"
+      | "shipDate"
+      | "shipCalendarDate"
+      | "items"
+    > & {
       carrier: string;
       shipDate: Date;
-      trackingUrl?: string | null;
-      serviceCode?: string | null;
-      carrierCostCents?: number;
-      carrierCostSource?: string;
-    }
-  | { kind: "cancelled"; reason?: string }
-  | { kind: "voided"; reason?: string; trackingNumber?: string | null };
+    })
+  | Omit<
+      Extract<CanonicalShipmentEvent, { kind: "cancelled" }>,
+      "shipmentId" | "engineRef"
+    >
+  | Omit<
+      Extract<CanonicalShipmentEvent, { kind: "voided" }>,
+      "shipmentId" | "engineRef"
+    >;
+
+export type ShipmentEvent = CanonicalShipmentRollupEvent;
 
 // ─── Internals ───────────────────────────────────────────────────────
 

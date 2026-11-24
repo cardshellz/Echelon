@@ -37,6 +37,13 @@ export {
   resolveSingleShipStationRuntimeAccount,
   ShipStationAccountConfigurationError,
 } from "./adapters/shipstation.adapter";
+export {
+  serializeShipmentPushPayloadToShipStationOrder,
+  formatShipStationOrderNumber,
+  shipStationOrderKeyForWmsShipment,
+  type ShipStationOrderRoutingIds,
+  type SerializedShipStationOrder,
+} from "./adapters/shipstation/shipstation-push-serializer";
 export { deriveReconcileEvent, type ReconcileEvent } from "./reconcile-derive";
 export {
   WMS_SHIPSTATION_RECONCILE_LOCK_ID,

@@ -40,6 +40,11 @@ import {
   CHANNEL_FULFILLMENT_RECEIPT_RETRY,
   ChannelFulfillmentReceiptRetryError,
 } from "../modules/oms/channel-fulfillment-authority.api";
+import { pushShipmentThroughEngine } from "../modules/orders/shipment-rollup-and-context.api";
+import {
+  fromEngineRef,
+  type ShippingEngine,
+} from "../modules/shipping/engine-and-reconcile.api";
 
 const AUDIT_USER_OPERATOR_PREFIX = "user:";
 const MAX_AUDIT_OPERATOR_LENGTH = 120;
@@ -57,6 +62,8 @@ function stableAuditUserId(rawUserId: unknown): string | null {
 
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
+  const getShippingEngine = (req: Request): ShippingEngine | null =>
+    (req.app.locals.services as any).shippingEngine || null;
   const getShipStation = (req: Request): ShipStationService | null =>
     (req.app.locals.services as any).shipStation || null;
   const getFlowReconciliationDependencies = (
@@ -652,9 +659,22 @@ export function registerOmsRoutes(app: Express) {
       if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
         return res.status(400).json({ error: "Invalid shipment ID" });
       }
+      const engine = getShippingEngine(req);
       const ss = getShipStation(req);
+      if (engine && engine.isConfigured()) {
+        const pushed = await pushShipmentThroughEngine(db, engine, shipmentId);
+        return res.json({
+          success: true,
+          engineRef: pushed.engineRef,
+          shipstationOrderId:
+            pushed.engineRef.engine === "shipstation"
+              ? fromEngineRef(pushed.engineRef)
+              : null,
+          orderKey: pushed.engineRef.engineShipmentRef ?? null,
+        });
+      }
       if (!ss || !ss.isConfigured()) {
-        return res.status(503).json({ error: "ShipStation not configured" });
+        return res.status(503).json({ error: "Shipping engine not configured" });
       }
       const result = await ss.pushShipment(shipmentId);
       res.json({ success: true, ...result });
@@ -680,10 +700,11 @@ export function registerOmsRoutes(app: Express) {
       if (!Number.isInteger(id) || id <= 0) {
         return res.status(400).json({ error: "Invalid order ID" });
       }
+      const engine = getShippingEngine(req);
       const ss = getShipStation(req);
 
-      if (!ss || !ss.isConfigured()) {
-        return res.status(503).json({ error: "ShipStation not configured" });
+      if ((!engine || !engine.isConfigured()) && (!ss || !ss.isConfigured())) {
+        return res.status(503).json({ error: "Shipping engine not configured" });
       }
 
       // overrideReview = an explicit operator "clear-review-and-push" (P2 of
@@ -723,7 +744,19 @@ export function registerOmsRoutes(app: Express) {
         });
       }
 
-      const result = await ss.pushShipment(shipmentId, { overrideReview });
+      const result =
+        engine && engine.isConfigured()
+          ? await pushShipmentThroughEngine(db, engine, shipmentId, { overrideReview }).then(
+              (pushed) => ({
+                engineRef: pushed.engineRef,
+                shipstationOrderId:
+                  pushed.engineRef.engine === "shipstation"
+                    ? fromEngineRef(pushed.engineRef)
+                    : null,
+                orderKey: pushed.engineRef.engineShipmentRef ?? null,
+              }),
+            )
+          : await ss!.pushShipment(shipmentId, { overrideReview });
       const updated = await getOms(req).getOrderById(id);
 
       res.json({

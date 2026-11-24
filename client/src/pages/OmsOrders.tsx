@@ -722,8 +722,8 @@ export default function OmsOrders() {
                             {event.eventType === "assigned_warehouse" && <Store className="h-4 w-4 text-orange-500" />}
                             {event.eventType === "shipped" && <Truck className="h-4 w-4 text-green-500" />}
                             {event.eventType === "tracking_pushed" && <Globe className="h-4 w-4 text-green-600" />}
-                            {(event.eventType === "pushed_to_shipstation" || event.eventType === "shipped_via_shipstation") && <Ship className="h-4 w-4 text-blue-500" />}
-                            {!["created", "inventory_reserved", "assigned_warehouse", "shipped", "tracking_pushed", "pushed_to_shipstation", "shipped_via_shipstation"].includes(event.eventType) && (
+                            {(event.eventType === "pushed_to_shipping_engine" || event.eventType === "shipped_via_shipping_engine" || event.eventType === "pushed_to_shipstation" || event.eventType === "shipped_via_shipstation") && <Ship className="h-4 w-4 text-blue-500" />}
+                            {!["created", "inventory_reserved", "assigned_warehouse", "shipped", "tracking_pushed", "pushed_to_shipping_engine", "shipped_via_shipping_engine", "pushed_to_shipstation", "shipped_via_shipstation"].includes(event.eventType) && (
                               <Timer className="h-4 w-4 text-muted-foreground" />
                             )}
                           </div>

@@ -13,6 +13,7 @@ import {
   type StoredShippingProviderLabelObservation,
 } from "../../shipping/carrier-tracking-and-dispatch.api";
 import { isPositivePostgresInteger } from "../../shipping/shipstation-provider-reconciliation.api";
+import { normalizeShipStationWebhookPayload } from "../../shipping/engine-and-reconcile.api";
 import {
   ShipStationUnmappedItemsError,
   ShipStationWebhookProcessingError,
@@ -541,6 +542,10 @@ export function createShipStationNotifyWebhookDispatch(
     );
 
     const shipments = data.shipments || [];
+    // Normalize incoming provider shipment payloads through the canonical
+    // ShippingEngine webhook normalizer (`P3.3`) while keeping label observation
+    // decoupled from carrier-possession dispatch.
+    normalizeShipStationWebhookPayload({ shipments });
     if (dependencies.labelCommercialFulfillment && !dependencies.relatedLabelReader) {
       throw Object.assign(new Error("Related-label refresh is not initialized"),
         { code: "SHIPSTATION_LABEL_REFRESH_UNAVAILABLE" });

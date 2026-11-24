@@ -253,16 +253,18 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
       : activeShipments.length > 0 || activeWms.some((w) => ["packed", "ready_to_ship", "shipped"].includes(String(w.warehouse_status))) ? "done"
       : activeWms.length ? "current" : "pending",
     activeWms.map((w) => w.warehouse_status).join(", ") || undefined);
-  add("engine_push", "Pushed to ShipStation",
-    deadRetry && /shipstation_shipment_push/.test(String(deadRetry.topic)) ? "failed"
+  const isEnginePushTopic = (topic: unknown) =>
+    /^(?:shipping_engine|shipstation)_shipment_push$/.test(String(topic ?? ""));
+  add("engine_push", "Pushed to shipping engine",
+    deadRetry && isEnginePushTopic(deadRetry.topic) ? "failed"
       : pushedShipments.length > 0 ? "done"
       : activeShipments.length ? "current" : "pending",
-    deadRetry && /shipstation_shipment_push/.test(String(deadRetry.topic)) ? String(deadRetry.last_error).slice(0, 120) : undefined);
+    deadRetry && isEnginePushTopic(deadRetry.topic) ? String(deadRetry.last_error).slice(0, 120) : undefined);
   add("shipped", "Shipped & confirmed",
-    deadRetry && /SHIP_NOTIFY/.test(String(deadRetry.topic)) ? "failed"
-      : shippedShipments.length > 0 || eventTypes.has("shipped_via_shipstation") ? "done"
+    deadRetry && /SHIP_NOTIFY|shipping_engine_webhook/.test(String(deadRetry.topic)) ? "failed"
+      : shippedShipments.length > 0 || eventTypes.has("shipped_via_shipping_engine") || eventTypes.has("shipped_via_shipstation") ? "done"
       : pushedShipments.length ? "current" : "pending",
-    deadRetry && /SHIP_NOTIFY/.test(String(deadRetry.topic)) ? String(deadRetry.last_error).slice(0, 120) : undefined);
+    deadRetry && /SHIP_NOTIFY|shipping_engine_webhook/.test(String(deadRetry.topic)) ? String(deadRetry.last_error).slice(0, 120) : undefined);
   add("writeback", "Written back to channel",
     !channelWritebackRequired ? "skipped"
       : allShippedShipmentsWrittenBack ? "done"

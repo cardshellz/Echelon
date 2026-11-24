@@ -302,11 +302,11 @@ export async function adoptProvenShipStationOrderOnOutboundShipmentInWms(
         engine_shipment_ref = ${input.orderKey},
         status = CASE WHEN status = 'planned' THEN 'queued'::wms.shipment_status ELSE status END,
         requires_review = CASE
-          WHEN review_reason = 'shipstation_push_retry_exhausted' THEN false
+          WHEN review_reason IN ('shipstation_push_retry_exhausted', 'shipping_engine_push_retry_exhausted') THEN false
           ELSE requires_review
         END,
         review_reason = CASE
-          WHEN review_reason = 'shipstation_push_retry_exhausted' THEN NULL
+          WHEN review_reason IN ('shipstation_push_retry_exhausted', 'shipping_engine_push_retry_exhausted') THEN NULL
           ELSE review_reason
         END,
         updated_at = NOW()
