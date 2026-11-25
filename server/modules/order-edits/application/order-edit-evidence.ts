@@ -5,6 +5,11 @@ import {
   orderEditFinancialsSchema,
   type OrderEditFinancials,
 } from "@shared/order-edits/order-edit-financials";
+import {
+  orderEditShippingChargeKey,
+  orderEditShippingCharges,
+  type OrderEditShippingRepricing,
+} from "@shared/order-edits/order-edit-shipping";
 import { OrderEditError } from "../domain/order-edit-error";
 import {
   matchesOrderEditFinancials,
@@ -59,13 +64,15 @@ export function financialsForQuotedLines(
     lines: financials.lines.filter((line) => expected.has(line.id)),
   });
 }
-function matchesShippingService(
+/** True when an order's delivery charges are not the repriced ones, compared by service and amount charged. */
+export function shippingChargesDiffer(
   snapshot: OrderEditSnapshot,
-  title: string,
+  repricing: OrderEditShippingRepricing,
 ): boolean {
   return (
-    snapshot.shippingContext?.lines.length === 1 &&
-    snapshot.shippingContext.lines[0].title === title
+    !snapshot.shippingContext ||
+    orderEditShippingChargeKey(snapshot.shippingContext.lines) !==
+      orderEditShippingChargeKey(orderEditShippingCharges(repricing))
   );
 }
 function shippingAmounts(snapshot: OrderEditSnapshot) {
@@ -90,10 +97,8 @@ export function recoveryFinancials(
 export function shippingWasReplaced(quote?: OrderEditQuote): boolean {
   return Boolean(
     quote?.shippingRepricing &&
-      quote.baseline.shippingContext?.lines.length === 1 &&
-      (quote.shippingCents !== quote.baseline.shippingCents ||
-        quote.shippingRepricing.title !==
-          quote.baseline.shippingContext.lines[0].title),
+      quote.baseline.shippingContext &&
+      shippingChargesDiffer(quote.baseline, quote.shippingRepricing),
   );
 }
 function unresolved(transactions: OrderEditTransaction[]): boolean {
@@ -312,7 +317,7 @@ export function matchesOrderEditQuote(
     snapshot.shippingCents !== quote.shippingCents ||
     (quote.shippingRepricing &&
       quote.baseline.shippingContext &&
-      !matchesShippingService(snapshot, quote.shippingRepricing.title)) ||
+      shippingChargesDiffer(snapshot, quote.shippingRepricing)) ||
     snapshot.evidence.shippingAddressFingerprint !==
       quote.baseline.evidence.shippingAddressFingerprint
   )
@@ -550,16 +555,16 @@ export function isUnpaidRecoveryRestored(
     observed.totalCents !== baseline.totalCents ||
     observed.shippingCents !== baseline.shippingCents ||
     (baseline.shippingContext &&
-      canonicalJson(shippingAmounts(observed)) !==
-        canonicalJson(
-          replaced
-            ? baseline.shippingContext.lines.map((line) => ({
-                title: line.title,
-                grossCents: baseline.shippingCents,
-                netCents: baseline.shippingCents,
-              }))
-            : shippingAmounts(baseline),
-        )) ||
+      (replaced
+        ? // Restored charges are custom fees at the amount paid; Shopify may list them in any order.
+          !observed.shippingContext ||
+          observed.shippingContext.lines.some(
+            (line) => line.grossCents !== line.netCents,
+          ) ||
+          orderEditShippingChargeKey(observed.shippingContext.lines) !==
+            orderEditShippingChargeKey(baseline.shippingContext.lines)
+        : canonicalJson(shippingAmounts(observed)) !==
+          canonicalJson(shippingAmounts(baseline)))) ||
     observed.subtotalCents !== baseline.subtotalCents ||
     observed.taxCents !== baseline.taxCents ||
     !matchesOrderEditFinancials(observed.financials, financials) ||
