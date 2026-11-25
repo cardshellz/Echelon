@@ -14,7 +14,7 @@ import { canonicalAvailabilityClaimPickCommandSchema, canonicalAvailabilityClaim
 import { eq, and, sql } from "drizzle-orm";
 import { IntegrityError, NotFoundError, ValidationError } from "../../../../shared/errors";
 import { AuditLogger, persistAuditEvent } from "../../../infrastructure/auditLogger";
-import { adjustOrReconcileStock } from "../../inventory/adjust-stock.api";
+import { adjustOrReconcileStock, FreezeViolationError } from "../../inventory/adjust-stock.api";
 import { cancelShipmentBlockingReplenTasksForOrderInInventory } from "../../inventory/cross-module-inventory-mutations.api";
 import {
   updateAutoFixedPickProductLocationInTx,
@@ -249,6 +249,7 @@ type Storage = {
   getUser: (id: string) => Promise<any | undefined>;
   getInventoryLevelsByProductVariantId: (id: number) => Promise<any[]>;
   getAllWarehouseLocations: () => Promise<WarehouseLocation[]>;
+  getWarehouseLocationById?: (id: number) => Promise<WarehouseLocation | undefined>;
   getPickQueueOrders: () => Promise<any[]>;
   getActiveReplenTierDefaults: () => Promise<any[]>;
   getActiveReplenRules: () => Promise<any[]>;
@@ -4246,6 +4247,11 @@ export class PickingUseCases {
     const variant = await this.storage.getProductVariantBySku(sku);
     if (!variant) {
       throw new Error(`No variant found for SKU ${sku}`);
+    }
+
+    const binLoc = await this.storage.getWarehouseLocationById?.(locationId);
+    if (binLoc?.cycleCountFreezeId != null) {
+      throw new FreezeViolationError(locationId);
     }
 
     if (didReplen) {

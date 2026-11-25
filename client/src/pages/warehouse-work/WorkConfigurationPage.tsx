@@ -3,6 +3,7 @@ import { Link, useParams } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -25,16 +26,28 @@ async function request(method: string, url: string, body?: unknown): Promise<unk
 }
 
 const selectClass = "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm";
-function Capabilities({ value, onChange, disabled }: {
-  value: WorkCapability[]; onChange: (next: WorkCapability[]) => void; disabled?: boolean;
+export const CONNECTED_STATION_CAPABILITIES: ReadonlySet<WorkCapability> = new Set(["assembly"]);
+function Capabilities({ value, onChange, disabled, stationMode = false }: {
+  value: WorkCapability[]; onChange: (next: WorkCapability[]) => void; disabled?: boolean; stationMode?: boolean;
 }) {
   return <fieldset disabled={disabled} className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
     <legend className="mb-2 text-sm font-medium">Capabilities</legend>
-    {WORK_CAPABILITIES.map((capability) => <label key={capability} className="flex items-center gap-2 text-sm">
-      <input type="checkbox" checked={value.includes(capability)} onChange={(event) => onChange(
-        event.target.checked ? [...value, capability] : value.filter((entry) => entry !== capability),
-      )} />{WORK_CAPABILITY_LABELS[capability]}
-    </label>)}
+    {WORK_CAPABILITIES.map((capability) => {
+      const comingSoon = stationMode && !CONNECTED_STATION_CAPABILITIES.has(capability);
+      return <label key={capability} className={`flex items-center gap-2 text-sm ${comingSoon ? "text-muted-foreground" : ""}`}>
+        <input
+          type="checkbox"
+          checked={value.includes(capability)}
+          disabled={comingSoon}
+          readOnly={comingSoon}
+          onChange={comingSoon ? undefined : (event) => onChange(
+            event.target.checked ? [...value, capability] : value.filter((entry) => entry !== capability),
+          )}
+        />
+        <span>{WORK_CAPABILITY_LABELS[capability]}</span>
+        {comingSoon && <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">Coming Soon</Badge>}
+      </label>;
+    })}
   </fieldset>;
 }
 
@@ -127,7 +140,7 @@ export function ConfigurationEditor({ setup, url }: { setup: WorkSetup; url: str
                 {setup.locations.map((location) => <option key={location.id} value={location.id} disabled={!location.active}>{location.code}{location.active ? "" : " (inactive)"}</option>)}
               </select></label>
             </div>
-            <Capabilities value={station.capabilities} onChange={(capabilities) => update({ capabilities })} />
+            <Capabilities value={station.capabilities} onChange={(capabilities) => update({ capabilities })} stationMode />
             {station.capabilities.includes("assembly") && <div className="space-y-3 rounded border p-3">
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!station.assemblyBindings}
                 onChange={(event) => update({ assemblyBindings: event.target.checked ? { materialLocationIds: [], outputLocationId: 0 } : undefined })} />
@@ -162,7 +175,7 @@ export function ConfigurationEditor({ setup, url }: { setup: WorkSetup; url: str
           </fieldset>;
         })}
         <Button type="button" variant="outline" disabled={configuration.stations.length >= 500} onClick={() => change({ ...configuration, stations: [...configuration.stations, {
-          id: crypto.randomUUID(), code: "", name: "", locationId: 0, capabilities: ["assembly", "packing"], enabled: true,
+          id: crypto.randomUUID(), code: "", name: "", locationId: 0, capabilities: ["assembly"], enabled: true,
         }] })}>Add physical station</Button>
       </CardContent></Card>
 

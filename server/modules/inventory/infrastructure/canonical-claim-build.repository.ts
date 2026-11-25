@@ -195,7 +195,7 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
     }
 
     const location = rows(await input.client.query(
-      `SELECT id
+      `SELECT id, cycle_count_freeze_id
        FROM warehouse.warehouse_locations
        WHERE id = $1 AND warehouse_id = $2 AND is_active = 1
        FOR SHARE`,
@@ -205,6 +205,13 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
       throw new BuildDomainError("CLAIM_BUILD_OUTPUT_LOCATION_INVALID", "The claimed build output location is not active in its warehouse", {
         warehouseId: input.warehouseId,
         outputLocationId: input.outputLocationId,
+      });
+    }
+    if (location.cycle_count_freeze_id != null) {
+      throw new BuildDomainError("BUILD_LOCATION_FROZEN", "The claimed build output location is frozen for cycle counting", {
+        warehouseId: input.warehouseId,
+        outputLocationId: input.outputLocationId,
+        cycleCountFreezeId: Number(location.cycle_count_freeze_id),
       });
     }
 

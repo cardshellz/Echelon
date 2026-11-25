@@ -10,6 +10,7 @@ import type { OperationalQuantityPosting } from "./infrastructure/operational-qu
 
 export type AdjustOrReconcileStockParams = Parameters<InventoryUseCases["adjustInventory"]>[0];
 export type AdjustOrReconcileStockResult = Awaited<ReturnType<InventoryUseCases["adjustInventory"]>>;
+export { FreezeViolationError } from "./application/inventory.use-cases";
 
 export async function adjustOrReconcileStock<TResult = AdjustOrReconcileStockResult>(
   owner: {

@@ -622,6 +622,26 @@ export async function executeUnpickClaimLine(
         });
       }
       const restoreReservation = claim.status === "active";
+      const unpickLocationIds = [...new Set([...byResource.values()].map((r) => r.warehouseLocationId))].sort((a, b) => a - b);
+      for (const locationId of unpickLocationIds) {
+        const locRow = rows(await client.query(
+          `SELECT warehouse_id, is_active, is_pickable, cycle_count_freeze_id
+           FROM warehouse.warehouse_locations
+           WHERE id = $1
+           FOR SHARE`,
+          [locationId],
+        ))[0];
+        if (locRow?.cycle_count_freeze_id != null) {
+          throw new InventoryAvailabilityClaimRepositoryError(
+            "CLAIM_UNPICK_LOCATION_FROZEN",
+            `Location ${locationId} is frozen for cycle counting — unpick blocked.`,
+            {
+              warehouseLocationId: locationId,
+              cycleCountFreezeId: Number(locRow.cycle_count_freeze_id),
+            },
+          );
+        }
+      }
       const unpicked = await deps.inventoryWriter.unpickResources({
         client,
         commandKey: `canonical:unpick:${command.idempotencyKey}`,

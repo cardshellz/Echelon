@@ -767,6 +767,7 @@ export class InventoryUseCases {
 
     const result = await this.db.transaction(async (tx) => {
       await lockInventoryCostGraph(tx);
+      await this.assertNotFrozen(params.warehouseLocationId, tx);
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -860,6 +861,7 @@ export class InventoryUseCases {
 
     const result = await this.db.transaction(async (tx) => {
       await lockInventoryCostGraph(tx);
+      await this.assertNotFrozen(params.warehouseLocationId, tx);
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -2146,6 +2148,8 @@ export class InventoryUseCases {
     /** Audit reference for the owning workflow. Generic transfers retain the legacy internal reference. */
     referenceType?: string;
     referenceId?: string;
+    /** Cycle-count-authorized transfer: permits bins frozen by this active cycleCountId while still blocking bins frozen by any other cycle count. */
+    cycleCountId?: number;
     /** Internal transaction orchestration hook; effects run only after the caller commits. */
     deferUntilCommit?: (effect: () => Promise<void>) => void;
     /**
@@ -2158,17 +2162,23 @@ export class InventoryUseCases {
     moveReserved?: boolean;
     /** Server-only workflow evidence. Public manual-transfer requests never
      * receive this capability; cross-warehouse custody must use a transfer order. */
-    interwarehouseTransfer?: { transferId: number; stage: "dispatch" | "receive" };
+    interwarehouseTransfer?: { transferId: number; stage: "dispatch" | "receive" | "cancel" };
   }): Promise<{ reservedMoved: number; orderItemsRepointed: number; transferReceiptId: number | null }> {
     for (const field of ["productVariantId", "fromLocationId", "toLocationId", "qty"] as const) {
       if (!Number.isSafeInteger(params[field]) || params[field] <= 0 || params[field] > 2_147_483_647) {
         throw new ValidationError(`${field} must be a positive safe integer within PostgreSQL bounds`);
       }
     }
+    if (
+      params.cycleCountId !== undefined &&
+      (!Number.isSafeInteger(params.cycleCountId) || params.cycleCountId <= 0 || params.cycleCountId > 2_147_483_647)
+    ) {
+      throw new ValidationError("cycleCountId must be a positive safe integer within PostgreSQL bounds");
+    }
     if (params.interwarehouseTransfer &&
         (!Number.isSafeInteger(params.interwarehouseTransfer.transferId) || params.interwarehouseTransfer.transferId <= 0 ||
          params.interwarehouseTransfer.transferId > 2_147_483_647 ||
-         !["dispatch", "receive"].includes(params.interwarehouseTransfer.stage))) {
+         !["dispatch", "receive", "cancel"].includes(params.interwarehouseTransfer.stage))) {
       throw new ValidationError("Inter-warehouse workflow evidence is invalid");
     }
     if (params.fromLocationId === params.toLocationId) throw new Error("Source and destination must differ");
@@ -2215,8 +2225,26 @@ export class InventoryUseCases {
 
       if (!fromLoc) throw new Error(`Source location ${params.fromLocationId} not found`);
       if (!toLoc) throw new Error(`Destination location ${params.toLocationId} not found`);
-      if (fromLoc.cycleCountFreezeId) throw new FreezeViolationError(params.fromLocationId);
-      if (toLoc.cycleCountFreezeId) throw new FreezeViolationError(params.toLocationId);
+      if (params.cycleCountId != null) {
+        const ccRes = await tx.execute(sql`
+          SELECT id, status FROM inventory.cycle_counts WHERE id=${params.cycleCountId} FOR SHARE
+        `);
+        const ccRow = ccRes.rows?.[0] as { id?: unknown; status?: unknown } | undefined;
+        if (!ccRow || String(ccRow.status) !== "in_progress") {
+          throw new AppError(
+            "Cycle count must be in progress to authorize frozen-bin transfers.",
+            "CYCLE_COUNT_NOT_IN_PROGRESS",
+            409,
+            { cycleCountId: params.cycleCountId },
+          );
+        }
+      }
+      if (fromLoc.cycleCountFreezeId && fromLoc.cycleCountFreezeId !== params.cycleCountId) {
+        throw new FreezeViolationError(params.fromLocationId);
+      }
+      if (toLoc.cycleCountFreezeId && toLoc.cycleCountFreezeId !== params.cycleCountId) {
+        throw new FreezeViolationError(params.toLocationId);
+      }
       if (fromLoc.isActive !== 1) throw new Error(`Source location ${fromLoc.code} is inactive`);
       if (toLoc.isActive !== 1) throw new Error(`Destination location ${toLoc.code} is inactive`);
       if (fromLoc.warehouseId == null) throw new Error(`Source location ${fromLoc.code} is not assigned to a warehouse`);
@@ -2255,13 +2283,19 @@ export class InventoryUseCases {
           FOR SHARE OF transfer,line
         `);
         const workflow = evidence.rows[0] as any;
-        const routeMatchesOrder = workflow && (params.interwarehouseTransfer.stage === "dispatch"
-          ? Number(workflow.source_location_id) === params.fromLocationId
-            && Number(workflow.transit_location_id) === params.toLocationId
-            && workflow.status === "ready"
-          : Number(workflow.transit_location_id) === params.fromLocationId
-            && Number(workflow.destination_location_id) === params.toLocationId
-            && ["in_transit", "partially_received", "exception"].includes(String(workflow.status)));
+        const routeMatchesOrder = workflow && (
+          params.interwarehouseTransfer.stage === "dispatch"
+            ? Number(workflow.source_location_id) === params.fromLocationId
+              && Number(workflow.transit_location_id) === params.toLocationId
+              && workflow.status === "ready"
+            : params.interwarehouseTransfer.stage === "cancel"
+              ? Number(workflow.transit_location_id) === params.fromLocationId
+                && Number(workflow.source_location_id) === params.toLocationId
+                && ["ready", "in_transit", "partially_received", "exception"].includes(String(workflow.status))
+              : Number(workflow.transit_location_id) === params.fromLocationId
+                && Number(workflow.destination_location_id) === params.toLocationId
+                && ["in_transit", "partially_received", "exception"].includes(String(workflow.status))
+        );
         if (!routeMatchesOrder || evidence.rows.length !== 1) throw new InventoryQuantityError(
           "INTERWAREHOUSE_CUSTODY_EVIDENCE_INVALID",
           "The inventory movement does not match the locked transfer order and SKU.",
@@ -2440,6 +2474,7 @@ export class InventoryUseCases {
         variantQtyAfter: sourceLevel.variantQty - params.qty,
         sourceState: "on_hand",
         targetState: "on_hand",
+        cycleCountId: params.cycleCountId ?? null,
         referenceType: params.referenceType ?? "internal",
         referenceId: params.referenceId ?? null,
         notes: params.notes ?? null,
@@ -2465,6 +2500,7 @@ export class InventoryUseCases {
           variantQtyAfter: reserved - reservedToMove,
           sourceState: "reserved",
           targetState: "reserved",
+          cycleCountId: params.cycleCountId ?? null,
           referenceType: params.referenceType ?? "internal",
           referenceId: params.referenceId ?? null,
           notes:

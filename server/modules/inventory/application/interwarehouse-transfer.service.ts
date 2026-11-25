@@ -403,12 +403,32 @@ export class InterwarehouseTransferService {
       const current = await this.loadLocked(tx, transferId);
       if (terminal(current.status)) throw new AppError("This transfer is already closed.", "INTERWAREHOUSE_TRANSFER_CLOSED", 409);
       const inTransit = current.dispatchedQty - current.receivedQty - current.damagedQty - current.lostQty;
+      let returnReceiptId: number | null = null;
       if (inTransit > 0) {
-        throw new AppError("Receive or reconcile all in-transit stock before closing the remaining request.", "INTERWAREHOUSE_TRANSFER_HAS_TRANSIT_STOCK", 409, { inTransitQuantity: inTransit });
+        const movement = await this.inventory.withTx(tx).transfer({
+          commandKey: `${commandKey}:cancel_return`,
+          productVariantId: current.productVariantId,
+          fromLocationId: current.transitLocationId,
+          toLocationId: current.sourceLocationId,
+          qty: inTransit,
+          userId: actor,
+          notes: `Cancelled WT-${String(transferId).padStart(8, "0")}: ${input.reason}`,
+          referenceType: "interwarehouse_transfer",
+          referenceId: `${transferId}:cancel:${commandKey}`,
+          interwarehouseTransfer: { transferId, stage: "cancel" },
+          deferUntilCommit: () => { /* durable event follow-up owns publication */ },
+        });
+        returnReceiptId = movement.transferReceiptId;
+        if (!returnReceiptId) throw new IntegrityError("Cancel return did not produce physical movement evidence", { transferId });
       }
-      const cancelledQty = current.requestedQty - current.dispatchedQty;
-      const status: InterwarehouseTransferStatus = current.dispatchedQty === 0 ? "cancelled" : "closed_with_variance";
-      await tx.execute(sql`UPDATE inventory.interwarehouse_transfer_lines SET cancelled_qty=${cancelledQty} WHERE transfer_id=${transferId}`);
+      const nextDispatchedQty = current.dispatchedQty - inTransit;
+      const cancelledQty = current.requestedQty - nextDispatchedQty;
+      const status: InterwarehouseTransferStatus = nextDispatchedQty === 0 ? "cancelled" : "closed_with_variance";
+      await tx.execute(sql`
+        UPDATE inventory.interwarehouse_transfer_lines
+        SET dispatched_qty=${nextDispatchedQty}, cancelled_qty=${cancelledQty}
+        WHERE transfer_id=${transferId}
+      `);
       await tx.execute(sql`
         UPDATE inventory.interwarehouse_transfers SET status=${status},cancelled_by=${actor},cancelled_at=${occurredAt},
           completed_by=${actor},completed_at=${occurredAt},exception_notes=concat_ws(E'\n',NULLIF(exception_notes,''),${input.reason}::text),
@@ -417,9 +437,9 @@ export class InterwarehouseTransferService {
       await this.closeTransitLocation(tx, current.transitLocationId, occurredAt);
       const event = await tx.execute(sql`
         INSERT INTO inventory.interwarehouse_transfer_events(
-          transfer_id,event_type,command_key,request_hash,actor,detail,occurred_at
-        ) VALUES (${transferId},'cancelled',${commandKey},${hash},${actor},
-          ${JSON.stringify({ reason: input.reason, cancelledQuantity: cancelledQty })}::jsonb,${occurredAt}) RETURNING id
+          transfer_id,event_type,command_key,request_hash,quantity,inventory_transaction_id,actor,detail,occurred_at
+        ) VALUES (${transferId},'cancelled',${commandKey},${hash},${inTransit},${returnReceiptId},${actor},
+          ${JSON.stringify({ reason: input.reason, cancelledQuantity: cancelledQty, returnedQuantity: inTransit })}::jsonb,${occurredAt}) RETURNING id
       `);
       eventId = integer(event.rows[0]?.id, "event id");
     });
