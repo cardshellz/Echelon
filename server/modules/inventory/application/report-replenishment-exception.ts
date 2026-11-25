@@ -6,8 +6,11 @@ import {
   inventoryLevels,
   cycleCounts,
   cycleCountItems,
+  warehouseLocations,
 } from "@shared/schema";
 import { AppError, IntegrityError, NotFoundError } from "@shared/errors";
+import { FreezeViolationError } from "./inventory.use-cases";
+import { freezeWarehouseLocationsChunkForCycleCountInWarehouse } from "../../warehouse/cross-module-warehouse-mutations.api";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import { createDrizzleFinancialCommandRepository } from "../../../platform/commands/command-results.repository";
 import { hashHttpFinancialCommand } from "../../../platform/commands/http-command";
@@ -107,6 +110,17 @@ export async function reportReplenishmentException(
           "Exception count requires the task's recorded source identity",
           { taskId },
         );
+      await tx.execute(
+        sql`SELECT id FROM warehouse.warehouse_locations WHERE id=${task.fromLocationId} FOR UPDATE`,
+      );
+      const [fromLoc] = await tx
+        .select()
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, task.fromLocationId))
+        .limit(1);
+      if (fromLoc?.cycleCountFreezeId != null) {
+        throw new FreezeViolationError(task.fromLocationId);
+      }
       const [level] = await tx
         .select()
         .from(inventoryLevels)
@@ -128,10 +142,14 @@ export async function reportReplenishmentException(
           countedBins: 0,
           varianceCount: 0,
           approvedVariances: 0,
+          startedAt: now,
           createdBy: actor,
           createdAt: now,
         })
         .returning();
+      await freezeWarehouseLocationsChunkForCycleCountInWarehouse(tx, count.id, [
+        task.fromLocationId,
+      ]);
       await tx
         .insert(cycleCountItems)
         .values({

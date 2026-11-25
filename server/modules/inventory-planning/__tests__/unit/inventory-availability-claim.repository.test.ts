@@ -731,6 +731,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
           }],
         };
       }
+      if (text.includes("FROM warehouse.warehouse_locations") && text.includes("cycle_count_freeze_id")) {
+        return {
+          rows: [{ warehouse_id: 1, is_active: 1, is_pickable: 1, cycle_count_freeze_id: null }],
+        };
+      }
       if (text.startsWith("UPDATE inventory.availability_claim_lot_allocations")
         || text.startsWith("UPDATE inventory.availability_claim_resources")
         || text.startsWith("UPDATE inventory.availability_claim_lines")) {
@@ -987,6 +992,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
             unit_cost_mills: "125",
             total_cost_mills: "375",
           }],
+        };
+      }
+      if (text.includes("FROM warehouse.warehouse_locations") && text.includes("cycle_count_freeze_id")) {
+        return {
+          rows: [{ warehouse_id: 1, is_active: 1, is_pickable: 1, cycle_count_freeze_id: null }],
         };
       }
       if (text.startsWith("UPDATE inventory.availability_claim_lot_allocations")
@@ -1261,6 +1271,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       if (text.startsWith("INSERT INTO inventory.availability_claim_lot_allocations")) {
         return { rows: [{ id: "22" }], rowCount: 1 };
       }
+      if (text.includes("FROM warehouse.warehouse_locations") && text.includes("cycle_count_freeze_id")) {
+        return {
+          rows: [{ warehouse_id: 1, is_active: 1, is_pickable: 1, cycle_count_freeze_id: null }],
+        };
+      }
       if (text.startsWith("UPDATE inventory.availability_claim_lot_allocations")
         || text.startsWith("UPDATE inventory.availability_claim_resources")
         || text.startsWith("UPDATE inventory.availability_claim_lines")) {
@@ -1507,6 +1522,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       if (text.startsWith("INSERT INTO inventory.availability_claim_lot_allocations")) {
         targetAllocationId += 1;
         return { rows: [{ id: String(targetAllocationId) }], rowCount: 1 };
+      }
+      if (text.includes("FROM warehouse.warehouse_locations") && text.includes("cycle_count_freeze_id")) {
+        return {
+          rows: [{ warehouse_id: 1, is_active: 1, is_pickable: 1, cycle_count_freeze_id: null }],
+        };
       }
       if (text.startsWith("UPDATE inventory.availability_claim_lot_allocations")
         || text.startsWith("UPDATE inventory.availability_claim_resources")

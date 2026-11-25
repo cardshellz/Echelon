@@ -3,8 +3,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Router } from "wouter";
-import { emptyWorkConfiguration, type WorkSetup } from "@shared/warehouse-work";
-import { ConfigurationEditor } from "../../WorkConfigurationPage";
+import { emptyWorkConfiguration, WORK_CAPABILITIES, type WorkSetup } from "@shared/warehouse-work";
+import { ConfigurationEditor, CONNECTED_STATION_CAPABILITIES } from "../../WorkConfigurationPage";
 import { prepareWorkSaveAttempt } from "../../work-configuration-draft";
 
 function setup(): WorkSetup {
@@ -53,6 +53,22 @@ describe("warehouse work draft UI", () => {
     expect(id).toHaveBeenCalledOnce(); expect(draft).toEqual(before);
     const changed = prepareWorkSaveAttempt({ ...draft, reason: "Separate assembly" }, first, () => "00000000-0000-4000-8000-000000000002");
     expect(changed.command.commandId).not.toBe(first.command.commandId);
+  });
+  it("marks the 10 unbuilt physical station capability toggles as Coming Soon read-only badges", () => {
+    const data = setup();
+    data.locations = [{ id: 1, code: "BENCH", active: true, zone: "PACK" }];
+    data.revision.configuration.stations = [{
+      id: "00000000-0000-4000-8000-000000000001",
+      code: "ASM",
+      name: "Assembly",
+      locationId: 1,
+      capabilities: ["assembly"],
+      enabled: true,
+    }];
+    expect(WORK_CAPABILITIES.length - CONNECTED_STATION_CAPABILITIES.size).toBe(10);
+    const html = render(data);
+    const badgeMatches = html.match(/Coming Soon/g) ?? [];
+    expect(badgeMatches).toHaveLength(10);
   });
   it("rejects invalid draft inputs before the HTTP command", () => {
     expect(() => prepareWorkSaveAttempt({ expectedRevision: 0, configuration: emptyWorkConfiguration(), reason: "" }, null, () => "00000000-0000-4000-8000-000000000001")).toThrow();

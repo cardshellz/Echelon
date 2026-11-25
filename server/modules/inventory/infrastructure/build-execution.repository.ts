@@ -267,6 +267,7 @@ function assertPersistedAuthorizationMatches(order: any, authorization: BuildAut
 
 const NON_EXECUTION_FAILURE_CODES = new Set([
   "BUILD_ORDER_NOT_FOUND",
+  "BUILD_LOCATION_FROZEN",
   "BUILD_RUN_EXCEEDS_REMAINING",
   "BUILD_RUN_INCOMPLETE",
   "CLAIM_BUILD_EXECUTION_NOT_AVAILABLE",
@@ -289,6 +290,35 @@ export class BuildExecutionRepository {
   ) {
     this.transformationAuthority = dependencies.transformationAuthority
       ?? legacyTransformationExecutionAuthority;
+  }
+
+  private async assertLocationsNotFrozen(
+    tx: Db,
+    locationIds: readonly number[],
+    buildOrderId: number,
+  ): Promise<void> {
+    const uniqueIds = [...new Set(locationIds.filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b);
+    if (uniqueIds.length === 0) return;
+    const frozen = await tx.execute(sql`
+      SELECT id, code, cycle_count_freeze_id
+      FROM warehouse.warehouse_locations
+      WHERE id = ANY(${sql.param(uniqueIds)}::integer[])
+        AND cycle_count_freeze_id IS NOT NULL
+      ORDER BY id
+      FOR SHARE
+    `);
+    if (frozen.rows.length > 0) {
+      const first = frozen.rows[0];
+      throw new BuildDomainError(
+        "BUILD_LOCATION_FROZEN",
+        `Location ${first.code ?? first.id} is frozen for cycle counting — build mutation blocked`,
+        {
+          buildOrderId,
+          locationId: Number(first.id),
+          cycleCountFreezeId: Number(first.cycle_count_freeze_id),
+        },
+      );
+    }
   }
 
   private async lockOrder(tx: Db, buildOrderId: number): Promise<any> {
@@ -555,6 +585,7 @@ export class BuildExecutionRepository {
           { buildOrderId: Number(order.id), componentVariantId: variantId, missingQty },
         );
       }
+      await this.assertLocationsNotFrozen(tx, [locationId], Number(order.id));
 
       const levelResult = await tx.execute(sql`
         SELECT id, variant_qty, reserved_qty
@@ -842,6 +873,14 @@ export class BuildExecutionRepository {
       rethrowBuildAuthorityError(error);
     }
     await this.assertConfigurationCurrent(tx, order, components);
+    await this.assertLocationsNotFrozen(
+      tx,
+      [
+        Number(order.output_location_id),
+        ...components.map((component) => Number(component.source_location_id)),
+      ],
+      input.buildOrderId,
+    );
     const quantities = calculateBuildRunQuantities({
       plannedBuilds: Number(order.planned_builds),
       completedBuilds: Number(order.completed_builds),
@@ -1517,6 +1556,14 @@ export class BuildExecutionRepository {
           qtyPicked: Number(lot.qty_picked),
         })),
       });
+      await this.assertLocationsNotFrozen(
+        tx,
+        [
+          Number(order.output_location_id),
+          ...outputLotsResult.rows.map((lot) => Number(lot.warehouse_location_id)),
+        ],
+        input.buildOrderId,
+      );
 
       const reversalResult = await tx.execute(sql`
         INSERT INTO inventory.build_run_reversals
@@ -1542,6 +1589,11 @@ export class BuildExecutionRepository {
         ORDER BY consumption.id
         FOR UPDATE OF reservation, lot
       `);
+      await this.assertLocationsNotFrozen(
+        tx,
+        consumptions.rows.map((consumption) => Number(consumption.source_location_id)),
+        input.buildOrderId,
+      );
       let restoredComponentQty = 0;
       const restoredByComponent = new Map<number, number>();
       const releasedCostAllocations=new Set<number>();

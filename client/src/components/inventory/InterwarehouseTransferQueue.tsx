@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowRight, CheckCircle2, Loader2, PackageCheck, Truck } from "lucide-react";
+import { AlertTriangle, ArrowRight, Ban, CheckCircle2, Loader2, PackageCheck, Truck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,7 @@ import { FinancialCommandRequestError } from "@/lib/financial-command";
 import { useInventoryCommand } from "@/lib/inventory-command";
 import type { InterwarehouseTransferStatus, InterwarehouseTransferSummary } from "@shared/types/interwarehouse-transfer";
 
-type Action = { kind: "receive" | "missing"; transfer: InterwarehouseTransferSummary } | null;
+type Action = { kind: "receive" | "missing" | "cancel"; transfer: InterwarehouseTransferSummary } | null;
 
 const statusLabel: Record<InterwarehouseTransferStatus, string> = {
   ready: "Ready",
@@ -79,6 +79,12 @@ export function InterwarehouseTransferQueue({ compact = false }: { compact?: boo
           notes: notes.trim() || undefined,
         });
       }
+      if (action.kind === "cancel") {
+        if (!notes.trim()) throw new Error("Enter a reason before cancelling this transfer.");
+        return inventoryCommand<InterwarehouseTransferSummary>(`/api/inventory/interwarehouse-transfers/${action.transfer.id}/cancel`, {
+          reason: notes.trim(),
+        });
+      }
       if (!Number.isSafeInteger(qty) || qty <= 0 || qty > action.transfer.inTransitQuantity) {
         throw new Error(`Enter a whole-number quantity from 1 to ${action.transfer.inTransitQuantity}.`);
       }
@@ -90,10 +96,16 @@ export function InterwarehouseTransferQueue({ compact = false }: { compact?: boo
     },
     onSuccess: (result: InterwarehouseTransferSummary) => {
       toast({
-        title: action?.kind === "receive" ? "Receipt posted" : "Transit discrepancy recorded",
+        title: action?.kind === "receive"
+          ? "Receipt posted"
+          : action?.kind === "cancel"
+            ? "Transfer cancelled"
+            : "Transit discrepancy recorded",
         description: result.followupPending
           ? `${result.transferNumber} was committed and has ${result.inTransitQuantity} unit(s) in transit. Notifications will retry automatically.`
-          : `${result.transferNumber} now has ${result.inTransitQuantity} unit(s) in transit.`,
+          : action?.kind === "cancel"
+            ? `${result.transferNumber} closed (${statusLabel[result.status].toLowerCase()}) and unreceived stock was returned to ${result.sourceWarehouseCode} · ${result.sourceLocationCode}.`
+            : `${result.transferNumber} now has ${result.inTransitQuantity} unit(s) in transit.`,
       });
       setAction(null);
       setNotes("");
@@ -110,7 +122,7 @@ export function InterwarehouseTransferQueue({ compact = false }: { compact?: boo
     },
   });
 
-  const openAction = (kind: "receive" | "missing", transfer: InterwarehouseTransferSummary) => {
+  const openAction = (kind: "receive" | "missing" | "cancel", transfer: InterwarehouseTransferSummary) => {
     setAction({ kind, transfer });
     setQuantity(String(transfer.inTransitQuantity));
     setDamagedQuantity("0");
@@ -151,12 +163,17 @@ export function InterwarehouseTransferQueue({ compact = false }: { compact?: boo
               <div className="text-sm"><span className="font-medium">{transfer.sku}</span> <span className="text-muted-foreground">× {transfer.requestedQuantity}</span></div>
               <div className="text-xs text-muted-foreground">Updated {dateTime.format(new Date(transfer.updatedAt))}</div>
             </div>
-            {transfer.inTransitQuantity > 0 && <div className="flex flex-wrap gap-2">
-              <Button size="sm" onClick={() => openAction("receive", transfer)} data-testid={`receive-transfer-${transfer.id}`}>
-                <PackageCheck className="mr-1.5 h-4 w-4" />Receive
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => openAction("missing", transfer)}>
-                <AlertTriangle className="mr-1.5 h-4 w-4" />Report missing
+            {!["completed", "closed_with_variance", "cancelled"].includes(transfer.status) && <div className="flex flex-wrap gap-2">
+              {transfer.inTransitQuantity > 0 && <>
+                <Button size="sm" onClick={() => openAction("receive", transfer)} data-testid={`receive-transfer-${transfer.id}`}>
+                  <PackageCheck className="mr-1.5 h-4 w-4" />Receive
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => openAction("missing", transfer)}>
+                  <AlertTriangle className="mr-1.5 h-4 w-4" />Report missing
+                </Button>
+              </>}
+              <Button size="sm" variant="outline" onClick={() => openAction("cancel", transfer)} data-testid={`cancel-transfer-${transfer.id}`}>
+                <Ban className="mr-1.5 h-4 w-4" />Cancel / Return
               </Button>
             </div>}
           </div>
@@ -181,13 +198,23 @@ export function InterwarehouseTransferQueue({ compact = false }: { compact?: boo
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {action?.kind === "receive" ? <PackageCheck className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5 text-amber-600" />}
-            {action?.kind === "receive" ? "Receive warehouse transfer" : "Reconcile missing inventory"}
+            {action?.kind === "receive"
+              ? <PackageCheck className="h-5 w-5" />
+              : action?.kind === "cancel"
+                ? <Ban className="h-5 w-5 text-destructive" />
+                : <AlertTriangle className="h-5 w-5 text-amber-600" />}
+            {action?.kind === "receive"
+              ? "Receive warehouse transfer"
+              : action?.kind === "cancel"
+                ? "Cancel transfer & return stock"
+                : "Reconcile missing inventory"}
           </DialogTitle>
           <DialogDescription>
             {action?.kind === "receive"
               ? "Post only the quantity physically counted at the destination. This makes received units available there immediately."
-              : "This writes off missing in-transit custody with an auditable reason. Use it only after investigating the shipment."}
+              : action?.kind === "cancel"
+                ? `Return ${action.transfer.inTransitQuantity} remaining in-transit unit(s) back to ${action.transfer.sourceWarehouseCode} · ${action.transfer.sourceLocationCode} and close this transfer.`
+                : "This writes off missing in-transit custody with an auditable reason. Use it only after investigating the shipment."}
           </DialogDescription>
         </DialogHeader>
         {action && <div className="space-y-4 py-2">
@@ -195,11 +222,11 @@ export function InterwarehouseTransferQueue({ compact = false }: { compact?: boo
             <p className="font-medium">{action.transfer.transferNumber} · {action.transfer.sku}</p>
             <p className="text-muted-foreground">{action.transfer.inTransitQuantity} unit(s) currently in transit</p>
           </div>
-          <div className="space-y-2">
+          {action.kind !== "cancel" && <div className="space-y-2">
             <Label htmlFor="transfer-action-quantity">{action.kind === "receive" ? "Quantity accepted" : "Quantity missing"}</Label>
             <Input id="transfer-action-quantity" type="number" min={action.kind === "receive" ? 0 : 1} max={action.transfer.inTransitQuantity} step={1}
               value={quantity} onChange={(event) => setQuantity(event.target.value)} disabled={mutation.isPending} />
-          </div>
+          </div>}
           {action.kind === "receive" && <div className="space-y-2">
             <Label htmlFor="transfer-damaged-quantity">Damaged quantity</Label>
             <Input id="transfer-damaged-quantity" type="number" min={0} max={action.transfer.inTransitQuantity} step={1}
@@ -212,18 +239,36 @@ export function InterwarehouseTransferQueue({ compact = false }: { compact?: boo
             </p>
           </div>}
           <div className="space-y-2">
-            <Label htmlFor="transfer-action-notes">{action.kind === "missing" ? "Investigation notes" : "Receiving notes (required for damage)"}</Label>
+            <Label htmlFor="transfer-action-notes">
+              {action.kind === "missing"
+                ? "Investigation notes"
+                : action.kind === "cancel"
+                  ? "Cancellation reason"
+                  : "Receiving notes (required for damage)"}
+            </Label>
             <Textarea id="transfer-action-notes" rows={3} value={notes} onChange={(event) => setNotes(event.target.value)}
-              placeholder={action.kind === "missing" ? "Carrier claim, count evidence, or investigation result…" : "Optional receiving details…"}
+              placeholder={action.kind === "missing"
+                ? "Carrier claim, count evidence, or investigation result…"
+                : action.kind === "cancel"
+                  ? "Why is this shipment being recalled or cancelled?"
+                  : "Optional receiving details…"}
               disabled={mutation.isPending} />
           </div>
         </div>}
         <DialogFooter>
           <Button variant="outline" onClick={() => setAction(null)} disabled={mutation.isPending}>Cancel</Button>
-          <Button onClick={() => mutation.mutate()} disabled={mutation.isPending} variant={action?.kind === "missing" ? "destructive" : "default"}>
+          <Button onClick={() => mutation.mutate()} disabled={mutation.isPending} variant={action?.kind === "missing" || action?.kind === "cancel" ? "destructive" : "default"}>
             {mutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              : action?.kind === "receive" ? <CheckCircle2 className="mr-2 h-4 w-4" /> : <Truck className="mr-2 h-4 w-4" />}
-            {action?.kind === "receive" ? "Post receipt" : "Record discrepancy"}
+              : action?.kind === "receive"
+                ? <CheckCircle2 className="mr-2 h-4 w-4" />
+                : action?.kind === "cancel"
+                  ? <Ban className="mr-2 h-4 w-4" />
+                  : <Truck className="mr-2 h-4 w-4" />}
+            {action?.kind === "receive"
+              ? "Post receipt"
+              : action?.kind === "cancel"
+                ? "Cancel & return stock"
+                : "Record discrepancy"}
           </Button>
         </DialogFooter>
       </DialogContent>

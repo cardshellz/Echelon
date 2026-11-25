@@ -384,6 +384,9 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
   it("consumes only claim-owned lots and reserves only committed transformation output", async () => {
     let outputLotId = 60;
     const fake = createClient(async (text) => {
+      if (text.includes("FROM warehouse.warehouse_locations") && text.includes("cycle_count_freeze_id IS NOT NULL")) {
+        return { rows: [] };
+      }
       if (text.startsWith("INSERT INTO inventory.inventory_levels")) return { rows: [], rowCount: 1 };
       if (text.includes("FROM inventory.inventory_levels") && text.includes("OR (product_variant_id")) {
         return {
@@ -496,6 +499,9 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
 
   it("posts canonical build inventory with build-linked lots and ledger evidence", async () => {
     const fake = createClient(async (text) => {
+      if (text.includes("FROM warehouse.warehouse_locations") && text.includes("cycle_count_freeze_id IS NOT NULL")) {
+        return { rows: [] };
+      }
       if (text.startsWith("INSERT INTO inventory.inventory_levels")) return { rows: [], rowCount: 1 };
       if (text.includes("FROM inventory.inventory_levels") && text.includes("OR (product_variant_id")) {
         return { rows: [

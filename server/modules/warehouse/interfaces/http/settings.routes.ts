@@ -315,9 +315,12 @@ export function registerSettingsRoutes(app: Express) {
         parseInt(req.params.id),
         parseInt(req.params.itemId),
         {
-          destinationLocationId: parseInt(req.body.destinationLocationId),
+          destinationLocationId: req.body.destinationLocationId != null ? parseInt(req.body.destinationLocationId) : undefined,
+          sourceLocationId: req.body.sourceLocationId != null ? parseInt(req.body.sourceLocationId) : undefined,
+          direction: req.body.direction === "to_item" ? "to_item" : "from_item",
           qty: parseInt(req.body.qty),
           notes: req.body.notes,
+          commandKey: typeof req.body.commandKey === "string" ? req.body.commandKey : undefined,
         },
         req.session.user?.id,
       ));

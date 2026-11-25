@@ -32,6 +32,7 @@ type DrizzleDb = {
 };
 
 import { InventoryUseCases } from "./inventory.use-cases";
+import { transferStock } from "../transfer-stock.api";
 import { validateWarehouseLocationIntegrity } from "../../warehouse/inventory-governance.api";
 import {
   unfreezeWarehouseLocationsForCycleCountInWarehouse,
@@ -963,9 +964,12 @@ export class CycleCountUseCases {
     cycleCountId: number,
     itemId: number,
     params: {
-      destinationLocationId: number;
+      destinationLocationId?: number;
+      sourceLocationId?: number;
+      direction?: "from_item" | "to_item";
       qty: number;
       notes?: string;
+      commandKey?: string;
     },
     userId?: string,
   ): Promise<{
@@ -974,11 +978,17 @@ export class CycleCountUseCases {
     newExpectedQty: number;
     newVarianceQty: number;
     autoResolved: boolean;
+    partnerItemId?: number;
+    partnerAutoResolved?: boolean;
   }> {
     const item = await this.storage.getCycleCountItemById(itemId);
     if (!item) throw new CycleCountError("Item not found", 404);
     if (item.cycleCountId !== cycleCountId) {
-      throw new CycleCountError("Item does not belong to this cycle count");
+      throw new CycleCountError("Item does not belong to this cycle count", 409);
+    }
+    const cycleCount = await this.storage.getCycleCountById?.(cycleCountId);
+    if (cycleCount && cycleCount.status !== "in_progress") {
+      throw new CycleCountError(`Cannot resolve variance with transfer for a ${cycleCount.status} cycle count`, 409);
     }
     if (item.status !== "investigate" && item.status !== "variance") {
       throw new CycleCountError("Item must be in 'investigate' or 'variance' status to resolve with transfer");
@@ -986,35 +996,60 @@ export class CycleCountUseCases {
     if (!item.productVariantId) {
       throw new CycleCountError("Item must have a linked product variant for transfer");
     }
-    if (params.qty <= 0) {
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) {
       throw new CycleCountError("Transfer quantity must be positive");
     }
-    if (params.destinationLocationId === item.warehouseLocationId) {
-      throw new CycleCountError("Destination must be different from source");
+
+    const isInbound =
+      params.direction === "to_item" ||
+      (params.sourceLocationId != null && params.destinationLocationId == null);
+    const partnerLocationId = isInbound
+      ? (params.sourceLocationId ?? params.destinationLocationId)
+      : params.destinationLocationId;
+    if (!partnerLocationId || !Number.isSafeInteger(partnerLocationId) || partnerLocationId <= 0) {
+      throw new CycleCountError(isInbound ? "Source location is required" : "Destination location is required");
+    }
+    if (partnerLocationId === item.warehouseLocationId) {
+      throw new CycleCountError("Source and destination locations must be different");
     }
 
-    // Look up destination location code for notes
-    const destLoc = await this.storage.getWarehouseLocationById(params.destinationLocationId);
-    const destCode = destLoc?.code || String(params.destinationLocationId);
+    const fromLocationId = isInbound ? partnerLocationId : item.warehouseLocationId;
+    const toLocationId = isInbound ? item.warehouseLocationId : partnerLocationId;
 
-    // Execute the transfer via inventory core
-    const transferNotes = `Cycle count #${cycleCountId} transfer resolution: ${item.expectedSku || 'unknown'} x ${params.qty} → ${destCode}. ${params.notes || ''}`.trim();
+    const partnerLoc = await this.storage.getWarehouseLocationById(partnerLocationId);
+    const partnerCode = partnerLoc?.code || String(partnerLocationId);
+    const itemLoc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+    const itemCode = itemLoc?.code || String(item.warehouseLocationId);
+    const skuLabel = item.expectedSku || item.countedSku || "unknown";
 
-    await this.inventoryUseCases.transfer({
+    const routeLabel = isInbound ? `${partnerCode} → ${itemCode}` : `${itemCode} → ${partnerCode}`;
+    const transferNotes = `Cycle count #${cycleCountId} transfer resolution: ${skuLabel} x ${params.qty} (${routeLabel}). ${params.notes || ""}`.trim();
+    const commandKey =
+      params.commandKey?.trim() ||
+      `cc-resolve-transfer:${cycleCountId}:item:${itemId}:from:${fromLocationId}:to:${toLocationId}:qty:${params.qty}:exp:${item.expectedQty ?? 0}`;
+
+    await transferStock(this.inventoryUseCases, {
+      commandKey,
+      cycleCountId,
       productVariantId: item.productVariantId,
-      fromLocationId: item.warehouseLocationId,
-      toLocationId: params.destinationLocationId,
+      fromLocationId,
+      toLocationId,
       qty: params.qty,
       userId,
+      referenceType: "cycle_count_item",
+      referenceId: String(itemId),
       notes: transferNotes,
     });
 
-    // Update expectedQty: the transfer reduced system qty at this location
-    const newExpectedQty = (item.expectedQty ?? 0) - params.qty;
+    const newExpectedQty = isInbound
+      ? (item.expectedQty ?? 0) + params.qty
+      : (item.expectedQty ?? 0) - params.qty;
     const newVarianceQty = (item.countedQty ?? 0) - newExpectedQty;
     const autoResolved = newVarianceQty === 0;
 
-    const noteEntry = `[Transfer] ${params.qty} units → ${destCode}${params.notes ? ': ' + params.notes : ''}`;
+    const noteEntry = isInbound
+      ? `[Transfer] ${params.qty} units ← ${partnerCode}${params.notes ? ": " + params.notes : ""}`
+      : `[Transfer] ${params.qty} units → ${partnerCode}${params.notes ? ": " + params.notes : ""}`;
     const updatedNotes = item.varianceNotes
       ? `${item.varianceNotes}\n${noteEntry}`
       : noteEntry;
@@ -1032,16 +1067,62 @@ export class CycleCountUseCases {
       updateData.resolvedBy = userId;
       updateData.resolvedAt = new Date();
     } else {
-      // Update variance type based on new variance direction
       updateData.varianceType = newVarianceQty > 0 ? "quantity_over" : "quantity_under";
     }
 
     await this.storage.updateCycleCountItem(itemId, updateData);
 
-    // Refresh bin stats
+    // If the partner bin also has an unapproved variance item for this SKU in this cycle count, sync it too.
+    let partnerItemId: number | undefined;
+    let partnerAutoResolved: boolean | undefined;
+    const allItemsBefore = (await this.storage.getCycleCountItems?.(cycleCountId)) ?? [];
+    const partnerItem = allItemsBefore.find(
+      (candidate) =>
+        candidate.id !== itemId &&
+        candidate.warehouseLocationId === partnerLocationId &&
+        candidate.productVariantId === item.productVariantId &&
+        candidate.countedQty !== null &&
+        (candidate.status === "variance" || candidate.status === "investigate"),
+    );
+    if (partnerItem) {
+      partnerItemId = partnerItem.id;
+      const partnerNewExpected = isInbound
+        ? (partnerItem.expectedQty ?? 0) - params.qty
+        : (partnerItem.expectedQty ?? 0) + params.qty;
+      const partnerNewVariance = (partnerItem.countedQty ?? 0) - partnerNewExpected;
+      partnerAutoResolved = partnerNewVariance === 0;
+      const partnerNote = isInbound
+        ? `[Transfer] ${params.qty} units → ${itemCode} (linked to item #${itemId})`
+        : `[Transfer] ${params.qty} units ← ${itemCode} (linked to item #${itemId})`;
+      const partnerUpdate: Record<string, any> = {
+        expectedQty: partnerNewExpected,
+        varianceQty: partnerNewVariance,
+        varianceNotes: partnerItem.varianceNotes
+          ? `${partnerItem.varianceNotes}\n${partnerNote}`
+          : partnerNote,
+      };
+      if (partnerAutoResolved) {
+        partnerUpdate.varianceType = null;
+        partnerUpdate.status = "resolved";
+        partnerUpdate.varianceReason = "transfer_resolution";
+        partnerUpdate.resolvedBy = userId;
+        partnerUpdate.resolvedAt = new Date();
+      } else {
+        partnerUpdate.varianceType = partnerNewVariance > 0 ? "quantity_over" : "quantity_under";
+      }
+      await this.storage.updateCycleCountItem(partnerItem.id, partnerUpdate);
+    }
+
+    const updatedItems = (await this.storage.getCycleCountItems?.(cycleCountId)) ?? [];
+    if (updatedItems.length > 0) {
+      const resolvedOrApproved = updatedItems.filter(
+        (i) => i.status === "approved" || i.status === "adjusted" || i.status === "resolved",
+      ).length;
+      await this.storage.updateCycleCount(cycleCountId, { approvedVariances: resolvedOrApproved });
+    }
+
     await this.refreshBinStats(cycleCountId);
 
-    // Fire channel sync for the transferred variant
     this.channelSync.queueSyncAfterInventoryChange(item.productVariantId).catch(() => {});
 
     return {
@@ -1050,6 +1131,8 @@ export class CycleCountUseCases {
       newExpectedQty,
       newVarianceQty,
       autoResolved,
+      partnerItemId,
+      partnerAutoResolved,
     };
   }
 
@@ -1270,19 +1353,87 @@ export class CycleCountUseCases {
       throw new CycleCountError("reasonCode is required");
     }
 
+    const cycleCount = await this.storage.getCycleCountById?.(cycleCountId);
+    if (cycleCount && cycleCount.status !== "in_progress") {
+      throw new CycleCountError(`Cannot bulk approve a ${cycleCount.status} cycle count`, 409);
+    }
+
     let approved = 0;
     let skipped = 0;
     let adjustmentCount = 0;
-    const transferCount = 0;
+    let transferCount = 0;
     const errors: string[] = [];
     const negativeGuardedItems: string[] = [];
     const processedIds = new Set<number>();
-    // Transfer suggestions remain available in getReconciliationPreview(). They
-    // are evidence for an operator, not authority to move stock. Bulk approval
-    // reconciles each physical count through the inventory authority and never
-    // commits a separate transfer before those reconciliations succeed.
 
-    // Now approve individual items with REAL-TIME variance
+    // Phase 1: Execute real FIFO-lot-preserving transfers for offsetting variances
+    // among the selected items BEFORE reconciling residual variances. Moving the
+    // actual FIFO lots preserves original PO unit_cost_mills, received_at age, and
+    // receipt_cost_origins instead of destroying lots at source and minting synthetic
+    // fallback-cost lots at destination.
+    const selectedCandidates: CycleCountItem[] = [];
+    const seenCandidateIds = new Set<number>();
+    for (const rawId of itemIds) {
+      const candidateId = parseInt(String(rawId), 10);
+      if (isNaN(candidateId) || seenCandidateIds.has(candidateId)) continue;
+      seenCandidateIds.add(candidateId);
+      const candidate = await this.storage.getCycleCountItemById(candidateId);
+      if (
+        candidate &&
+        candidate.cycleCountId === cycleCountId &&
+        candidate.status !== "approved" &&
+        candidate.status !== "adjusted" &&
+        candidate.status !== "resolved" &&
+        candidate.varianceType &&
+        candidate.productVariantId &&
+        candidate.countedQty !== null
+      ) {
+        selectedCandidates.push(candidate);
+      }
+    }
+
+    if (selectedCandidates.length >= 2) {
+      const matchedTransfers = await this.detectTransfers(selectedCandidates);
+      for (const t of matchedTransfers) {
+        try {
+          const levelRes = await this.db.execute(sql`
+            SELECT COALESCE(variant_qty, 0) AS variant_qty, COALESCE(reserved_qty, 0) AS reserved_qty
+            FROM inventory.inventory_levels
+            WHERE product_variant_id = ${t.productVariantId}
+              AND warehouse_location_id = ${t.fromLocationId}
+          `);
+          const levelRow = levelRes.rows?.[0] as { variant_qty?: unknown; reserved_qty?: unknown } | undefined;
+          const liveOnHand = Number(levelRow?.variant_qty ?? 0);
+          const liveReserved = Number(levelRow?.reserved_qty ?? 0);
+          const unreservedAvailable = Math.max(0, liveOnHand - liveReserved);
+          const executableQty = Math.min(t.qty, unreservedAvailable);
+          if (executableQty <= 0) continue;
+
+          const transferNotes = `Cycle count #${cycleCountId} bulk variance transfer (${reasonCode}): ${t.sku} x ${executableQty} (${t.fromLocationCode} → ${t.toLocationCode})${notes ? ". " + notes : ""}`.trim();
+          const commandKey = `cc-bulk-transfer:${cycleCountId}:pv:${t.productVariantId}:from:${t.fromLocationId}:to:${t.toLocationId}:qty:${executableQty}`;
+
+          await transferStock(this.inventoryUseCases, {
+            commandKey,
+            cycleCountId,
+            productVariantId: t.productVariantId,
+            fromLocationId: t.fromLocationId,
+            toLocationId: t.toLocationId,
+            qty: executableQty,
+            userId: approvedBy,
+            referenceType: "cycle_count",
+            referenceId: String(cycleCountId),
+            notes: transferNotes,
+          });
+          transferCount++;
+        } catch (transferErr: any) {
+          logger.warn("inventory.cycle_count_use_cases", {
+            message: `[CYCLE COUNT] Bulk variance transfer skipped (${t.sku} ${t.fromLocationCode}→${t.toLocationCode}): ${transferErr?.message}`,
+          });
+        }
+      }
+    }
+
+    // Phase 2: Reconcile each item against live post-transfer inventory through the authority boundary
     for (const rawId of itemIds) {
       const itemId = parseInt(String(rawId));
       if (isNaN(itemId) || processedIds.has(itemId)) continue;

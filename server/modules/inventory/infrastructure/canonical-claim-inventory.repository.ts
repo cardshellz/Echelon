@@ -1872,6 +1872,30 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       }
     }
 
+    const touchedLocationIds = [
+      ...new Set([outputLocationId, ...resources.map((resource) => resource.warehouseLocationId)]),
+    ].sort((a, b) => a - b);
+    const frozenLocations = rows(await input.client.query(
+      `SELECT id, cycle_count_freeze_id
+       FROM warehouse.warehouse_locations
+       WHERE id = ANY($1::integer[])
+         AND cycle_count_freeze_id IS NOT NULL
+       ORDER BY id
+       FOR SHARE`,
+      [touchedLocationIds],
+    ));
+    if (frozenLocations.length > 0) {
+      const firstFrozen = frozenLocations[0];
+      throw new CanonicalClaimInventoryMutationError(
+        "CLAIM_OPERATION_LOCATION_FROZEN",
+        `Location ${firstFrozen.id} is frozen for cycle counting — transformation blocked.`,
+        {
+          warehouseLocationId: Number(firstFrozen.id),
+          cycleCountFreezeId: Number(firstFrozen.cycle_count_freeze_id),
+        },
+      );
+    }
+
     await input.client.query(
       `INSERT INTO inventory.inventory_levels (
          product_variant_id, warehouse_location_id, variant_qty, reserved_qty,
