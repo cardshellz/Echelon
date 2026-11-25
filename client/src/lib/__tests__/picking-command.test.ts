@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  clearPendingPickingCommand,
+  getPendingPickingCommand,
+  PendingPickingCommandConflictError,
   sendPickingCommand,
   PickingCommandRejectedError,
 } from "../picking-command";
@@ -156,5 +159,49 @@ describe("retained warehouse command intent", () => {
     completeDuplicate(true);
     await duplicate;
     expect(storage.getItem(storage.key(0)!)).toContain(newer);
+  });
+  it("recovers cleanly from corrupted localStorage entries and supports explicit conflict reset", async () => {
+    const storage = memoryStorage();
+    storage.setItem("echelon.picking.pending.v1:pick:55", "{not-valid-json");
+    expect(getPendingPickingCommand("pick", 55, storage)).toBeNull();
+    expect(storage.length).toBe(0);
+
+    await expect(
+      sendPickingCommand(
+        "pick",
+        55,
+        { status: "in_progress", pickedQuantity: 1 },
+        async () => {
+          throw new Error("timeout");
+        },
+        storage,
+        () => uuid,
+      ),
+    ).rejects.toThrow("timeout");
+    expect(getPendingPickingCommand("pick", 55, storage)?.commandId).toBe(uuid);
+
+    await expect(
+      sendPickingCommand(
+        "pick",
+        55,
+        { status: "completed", pickedQuantity: 2 },
+        async () => ({ ok: true }),
+        storage,
+      ),
+    ).rejects.toBeInstanceOf(PendingPickingCommandConflictError);
+
+    clearPendingPickingCommand("pick", 55, storage);
+    expect(getPendingPickingCommand("pick", 55, storage)).toBeNull();
+
+    const result = await sendPickingCommand(
+      "pick",
+      55,
+      { status: "completed", pickedQuantity: 2 },
+      async () => ({ ok: true }),
+      storage,
+      () => "123e4567-e89b-42d3-a456-426614174999",
+    );
+    expect(result).toEqual({ ok: true });
+    expect(storage.length).toBe(0);
   });
 });

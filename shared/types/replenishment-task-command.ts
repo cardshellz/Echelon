@@ -12,6 +12,8 @@ export const replenishmentTaskPatchSchema = z
     assignedTo: z.string().trim().min(1).max(100).nullable().optional(),
     priority: positiveInteger.max(10).optional(),
     notes: z.string().max(5000).nullable().optional(),
+    exceptionReason: z.string().max(500).nullable().optional(),
+    fromLocationId: positiveInteger.optional(),
   })
   .strict()
   .refine(
@@ -19,10 +21,12 @@ export const replenishmentTaskPatchSchema = z
       value.status !== undefined ||
       value.assignedTo !== undefined ||
       value.priority !== undefined ||
-      value.notes !== undefined,
+      value.notes !== undefined ||
+      value.exceptionReason !== undefined ||
+      value.fromLocationId !== undefined,
     {
       message:
-        "A task command must change status, assignment, priority or notes",
+        "A task command must change status, assignment, priority, source location, exception reason or notes",
     },
   );
 export type ReplenishmentTaskPatch = z.infer<

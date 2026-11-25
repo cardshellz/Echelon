@@ -143,11 +143,78 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
       const locationId = req.query.locationId ? parseInt(String(req.query.locationId)) : null;
-      const limit = parseInt(String(req.query.limit)) || 20;
+      const defaultLimit = locationId ? 500 : 20;
+      const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit)) || defaultLimit));
 
       if (locationId) {
-        const result = await storage.searchSkusByLocation(locationId, limit);
-        return res.json(result);
+        const searchPattern = query ? `%${query}%` : undefined;
+        const rows = await storage.searchSkusByLocation(locationId, limit, searchPattern);
+        if (rows.length === 0) return res.json(rows);
+
+        const [sourceLoc, allLocations, allVariants] = await Promise.all([
+          storage.getWarehouseLocationById(locationId).catch(() => undefined),
+          storage.getAllWarehouseLocations().catch(() => []),
+          storage.getAllProductVariants().catch(() => []),
+        ]);
+        const locById = new Map(allLocations.map((l) => [l.id, l]));
+        const variantsByProductId = new Map<number, typeof allVariants>();
+        for (const v of allVariants) {
+          if (!v.productId || !v.isActive) continue;
+          const list = variantsByProductId.get(v.productId) ?? [];
+          list.push(v);
+          variantsByProductId.set(v.productId, list);
+        }
+
+        const enriched = await Promise.all(
+          rows.map(async (row) => {
+            const variantId = Number(row.variantId);
+            const productId = row.productId != null ? Number(row.productId) : null;
+            const unitsPerVariant = Number(row.unitsPerVariant ?? 1);
+            let primaryPickLocationId: number | null = null;
+            let primaryPickLocationCode: string | null = null;
+            try {
+              const assignedIds = await storage.getAssignedLocationIdsForVariant(variantId);
+              const candidateLocs = assignedIds
+                .map((id) => locById.get(id))
+                .filter((loc): loc is NonNullable<typeof loc> => Boolean(loc && loc.isActive === 1 && loc.locationType === "pick"));
+              const scopedLoc =
+                (sourceLoc?.warehouseId != null
+                  ? candidateLocs.find((l) => l.warehouseId === sourceLoc.warehouseId)
+                  : undefined) ?? candidateLocs[0];
+              if (scopedLoc) {
+                primaryPickLocationId = scopedLoc.id;
+                primaryPickLocationCode = scopedLoc.code;
+              }
+            } catch {
+              // ignore slotting enrichment errors
+            }
+
+            let breakTargetVariantId: number | null = null;
+            let breakTargetSku: string | null = null;
+            let breakOutputQty: number | null = null;
+            if (productId && unitsPerVariant > 1) {
+              const siblings = (variantsByProductId.get(productId) ?? [])
+                .filter((v) => v.id !== variantId && v.unitsPerVariant > 0 && v.unitsPerVariant < unitsPerVariant && unitsPerVariant % v.unitsPerVariant === 0)
+                .sort((a, b) => a.unitsPerVariant - b.unitsPerVariant);
+              const baseOrChild = siblings[0];
+              if (baseOrChild) {
+                breakTargetVariantId = baseOrChild.id;
+                breakTargetSku = baseOrChild.sku ?? null;
+                breakOutputQty = Math.floor(unitsPerVariant / baseOrChild.unitsPerVariant);
+              }
+            }
+
+            return {
+              ...row,
+              primaryPickLocationId,
+              primaryPickLocationCode,
+              breakTargetVariantId,
+              breakTargetSku,
+              breakOutputQty,
+            };
+          }),
+        );
+        return res.json(enriched);
       }
 
       if (!query) {

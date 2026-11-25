@@ -380,35 +380,37 @@ export function PickingQueueView({
                 <option value="shopify">Shopify</option>
                 <option value="ebay">eBay</option>
               </select>
-              {/* Mode Toggle - Compact */}
-              <div className="flex items-center rounded-md border bg-muted/50 p-0.5">
-                <Button
-                  variant={pickingMode === "batch" ? "default" : "ghost"}
-                  size="sm"
-                  disabled={queue.length === 0}
-                  title={queue.length === 0 ? "No active pick batches" : "Batch picking mode"}
-                  onClick={() => setPickingMode("batch")}
-                  className={cn(
-                    "h-7 px-2 text-xs",
-                    pickingMode === "batch" && "bg-primary shadow-sm",
-                  )}
-                  data-testid="button-batch-mode"
-                >
-                  <Layers className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant={pickingMode === "single" ? "default" : "ghost"}
-                  size="sm"
-                  onClick={() => setPickingMode("single")}
-                  className={cn(
-                    "h-7 px-2 text-xs",
-                    pickingMode === "single" && "bg-primary shadow-sm",
-                  )}
-                  data-testid="button-single-mode"
-                >
-                  <Package className="h-3.5 w-3.5" />
-                </Button>
-              </div>
+              {/* Mode Toggle - Single Order Active (Batch hidden until queue.length > 0) */}
+              {queue.length > 0 && (
+                <div className="flex items-center rounded-md border bg-muted/50 p-0.5">
+                  <Button
+                    variant={pickingMode === "batch" ? "default" : "ghost"}
+                    size="sm"
+                    disabled={queue.length === 0}
+                    title={queue.length === 0 ? "No active pick batches" : "Batch picking mode"}
+                    onClick={() => setPickingMode("batch")}
+                    className={cn(
+                      "h-7 px-2 text-xs",
+                      pickingMode === "batch" && "bg-primary shadow-sm",
+                    )}
+                    data-testid="button-batch-mode"
+                  >
+                    <Layers className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant={pickingMode === "single" ? "default" : "ghost"}
+                    size="sm"
+                    onClick={() => setPickingMode("single")}
+                    className={cn(
+                      "h-7 px-2 text-xs",
+                      pickingMode === "single" && "bg-primary shadow-sm",
+                    )}
+                    data-testid="button-single-mode"
+                  >
+                    <Package className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              )}
 
               {/* Sync Shopify - Icon only on mobile */}
               <Button

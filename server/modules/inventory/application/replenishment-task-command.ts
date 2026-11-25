@@ -1,12 +1,12 @@
 import { and, eq, sql } from "drizzle-orm";
 import { createSelectSchema } from "drizzle-zod";
 import { z } from "zod";
-import { replenTasks } from "@shared/schema";
+import { replenTasks, warehouseLocations } from "@shared/schema";
 import {
   replenishmentTaskPatchSchema,
   assertReplenishmentTaskTransition,
 } from "@shared/types/replenishment-task-command";
-import { AppError, IntegrityError, NotFoundError } from "@shared/errors";
+import { AppError, IntegrityError, NotFoundError, ValidationError } from "@shared/errors";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import { createDrizzleFinancialCommandRepository } from "../../../platform/commands/command-results.repository";
 import { hashHttpFinancialCommand } from "../../../platform/commands/http-command";
@@ -88,13 +88,59 @@ export async function changeReplenishmentTask(
         task.status,
         updates.status ?? task.status,
       );
+      if (
+        updates.fromLocationId !== undefined &&
+        updates.fromLocationId !== task.fromLocationId
+      ) {
+        if (updates.fromLocationId === task.toLocationId) {
+          throw new ValidationError(
+            "Source location cannot be the same as destination pick location",
+          );
+        }
+        const [fromLoc] = await tx
+          .select()
+          .from(warehouseLocations)
+          .where(eq(warehouseLocations.id, updates.fromLocationId))
+          .limit(1);
+        if (!fromLoc || fromLoc.isActive !== 1) {
+          throw new ValidationError("Selected source location is not active");
+        }
+        if (
+          fromLoc.locationType === "in_transit" ||
+          fromLoc.locationType === "3pl_virtual"
+        ) {
+          throw new ValidationError(
+            "Replenishment source must be a physical warehouse location",
+          );
+        }
+        if (
+          task.warehouseId != null &&
+          fromLoc.warehouseId != null &&
+          fromLoc.warehouseId !== task.warehouseId
+        ) {
+          throw new ValidationError(
+            "Selected source location belongs to a different warehouse",
+          );
+        }
+      }
       const now = clock();
       if (!(now instanceof Date) || Number.isNaN(now.getTime()))
         throw new IntegrityError("Task command clock is invalid", { taskId });
+      const retryingBlockedTask =
+        task.status === "blocked" && updates.status === "pending";
       const [updated] = await tx
         .update(replenTasks)
         .set({
           ...updates,
+          ...(retryingBlockedTask
+            ? {
+                exceptionReason:
+                  updates.exceptionReason !== undefined
+                    ? updates.exceptionReason
+                    : null,
+                blocksShipment: false,
+              }
+            : {}),
           ...(updates.status === "cancelled" ? { completedAt: now } : {}),
           ...(updates.status === "assigned" ? { assignedAt: now } : {}),
           ...(updates.status === "in_progress"
@@ -124,6 +170,8 @@ export async function changeReplenishmentTask(
               status: task.status,
               assignedTo: task.assignedTo,
               priority: task.priority,
+              fromLocationId: task.fromLocationId,
+              exceptionReason: task.exceptionReason,
               notes: task.notes,
             },
             after: {
@@ -131,6 +179,8 @@ export async function changeReplenishmentTask(
               status: updated.status,
               assignedTo: updated.assignedTo,
               priority: updated.priority,
+              fromLocationId: updated.fromLocationId,
+              exceptionReason: updated.exceptionReason,
               notes: updated.notes,
             },
           },

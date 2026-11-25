@@ -98,7 +98,7 @@ export interface IInventoryStorage {
   hasProductLocationAssignment(productVariantId: number, warehouseLocationId: number): Promise<boolean>;
   getAssignedLocationIdsForVariant(productVariantId: number): Promise<number[]>;
 
-  searchSkusByLocation(locationId: number, limit: number): Promise<Record<string, unknown>[]>;
+  searchSkusByLocation(locationId: number, limit: number, searchPattern?: string): Promise<Record<string, unknown>[]>;
   searchSkusByPattern(searchPattern: string, limit: number): Promise<Record<string, unknown>[]>;
   searchSkuLocations(searchPattern: string): Promise<Record<string, unknown>[]>;
   getSourceInventoryForConversion(variantId: number, locationId?: number): Promise<Record<string, unknown>[]>;
@@ -853,12 +853,22 @@ export function createInventoryMethods(
     return result.map(a => a.warehouseLocationId).filter((id): id is number => id !== null);
   },
 
-  async searchSkusByLocation(locationId: number, limit: number): Promise<Record<string, unknown>[]> {
+  async searchSkusByLocation(locationId: number, limit: number, searchPattern?: string): Promise<Record<string, unknown>[]> {
+    const patternFilter = searchPattern
+      ? sql`AND (
+          LOWER(pv.sku) LIKE ${searchPattern} OR
+          LOWER(COALESCE(pv.name, '')) LIKE ${searchPattern} OR
+          LOWER(COALESCE(to_jsonb(pv)->>'barcode', '')) LIKE ${searchPattern}
+        )`
+      : sql``;
     const result = await db.execute(sql`
       SELECT
         pv.sku as sku,
         pv.name as name,
         pv.id as "variantId",
+        to_jsonb(pv)->>'barcode' as barcode,
+        (to_jsonb(pv)->>'product_id')::int as "productId",
+        COALESCE((to_jsonb(pv)->>'units_per_variant')::int, 1) as "unitsPerVariant",
         GREATEST(il.variant_qty - COALESCE(il.reserved_qty,0),0) as available,
         il.variant_qty as "onHand",
         COALESCE(il.reserved_qty,0) as reserved,
@@ -871,6 +881,7 @@ export function createInventoryMethods(
         AND il.variant_qty > 0
         AND pv.requires_shipping = true
         AND COALESCE(pv.track_inventory, true) = true
+        ${patternFilter}
       ORDER BY pv.sku
       LIMIT ${limit}
     `);
@@ -885,7 +896,8 @@ export function createInventoryMethods(
         'product_variant' as source,
         pv.product_id as "productId",
         pv.id as "productVariantId",
-        pv.units_per_variant as "unitsPerVariant"
+        pv.units_per_variant as "unitsPerVariant",
+        to_jsonb(pv)->>'barcode' as barcode
       FROM catalog.product_variants pv
       WHERE pv.is_active = true
         AND pv.requires_shipping = true
@@ -893,7 +905,8 @@ export function createInventoryMethods(
         AND pv.sku IS NOT NULL
         AND (
           LOWER(pv.sku) LIKE ${searchPattern} OR
-          LOWER(pv.name) LIKE ${searchPattern}
+          LOWER(COALESCE(pv.name, '')) LIKE ${searchPattern} OR
+          LOWER(COALESCE(to_jsonb(pv)->>'barcode', '')) LIKE ${searchPattern}
         )
       ORDER BY pv.sku
       LIMIT ${limit}
@@ -907,6 +920,7 @@ export function createInventoryMethods(
         pv.sku,
         pv.name,
         pv.id as "variantId",
+        to_jsonb(pv)->>'barcode' as barcode,
         wl.code as location,
         wl.zone,
         wl.location_type as "locationType",
@@ -924,7 +938,8 @@ export function createInventoryMethods(
         AND COALESCE(pv.track_inventory, true) = true
         AND (
           LOWER(pv.sku) LIKE ${searchPattern} OR
-          LOWER(pv.name) LIKE ${searchPattern}
+          LOWER(COALESCE(pv.name, '')) LIKE ${searchPattern} OR
+          LOWER(COALESCE(to_jsonb(pv)->>'barcode', '')) LIKE ${searchPattern}
         )
       ORDER BY pv.sku, wl.code
     `);

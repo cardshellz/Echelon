@@ -382,7 +382,7 @@ export default function WarehouseLocations() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/warehouse/zones"] });
       setIsCreateZoneOpen(false);
-      setNewZone({ code: "", name: "", description: "", locationType: "bin", isPickable: 1 });
+      setNewZone({ code: "", name: "", description: "", locationType: "pick", isPickable: 1 });
       toast({ title: "Zone created successfully" });
     },
     onError: (error: Error) => {
@@ -415,8 +415,8 @@ export default function WarehouseLocations() {
       level: "",
       bin: "",
       name: "",
-      locationType: "bin",
-      binType: "",
+      locationType: "pick",
+      binType: "bin",
       isPickable: 1,
       warehouseId: "",
     });
@@ -425,6 +425,7 @@ export default function WarehouseLocations() {
   const handleCreateLocation = () => {
     const data: any = {
       locationType: newLocation.locationType,
+      binType: newLocation.binType || "bin",
       isPickable: newLocation.isPickable,
     };
     if (newLocation.zone) data.zone = newLocation.zone.toUpperCase();
@@ -1049,16 +1050,38 @@ export default function WarehouseLocations() {
                 </Select>
               </div>
               <div>
-                <Label className="text-xs">Location Type</Label>
+                <Label className="text-xs">Location Type (Function)</Label>
                 <Select
                   value={newLocation.locationType}
-                  onValueChange={(v) => setNewLocation({ ...newLocation, locationType: v })}
+                  onValueChange={(v) =>
+                    setNewLocation({
+                      ...newLocation,
+                      locationType: v,
+                      isPickable: v === "pick" ? 1 : 0,
+                    })
+                  }
                 >
                   <SelectTrigger className="h-11" data-testid="select-location-type">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     {LOCATION_TYPES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="text-xs">Bin Type (Form Factor)</Label>
+                <Select
+                  value={newLocation.binType || "bin"}
+                  onValueChange={(v) => setNewLocation({ ...newLocation, binType: v })}
+                >
+                  <SelectTrigger className="h-11" data-testid="select-bin-type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {BIN_TYPES.map((t) => (
                       <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
                     ))}
                   </SelectContent>
@@ -1218,7 +1241,13 @@ export default function WarehouseLocations() {
                   <Label className="text-xs">Location Type (Function)</Label>
                   <Select
                     value={editingLocation.locationType}
-                    onValueChange={(v) => setEditingLocation({ ...editingLocation, locationType: v })}
+                    onValueChange={(v) =>
+                      setEditingLocation({
+                        ...editingLocation,
+                        locationType: v,
+                        isPickable: v === "pick" ? 1 : 0,
+                      })
+                    }
                   >
                     <SelectTrigger className="h-11">
                       <SelectValue />
@@ -1474,9 +1503,9 @@ export default function WarehouseLocations() {
                 <Label className="text-xs">CSV Data</Label>
                 <Textarea
                   className="font-mono text-xs h-32 md:h-48"
-                  placeholder="zone,aisle,bay,level,bin,name,location_type,is_pickable
-FWD,A,01,A,1,Forward Pick A1,bin,1
-BULK,B,02,B,,Bulk B2,pallet,0"
+                  placeholder="zone,aisle,bay,level,bin,name,location_type,bin_type,is_pickable
+FWD,A,01,A,1,Forward Pick A1,pick,bin,1
+BULK,B,02,B,,Bulk B2,reserve,pallet,0"
                   value={csvData}
                   onChange={(e) => setCsvData(e.target.value)}
                   data-testid="textarea-csv-data"
@@ -1493,8 +1522,9 @@ BULK,B,02,B,,Bulk B2,pallet,0"
                 <ul className="list-disc list-inside space-y-1">
                   <li><code>zone, aisle, bay, level, bin</code> - Location hierarchy</li>
                   <li><code>name</code> - Friendly name (optional)</li>
-                  <li><code>location_type</code> - bin, shelf, pallet, carton_flow, floor</li>
-                  <li><code>is_pickable</code> - 1 or 0</li>
+                  <li><code>location_type</code> - pick, reserve, receiving, staging</li>
+                  <li><code>bin_type</code> - bin, shelf, pallet, carton_flow, floor (optional)</li>
+                  <li><code>is_pickable</code> - 1 (pickable) or 0 (non-pickable)</li>
                   <li><code>warehouse_id</code> - Warehouse ID (optional)</li>
                 </ul>
               </div>

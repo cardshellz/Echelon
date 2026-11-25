@@ -1,10 +1,22 @@
+import { lazy, Suspense } from "react";
 import { useLocation } from "wouter";
+import { Loader2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/lib/auth";
 import PickingQueue from "./Picking";
-import PickingLogs from "./PickingLogs";
-import PickingMetrics from "./PickingMetrics";
-import PickingSettings from "./PickingSettings";
+
+const PickingLogs = lazy(() => import("./PickingLogs"));
+const PickingMetrics = lazy(() => import("./PickingMetrics"));
+const PickingSettings = lazy(() => import("./PickingSettings"));
+
+function TabLoadingFallback() {
+  return (
+    <div className="flex items-center justify-center h-64 text-muted-foreground">
+      <Loader2 className="h-6 w-6 animate-spin mr-2" />
+      <span className="text-sm">Loading...</span>
+    </div>
+  );
+}
 
 export default function PickingPage() {
   const [location, navigate] = useLocation();
@@ -38,17 +50,23 @@ export default function PickingPage() {
       </TabsContent>
       {canViewLogs && (
         <TabsContent value="logs" className="mt-0 flex-1 overflow-auto">
-          <PickingLogs />
+          <Suspense fallback={<TabLoadingFallback />}>
+            <PickingLogs />
+          </Suspense>
         </TabsContent>
       )}
       {canViewMetrics && (
         <TabsContent value="metrics" className="mt-0 flex-1 overflow-auto">
-          <PickingMetrics />
+          <Suspense fallback={<TabLoadingFallback />}>
+            <PickingMetrics />
+          </Suspense>
         </TabsContent>
       )}
       {canManageSettings && (
         <TabsContent value="settings" className="mt-0 flex-1 overflow-auto">
-          <PickingSettings />
+          <Suspense fallback={<TabLoadingFallback />}>
+            <PickingSettings />
+          </Suspense>
         </TabsContent>
       )}
     </Tabs>

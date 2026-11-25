@@ -257,14 +257,8 @@ export function registerPickingRoutes(app: Express) {
         ? error.statusCode
         : error?.name === "ValidationError" ? 400 : 500;
       const reason = error?.context?.reason ?? error?.details?.reason ?? error?.reason ?? null;
-      const commandRejected = status === 409 && [
-        "pick_progress_conflict",
-        "pick_quantity_conflict",
-        "order_on_hold",
-        "order_item_on_hold",
-        "line_on_hold",
-        "pick_progress_delta_invalid",
-      ].includes(String(reason));
+      const inProgress = error?.code === "PICKING_COMMAND_IN_PROGRESS" || error?.code === "FINANCIAL_COMMAND_IN_PROGRESS";
+      const commandRejected = status >= 400 && status < 500 && !inProgress;
       res.status(status).json({
         error: error.message || "Failed to update item",
         code: error.code,
@@ -301,12 +295,8 @@ export function registerPickingRoutes(app: Express) {
         ? error.statusCode
         : error?.name === "ValidationError" ? 400 : 500;
       const reason = error?.context?.reason ?? error?.details?.reason ?? error?.reason ?? null;
-      const commandRejected = status === 409 && [
-        "unpick_progress_conflict",
-        "unpick_identity_changed",
-        "order_on_hold",
-        "order_not_unpickable",
-      ].includes(String(reason));
+      const inProgress = error?.code === "PICKING_COMMAND_IN_PROGRESS" || error?.code === "FINANCIAL_COMMAND_IN_PROGRESS";
+      const commandRejected = status >= 400 && status < 500 && !inProgress;
       res.status(status).json({
         error: error.message || "Failed to unpick item",
         code: error.code,

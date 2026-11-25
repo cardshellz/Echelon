@@ -166,7 +166,9 @@ export function PickingActiveItemView({
       {/* Hidden scanner sink - captures hardware barcode scans reliably without software keyboard */}
       <input
         ref={hiddenScannerRef}
-        className="opacity-0 absolute -z-10"
+        type="text"
+        inputMode="none"
+        className="opacity-0 absolute -z-10 pointer-events-none"
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();

@@ -1,5 +1,6 @@
 import { sendPickingCommand, PickingCommandRejectedError } from "@/lib/picking-command";
 import { pickingSourcePlanSchema, type PickingSourcePlan } from "@shared/picking-source-plan";
+import { sortByWalkPath } from "@shared/warehouse/walk-path";
 import type { PickingAssignmentSnapshot } from "@shared/types/picking-assignment-release";
 import { derivePickerLineProgress } from "@/lib/picking-progress";
 import type { Order, OrderItem, ItemStatus } from "@shared/schema";
@@ -235,24 +236,36 @@ export async function releaseOrder(orderId: number, expectedAssignment: PickingA
   return res.json();
 }
 
-const PRE_EFFECT_CONFLICT_REASONS = new Set([
-  "pick_progress_conflict",
-  "pick_quantity_conflict",
-  "order_on_hold",
-  "order_item_on_hold",
-  "line_on_hold",
-  "pick_progress_delta_invalid",
-  "unpick_progress_conflict",
-  "unpick_identity_changed",
-  "order_not_unpickable",
+const IN_PROGRESS_CONFLICT_CODES = new Set([
+  "PICKING_COMMAND_IN_PROGRESS",
+  "FINANCIAL_COMMAND_IN_PROGRESS",
 ]);
 
 export function isDefiniteCommandRejection(status: number, body: any): boolean {
-  if (status < 500 && status !== 409) return true;
-  if (status === 409 && (body?.commandRejected === true || PRE_EFFECT_CONFLICT_REASONS.has(String(body?.reason ?? "")))) {
-    return true;
-  }
-  return false;
+  if (status < 400 || status >= 500) return false;
+  if (body?.ambiguous === true) return false;
+  if (IN_PROGRESS_CONFLICT_CODES.has(String(body?.code ?? ""))) return false;
+  if (status !== 409) return true;
+  if (body?.commandRejected === false) return false;
+  return true;
+}
+
+export function sortPickItemsByWalkPath(items: readonly PickItem[]): PickItem[] {
+  return sortByWalkPath(items, (item) => {
+    const code =
+      item.sourcePlan?.status === "ready"
+        ? item.sourcePlan.locationCode
+        : item.location;
+    return {
+      id: item.id,
+      sku: item.sku,
+      code,
+      isUnassigned:
+        (item.sourcePlan?.status === "confirmation_only" ||
+          item.sourcePlan?.status === "blocked") &&
+        (!code || code === "UNASSIGNED"),
+    };
+  });
 }
 
 export async function unpickItem(itemId: number, qty: number, reason: string = "Picker unpick"): Promise<PickResponse> {
@@ -596,32 +609,34 @@ export function mapPickerOrder(order: OrderWithItems): SingleOrder {
     shippingServiceLevel: (order as any).shippingServiceLevel,
     memberPlanName: (order as any).memberPlanName,
     memberPlanColor: (order as any).memberPlanColor,
-    items: order.items
-      .map((item): PickItem => {
-        const progress = derivePickerLineProgress({
-          quantity: item.quantity,
-          pickedQuantity: item.pickedQuantity || 0,
-          fulfilledQuantity: item.fulfilledQuantity || 0,
-          status: item.status as PickItem["status"],
-        });
-        return {
-          id: item.id,
-          sku: item.sku,
-          name: item.name,
-          location: item.location,
-          sourcePlan: item.sourcePlan ? pickingSourcePlanSchema.parse(item.sourcePlan) : undefined,
-          qty: progress.targetQuantity,
-          picked: progress.pickedQuantity,
-          status: progress.status,
-          orderId: order.orderNumber,
-          wmsOrderId: order.id,
-          onHold: item.onHold === true,
-          image: item.imageUrl || "",
-          barcode: item.barcode || undefined,
-          replenPrediction: item.replenPrediction ?? null,
-        };
-      })
-      .filter((item) => item.qty > 0 || item.status === "short"),
+    items: sortPickItemsByWalkPath(
+      order.items
+        .map((item): PickItem => {
+          const progress = derivePickerLineProgress({
+            quantity: item.quantity,
+            pickedQuantity: item.pickedQuantity || 0,
+            fulfilledQuantity: item.fulfilledQuantity || 0,
+            status: item.status as PickItem["status"],
+          });
+          return {
+            id: item.id,
+            sku: item.sku,
+            name: item.name,
+            location: item.location,
+            sourcePlan: item.sourcePlan ? pickingSourcePlanSchema.parse(item.sourcePlan) : undefined,
+            qty: progress.targetQuantity,
+            picked: progress.pickedQuantity,
+            status: progress.status,
+            orderId: order.orderNumber,
+            wmsOrderId: order.id,
+            onHold: item.onHold === true,
+            image: item.imageUrl || "",
+            barcode: item.barcode || undefined,
+            replenPrediction: item.replenPrediction ?? null,
+          };
+        })
+        .filter((item) => item.qty > 0 || item.status === "short"),
+    ),
   };
 }
 
@@ -665,7 +680,7 @@ export function groupMappedPickerOrders(allOrdersMapped: SingleOrder[]): SingleO
         ...order,
         id: `combined-${order.combinedGroupId}`,
         orderNumber: orderNumbers,
-        items: allItems,
+        items: sortPickItemsByWalkPath(allItems),
         combinedOrders: combinedOrdersList,
         isCombinedGroup: true,
       });
