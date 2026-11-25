@@ -47,10 +47,11 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       throw new Error("Cost lineage tests require a separate explicitly disposable local PostgreSQL database.");
     }
     pool = new pg.Pool({ connectionString: databaseUrl, application_name: "echelon-cost-lineage-test", max: 4 });
-    for (const name of ["procurement", "inventory", "oms"]) {
+    for (const name of ["procurement", "inventory", "oms", "warehouse"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
+    await pool.query(`CREATE TABLE warehouse.warehouse_locations (id integer PRIMARY KEY, code text, cycle_count_freeze_id integer)`);
     for (const table of ["purchase_order_lines", "inbound_shipment_lines", "receiving_orders", "receiving_lines", "vendor_invoice_lines"]) {
       await pool.query(`CREATE TABLE procurement.${table} (id integer PRIMARY KEY)`);
     }
