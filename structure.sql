@@ -31625,6 +31625,7 @@ CREATE TABLE membership.plans (
     rewards_code_expiry_days integer DEFAULT 2 NOT NULL,
     tier_level integer DEFAULT 0 NOT NULL,
     is_available_for_purchase boolean DEFAULT false NOT NULL,
+    points_expiry_notice_days integer DEFAULT 30 NOT NULL,
     CONSTRAINT plans_purchase_availability_check CHECK (((is_available_for_purchase = false) OR ((is_active = true) AND (is_free_tier = false))))
 );
 
@@ -31634,6 +31635,24 @@ CREATE TABLE membership.plans (
 --
 
 COMMENT ON COLUMN membership.plans.upgrade_to_plan_id IS 'The plan this one upgrades to (defines upgrade path in member portal)';
+
+
+--
+-- Name: points_expiry_notices; Type: TABLE; Schema: membership; Owner: -
+--
+
+CREATE TABLE membership.points_expiry_notices (
+    id character varying DEFAULT gen_random_uuid() NOT NULL,
+    member_id character varying NOT NULL,
+    plan_id character varying NOT NULL,
+    points numeric(12,2) NOT NULL,
+    earned_before timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    notified_at timestamp with time zone DEFAULT now() NOT NULL,
+    dedupe_key text NOT NULL,
+    expired_at timestamp with time zone,
+    expired_points numeric(12,2)
+);
 
 
 --
@@ -51555,6 +51574,22 @@ ALTER TABLE ONLY membership.plans
 
 
 --
+-- Name: points_expiry_notices points_expiry_notices_dedupe_key_key; Type: CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.points_expiry_notices
+    ADD CONSTRAINT points_expiry_notices_dedupe_key_key UNIQUE (dedupe_key);
+
+
+--
+-- Name: points_expiry_notices points_expiry_notices_pkey; Type: CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.points_expiry_notices
+    ADD CONSTRAINT points_expiry_notices_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: portal_config_audit_events portal_config_audit_events_pkey; Type: CONSTRAINT; Schema: membership; Owner: -
 --
 
@@ -60296,6 +60331,13 @@ CREATE INDEX plan_channel_access_channel_idx ON membership.plan_channel_access U
 --
 
 CREATE INDEX plan_channel_access_plan_idx ON membership.plan_channel_access USING btree (plan_id);
+
+
+--
+-- Name: points_expiry_notices_member_expires; Type: INDEX; Schema: membership; Owner: -
+--
+
+CREATE INDEX points_expiry_notices_member_expires ON membership.points_expiry_notices USING btree (member_id, expires_at);
 
 
 --
@@ -78563,6 +78605,14 @@ ALTER TABLE ONLY membership.plan_variant_overrides
 
 ALTER TABLE ONLY membership.plans
     ADD CONSTRAINT plans_upgrade_to_plan_id_fkey FOREIGN KEY (upgrade_to_plan_id) REFERENCES membership.plans(id);
+
+
+--
+-- Name: points_expiry_notices points_expiry_notices_member_id_fkey; Type: FK CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.points_expiry_notices
+    ADD CONSTRAINT points_expiry_notices_member_id_fkey FOREIGN KEY (member_id) REFERENCES membership.members(id);
 
 
 --
