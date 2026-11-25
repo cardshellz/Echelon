@@ -11,6 +11,7 @@ const closeResultSchema = z.object({
   success: z.literal(true),
   unitsReceived: z.number().int().nonnegative().safe(),
   linesProcessed: z.number().int().nonnegative().safe(),
+  dockStagedCount: z.number().int().nonnegative().safe().optional(),
   order: z.object({ id: z.number().int().positive(), status: z.literal("closed") }).optional(),
   costReconciliation: z.object({ state: z.enum(["applied", "review_required", "retry_required", "not_applicable"]) }).optional(),
 });
