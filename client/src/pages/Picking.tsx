@@ -346,6 +346,31 @@ function PickingWorkspace() {
     }
   };
 
+  const handlePendingCommandConflict = (conflictError: PendingPickingCommandConflictError) => {
+    toast({
+      title: "Previous action pending",
+      description: conflictError.message,
+      variant: "destructive",
+      action: (
+        <ToastAction
+          altText="Clear stuck retry"
+          onClick={() => {
+            clearPendingPickingCommand(conflictError.action, conflictError.itemId);
+            queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+            toast({
+              title: "Cleared pending retry",
+              description: "Refreshed order state — you can record the pick now.",
+            });
+          }}
+        >
+          Clear stuck retry
+        </ToastAction>
+      ),
+    });
+    playSound("error");
+    queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+  };
+
   // Mutation for updating items
   const updateItemMutation = useMutation({
     mutationFn: ({
@@ -488,29 +513,11 @@ function PickingWorkspace() {
         return;
       }
 
-      if (error instanceof PendingPickingCommandConflictError) {
-        toast({
-          title: "Previous action pending",
-          description: error.message,
-          variant: "destructive",
-          action: (
-            <ToastAction
-              altText="Clear stuck retry"
-              onClick={() => {
-                clearPendingPickingCommand(error.action, error.itemId);
-                queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
-                toast({
-                  title: "Cleared pending retry",
-                  description: "Refreshed order state — you can record the pick now.",
-                });
-              }}
-            >
-              Clear stuck retry
-            </ToastAction>
-          ),
-        });
-        playSound("error");
-        queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      if (
+        error?.name === "PendingPickingCommandConflictError" &&
+        typeof handlePendingCommandConflict === "function"
+      ) {
+        handlePendingCommandConflict(error as PendingPickingCommandConflictError);
         return;
       }
 
