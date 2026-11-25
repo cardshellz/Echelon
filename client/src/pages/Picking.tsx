@@ -1,9 +1,15 @@
-import React, { useState, useRef, useMemo } from "react";
+import React, { useState, useRef, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { OrderItem, ItemStatus } from "@shared/schema";
 import { useSettings } from "@/lib/settings";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import { ToastAction } from "@/components/ui/toast";
+import {
+  clearPendingPickingCommand,
+  getPendingPickingCommand,
+  PendingPickingCommandConflictError,
+} from "@/lib/picking-command";
 import { derivePickerLineProgress } from "@/lib/picking-progress";
 import {
   playSound as playSoundLib,
@@ -155,6 +161,25 @@ function PickingWorkspace() {
   );
 
   useSyncCompletedOrders({ pickingMode, ordersFromApi, setLocalSingleQueue });
+
+  // Reconcile any retained client pick commands whose server state has already advanced
+  useEffect(() => {
+    for (const order of ordersFromApi) {
+      for (const item of order.items) {
+        const pending = getPendingPickingCommand("pick", item.id);
+        if (!pending) continue;
+        const pendingQty = Number(pending.payload.pickedQuantity);
+        const pendingStatus = String(pending.payload.status ?? "");
+        const serverCommitted =
+          (Number.isFinite(pendingQty) && item.picked >= pendingQty) ||
+          (pendingStatus === "completed" && item.status === "completed") ||
+          (pendingStatus === "short" && item.status === "short");
+        if (serverCommitted) {
+          clearPendingPickingCommand("pick", item.id);
+        }
+      }
+    }
+  }, [ordersFromApi]);
 
   // Bin count dialog state for true inventory discrepancies.
   const [binCountOpen, setBinCountOpen] = useState(false);
@@ -463,8 +488,33 @@ function PickingWorkspace() {
         return;
       }
 
+      if (error instanceof PendingPickingCommandConflictError) {
+        toast({
+          title: "Previous action pending",
+          description: error.message,
+          variant: "destructive",
+          action: (
+            <ToastAction
+              altText="Clear stuck retry"
+              onClick={() => {
+                clearPendingPickingCommand(error.action, error.itemId);
+                queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+                toast({
+                  title: "Cleared pending retry",
+                  description: "Refreshed order state — you can record the pick now.",
+                });
+              }}
+            >
+              Clear stuck retry
+            </ToastAction>
+          ),
+        });
+        playSound("error");
+        queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+        return;
+      }
+
       // Show error to user
-      console.error("[PICK ERROR]", error.message, "status:", error);
       toast({
         title: "Pick failed",
         description: error.message || "Failed to update item. Try again.",
@@ -677,6 +727,10 @@ function PickingWorkspace() {
     multiQtyOpen,
     binCountOpen,
     allocationDialogOpen,
+    editQtyOpen,
+    replenGuidanceOpen,
+    soundSettingsOpen,
+    foundOnShelfOpen: Boolean(foundOnShelfPrompt),
     activeWork,
   });
 
@@ -805,10 +859,8 @@ function PickingWorkspace() {
       }, 300);
     }
     setTimeout(() => {
-      if (manualInputRef.current && !shortPickOpen && !binCountOpen) {
-        manualInputRef.current.focus();
-      }
-    }, 500);
+      maintainFocus();
+    }, 350);
   };
 
   const checkReplenGuidance = async (item: PickItem, listIndex: number | null) => {
@@ -1274,6 +1326,11 @@ function PickingWorkspace() {
     shortPickOpen,
     multiQtyOpen,
     binCountOpen,
+    allocationDialogOpen,
+    editQtyOpen,
+    replenGuidanceOpen,
+    soundSettingsOpen,
+    foundOnShelfOpen: Boolean(foundOnShelfPrompt),
     setScanInput,
     setScanStatus,
     setDebugLog,

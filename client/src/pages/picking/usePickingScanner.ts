@@ -126,6 +126,10 @@ export function usePickingFocusAndRefs({
   multiQtyOpen,
   binCountOpen,
   allocationDialogOpen,
+  editQtyOpen = false,
+  replenGuidanceOpen = false,
+  soundSettingsOpen = false,
+  foundOnShelfOpen = false,
   activeWork,
 }: {
   view: PickingViewState;
@@ -133,6 +137,10 @@ export function usePickingFocusAndRefs({
   multiQtyOpen: boolean;
   binCountOpen: boolean;
   allocationDialogOpen: boolean;
+  editQtyOpen?: boolean;
+  replenGuidanceOpen?: boolean;
+  soundSettingsOpen?: boolean;
+  foundOnShelfOpen?: boolean;
   activeWork: PickBatch | SingleOrder | undefined;
 }) {
   const manualInputRef = useRef<HTMLInputElement>(null);
@@ -140,11 +148,21 @@ export function usePickingFocusAndRefs({
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
+  const anyDialogOpen =
+    shortPickOpen ||
+    multiQtyOpen ||
+    binCountOpen ||
+    allocationDialogOpen ||
+    editQtyOpen ||
+    replenGuidanceOpen ||
+    soundSettingsOpen ||
+    foundOnShelfOpen;
+
   const maintainFocus = useCallback(() => {
-    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && !allocationDialogOpen) {
-      if (hiddenScannerRef.current) hiddenScannerRef.current.focus();
+    if (view === "picking" && !anyDialogOpen) {
+      if (hiddenScannerRef.current) hiddenScannerRef.current.focus({ preventScroll: true });
     }
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, allocationDialogOpen]);
+  }, [view, anyDialogOpen]);
 
   useEffect(() => {
     if (view === "picking") {
@@ -156,17 +174,19 @@ export function usePickingFocusAndRefs({
   }, [view, maintainFocus]);
 
   useEffect(() => {
-    if (!shortPickOpen && !multiQtyOpen && !binCountOpen && !allocationDialogOpen) {
+    if (!anyDialogOpen) {
       setTimeout(maintainFocus, 100);
     }
-  }, [shortPickOpen, multiQtyOpen, binCountOpen, allocationDialogOpen, maintainFocus]);
+  }, [anyDialogOpen, maintainFocus]);
 
   useEffect(() => {
     if (view === "picking") {
       const handleFocusIn = (e: FocusEvent) => {
-        const target = e.target as HTMLElement;
-        if (shortPickOpen || multiQtyOpen || binCountOpen || allocationDialogOpen) return;
-        if (target !== manualInputRef.current && target.tagName === "INPUT") {
+        const target = e.target as HTMLElement | null;
+        if (!target || anyDialogOpen) return;
+        if (target === manualInputRef.current || target === hiddenScannerRef.current) return;
+        if (target.closest?.("[role='dialog'], [role='alertdialog']")) return;
+        if (target.tagName === "INPUT") {
           e.preventDefault();
           maintainFocus();
         }
@@ -175,7 +195,7 @@ export function usePickingFocusAndRefs({
       document.addEventListener("focusin", handleFocusIn);
       return () => document.removeEventListener("focusin", handleFocusIn);
     }
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, allocationDialogOpen, maintainFocus]);
+  }, [view, anyDialogOpen, maintainFocus]);
 
   useEffect(() => {
     if (view !== "picking" || !activeWork) return;
@@ -209,6 +229,11 @@ export function usePickingScanHandlers({
   shortPickOpen,
   multiQtyOpen,
   binCountOpen,
+  allocationDialogOpen = false,
+  editQtyOpen = false,
+  replenGuidanceOpen = false,
+  soundSettingsOpen = false,
+  foundOnShelfOpen = false,
   setScanInput,
   setScanStatus,
   setDebugLog,
@@ -230,6 +255,11 @@ export function usePickingScanHandlers({
   shortPickOpen: boolean;
   multiQtyOpen: boolean;
   binCountOpen: boolean;
+  allocationDialogOpen?: boolean;
+  editQtyOpen?: boolean;
+  replenGuidanceOpen?: boolean;
+  soundSettingsOpen?: boolean;
+  foundOnShelfOpen?: boolean;
   setScanInput: React.Dispatch<React.SetStateAction<string>>;
   setScanStatus: React.Dispatch<React.SetStateAction<"idle" | "success" | "error">>;
   setDebugLog: React.Dispatch<React.SetStateAction<string[]>>;
@@ -248,8 +278,18 @@ export function usePickingScanHandlers({
   const scanBufferTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const processScanRef = useRef<(value: string) => void>(() => {});
 
+  const anyDialogOpen =
+    shortPickOpen ||
+    multiQtyOpen ||
+    binCountOpen ||
+    allocationDialogOpen ||
+    editQtyOpen ||
+    replenGuidanceOpen ||
+    soundSettingsOpen ||
+    foundOnShelfOpen;
+
   useEffect(() => {
-    if (view !== "picking" || shortPickOpen || multiQtyOpen || binCountOpen) {
+    if (view !== "picking" || anyDialogOpen) {
       return;
     }
 
@@ -310,7 +350,7 @@ export function usePickingScanHandlers({
         clearTimeout(scanBufferTimeoutRef.current);
       }
     };
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, setDebugLog, setScanInput]);
+  }, [view, anyDialogOpen, setDebugLog, setScanInput]);
 
   const acceptFocusedScan = () => {
     if (!currentItem) return;

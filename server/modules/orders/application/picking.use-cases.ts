@@ -3,6 +3,7 @@ import { preparePickingCommand, pickingCommandKey, pickingCommandBeforeItem, rea
   type PickingCommandRecord, pickingReceiptItemSchema, executePickingCommand } from "../../wms/picking-execution.api";
 import { createPickingCommandLog } from "../../wms/picking-execution.api";
 import { selectPickingSource, PickingSourcePlanError, type PickingSourcePlan } from "@shared/picking-source-plan";
+import { sortByWalkPath } from "@shared/warehouse/walk-path";
 import { reconcileWmsPickingProgress, UNMAPPED_LINE_MISSING_VARIANT } from "../../wms/picking-execution.api";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { validatePickerOrder } from "@shared/types/picker-order";
@@ -11,7 +12,7 @@ import { pickingCommandSchema } from "@shared/types/picking-command";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalAvailabilityClaimPickCommandSchema, canonicalAvailabilityClaimUnpickCommandSchema, canonicalAvailabilityClaimPickResultSchema } from "@shared/types/inventory-availability-claims";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, inArray, sql } from "drizzle-orm";
 import { IntegrityError, NotFoundError, ValidationError } from "../../../../shared/errors";
 import { AuditLogger, persistAuditEvent } from "../../../infrastructure/auditLogger";
 import { adjustOrReconcileStock, FreezeViolationError } from "../../inventory/adjust-stock.api";
@@ -5096,7 +5097,34 @@ export class PickingUseCases {
     return display;
   }
 
-  private async planPickingItems<T extends OrderItem>(items: readonly T[], warehouseId: number | null): Promise<Array<T & { sourcePlan: PickingSourcePlan }>> {
+  private async loadLocationHierarchyMap(locationIds: readonly number[]): Promise<Map<number, Pick<WarehouseLocation, "id" | "zone" | "aisle" | "bay" | "level" | "bin">>> {
+    if (locationIds.length === 0 || typeof (this.db as any)?.select !== "function") {
+      return new Map();
+    }
+    try {
+      const rows = await this.db
+        .select({
+          id: warehouseLocations.id,
+          zone: warehouseLocations.zone,
+          aisle: warehouseLocations.aisle,
+          bay: warehouseLocations.bay,
+          level: warehouseLocations.level,
+          bin: warehouseLocations.bin,
+        })
+        .from(warehouseLocations)
+        .where(inArray(warehouseLocations.id, [...locationIds]));
+      return new Map(
+        rows.map((loc: Pick<WarehouseLocation, "id" | "zone" | "aisle" | "bay" | "level" | "bin">) => [loc.id, loc]),
+      );
+    } catch {
+      return new Map();
+    }
+  }
+
+  private async planPickingItems<T extends OrderItem>(
+    items: readonly T[],
+    warehouseId: number | null,
+  ): Promise<Array<T & { sourcePlan: PickingSourcePlan }>> {
     const planned: Array<T & { sourcePlan: PickingSourcePlan }> = [];
     for (const item of items) {
       try {
@@ -5110,7 +5138,32 @@ export class PickingUseCases {
         planned.push({ ...item, sourcePlan: { status: "blocked", reason: String(error.context?.reason ?? "pick_source_invalid"), message: error.message } });
       }
     }
-    return planned;
+    if (planned.length <= 1) return planned;
+    const readyLocationIds = Array.from(
+      new Set(
+        planned
+          .filter((it): it is T & { sourcePlan: Extract<PickingSourcePlan, { status: "ready" }> } => it.sourcePlan.status === "ready")
+          .map((it) => it.sourcePlan.warehouseLocationId),
+      ),
+    );
+    const locationById = await this.loadLocationHierarchyMap(readyLocationIds);
+    return sortByWalkPath(planned, (item) => {
+      const loc = item.sourcePlan.status === "ready"
+        ? locationById.get(item.sourcePlan.warehouseLocationId)
+        : undefined;
+      const code = item.sourcePlan.status === "ready" ? item.sourcePlan.locationCode : item.location;
+      return {
+        id: item.id,
+        sku: item.sku,
+        code,
+        zone: loc?.zone ?? item.zone,
+        aisle: loc?.aisle,
+        bay: loc?.bay,
+        level: loc?.level,
+        bin: loc?.bin,
+        isUnassigned: item.sourcePlan.status !== "ready" && (!code || code === "UNASSIGNED"),
+      };
+    });
   }
 
   /** Predictions use the operation's exact variant/location, never a SKU/code lookup. */

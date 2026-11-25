@@ -35,6 +35,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 import { format } from "date-fns";
 import {
   buildReplenTaskRetryRequest,
@@ -64,6 +65,7 @@ import {
   Warehouse,
   Save,
   Search,
+  ScanBarcode,
   ChevronsUpDown,
   Check,
   XCircle
@@ -318,6 +320,7 @@ function compareTaskQueuePriority(a: ReplenTask, b: ReplenTask): number {
 export default function Replenishment() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const [location, setLocation] = useLocation();
   const initialUrlParams = useMemo(() => new URLSearchParams(window.location.search), []);
   const initialTaskId = initialUrlParams.get("taskId");
@@ -340,6 +343,9 @@ export default function Replenishment() {
   const [showExceptionDialog, setShowExceptionDialog] = useState(false);
   const [markDoneTaskId, setMarkDoneTaskId] = useState<number | null>(null);
   const [transferReceiptId, setTransferReceiptId] = useState("");
+  const [sourceChangeTask, setSourceChangeTask] = useState<ReplenTask | null>(null);
+  const [newSourceLocationId, setNewSourceLocationId] = useState<string>("");
+  const [sourceChangeSearch, setSourceChangeSearch] = useState<string>("");
   const [exceptionTaskId, setExceptionTaskId] = useState<number | null>(null);
   const [exceptionForm, setExceptionForm] = useState({ reason: "", notes: "" });
   const [locConfigSearch, setLocConfigSearch] = useState("");
@@ -448,6 +454,24 @@ export default function Replenishment() {
     () => filterActionableWarehouseLocations(locations),
     [locations],
   );
+
+  const { data: recentTransfers = [] } = useQuery<Array<{
+    id: number;
+    fromLocation: string;
+    toLocation: string;
+    sku: string;
+    productName: string;
+    quantity: number;
+    createdAt: string;
+  }>>({
+    queryKey: ["/api/inventory/transfers", "replen-link"],
+    queryFn: async () => {
+      const res = await fetch("/api/inventory/transfers?limit=30", { credentials: "include" });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: markDoneTaskId !== null,
+  });
   const pickLocations = useMemo(
     () => filterActionableWarehouseLocations(locations, { locationType: "pick" }),
     [locations],
@@ -669,6 +693,7 @@ export default function Replenishment() {
           maxQty: data.maxQty ? parseInt(data.maxQty) : null,
           replenMethod: data.replenMethod,
           priority: parseInt(data.priority),
+          autoReplen: parseInt(data.autoReplen) || 0,
         }),
       });
       if (!res.ok) throw new Error("Failed to create tier default");
@@ -738,6 +763,7 @@ export default function Replenishment() {
           maxQty: data.maxQty ? parseInt(data.maxQty) : null,
           replenMethod: data.replenMethod || null,
           priority: data.priority ? parseInt(data.priority) : null,
+          autoReplen: data.autoReplen ? parseInt(data.autoReplen) : null,
         }),
       });
       if (!res.ok) throw new Error("Failed to create override");
@@ -840,7 +866,6 @@ export default function Replenishment() {
         description: `Task #${data.id}`, duration: 8000 });
     },
     onError: (err: Error) => {
-      console.error("Mutation Error:", err);
       toast({ title: "Failed to create task", description: err.message, variant: "destructive", duration: 7000 });
     },
   });
@@ -1409,7 +1434,9 @@ export default function Replenishment() {
         task.exceptionReason,
         task.notes,
         task.sourceVariant?.sku,
+        (task.sourceVariant as any)?.barcode,
         task.pickVariant?.sku,
+        (task.pickVariant as any)?.barcode,
         task.product?.sku,
         task.product?.title,
         task.fromLocation?.code,
@@ -1512,11 +1539,39 @@ export default function Replenishment() {
                 </SelectContent>
               </Select>
               <div className="relative w-full sm:w-64">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <ScanBarcode className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={taskSearch}
                   onChange={(event) => setTaskSearch(event.target.value)}
-                  placeholder="Task #, SKU, location, reason"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && taskSearch.trim()) {
+                      event.preventDefault();
+                      const token = taskSearch.trim().toLowerCase();
+                      const openMatches = filteredTasks.filter((t) => OPEN_REPLEN_STATUSES.has(t.status));
+                      const exact = openMatches.filter((t) => {
+                        const candidates = [
+                          t.sourceVariant?.sku,
+                          (t.sourceVariant as any)?.barcode,
+                          t.pickVariant?.sku,
+                          (t.pickVariant as any)?.barcode,
+                          t.fromLocation?.code,
+                          t.toLocation?.code,
+                          `#${t.id}`,
+                          String(t.id),
+                        ];
+                        return candidates.some((c) => c?.toLowerCase() === token);
+                      });
+                      const matched = exact.length === 1 ? exact[0] : openMatches.length === 1 ? openMatches[0] : null;
+                      if (matched) {
+                        setLocation(`/replenishment?taskId=${matched.id}&status=${taskFilter}`);
+                        toast({
+                          title: `Matched Task #${matched.id}`,
+                          description: `${matched.fromLocation?.code || "Source"} → ${matched.toLocation?.code || "Pick"} (${matched.pickVariant?.sku || matched.sourceVariant?.sku || "SKU"})`,
+                        });
+                      }
+                    }
+                  }}
+                  placeholder="Scan barcode, SKU, bin, or task #"
                   className="h-10 pl-9 pr-9"
                   data-testid="input-task-search"
                 />
@@ -1595,14 +1650,219 @@ export default function Replenishment() {
                   <p>No replenishment tasks{(warehouseFilter !== "all" || modeFilter !== "all" || demandFilter !== "all" || taskSearch.trim()) ? " matching filters" : ""}</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto">
+                <>
+                {/* Mobile Card Layout (< 768px) */}
+                <div className="md:hidden divide-y" data-testid="mobile-replen-task-list">
+                  {filteredTasks.map((task) => {
+                    const noSourceReviewTask = isNoSourceReviewTask(task);
+                    const demandLines = activeDemandLines(task);
+                    const demandUnits = activeDemandUnits(task);
+                    const hasActiveDemand = demandLines > 0 && OPEN_REPLEN_STATUSES.has(task.status);
+                    const canExecuteTask = ["pending", "assigned", "in_progress"].includes(task.status) && !noSourceReviewTask;
+                    const canStartTask = (task.status === "pending" || task.status === "assigned") && !noSourceReviewTask;
+                    const canChangeSource = OPEN_REPLEN_STATUSES.has(task.status);
+                    const canMarkDoneWithoutMovement =
+                      ["pending", "assigned", "in_progress", "blocked"].includes(task.status) &&
+                      !noSourceReviewTask &&
+                      !hasActiveDemand;
+                    const isCaseBreakDisplay =
+                      task.replenMethod === "case_break" &&
+                      task.sourceVariant &&
+                      task.pickVariant &&
+                      task.sourceProductVariantId !== task.pickProductVariantId;
+                    const completedCases = isCaseBreakDisplay
+                      ? Math.min(
+                          task.qtySourceUnits,
+                          Math.floor(task.qtyCompleted / Math.max(1, task.sourceVariant?.unitsPerVariant || task.qtyTargetUnits || 1)),
+                        )
+                      : 0;
+                    return (
+                      <div
+                        key={task.id}
+                        data-testid={`mobile-card-task-${task.id}`}
+                        className={`p-3 space-y-2.5 ${focusedTaskId === task.id ? "bg-amber-50/80 dark:bg-amber-950/30" : ""}`}
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className="font-mono text-sm font-bold text-blue-700 hover:underline dark:text-blue-400"
+                              onClick={() => setLocation(`/replenishment?taskId=${task.id}&status=${task.status}`)}
+                            >
+                              #{task.id}
+                            </button>
+                            {getStatusBadge(task.status)}
+                            {hasActiveDemand && (
+                              <Badge className="bg-orange-600 text-[10px] px-1.5 py-0.5">
+                                Demand {demandLines} / {demandUnits}
+                              </Badge>
+                            )}
+                          </div>
+                          <span className="text-xs text-muted-foreground">{formatRelativeTime(task.createdAt)}</span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 rounded-md border bg-muted/20 p-2 text-xs">
+                          <div>
+                            <div className="text-[10px] uppercase text-muted-foreground font-semibold">Source SKU</div>
+                            <div className="font-mono font-medium truncate">
+                              {noSourceReviewTask ? "No valid source" : task.sourceVariant?.sku || task.product?.sku || "-"}
+                            </div>
+                            {!noSourceReviewTask && task.sourceVariant && (
+                              <div className="text-[10px] text-muted-foreground">{uomLabel(task.sourceVariant.hierarchyLevel)}</div>
+                            )}
+                          </div>
+                          <div>
+                            <div className="text-[10px] uppercase text-muted-foreground font-semibold">Pick SKU</div>
+                            <div className="font-mono font-medium truncate">
+                              {task.pickVariant?.sku || task.product?.sku || "-"}
+                            </div>
+                            {task.pickVariant && (
+                              <div className="text-[10px] text-muted-foreground">{uomLabel(task.pickVariant.hierarchyLevel)}</div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 text-sm">
+                          <div className="flex items-center gap-1.5 font-mono font-semibold">
+                            <span>{noSourceReviewTask ? "NO SOURCE" : task.fromLocation?.code || `LOC-${task.fromLocationId}`}</span>
+                            {canChangeSource && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                                title="Change source bin"
+                                onClick={() => {
+                                  setSourceChangeTask(task);
+                                  setNewSourceLocationId(task.fromLocationId ? String(task.fromLocationId) : "");
+                                  setSourceChangeSearch("");
+                                }}
+                                data-testid={`mobile-change-source-${task.id}`}
+                              >
+                                <Edit className="h-3 w-3" />
+                              </Button>
+                            )}
+                            <ArrowRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                            <span className="text-primary">{task.toLocation?.code || `LOC-${task.toLocationId}`}</span>
+                          </div>
+                          <div className="font-semibold text-xs text-right">
+                            {noSourceReviewTask ? (
+                              <span className="text-muted-foreground">Review</span>
+                            ) : isCaseBreakDisplay ? (
+                              <span>
+                                {completedCases}/{task.qtySourceUnits} {uomLabel(task.sourceVariant!.hierarchyLevel)}
+                                <span className="text-muted-foreground mx-0.5">→</span>
+                                {Math.floor(task.qtyCompleted / (task.pickVariant!.unitsPerVariant || 1))}/{Math.floor(task.qtyTargetUnits / (task.pickVariant!.unitsPerVariant || 1))} {uomLabel(task.pickVariant!.hierarchyLevel)}
+                              </span>
+                            ) : (
+                              <span>{task.qtyCompleted}/{task.qtyTargetUnits}</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {task.status === "blocked" && task.exceptionReason && (
+                          <div className="text-xs font-medium text-red-700 dark:text-red-400">
+                            {formatTaskReason(task.exceptionReason)}
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          {canStartTask && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="min-h-[40px] text-xs flex-1"
+                              disabled={updateTaskMutation.isPending}
+                              onClick={() => updateTaskMutation.mutate({
+                                id: task.id,
+                                data: {
+                                  status: "in_progress",
+                                  ...(user?.username ? { assignedTo: user.username } : {}),
+                                },
+                              })}
+                              data-testid={`mobile-start-task-${task.id}`}
+                            >
+                              <Play className="w-3.5 h-3.5 mr-1" />
+                              {task.status === "pending" ? "Claim & Start" : "Start"}
+                            </Button>
+                          )}
+                          {canExecuteTask && (
+                            <Button
+                              size="sm"
+                              className="bg-green-600 hover:bg-green-700 min-h-[40px] text-xs flex-1"
+                              disabled={executeTaskMutation.isPending}
+                              onClick={() => executeTaskMutation.mutate(task.id)}
+                              data-testid={`mobile-complete-task-${task.id}`}
+                            >
+                              <CheckCircle className="w-3.5 h-3.5 mr-1" />
+                              Complete
+                            </Button>
+                          )}
+                          {canRetryReplenTask(task) && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="min-h-[40px] text-xs text-blue-700 border-blue-300 flex-1"
+                              disabled={updateTaskMutation.isPending}
+                              onClick={() => updateTaskMutation.mutate({
+                                id: task.id,
+                                data: buildReplenTaskRetryRequest(),
+                              })}
+                              data-testid={`mobile-retry-task-${task.id}`}
+                            >
+                              <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                              Retry
+                            </Button>
+                          )}
+                          {["pending", "assigned", "in_progress"].includes(task.status) && !noSourceReviewTask && (
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              className="min-h-[40px] text-xs"
+                              onClick={() => { setExceptionTaskId(task.id); setExceptionForm({ reason: "", notes: "" }); setShowExceptionDialog(true); }}
+                            >
+                              <AlertCircle className="w-3.5 h-3.5 mr-1" />
+                              Exception
+                            </Button>
+                          )}
+                          {canMarkDoneWithoutMovement && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="min-h-[40px] text-xs text-amber-700 border-amber-300"
+                              onClick={() => { setMarkDoneTaskId(task.id); setTransferReceiptId(""); }}
+                            >
+                              Link transfer
+                            </Button>
+                          )}
+                          {OPEN_REPLEN_STATUSES.has(task.status) && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="min-h-[40px] text-xs text-muted-foreground hover:text-destructive"
+                              onClick={() => updateTaskMutation.mutate({
+                                id: task.id,
+                                data: { status: "cancelled" },
+                              })}
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Desktop Table (>= 768px) */}
+                <div className="hidden md:block overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead className="text-xs">Task</TableHead>
                       <TableHead className="text-xs">Created</TableHead>
-                      <TableHead className="text-xs hidden md:table-cell">Source</TableHead>
-                      <TableHead className="text-xs hidden md:table-cell">Pick</TableHead>
+                      <TableHead className="text-xs">Source</TableHead>
+                      <TableHead className="text-xs">Pick</TableHead>
                       <TableHead className="text-xs">From</TableHead>
                       <TableHead className="hidden sm:table-cell"></TableHead>
                       <TableHead className="text-xs">To</TableHead>
@@ -1622,10 +1882,23 @@ export default function Replenishment() {
                       const demandUnits = activeDemandUnits(task);
                       const hasActiveDemand = demandLines > 0 && OPEN_REPLEN_STATUSES.has(task.status);
                       const canExecuteTask = ["pending", "assigned", "in_progress"].includes(task.status) && !noSourceReviewTask;
+                      const canStartTask = (task.status === "pending" || task.status === "assigned") && !noSourceReviewTask;
+                      const canChangeSource = OPEN_REPLEN_STATUSES.has(task.status);
                       const canMarkDoneWithoutMovement =
                         ["pending", "assigned", "in_progress", "blocked"].includes(task.status) &&
                         !noSourceReviewTask &&
                         !hasActiveDemand;
+                      const isCaseBreakDisplay =
+                        task.replenMethod === "case_break" &&
+                        task.sourceVariant &&
+                        task.pickVariant &&
+                        task.sourceProductVariantId !== task.pickProductVariantId;
+                      const completedCases = isCaseBreakDisplay
+                        ? Math.min(
+                            task.qtySourceUnits,
+                            Math.floor(task.qtyCompleted / Math.max(1, task.sourceVariant?.unitsPerVariant || task.qtyTargetUnits || 1)),
+                          )
+                        : 0;
                       return (
                       <TableRow
                         key={task.id}
@@ -1643,7 +1916,7 @@ export default function Replenishment() {
                           </button>
                         </TableCell>
                         <TableCell className="py-2 text-xs text-muted-foreground">{formatRelativeTime(task.createdAt)}</TableCell>
-                        <TableCell className="hidden md:table-cell py-2">
+                        <TableCell className="py-2">
                           <div className="text-xs sm:text-sm">
                             {noSourceReviewTask ? "No valid source" : task.sourceVariant?.sku || task.product?.sku || "-"}
                             {!noSourceReviewTask && task.sourceVariant && (
@@ -1651,7 +1924,7 @@ export default function Replenishment() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="hidden md:table-cell py-2">
+                        <TableCell className="py-2">
                           <div className="text-xs sm:text-sm">
                             {task.pickVariant?.sku || task.product?.sku || "-"}
                             {task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId && (
@@ -1660,8 +1933,25 @@ export default function Replenishment() {
                           </div>
                         </TableCell>
                         <TableCell className="py-2">
-                          <div className="font-mono text-xs sm:text-sm">
-                            {noSourceReviewTask ? "NO SOURCE" : task.fromLocation?.code || `LOC-${task.fromLocationId}`}
+                          <div className="flex items-center gap-1 font-mono text-xs sm:text-sm">
+                            <span>{noSourceReviewTask ? "NO SOURCE" : task.fromLocation?.code || `LOC-${task.fromLocationId}`}</span>
+                            {canChangeSource && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                                title="Change source bin"
+                                onClick={() => {
+                                  setSourceChangeTask(task);
+                                  setNewSourceLocationId(task.fromLocationId ? String(task.fromLocationId) : "");
+                                  setSourceChangeSearch("");
+                                }}
+                                data-testid={`button-change-source-${task.id}`}
+                              >
+                                <Edit className="h-3 w-3" />
+                              </Button>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell className="hidden sm:table-cell py-2">
@@ -1676,11 +1966,11 @@ export default function Replenishment() {
                           <div className="font-medium text-xs sm:text-sm">
                             {noSourceReviewTask ? (
                               <span className="text-muted-foreground">Review</span>
-                            ) : task.replenMethod === "case_break" && task.sourceVariant && task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId ? (
+                            ) : isCaseBreakDisplay ? (
                               <span>
-                                {task.qtySourceUnits} {uomLabel(task.sourceVariant.hierarchyLevel)}
+                                {completedCases}/{task.qtySourceUnits} {uomLabel(task.sourceVariant!.hierarchyLevel)}
                                 <span className="text-muted-foreground mx-0.5">→</span>
-                                {Math.floor(task.qtyCompleted / (task.pickVariant.unitsPerVariant || 1))}/{Math.floor(task.qtyTargetUnits / (task.pickVariant.unitsPerVariant || 1))} {uomLabel(task.pickVariant.hierarchyLevel)}
+                                {Math.floor(task.qtyCompleted / (task.pickVariant!.unitsPerVariant || 1))}/{Math.floor(task.qtyTargetUnits / (task.pickVariant!.unitsPerVariant || 1))} {uomLabel(task.pickVariant!.hierarchyLevel)}
                               </span>
                             ) : (
                               <span>{task.qtyCompleted}/{task.qtyTargetUnits}</span>
@@ -1724,19 +2014,23 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="py-2">
                           <div className="flex gap-1">
-                            {task.status === "pending" && !canExecuteTask && (
+                            {canStartTask && (
                               <Button
                                 size="sm"
                                 variant="outline"
                                 className="min-h-[36px] text-xs"
+                                disabled={updateTaskMutation.isPending}
                                 onClick={() => updateTaskMutation.mutate({
                                   id: task.id,
-                                  data: { status: "in_progress" }
+                                  data: {
+                                    status: "in_progress",
+                                    ...(user?.username ? { assignedTo: user.username } : {}),
+                                  }
                                 })}
                                 data-testid={`button-start-task-${task.id}`}
                               >
                                 <Play className="w-3 h-3 sm:mr-1" />
-                                <span className="hidden sm:inline">Start</span>
+                                <span className="hidden sm:inline">{task.status === "pending" ? "Start" : "Resume"}</span>
                               </Button>
                             )}
                             {canExecuteTask && (
@@ -1840,6 +2134,7 @@ export default function Replenishment() {
                   </TableBody>
                 </Table>
                 </div>
+                </>
               )}
             </CardContent>
           </Card>
@@ -2025,6 +2320,8 @@ export default function Replenishment() {
                             {override.maxQty !== null && <Badge variant="secondary" className="text-xs">Max: {override.maxQty}</Badge>}
                             {override.sourcePriority && <Badge variant="secondary" className="text-xs">{override.sourcePriority}</Badge>}
                             {override.pickLocationType && <Badge variant="outline" className="text-xs">{override.pickLocationType}</Badge>}
+                            {(override as any).autoReplen === 1 && <Badge className="bg-emerald-600 text-xs">Auto-Complete</Badge>}
+                            {(override as any).autoReplen === 2 && <Badge variant="secondary" className="text-xs">Manual Queue</Badge>}
                           </div>
                         </TableCell>
                         <TableCell className="py-2">
@@ -2700,14 +2997,14 @@ export default function Replenishment() {
               <div>
                 <Label className="text-xs md:text-sm">Pick Variant (Optional)</Label>
                 <Select 
-                  value={overrideForm.pickVariantId} 
-                  onValueChange={(v) => setOverrideForm({ ...overrideForm, pickVariantId: v })}
+                  value={overrideForm.pickVariantId || "_default"} 
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, pickVariantId: v === "_default" ? "" : v })}
                 >
                   <SelectTrigger className="h-10" data-testid="select-override-pick-variant">
                     <SelectValue placeholder="Use default..." />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Use default</SelectItem>
+                    <SelectItem value="_default">Use default</SelectItem>
                     {getVariantsForProduct(overrideForm.productId).map((v) => (
                       <SelectItem key={v.id} value={v.id.toString()}>
                         {v.sku || v.name} ({v.unitsPerVariant} units)
@@ -2719,14 +3016,14 @@ export default function Replenishment() {
               <div>
                 <Label className="text-xs md:text-sm">Source Variant (Optional)</Label>
                 <Select 
-                  value={overrideForm.sourceVariantId} 
-                  onValueChange={(v) => setOverrideForm({ ...overrideForm, sourceVariantId: v })}
+                  value={overrideForm.sourceVariantId || "_default"} 
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, sourceVariantId: v === "_default" ? "" : v })}
                 >
                   <SelectTrigger className="h-10" data-testid="select-override-source-variant">
                     <SelectValue placeholder="Use default..." />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Use default</SelectItem>
+                    <SelectItem value="_default">Use default</SelectItem>
                     {getVariantsForProduct(overrideForm.productId).map((v) => (
                       <SelectItem key={v.id} value={v.id.toString()}>
                         {v.sku || v.name} ({v.unitsPerVariant} units)
@@ -2741,14 +3038,14 @@ export default function Replenishment() {
               <div>
                 <Label className="text-xs md:text-sm">Replen Method (Optional)</Label>
                 <Select 
-                  value={overrideForm.replenMethod} 
-                  onValueChange={(v) => setOverrideForm({ ...overrideForm, replenMethod: v })}
+                  value={overrideForm.replenMethod || "_default"} 
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, replenMethod: v === "_default" ? "" : v })}
                 >
                   <SelectTrigger className="h-10" data-testid="select-override-replen-method">
                     <SelectValue placeholder="Use default..." />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Use default</SelectItem>
+                    <SelectItem value="_default">Use default</SelectItem>
                     {REPLEN_METHODS.map((m) => (
                       <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
                     ))}
@@ -2758,14 +3055,14 @@ export default function Replenishment() {
               <div>
                 <Label className="text-xs md:text-sm">Source Priority (Optional)</Label>
                 <Select 
-                  value={overrideForm.sourcePriority} 
-                  onValueChange={(v) => setOverrideForm({ ...overrideForm, sourcePriority: v })}
+                  value={overrideForm.sourcePriority || "_default"} 
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, sourcePriority: v === "_default" ? "" : v })}
                 >
                   <SelectTrigger className="h-10" data-testid="select-override-source-priority">
                     <SelectValue placeholder="Use default..." />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Use default</SelectItem>
+                    <SelectItem value="_default">Use default</SelectItem>
                     {SOURCE_PRIORITIES.map((p) => (
                       <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
                     ))}
@@ -2811,14 +3108,14 @@ export default function Replenishment() {
               <div>
                 <Label className="text-xs md:text-sm">Execution</Label>
                 <Select
-                  value={overrideForm.autoReplen}
-                  onValueChange={(v) => setOverrideForm({ ...overrideForm, autoReplen: v })}
+                  value={overrideForm.autoReplen || "_default"}
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, autoReplen: v === "_default" ? "" : v })}
                 >
                   <SelectTrigger className="h-10" data-testid="select-override-auto-replen">
                     <SelectValue placeholder="Use default" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Tier Default ({effectiveWarehouseReplenMode})</SelectItem>
+                    <SelectItem value="_default">Tier Default ({effectiveWarehouseReplenMode})</SelectItem>
                     <SelectItem value="2">Manual — Worker picks up from queue</SelectItem>
                     <SelectItem value="1">Auto-Complete — System executes immediately</SelectItem>
                   </SelectContent>
@@ -3525,15 +3822,176 @@ export default function Replenishment() {
         </DialogContent>
       </Dialog>
 
-      {/* Exception Dialog */}
+      {/* Link Completed Transfer Dialog */}
       <Dialog open={markDoneTaskId !== null} onOpenChange={open => { if (!open) setMarkDoneTaskId(null); }}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Link completed transfer</DialogTitle>
-            <DialogDescription>Enter the transfer receipt that moved this task's exact SKU from its source to its destination.</DialogDescription></DialogHeader>
-          <Label htmlFor="replen-transfer-receipt">Transfer receipt ID</Label>
-          <Input id="replen-transfer-receipt" type="number" min={1} value={transferReceiptId} onChange={event => setTransferReceiptId(event.target.value)} />
-          <DialogFooter><Button disabled={markDoneMutation.isPending || !Number.isSafeInteger(Number(transferReceiptId)) || Number(transferReceiptId) <= 0}
-            onClick={() => { if (markDoneTaskId !== null) markDoneMutation.mutate({ id: markDoneTaskId, receiptId: Number(transferReceiptId) }); }}>Link transfer</Button></DialogFooter>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Link completed transfer</DialogTitle>
+            <DialogDescription>
+              Select a recent transfer or enter the transfer receipt ID that moved this task's SKU into its pick bin.
+            </DialogDescription>
+          </DialogHeader>
+          {(() => {
+            const targetTask = tasks.find((t) => t.id === markDoneTaskId);
+            const sortedTransfers = [...recentTransfers].sort((a, b) => {
+              const aMatches =
+                (targetTask?.toLocation?.code && a.toLocation === targetTask.toLocation.code ? 2 : 0) +
+                ((targetTask?.pickVariant?.sku && a.sku === targetTask.pickVariant.sku) ||
+                (targetTask?.sourceVariant?.sku && a.sku === targetTask.sourceVariant.sku)
+                  ? 2
+                  : 0);
+              const bMatches =
+                (targetTask?.toLocation?.code && b.toLocation === targetTask.toLocation.code ? 2 : 0) +
+                ((targetTask?.pickVariant?.sku && b.sku === targetTask.pickVariant.sku) ||
+                (targetTask?.sourceVariant?.sku && b.sku === targetTask.sourceVariant.sku)
+                  ? 2
+                  : 0);
+              return bMatches - aMatches;
+            });
+            return (
+              <div className="space-y-3 py-1">
+                {sortedTransfers.length > 0 && (
+                  <div className="space-y-1.5">
+                    <Label>Recent Transfers</Label>
+                    <Select
+                      value={transferReceiptId && sortedTransfers.some((t) => String(t.id) === transferReceiptId) ? transferReceiptId : "_manual"}
+                      onValueChange={(v) => {
+                        if (v !== "_manual") setTransferReceiptId(v);
+                      }}
+                    >
+                      <SelectTrigger className="h-10" data-testid="select-recent-transfer">
+                        <SelectValue placeholder="Choose a recent transfer..." />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-64">
+                        <SelectItem value="_manual">Select from recent transfers...</SelectItem>
+                        {sortedTransfers.map((tr) => {
+                          const isMatch =
+                            Boolean(targetTask?.toLocation?.code && tr.toLocation === targetTask.toLocation.code) &&
+                            Boolean(
+                              (targetTask?.pickVariant?.sku && tr.sku === targetTask.pickVariant.sku) ||
+                              (targetTask?.sourceVariant?.sku && tr.sku === targetTask.sourceVariant.sku),
+                            );
+                          return (
+                            <SelectItem key={tr.id} value={String(tr.id)}>
+                              #{tr.id} — {tr.fromLocation} → {tr.toLocation} · {tr.sku} × {tr.quantity}
+                              {isMatch ? " (Matches task)" : ""}
+                            </SelectItem>
+                          );
+                        })}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <Label htmlFor="replen-transfer-receipt">Transfer receipt ID</Label>
+                  <Input
+                    id="replen-transfer-receipt"
+                    type="number"
+                    min={1}
+                    placeholder="e.g. 1042"
+                    value={transferReceiptId}
+                    onChange={event => setTransferReceiptId(event.target.value)}
+                  />
+                </div>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMarkDoneTaskId(null)}>Cancel</Button>
+            <Button
+              disabled={markDoneMutation.isPending || !Number.isSafeInteger(Number(transferReceiptId)) || Number(transferReceiptId) <= 0}
+              onClick={() => { if (markDoneTaskId !== null) markDoneMutation.mutate({ id: markDoneTaskId, receiptId: Number(transferReceiptId) }); }}
+            >
+              Link transfer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Change Source Bin Confirmation Dialog */}
+      <Dialog
+        open={sourceChangeTask !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSourceChangeTask(null);
+            setNewSourceLocationId("");
+            setSourceChangeSearch("");
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Change Source Bin — Task #{sourceChangeTask?.id}</DialogTitle>
+            <DialogDescription>
+              Confirm switching the source bin for {sourceChangeTask?.sourceVariant?.sku || sourceChangeTask?.pickVariant?.sku || "this task"} feeding {sourceChangeTask?.toLocation?.code || "pick bin"}.
+            </DialogDescription>
+          </DialogHeader>
+          {sourceChangeTask && (
+            <div className="space-y-3 py-1">
+              <div className="rounded-md border bg-muted/30 p-2.5 text-xs flex items-center justify-between">
+                <span className="text-muted-foreground">Current Source:</span>
+                <span className="font-mono font-semibold">{sourceChangeTask.fromLocation?.code || `LOC-${sourceChangeTask.fromLocationId}`}</span>
+              </div>
+              <div className="space-y-1.5">
+                <Label>New Source Location</Label>
+                <Input
+                  placeholder="Filter source bins..."
+                  value={sourceChangeSearch}
+                  onChange={(e) => setSourceChangeSearch(e.target.value)}
+                  className="h-9"
+                />
+                <Select value={newSourceLocationId || "_none"} onValueChange={(v) => setNewSourceLocationId(v === "_none" ? "" : v)}>
+                  <SelectTrigger className="h-10" data-testid="select-new-source-bin">
+                    <SelectValue placeholder="Select new source bin..." />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-60">
+                    <SelectItem value="_none">Select source bin...</SelectItem>
+                    {actionableLocations
+                      .filter(
+                        (loc) =>
+                          loc.id !== sourceChangeTask.toLocationId &&
+                          (!sourceChangeTask.warehouseId || !loc.warehouseId || loc.warehouseId === sourceChangeTask.warehouseId) &&
+                          (!sourceChangeSearch.trim() || loc.code.toLowerCase().includes(sourceChangeSearch.trim().toLowerCase())),
+                      )
+                      .map((loc) => (
+                        <SelectItem key={loc.id} value={String(loc.id)}>
+                          {loc.code} ({(loc.locationType || "bin").replace("_", " ")})
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSourceChangeTask(null)}>Cancel</Button>
+            <Button
+              disabled={
+                updateTaskMutation.isPending ||
+                !newSourceLocationId ||
+                Number(newSourceLocationId) === sourceChangeTask?.fromLocationId
+              }
+              onClick={() => {
+                if (!sourceChangeTask || !newSourceLocationId) return;
+                updateTaskMutation.mutate(
+                  {
+                    id: sourceChangeTask.id,
+                    data: { fromLocationId: Number(newSourceLocationId) },
+                  },
+                  {
+                    onSuccess: () => {
+                      setSourceChangeTask(null);
+                      setNewSourceLocationId("");
+                      setSourceChangeSearch("");
+                    },
+                  },
+                );
+              }}
+              data-testid="button-confirm-source-change"
+            >
+              Confirm Source Change
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
       <Dialog open={showExceptionDialog} onOpenChange={setShowExceptionDialog}>

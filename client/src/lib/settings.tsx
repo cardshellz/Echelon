@@ -24,7 +24,11 @@ const SettingsContext = createContext<SettingsContextType | undefined>(undefined
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [pickingMode, setPickingModeState] = useState<PickingMode>(() => {
     const saved = localStorage.getItem("pickingMode");
-    return (saved === "batch" || saved === "single") ? saved : "batch";
+    if (saved === "batch") {
+      localStorage.setItem("pickingMode", "single");
+      return "single";
+    }
+    return saved === "single" ? "single" : "single";
   });
   
   const [pickerViewMode, setPickerViewModeState] = useState<PickerViewMode>(() => {

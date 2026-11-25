@@ -9,12 +9,13 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2, X, AlertTriangle } from "lucide-react";
+import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2, X, AlertTriangle, Boxes } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { format } from "date-fns";
 import { playSoundWithHaptic } from "@/lib/sounds";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 import { InterwarehouseTransferQueue } from "@/components/inventory/InterwarehouseTransferQueue";
+import InlineCaseBreakDialog from "@/components/operations/InlineCaseBreakDialog";
 
 interface Transfer {
   id: number;
@@ -48,11 +49,19 @@ interface SkuResult {
   sku: string;
   name: string;
   variantId: number;
+  barcode?: string | null;
+  productId?: number | null;
+  unitsPerVariant?: number;
   available: number;
   onHand?: number;
   reserved?: number;
   locationId?: number;
   location?: string;
+  primaryPickLocationId?: number | null;
+  primaryPickLocationCode?: string | null;
+  breakTargetVariantId?: number | null;
+  breakTargetSku?: string | null;
+  breakOutputQty?: number | null;
 }
 
 function stockSummary(stock: { available: number; onHand?: number; reserved?: number }): string {
@@ -101,6 +110,8 @@ export default function Transfers() {
   // SKU Lookup modal state
   const [lookupOpen, setLookupOpen] = useState(false);
   const [lookupSearch, setLookupSearch] = useState("");
+  const [transferTab, setTransferTab] = useState<"move" | "case_break">("move");
+  const [caseBreakOpen, setCaseBreakOpen] = useState(false);
   
   // Mobile wizard state
   const [mobileStep, setMobileStep] = useState<MobileStep>("source");
@@ -190,18 +201,21 @@ export default function Transfers() {
     && selectedToLocation.id !== fromLocationId
     && selectedToLocation.code.trim().toUpperCase() === normalizedDestinationCode;
   
+  const serverSkuQuery = skuFilter.trim().length >= 2 ? skuFilter.trim() : "";
   const { data: skusAtLocation = [] } = useQuery<SkuResult[]>({
-    queryKey: ["/api/inventory/skus/search", "location", fromLocationId],
+    queryKey: ["/api/inventory/skus/search", "location", fromLocationId, serverSkuQuery],
     queryFn: async () => {
       if (!fromLocationId) return [];
-      const res = await fetch(`/api/inventory/skus/search?locationId=${fromLocationId}&limit=50`);
+      const qs = new URLSearchParams({ locationId: String(fromLocationId), limit: "500" });
+      if (serverSkuQuery) qs.set("q", serverSkuQuery);
+      const res = await fetch(`/api/inventory/skus/search?${qs.toString()}`);
       return res.json();
     },
     enabled: !!fromLocationId
   });
 
   useEffect(() => {
-    if (skusAtLocation && skusAtLocation.length === 1 && !variantId) {
+    if (skusAtLocation && skusAtLocation.length === 1 && !variantId && !skuFilter.trim()) {
       const result = skusAtLocation[0];
       setSelectedSkuLabel(result.sku);
       setVariantId(result.variantId);
@@ -210,23 +224,42 @@ export default function Transfers() {
         setQuantity(String(suggestedTransferQuantity(result)));
       }
     }
-  }, [skusAtLocation, variantId, quantity]);
-  const currentSelectedStock = skusAtLocation.find(row => row.variantId === variantId);
+  }, [skusAtLocation, variantId, quantity, skuFilter]);
+  const currentSelectedStock = skusAtLocation.find(row => row.variantId === variantId) ?? selectedSku ?? undefined;
+  const activePrimaryPickLocationId =
+    currentSelectedStock?.primaryPickLocationId && currentSelectedStock.primaryPickLocationId !== fromLocationId
+      ? currentSelectedStock.primaryPickLocationId
+      : null;
+  const activePrimaryPickLocationCode =
+    activePrimaryPickLocationId
+      ? currentSelectedStock?.primaryPickLocationCode ?? locations.find(l => l.id === activePrimaryPickLocationId)?.code ?? null
+      : null;
+  const canBreakSelectedSku = Boolean(
+    fromLocationId &&
+    currentSelectedStock &&
+    Number(currentSelectedStock.unitsPerVariant ?? 1) > 1 &&
+    currentSelectedStock.breakTargetVariantId &&
+    currentSelectedStock.breakTargetSku &&
+    Number(currentSelectedStock.breakOutputQty ?? 0) > 0,
+  );
   useEffect(() => {
-    if (currentSelectedStock) {
+    if (currentSelectedStock && currentSelectedStock.variantId === variantId) {
       setSelectedSkuAvailable(currentSelectedStock.available);
       setSelectedSku(previous => previous?.variantId === currentSelectedStock.variantId ? currentSelectedStock : previous);
     }
-  }, [currentSelectedStock]);
+  }, [currentSelectedStock, variantId]);
   
   const { data: lookupResults = [] } = useQuery<Array<{
     sku: string;
     name: string;
     variantId: number;
+    barcode?: string | null;
     location: string;
     zone: string | null;
     locationType: string | null;
     available: number;
+    onHand?: number;
+    reserved?: number;
     locationId: number;
     warehouseCode: string | null;
   }>>({
@@ -471,6 +504,134 @@ export default function Transfers() {
     </Dialog>
   );
 
+  const caseBreakModal = (
+    <InlineCaseBreakDialog
+      open={caseBreakOpen}
+      onOpenChange={setCaseBreakOpen}
+      defaultFromLocationId={fromLocationId ?? undefined}
+      defaultFromLocationCode={selectedFromLocation?.code ?? sourceLocationCode}
+      sourceVariantId={currentSelectedStock?.variantId ?? variantId ?? undefined}
+      sourceSku={currentSelectedStock?.sku ?? selectedSkuLabel}
+      pickVariantId={currentSelectedStock?.breakTargetVariantId ?? undefined}
+      pickSku={currentSelectedStock?.breakTargetSku ?? undefined}
+      conversionInputQty={1}
+      conversionOutputQty={currentSelectedStock?.breakOutputQty ?? 0}
+    />
+  );
+
+  const lookupDialog = (
+    <Dialog open={lookupOpen} onOpenChange={(open) => { setLookupOpen(open); if (!open) setLookupSearch(""); }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Search className="h-5 w-5" />
+            SKU / Barcode Lookup
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              value={lookupSearch}
+              onChange={(e) => setLookupSearch(e.target.value)}
+              placeholder="Search or scan SKU, barcode, or name..."
+              className="pl-10"
+              autoFocus
+              data-testid="input-lookup-search"
+            />
+          </div>
+
+          {lookupSearch.length >= 2 && lookupResults.length === 0 && (
+            <p className="text-sm text-muted-foreground text-center py-4">No inventory found for this SKU</p>
+          )}
+
+          {lookupResults.length > 0 && (
+            <div className="border rounded-md max-h-80 overflow-y-auto">
+              <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-3 py-2 bg-slate-50 border-b text-xs font-medium text-muted-foreground sticky top-0">
+                <span>WH</span>
+                <span>Location</span>
+                <span>Type</span>
+                <span className="text-right">Stock</span>
+              </div>
+              {(() => {
+                const grouped = lookupResults.reduce((acc, r) => {
+                  if (!acc[r.sku]) acc[r.sku] = { name: r.name, locations: [] };
+                  acc[r.sku].locations.push(r);
+                  return acc;
+                }, {} as Record<string, { name: string; locations: typeof lookupResults }>);
+
+                return Object.entries(grouped).map(([sku, data]) => (
+                  <div key={sku}>
+                    <div className="px-3 py-2 bg-slate-50/50 border-b">
+                      <div className="font-medium text-sm font-mono">{sku}</div>
+                      <div className="text-xs text-muted-foreground truncate">{data.name}</div>
+                      <div className="text-xs font-medium text-blue-600">
+                        Available: {data.locations.reduce((sum, l) => sum + Number(l.available), 0)} units across {data.locations.length} location{data.locations.length !== 1 ? "s" : ""}
+                      </div>
+                    </div>
+                    {data.locations.map((loc) => (
+                      <button
+                        key={`${sku}-${loc.locationId}`}
+                        type="button"
+                        onClick={() => {
+                          const qtyStr = String(suggestedTransferQuantity({ available: Number(loc.available), onHand: loc.onHand != null ? Number(loc.onHand) : undefined }));
+                          setFromLocationId(Number(loc.locationId));
+                          setLocationSearch(loc.location);
+                          setSourceLocationCode(loc.location.toUpperCase());
+                          setVariantId(Number(loc.variantId));
+                          setSelectedSkuLabel(sku);
+                          setSelectedSkuAvailable(Number(loc.available));
+                          setSelectedSku({
+                            sku,
+                            name: loc.name,
+                            variantId: Number(loc.variantId),
+                            available: Number(loc.available),
+                            onHand: loc.onHand != null ? Number(loc.onHand) : undefined,
+                            reserved: loc.reserved != null ? Number(loc.reserved) : undefined,
+                            locationId: Number(loc.locationId),
+                            location: loc.location,
+                          });
+                          setQuantity(qtyStr);
+                          setMobileQuantity(qtyStr);
+                          if (isMobile) setMobileStep("quantity");
+                          setLookupOpen(false);
+                          setLookupSearch("");
+                          playSoundWithHaptic("success", "classic", true);
+                        }}
+                        className="w-full text-left grid grid-cols-[auto_1fr_auto_auto] gap-2 px-3 py-2.5 border-b last:border-b-0 text-sm items-center hover:bg-blue-50/60 transition-colors cursor-pointer"
+                        data-testid={`lookup-row-${sku}-${loc.locationId}`}
+                      >
+                        <Badge variant="secondary" className="text-xs">{loc.warehouseCode || "—"}</Badge>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <MapPin className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                          <span className="font-medium font-mono">{loc.location}</span>
+                          {loc.zone && <span className="text-xs text-muted-foreground">({loc.zone})</span>}
+                        </div>
+                        <Badge variant="outline" className="text-xs">{loc.locationType || "N/A"}</Badge>
+                        <div className="text-right">
+                          <div className="font-medium text-green-700">{loc.available} avail</div>
+                          {loc.onHand != null && (
+                            <div className="text-[11px] text-muted-foreground">
+                              {loc.onHand} OH · {loc.reserved ?? 0} res
+                            </div>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ));
+              })()}
+            </div>
+          )}
+
+          <p className="text-xs text-muted-foreground">
+            Click any location row to pre-fill the transfer form with that source bin and SKU.
+          </p>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+
   if (isMobile) {
     return (
       <div className="min-h-screen bg-slate-50 p-4">
@@ -497,6 +658,16 @@ export default function Transfers() {
                       setFromLocationId(null);
                       setSelectedSku(null);
                       setVariantId(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && sourceExactMatches.length === 1) {
+                        e.preventDefault();
+                        const loc = sourceExactMatches[0];
+                        setSourceLocationCode(loc.code.toUpperCase());
+                        setFromLocationId(loc.id);
+                        playSoundWithHaptic("scan", "classic", true);
+                        setMobileStep("sku");
+                      }
                     }}
                     placeholder="A-01-01"
                     className="pl-10 h-14 text-xl text-center uppercase"
@@ -561,19 +732,45 @@ export default function Transfers() {
                 </div>
                 <p className="text-sm text-muted-foreground">Items in bin {sourceLocationCode}:</p>
                 
-                {skusAtLocation.length > 5 && (
+                <div className="relative">
+                  <ScanLine className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input
                     value={skuFilter}
                     onChange={(e) => setSkuFilter(e.target.value)}
-                    placeholder="Filter SKUs in this bin..."
-                    className="h-12"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && skuFilter.trim()) {
+                        e.preventDefault();
+                        const token = skuFilter.trim().toLowerCase();
+                        const exact = skusAtLocation.find(
+                          (it) =>
+                            it.sku.toLowerCase() === token ||
+                            (it.barcode && it.barcode.toLowerCase() === token),
+                        );
+                        if (exact) {
+                          setSelectedSku(exact);
+                          setVariantId(exact.variantId);
+                          setMobileQuantity(String(suggestedTransferQuantity(exact)));
+                          setSkuFilter("");
+                          playSoundWithHaptic("scan", "classic", true);
+                          setMobileStep("quantity");
+                        }
+                      }
+                    }}
+                    placeholder="Scan barcode or search SKUs in this bin..."
+                    className="pl-9 h-12"
                     data-testid="input-filter-sku"
                   />
-                )}
+                </div>
                 
                 <div className="max-h-[300px] overflow-y-auto space-y-2">
                   {skusAtLocation
-                    .filter(item => !skuFilter || item.sku.toLowerCase().includes(skuFilter.toLowerCase()) || item.name.toLowerCase().includes(skuFilter.toLowerCase()))
+                    .filter(
+                      item =>
+                        !skuFilter ||
+                        item.sku.toLowerCase().includes(skuFilter.toLowerCase()) ||
+                        item.name.toLowerCase().includes(skuFilter.toLowerCase()) ||
+                        Boolean(item.barcode && item.barcode.toLowerCase().includes(skuFilter.toLowerCase())),
+                    )
                     .map((item) => (
                     <button
                       key={item.sku}
@@ -685,6 +882,23 @@ export default function Transfers() {
                   </Button>
                 </div>
                 <p className="text-sm text-muted-foreground">Scan or enter the bin you're moving TO</p>
+
+                {activePrimaryPickLocationId && activePrimaryPickLocationCode && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDestLocationCode(activePrimaryPickLocationCode.toUpperCase());
+                      setToLocationId(activePrimaryPickLocationId);
+                      playSoundWithHaptic("scan", "classic", true);
+                      setMobileStep("confirm");
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-2.5 rounded-md border border-emerald-300 bg-emerald-50 text-emerald-900 text-sm font-medium"
+                    data-testid="button-mobile-use-primary-pick"
+                  >
+                    <span>Primary Pick Bin: <strong className="font-mono">{activePrimaryPickLocationCode}</strong></span>
+                    <Badge className="bg-emerald-600 text-xs">Tap to select</Badge>
+                  </button>
+                )}
                 
                 <div className="relative">
                   <ScanLine className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
@@ -693,6 +907,16 @@ export default function Transfers() {
                     onChange={(e) => {
                       setDestLocationCode(e.target.value.toUpperCase());
                       setToLocationId(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && destinationExactMatches.length === 1) {
+                        e.preventDefault();
+                        const loc = destinationExactMatches[0];
+                        setDestLocationCode(loc.code.toUpperCase());
+                        setToLocationId(loc.id);
+                        playSoundWithHaptic("scan", "classic", true);
+                        setMobileStep("confirm");
+                      }
                     }}
                     placeholder="B-02-03"
                     className="pl-10 h-14 text-xl text-center uppercase"
@@ -854,6 +1078,8 @@ export default function Transfers() {
             </CardContent>
           </Card>
         )}
+        {lookupDialog}
+        {caseBreakModal}
         {reservationDialog}
       </div>
     );
@@ -870,8 +1096,31 @@ export default function Transfers() {
       
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
             <CardTitle>New Transfer</CardTitle>
+            <div className="flex items-center rounded-md border bg-muted/40 p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setTransferTab("move")}
+                className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                  transferTab === "move" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
+                data-testid="tab-transfer-move"
+              >
+                Move Stock
+              </button>
+              <button
+                type="button"
+                onClick={() => setTransferTab("case_break")}
+                className={`px-2.5 py-1 rounded font-medium transition-colors flex items-center gap-1 ${
+                  transferTab === "case_break" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
+                data-testid="tab-transfer-case-break"
+              >
+                <Boxes className="h-3.5 w-3.5" />
+                Case Break
+              </button>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
@@ -912,7 +1161,19 @@ export default function Transfers() {
                       // pick so the list stays open for an explicit choice.
                       if (fromLocationId) setFromLocationId(null);
                     }}
-                    placeholder="Search bin location..."
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && locationSearch.trim()) {
+                        const upper = locationSearch.trim().toUpperCase();
+                        const exact = actionableLocations.filter((l) => l.code.trim().toUpperCase() === upper);
+                        if (exact.length === 1) {
+                          e.preventDefault();
+                          setFromLocationId(exact[0].id);
+                          setLocationSearch(exact[0].code);
+                          playSoundWithHaptic("scan", "classic", true);
+                        }
+                      }
+                    }}
+                    placeholder="Search or scan bin location..."
                     className="pl-10"
                     data-testid="input-source-search"
                   />
@@ -959,50 +1220,133 @@ export default function Transfers() {
                 </Button>
               </div>
               {variantId ? (
-                <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
-                  <Package className="h-4 w-4 text-muted-foreground" />
-                  <span className="font-medium flex-1">{selectedSkuLabel}</span>
-                  {selectedSkuAvailable != null && (
-                    <span className="text-xs text-green-600">{currentSelectedStock ? stockSummary(currentSelectedStock) : `${selectedSkuAvailable.toLocaleString()} available`}</span>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
+                    <Package className="h-4 w-4 text-muted-foreground" />
+                    <span className="font-medium flex-1 font-mono">{selectedSkuLabel}</span>
+                    {selectedSkuAvailable != null && (
+                      <span className="text-xs text-green-600">{currentSelectedStock ? stockSummary(currentSelectedStock) : `${selectedSkuAvailable.toLocaleString()} available`}</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVariantId(null);
+                        setSelectedSkuLabel("");
+                        setSelectedSkuAvailable(null);
+                        setQuantity("");
+                      }}
+                      className="p-1 hover:bg-slate-200 rounded"
+                      data-testid="button-clear-sku"
+                    >
+                      <X className="h-4 w-4 text-muted-foreground" />
+                    </button>
+                  </div>
+                  {(transferTab === "case_break" || canBreakSelectedSku) && (
+                    <div className="rounded-md border border-blue-200 bg-blue-50/60 p-2.5 flex items-center justify-between gap-2 text-xs">
+                      {canBreakSelectedSku ? (
+                        <>
+                          <div>
+                            <div className="font-medium text-blue-900">
+                              Case/Pack convertible to <span className="font-mono">{currentSelectedStock?.breakTargetSku}</span>
+                            </div>
+                            <div className="text-blue-700">
+                              1 {selectedSkuLabel} yields {currentSelectedStock?.breakOutputQty} {currentSelectedStock?.breakTargetSku}
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="border-blue-300 text-blue-800 hover:bg-blue-100 shrink-0"
+                            onClick={() => setCaseBreakOpen(true)}
+                            data-testid="button-open-inline-case-break"
+                          >
+                            <Boxes className="h-3.5 w-3.5 mr-1" />
+                            Break Case
+                          </Button>
+                        </>
+                      ) : (
+                        <span className="text-blue-800">
+                          Select a Case or Multi-pack SKU in the source bin to break it into smaller sellable units.
+                        </span>
+                      )}
+                    </div>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setVariantId(null);
-                      setSelectedSkuLabel("");
-                      setSelectedSkuAvailable(null);
-                      setQuantity("");
-                    }}
-                    className="p-1 hover:bg-slate-200 rounded"
-                    data-testid="button-clear-sku"
-                  >
-                    <X className="h-4 w-4 text-muted-foreground" />
-                  </button>
                 </div>
               ) : !fromLocationId ? (
                 <p className="text-sm text-muted-foreground py-2">Select a source bin first</p>
-              ) : skusAtLocation.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-2">No inventory in this bin</p>
               ) : (
-                <div className="border rounded-md max-h-48 overflow-y-auto">
-                  {skusAtLocation.map((result) => (
-                    <button
-                      key={result.variantId}
-                      type="button"
-                      className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
-                      onClick={() => {
-                        setSelectedSkuLabel(result.sku);
-                        setVariantId(result.variantId);
-                        setSelectedSkuAvailable(result.available);
-                        setQuantity(String(result.available));
+                <div className="space-y-2">
+                  <div className="relative">
+                    <ScanLine className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      value={skuFilter}
+                      onChange={(e) => setSkuFilter(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && skuFilter.trim()) {
+                          e.preventDefault();
+                          const token = skuFilter.trim().toLowerCase();
+                          const exact = skusAtLocation.find(
+                            (it) =>
+                              it.sku.toLowerCase() === token ||
+                              (it.barcode && it.barcode.toLowerCase() === token),
+                          );
+                          if (exact) {
+                            setSelectedSkuLabel(exact.sku);
+                            setVariantId(exact.variantId);
+                            setSelectedSkuAvailable(exact.available);
+                            setQuantity(String(suggestedTransferQuantity(exact)));
+                            setSkuFilter("");
+                            playSoundWithHaptic("scan", "classic", true);
+                          }
+                        }
                       }}
-                      data-testid={`sku-at-location-${result.variantId}`}
-                    >
-                      <div className="font-medium">{result.sku}</div>
-                      <div className="text-xs text-muted-foreground truncate">{result.name}</div>
-                      <div className="text-xs text-green-600">{stockSummary(result)}</div>
-                    </button>
-                  ))}
+                      placeholder="Filter or scan SKU / barcode in this bin..."
+                      className="pl-9 h-9 text-sm"
+                      data-testid="input-desktop-sku-filter"
+                    />
+                  </div>
+                  {skusAtLocation.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-2">
+                      {skuFilter.trim() ? "No matching SKUs in this bin" : "No inventory in this bin"}
+                    </p>
+                  ) : (
+                    <div className="border rounded-md max-h-48 overflow-y-auto">
+                      {skusAtLocation
+                        .filter(
+                          (result) =>
+                            !skuFilter.trim() ||
+                            result.sku.toLowerCase().includes(skuFilter.toLowerCase()) ||
+                            result.name.toLowerCase().includes(skuFilter.toLowerCase()) ||
+                            Boolean(result.barcode && result.barcode.toLowerCase().includes(skuFilter.toLowerCase())),
+                        )
+                        .map((result) => (
+                          <button
+                            key={result.variantId}
+                            type="button"
+                            className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                            onClick={() => {
+                              setSelectedSkuLabel(result.sku);
+                              setVariantId(result.variantId);
+                              setSelectedSkuAvailable(result.available);
+                              setQuantity(String(suggestedTransferQuantity(result)));
+                            }}
+                            data-testid={`sku-at-location-${result.variantId}`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-medium font-mono">{result.sku}</span>
+                              {result.primaryPickLocationCode && (
+                                <Badge variant="outline" className="text-[10px] border-emerald-300 text-emerald-700">
+                                  Pick: {result.primaryPickLocationCode}
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="text-xs text-muted-foreground truncate">{result.name}</div>
+                            <div className="text-xs text-green-600">{stockSummary(result)}</div>
+                          </button>
+                        ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1020,7 +1364,24 @@ export default function Transfers() {
             </div>
             
             <div className="space-y-2">
-              <Label>Destination Location</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label>Destination Location</Label>
+                {activePrimaryPickLocationId && activePrimaryPickLocationCode && toLocationId !== activePrimaryPickLocationId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToLocationId(activePrimaryPickLocationId);
+                      setDestLocationSearch(activePrimaryPickLocationCode);
+                    }}
+                    className="text-xs font-medium text-emerald-700 hover:underline flex items-center gap-1"
+                    data-testid="button-use-primary-pick-bin"
+                  >
+                    <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-800 text-[10px] px-1.5 py-0">
+                      Primary Pick: {activePrimaryPickLocationCode}
+                    </Badge>
+                  </button>
+                )}
+              </div>
               {toLocationId ? (
                 <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
                   <MapPin className="h-4 w-4 text-muted-foreground" />
@@ -1028,6 +1389,9 @@ export default function Transfers() {
                     {locations.find(l => l.id === toLocationId)?.code}
                     {(() => { const loc = locations.find(l => l.id === toLocationId); return loc?.warehouseId ? ` (${warehouseMap.get(loc.warehouseId) || ''})` : ''; })()}
                   </span>
+                  {toLocationId === activePrimaryPickLocationId && (
+                    <Badge className="bg-emerald-600 text-[10px] px-1.5 py-0">Primary Pick Bin</Badge>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -1052,7 +1416,19 @@ export default function Transfers() {
                       // like FLOOR-06 remain selectable.
                       if (toLocationId) setToLocationId(null);
                     }}
-                    placeholder="Search destination..."
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && destLocationSearch.trim()) {
+                        const upper = destLocationSearch.trim().toUpperCase();
+                        const exact = destinationCandidates.filter((l) => l.code.trim().toUpperCase() === upper);
+                        if (exact.length === 1) {
+                          e.preventDefault();
+                          setToLocationId(exact[0].id);
+                          setDestLocationSearch(exact[0].code);
+                          playSoundWithHaptic("scan", "classic", true);
+                        }
+                      }
+                    }}
+                    placeholder="Search or scan destination..."
                     className="pl-10"
                     data-testid="input-dest-search"
                   />
@@ -1064,13 +1440,20 @@ export default function Transfers() {
                     <button
                       key={loc.id}
                       type="button"
-                      className="w-full px-3 py-2 text-left hover:bg-slate-100 text-sm"
+                      className="w-full px-3 py-2 text-left hover:bg-slate-100 text-sm flex items-center justify-between gap-2"
                       onClick={() => {
                         setToLocationId(loc.id);
                         setDestLocationSearch(loc.code);
                       }}
                     >
-                      {loc.code} <span className="text-muted-foreground">({loc.warehouseId ? warehouseMap.get(loc.warehouseId) || '' : ''}{loc.zone ? ` · ${loc.zone}` : ''})</span>
+                      <span>
+                        {loc.code} <span className="text-muted-foreground">({loc.warehouseId ? warehouseMap.get(loc.warehouseId) || '' : ''}{loc.zone ? ` · ${loc.zone}` : ''})</span>
+                      </span>
+                      {loc.id === activePrimaryPickLocationId && (
+                        <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-800 text-[10px]">
+                          Primary Pick Bin
+                        </Badge>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -1147,9 +1530,10 @@ export default function Transfers() {
                         onClick={() => undoMutation.mutate(t.id)}
                         disabled={undoMutation.isPending}
                         data-testid={`button-undo-${t.id}`}
+                        title="Create an append-only reverse transfer back to the source bin"
                       >
                         <Undo2 className="h-4 w-4 mr-1" />
-                        Undo
+                        Reverse
                       </Button>
                     )}
                   </div>
@@ -1161,80 +1545,8 @@ export default function Transfers() {
         </Card>
       </div>
       
-      <Dialog open={lookupOpen} onOpenChange={(open) => { setLookupOpen(open); if (!open) setLookupSearch(""); }}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Search className="h-5 w-5" />
-              SKU Lookup
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                value={lookupSearch}
-                onChange={(e) => setLookupSearch(e.target.value)}
-                placeholder="Search by SKU or name..."
-                className="pl-10"
-                autoFocus
-                data-testid="input-lookup-search"
-              />
-            </div>
-            
-            {lookupSearch.length >= 2 && lookupResults.length === 0 && (
-              <p className="text-sm text-muted-foreground text-center py-4">No inventory found for this SKU</p>
-            )}
-            
-            {lookupResults.length > 0 && (
-              <div className="border rounded-md max-h-80 overflow-y-auto">
-                <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-3 py-2 bg-slate-50 border-b text-xs font-medium text-muted-foreground sticky top-0">
-                  <span>WH</span>
-                  <span>Location</span>
-                  <span>Type</span>
-                  <span className="text-right">Available</span>
-                </div>
-                {(() => {
-                  const grouped = lookupResults.reduce((acc, r) => {
-                    if (!acc[r.sku]) acc[r.sku] = { name: r.name, locations: [] };
-                    acc[r.sku].locations.push(r);
-                    return acc;
-                  }, {} as Record<string, { name: string; locations: typeof lookupResults }>);
-                  
-                  return Object.entries(grouped).map(([sku, data]) => (
-                    <div key={sku}>
-                      <div className="px-3 py-2 bg-slate-50/50 border-b">
-                        <div className="font-medium text-sm">{sku}</div>
-                        <div className="text-xs text-muted-foreground truncate">{data.name}</div>
-                        <div className="text-xs font-medium text-blue-600">
-                          Available: {data.locations.reduce((sum, l) => sum + l.available, 0)} units across {data.locations.length} location{data.locations.length !== 1 ? 's' : ''}
-                        </div>
-                      </div>
-                      {data.locations.map((loc) => (
-                        <div key={`${sku}-${loc.locationId}`} className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-3 py-2 border-b last:border-b-0 text-sm items-center">
-                          <Badge variant="secondary" className="text-xs">{loc.warehouseCode || '—'}</Badge>
-                          <div className="flex items-center gap-1.5">
-                            <MapPin className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-                            <span className="font-medium">{loc.location}</span>
-                            {loc.zone && <span className="text-xs text-muted-foreground">({loc.zone})</span>}
-                          </div>
-                          <Badge variant="outline" className="text-xs">{loc.locationType || 'N/A'}</Badge>
-                          <span className="text-right font-medium">{loc.available}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ));
-                })()}
-              </div>
-            )}
-            
-            <p className="text-xs text-muted-foreground">
-              This is for informational purposes only. To transfer inventory, select a source bin on the transfer form.
-            </p>
-          </div>
-        </DialogContent>
-      </Dialog>
-
+      {lookupDialog}
+      {caseBreakModal}
       {reservationDialog}
     </div>
   );

@@ -1213,20 +1213,10 @@ export default function Orders() {
           <div className="flex items-center gap-2 md:gap-3 flex-wrap">
             <div className="flex items-center rounded-lg border bg-muted/50 p-1" data-testid="picking-mode-toggle">
               <Button
-                variant={pickingMode === "batch" ? "default" : "ghost"}
-                size="sm"
-                onClick={() => setPickingMode("batch")}
-                className={cn("gap-1 md:gap-2 px-2 md:px-3", pickingMode === "batch" && "bg-primary shadow-sm")}
-                data-testid="button-batch-mode"
-              >
-                <Layers className="h-4 w-4" />
-                <span className="hidden sm:inline">Batch</span>
-              </Button>
-              <Button
-                variant={pickingMode === "single" ? "default" : "ghost"}
+                variant="default"
                 size="sm"
                 onClick={() => setPickingMode("single")}
-                className={cn("gap-1 md:gap-2 px-2 md:px-3", pickingMode === "single" && "bg-primary shadow-sm")}
+                className="gap-1 md:gap-2 px-2 md:px-3 bg-primary shadow-sm"
                 data-testid="button-single-mode"
               >
                 <Package className="h-4 w-4" />

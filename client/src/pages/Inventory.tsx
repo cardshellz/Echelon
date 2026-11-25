@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
 import { warehouseLabel } from "@/lib/warehouse-label";
+import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 import InlineCaseBreakDialog from "@/components/operations/InlineCaseBreakDialog";
 import { allowedCaseBreakSources } from "@/features/inventory/allowed-case-breaks";
 import type { AllowedInventoryConversion } from "@shared/types/inventory-conversions";
@@ -116,6 +117,8 @@ interface WarehouseLocation {
   locationType: string;
   zone: string;
   isPickable: number;
+  isActive?: number | null;
+  warehouseId?: number | null;
   parentLocationId: number | null;
   movementPolicy: string;
   capacityCubicMm: number | null;
@@ -222,12 +225,14 @@ interface BinInventory {
   hasUnassigned: boolean;
 }
 
-function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, warehouseId }: {
+function VariantLocationRows({ variantId, sku, warehouses, canEdit, canAdjust, onTransfer, onAdjust, warehouseId }: {
   variantId: number;
   sku: string;
   warehouses: Warehouse[];
   canEdit: boolean;
+  canAdjust: boolean;
   onTransfer: (fromLocationId: number, fromLocationCode: string, variantId: number, sku: string) => void;
+  onAdjust: (locationId: number, currentQty: number) => void;
   warehouseId?: number | null;
 }) {
   const [, navigate] = useLocation();
@@ -367,6 +372,20 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
                     >
                       <ArrowLeftRight className="h-3 w-3 mr-1" />
                       Move
+                    </Button>
+                  )}
+                  {canAdjust && locLevel.location?.id && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs px-2"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onAdjust(locLevel.location!.id, locLevel.variantQty);
+                      }}
+                      data-testid={`button-adjust-bin-${locLevel.location.id}`}
+                    >
+                      Adjust
                     </Button>
                   )}
                 </div>
@@ -523,6 +542,10 @@ export default function Inventory() {
   const [searchQuery, setSearchQuery] = useState("");
   const [adjustDialogOpen, setAdjustDialogOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItemSummary | null>(null);
+  const [adjustmentLocationId, setAdjustmentLocationId] = useState<string>("");
+  const [adjustmentLocationSearch, setAdjustmentLocationSearch] = useState<string>("");
+  const [adjustmentReasonId, setAdjustmentReasonId] = useState<string>("");
+  const [adjustmentUnitCost, setAdjustmentUnitCost] = useState<string>("");
   const [adjustmentQty, setAdjustmentQty] = useState("");
   const [adjustmentReason, setAdjustmentReason] = useState("");
   const [addItemDialogOpen, setAddItemDialogOpen] = useState(false);
@@ -647,6 +670,58 @@ export default function Inventory() {
   const queryClient = useQueryClient();
   const { hasPermission } = useAuth();
   const canEdit = hasPermission("inventory", "edit");
+  const canAdjust = hasPermission("inventory", "admin");
+
+  const { data: allAdjustLocations = [] } = useQuery<WarehouseLocation[]>({
+    queryKey: ["/api/warehouse/locations"],
+    enabled: adjustDialogOpen,
+  });
+
+  const { data: selectedVariantLocations = [] } = useQuery<VariantLocationLevel[]>({
+    queryKey: ["/api/inventory/variants", selectedItem?.productVariantId, "locations"],
+    queryFn: async () => {
+      if (!selectedItem?.productVariantId) return [];
+      const res = await fetch(`/api/inventory/variants/${selectedItem.productVariantId}/locations`, { credentials: "include" });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: adjustDialogOpen && !!selectedItem?.productVariantId,
+  });
+
+  const { data: adjustmentReasons = [] } = useQuery<Array<{ id: number; code: string; name: string }>>({
+    queryKey: ["/api/inventory/adjustment-reasons"],
+    queryFn: async () => {
+      const res = await fetch("/api/inventory/adjustment-reasons?active=true", { credentials: "include" });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: adjustDialogOpen,
+  });
+
+  useEffect(() => {
+    if (!adjustDialogOpen || adjustmentLocationId) return;
+    const assigned = selectedVariantLocations.find((l) => l.isAssigned && l.location?.id);
+    const firstBin = assigned?.location?.id ?? selectedVariantLocations[0]?.location?.id;
+    if (firstBin) {
+      setAdjustmentLocationId(String(firstBin));
+    }
+  }, [adjustDialogOpen, adjustmentLocationId, selectedVariantLocations]);
+
+  const actionableAdjustLocations = useMemo(() => {
+    const base = filterActionableWarehouseLocations(allAdjustLocations, {
+      warehouseId: selectedWarehouseId ?? undefined,
+      search: adjustmentLocationSearch,
+    });
+    const variantLocIds = new Set(
+      selectedVariantLocations.map((l) => l.location?.id).filter((id): id is number => Boolean(id)),
+    );
+    return [...base].sort((a, b) => {
+      const aHas = variantLocIds.has(a.id) ? 1 : 0;
+      const bHas = variantLocIds.has(b.id) ? 1 : 0;
+      if (aHas !== bHas) return bHas - aHas;
+      return a.code.localeCompare(b.code);
+    });
+  }, [allAdjustLocations, selectedWarehouseId, adjustmentLocationSearch, selectedVariantLocations]);
 
   const { data: warehouses = [] } = useQuery<Warehouse[]>({
     queryKey: ["/api/warehouses"],
@@ -758,7 +833,14 @@ export default function Inventory() {
   });
 
   const adjustInventoryMutation = useMutation({
-    mutationFn: async (data: { productVariantId: number; warehouseLocationId: number; qtyDelta: number; reason: string }) => {
+    mutationFn: async (data: {
+      productVariantId: number;
+      warehouseLocationId: number;
+      qtyDelta: number;
+      reason: string;
+      reasonId?: number;
+      unitCostCents?: number;
+    }) => {
       return inventoryCommand("/api/inventory/adjust", data);
     },
     onSuccess: () => {
@@ -766,6 +848,10 @@ export default function Inventory() {
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
       setAdjustDialogOpen(false);
       setSelectedItem(null);
+      setAdjustmentLocationId("");
+      setAdjustmentLocationSearch("");
+      setAdjustmentReasonId("");
+      setAdjustmentUnitCost("");
       setAdjustmentQty("");
       setAdjustmentReason("");
     },
@@ -984,13 +1070,48 @@ export default function Inventory() {
     setExpandedZones(next);
   };
 
+  const openAdjustForVariant = (
+    item: { variantId: number; sku: string; name: string; variantQty: number; reservedQty: number; atpUnits: number },
+    preselectedLocationId?: number,
+  ) => {
+    setSelectedItem({
+      productVariantId: item.variantId,
+      baseSku: item.sku,
+      name: item.name,
+      totalOnHandPieces: item.variantQty,
+      totalReservedPieces: item.reservedQty,
+      totalAtpPieces: item.atpUnits,
+      variants: [],
+    });
+    setAdjustmentLocationId(preselectedLocationId ? String(preselectedLocationId) : "");
+    setAdjustmentLocationSearch("");
+    setAdjustmentReasonId("");
+    setAdjustmentUnitCost("");
+    setAdjustmentQty("");
+    setAdjustmentReason("");
+    setAdjustDialogOpen(true);
+  };
+
   const handleAdjustSubmit = () => {
-    if (!selectedItem || !adjustmentQty || !adjustmentReason) return;
+    const locId = parseInt(adjustmentLocationId, 10);
+    const parsedDelta = parseInt(adjustmentQty, 10);
+    if (!selectedItem || !Number.isSafeInteger(locId) || locId <= 0 || !Number.isSafeInteger(parsedDelta) || parsedDelta === 0 || !adjustmentReason.trim()) {
+      return;
+    }
+    let unitCostCents: number | undefined;
+    if (parsedDelta > 0 && adjustmentUnitCost.trim() !== "") {
+      const parsedCost = parseFloat(adjustmentUnitCost);
+      if (Number.isFinite(parsedCost) && parsedCost >= 0) {
+        unitCostCents = Math.round(parsedCost * 100);
+      }
+    }
     adjustInventoryMutation.mutate({
       productVariantId: selectedItem.productVariantId,
-      warehouseLocationId: 0,
-      qtyDelta: parseInt(adjustmentQty),
-      reason: adjustmentReason,
+      warehouseLocationId: locId,
+      qtyDelta: parsedDelta,
+      reason: adjustmentReason.trim(),
+      ...(adjustmentReasonId ? { reasonId: parseInt(adjustmentReasonId, 10) } : {}),
+      ...(unitCostCents !== undefined ? { unitCostCents } : {}),
     });
   };
 
@@ -1540,7 +1661,24 @@ export default function Inventory() {
                             {level.atpUnavailable
                               ? <TableCell className="text-right text-sm font-medium text-amber-700" title="Sellable stock could not be calculated for this product. Its conversion rules may no longer match its package sizes; review Inventory behavior on the product page.">Unavailable</TableCell>
                               : <TableCell className="text-right font-mono font-medium text-green-600">{level.atpUnits.toLocaleString()}</TableCell>}
-                            {canEdit && <TableCell></TableCell>}
+                            {canEdit && (
+                              <TableCell className="text-right">
+                                {canAdjust && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 text-xs px-2"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openAdjustForVariant(level);
+                                    }}
+                                    data-testid={`button-adjust-variant-${level.variantId}`}
+                                  >
+                                    Adjust
+                                  </Button>
+                                )}
+                              </TableCell>
+                            )}
                           </TableRow>
                           {expandedVariants.has(level.variantId) && (
                             <>
@@ -1549,6 +1687,7 @@ export default function Inventory() {
                                 sku={level.sku}
                                 warehouses={warehouses}
                                 canEdit={canEdit}
+                                canAdjust={canAdjust}
                                 warehouseId={selectedWarehouseId}
                                 onTransfer={(fromLocationId, fromLocationCode, variantId, sku) => {
                                   setTransferDialog({
@@ -1559,6 +1698,7 @@ export default function Inventory() {
                                     sku,
                                   });
                                 }}
+                                onAdjust={(locationId) => openAdjustForVariant(level, locationId)}
                               />
                               {(() => {
                                 const descendants = allowedCaseBreakSources(level, variantLevels);
@@ -2142,40 +2282,117 @@ export default function Inventory() {
           <DialogHeader>
             <DialogTitle>Adjust Inventory</DialogTitle>
             <DialogDescription className="text-sm">
-              Adjust the base unit count for {selectedItem?.baseSku}. Use positive numbers to add stock, negative to remove.
+              Adjust stock for <span className="font-mono font-medium">{selectedItem?.baseSku}</span> at a specific physical warehouse bin. Use positive numbers to add stock, negative to remove.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label className="text-sm">Current On Hand: {selectedItem?.totalOnHandPieces.toLocaleString()} pieces</Label>
+          <div className="space-y-4 py-3">
+            <div className="rounded-md bg-muted/40 px-3 py-2 text-xs flex justify-between">
+              <span className="text-muted-foreground">Total On Hand:</span>
+              <span className="font-mono font-semibold">{selectedItem?.totalOnHandPieces.toLocaleString()} units</span>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="qty" className="text-sm">Adjustment Quantity (+ or -)</Label>
+
+            <div className="space-y-1.5">
+              <Label className="text-sm">Warehouse Location *</Label>
+              <Input
+                placeholder="Filter locations..."
+                value={adjustmentLocationSearch}
+                onChange={(e) => setAdjustmentLocationSearch(e.target.value)}
+                className="h-9 text-sm"
+                autoComplete="off"
+              />
+              <Select
+                value={adjustmentLocationId || "_none"}
+                onValueChange={(v) => setAdjustmentLocationId(v === "_none" ? "" : v)}
+              >
+                <SelectTrigger className="h-11" data-testid="select-adjust-location">
+                  <SelectValue placeholder="Select physical bin..." />
+                </SelectTrigger>
+                <SelectContent className="max-h-60">
+                  <SelectItem value="_none">Select physical bin...</SelectItem>
+                  {actionableAdjustLocations.map((loc) => {
+                    const existingLevel = selectedVariantLocations.find((l) => l.location?.id === loc.id);
+                    return (
+                      <SelectItem key={loc.id} value={String(loc.id)}>
+                        {loc.code} ({loc.locationType.replace("_", " ")})
+                        {existingLevel ? ` — ${existingLevel.variantQty} on hand` : ""}
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="qty" className="text-sm">Adjustment Quantity (+ or -) *</Label>
               <Input
                 id="qty"
                 type="number"
-                placeholder="e.g., 100 or -50"
+                placeholder="e.g., 10 or -5"
                 value={adjustmentQty}
                 onChange={(e) => setAdjustmentQty(e.target.value)}
                 className="w-full h-11"
                 autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
+                data-testid="input-adjust-qty"
               />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="reason" className="text-sm">Reason for Adjustment</Label>
+
+            {parseInt(adjustmentQty, 10) > 0 && (
+              <div className="space-y-1.5">
+                <Label htmlFor="adjust-unit-cost" className="text-sm">Unit Cost ($) — for new stock valuation</Label>
+                <Input
+                  id="adjust-unit-cost"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="Leave blank to inherit existing SKU cost"
+                  value={adjustmentUnitCost}
+                  onChange={(e) => setAdjustmentUnitCost(e.target.value)}
+                  className="w-full h-11"
+                  autoComplete="off"
+                  data-testid="input-adjust-unit-cost"
+                />
+              </div>
+            )}
+
+            {adjustmentReasons.length > 0 && (
+              <div className="space-y-1.5">
+                <Label className="text-sm">Reason Code (Optional)</Label>
+                <Select
+                  value={adjustmentReasonId || "_none"}
+                  onValueChange={(v) => {
+                    const next = v === "_none" ? "" : v;
+                    setAdjustmentReasonId(next);
+                    if (next && !adjustmentReason.trim()) {
+                      const matched = adjustmentReasons.find((r) => String(r.id) === next);
+                      if (matched) setAdjustmentReason(matched.name);
+                    }
+                  }}
+                >
+                  <SelectTrigger className="h-10" data-testid="select-adjust-reason-code">
+                    <SelectValue placeholder="Select reason code..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="_none">Custom reason...</SelectItem>
+                    {adjustmentReasons.map((r) => (
+                      <SelectItem key={r.id} value={String(r.id)}>
+                        {r.name} ({r.code})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <Label htmlFor="reason" className="text-sm">Reason / Notes *</Label>
               <Textarea
                 id="reason"
                 placeholder="e.g., Cycle count correction, damaged goods, etc."
                 value={adjustmentReason}
                 onChange={(e) => setAdjustmentReason(e.target.value)}
-                className="w-full min-h-[100px]"
+                className="w-full min-h-[84px]"
                 autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
+                data-testid="input-adjust-reason"
               />
             </div>
           </div>
@@ -2183,8 +2400,15 @@ export default function Inventory() {
             <Button variant="outline" onClick={() => setAdjustDialogOpen(false)} className="w-full sm:w-auto min-h-[44px]">Cancel</Button>
             <Button 
               onClick={handleAdjustSubmit}
-              disabled={!adjustmentQty || !adjustmentReason || adjustInventoryMutation.isPending}
+              disabled={
+                !adjustmentLocationId ||
+                !adjustmentQty ||
+                parseInt(adjustmentQty, 10) === 0 ||
+                !adjustmentReason.trim() ||
+                adjustInventoryMutation.isPending
+              }
               className="w-full sm:w-auto min-h-[44px]"
+              data-testid="button-submit-adjustment"
             >
               {adjustInventoryMutation.isPending ? "Adjusting..." : "Apply Adjustment"}
             </Button>

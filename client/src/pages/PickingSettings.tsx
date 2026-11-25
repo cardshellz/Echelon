@@ -216,40 +216,42 @@ export default function PickingSettings() {
                         </div>
                       </div>
                     </label>
-                    <label className={`flex items-start gap-3 p-3 md:p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${form.postPickStatus === 'picked' ? 'border-primary bg-primary/5' : ''}`}>
+                    <label className="flex items-start gap-3 p-3 md:p-4 border rounded-lg opacity-60 cursor-not-allowed bg-muted/20">
                       <input
                         type="radio"
                         name="postPickStatus"
                         value="picked"
+                        disabled
                         checked={form.postPickStatus === "picked"}
-                        onChange={(e) => setForm({ ...form, postPickStatus: e.target.value })}
+                        onChange={() => {}}
                         className="mt-1 h-5 w-5"
                       />
                       <div>
                         <div className="font-medium text-sm md:text-base flex items-center gap-2">
                           <Layers className="w-4 h-4" />
                           Send to Pack Station
-                          <Badge variant="outline" className="text-xs">Future</Badge>
+                          <Badge variant="outline" className="text-xs">Coming Soon</Badge>
                         </div>
                         <div className="text-xs md:text-sm text-muted-foreground">
                           Order moves to a pack queue where items are verified, boxed, and labeled before shipping.
                         </div>
                       </div>
                     </label>
-                    <label className={`flex items-start gap-3 p-3 md:p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${form.postPickStatus === 'staged' ? 'border-primary bg-primary/5' : ''}`}>
+                    <label className="flex items-start gap-3 p-3 md:p-4 border rounded-lg opacity-60 cursor-not-allowed bg-muted/20">
                       <input
                         type="radio"
                         name="postPickStatus"
                         value="staged"
+                        disabled
                         checked={form.postPickStatus === "staged"}
-                        onChange={(e) => setForm({ ...form, postPickStatus: e.target.value })}
+                        onChange={() => {}}
                         className="mt-1 h-5 w-5"
                       />
                       <div>
                         <div className="font-medium text-sm md:text-base flex items-center gap-2">
                           <Warehouse className="w-4 h-4" />
                           Stage for Consolidation
-                          <Badge variant="outline" className="text-xs">Future</Badge>
+                          <Badge variant="outline" className="text-xs">Coming Soon</Badge>
                         </div>
                         <div className="text-xs md:text-sm text-muted-foreground">
                           Order is staged in a holding area for consolidated shipments or route-based loading.
@@ -285,38 +287,40 @@ export default function PickingSettings() {
                         </div>
                       </div>
                     </label>
-                    <label className={`flex items-start gap-3 p-3 md:p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${form.pickMode === 'batch' ? 'border-primary bg-primary/5' : ''}`}>
+                    <label className="flex items-start gap-3 p-3 md:p-4 border rounded-lg opacity-60 cursor-not-allowed bg-muted/20">
                       <input
                         type="radio"
                         name="pickMode"
                         value="batch"
+                        disabled
                         checked={form.pickMode === "batch"}
-                        onChange={(e) => setForm({ ...form, pickMode: e.target.value })}
+                        onChange={() => {}}
                         className="mt-1 h-5 w-5"
                       />
                       <div>
                         <div className="font-medium text-sm md:text-base flex items-center gap-2">
                           Batch Pick
-                          <Badge variant="outline" className="text-xs">Future</Badge>
+                          <Badge variant="outline" className="text-xs">Coming Soon</Badge>
                         </div>
                         <div className="text-xs md:text-sm text-muted-foreground">
                           Picker collects items for multiple orders in a single pass through the warehouse, then sorts at a pack station.
                         </div>
                       </div>
                     </label>
-                    <label className={`flex items-start gap-3 p-3 md:p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${form.pickMode === 'wave' ? 'border-primary bg-primary/5' : ''}`}>
+                    <label className="flex items-start gap-3 p-3 md:p-4 border rounded-lg opacity-60 cursor-not-allowed bg-muted/20">
                       <input
                         type="radio"
                         name="pickMode"
                         value="wave"
+                        disabled
                         checked={form.pickMode === "wave"}
-                        onChange={(e) => setForm({ ...form, pickMode: e.target.value })}
+                        onChange={() => {}}
                         className="mt-1 h-5 w-5"
                       />
                       <div>
                         <div className="font-medium text-sm md:text-base flex items-center gap-2">
                           Wave Pick
-                          <Badge variant="outline" className="text-xs">Future</Badge>
+                          <Badge variant="outline" className="text-xs">Coming Soon</Badge>
                         </div>
                         <div className="text-xs md:text-sm text-muted-foreground">
                           Orders are grouped into waves by carrier, zone, or SLA. The wave is released as a unit and divided among pickers.
