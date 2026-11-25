@@ -164,11 +164,13 @@ export function PickingActiveItemView({
   return (
     <div className="flex flex-col min-h-full bg-muted/20 overflow-auto select-none">
       {/* Hidden scanner sink - captures hardware barcode scans reliably without software keyboard */}
+      {/* Keep this a plain, focusable text input. #2158 added inputMode="none" and
+          pointer-events-none here and hardware scans stopped registering on the
+          warehouse handhelds (scan picks fell to zero on 2026-11-25). Test on a
+          real gun before changing these attributes. */}
       <input
         ref={hiddenScannerRef}
-        type="text"
-        inputMode="none"
-        className="opacity-0 absolute -z-10 pointer-events-none"
+        className="opacity-0 absolute -z-10"
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();

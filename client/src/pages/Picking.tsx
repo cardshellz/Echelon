@@ -865,9 +865,14 @@ function PickingWorkspace() {
         advanceToNext();
       }, 300);
     }
+    // Return focus to the visible scan box after each pick (pre-#2158 behavior).
+    // Moving it onto the hidden scanner sink was part of the #2158 change that
+    // stopped hardware scans registering on the handhelds.
     setTimeout(() => {
-      maintainFocus();
-    }, 350);
+      if (manualInputRef.current && !shortPickOpen && !binCountOpen) {
+        manualInputRef.current.focus();
+      }
+    }, 500);
   };
 
   const checkReplenGuidance = async (item: PickItem, listIndex: number | null) => {
