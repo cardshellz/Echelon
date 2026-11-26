@@ -31774,6 +31774,31 @@ CREATE TABLE membership.product_collections (
 
 
 --
+-- Name: promotions; Type: TABLE; Schema: membership; Owner: -
+--
+
+CREATE TABLE membership.promotions (
+    id character varying DEFAULT gen_random_uuid() NOT NULL,
+    slug text NOT NULL,
+    label text NOT NULL,
+    status text DEFAULT 'draft'::text NOT NULL,
+    starts_on date NOT NULL,
+    ends_on date NOT NULL,
+    starts_time text,
+    ends_time text,
+    effects jsonb NOT NULL,
+    messages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    created_by text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT promotions_ends_time_format CHECK (((ends_time IS NULL) OR (ends_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'::text))),
+    CONSTRAINT promotions_starts_time_format CHECK (((starts_time IS NULL) OR (starts_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'::text))),
+    CONSTRAINT promotions_status_known CHECK ((status = ANY (ARRAY['draft'::text, 'scheduled'::text, 'cancelled'::text]))),
+    CONSTRAINT promotions_window_order CHECK ((starts_on <= ends_on))
+);
+
+
+--
 -- Name: redemption_options; Type: TABLE; Schema: membership; Owner: -
 --
 
@@ -51622,6 +51647,22 @@ ALTER TABLE ONLY membership.product_collections
 
 
 --
+-- Name: promotions promotions_pkey; Type: CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.promotions
+    ADD CONSTRAINT promotions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: promotions promotions_slug_key; Type: CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.promotions
+    ADD CONSTRAINT promotions_slug_key UNIQUE (slug);
+
+
+--
 -- Name: redemption_options redemption_options_pkey; Type: CONSTRAINT; Schema: membership; Owner: -
 --
 
@@ -60345,6 +60386,13 @@ CREATE INDEX points_expiry_notices_member_expires ON membership.points_expiry_no
 --
 
 CREATE UNIQUE INDEX portal_config_singleton_key_uidx ON membership.portal_config USING btree (singleton_key);
+
+
+--
+-- Name: promotions_status_window; Type: INDEX; Schema: membership; Owner: -
+--
+
+CREATE INDEX promotions_status_window ON membership.promotions USING btree (status, starts_on, ends_on);
 
 
 --
