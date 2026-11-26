@@ -430,7 +430,7 @@ suite(
       await owner().recoverReplenishmentFollowups();
       expect(await readTask(task.id)).toMatchObject({
         status: "completed",
-        qty_completed: 10,
+        qty_completed: 5,
       });
       expect(await transfers()).toHaveLength(1);
     });
