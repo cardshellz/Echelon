@@ -20,6 +20,7 @@ import {
   unchangedOrderEditSnapshot,
   recoveryFinancials,
   shippingWasReplaced,
+  shippingChargesDiffer,
   unchangedOrderEditRefundPayments,
   financialsForQuotedLines,
 } from "../application/order-edit-evidence";
@@ -99,6 +100,12 @@ import type {
 import { SHOPIFY_CALCULATED_LINE_ID_PATTERN } from "@shared/order-edits/shopify-edit-identity";
 import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
+import {
+  orderEditShippingChargeKey,
+  orderEditShippingCharges,
+  orderEditShippingTitle,
+  type OrderEditShippingRepricing,
+} from "@shared/order-edits/order-edit-shipping";
 import * as gql from "./shopify-order-edit.queries";
 import { ShopifyOrderEditShippingCalculator } from "./shopify-order-edit-shipping.calculator";
 import type {
@@ -1671,15 +1678,11 @@ export class ShopifyOrderEditProvider
       netCents: baseline.shippingCents,
       discountLabels: baseline.financials!.shippingDiscountLabels,
     };
-    if (
-      shippingRepricing.netCents !== baseline.shippingCents ||
-      shippingRepricing.title !== baseline.shippingContext?.lines[0]?.title
-    ) {
+    if (shippingChargesDiffer(baseline, shippingRepricing)) {
       calculated = await this.replaceShipping(
         credentials,
         calculated,
-        shippingRepricing.title,
-        shippingRepricing.netCents,
+        orderEditShippingCharges(shippingRepricing),
       );
       shippingFinancials = {
         grossCents: shippingRepricing.netCents,
@@ -2030,17 +2033,16 @@ export class ShopifyOrderEditProvider
       discountLabels: baseline.financials!.shippingDiscountLabels,
     };
     if (
-      shippingRepricing.netCents !== baseline.shippingCents ||
-      (baseline.shippingContext &&
-        shippingRepricing.title !== baseline.shippingContext.lines[0]?.title)
+      baseline.shippingContext
+        ? shippingChargesDiffer(baseline, shippingRepricing)
+        : shippingRepricing.netCents !== baseline.shippingCents
     ) {
       // Admin Order Edit cannot apply a new checkout shipping Function discount.
-      // Store the verified net charge; preserve the native rate/benefit separately as audit evidence.
+      // Store each delivery group's verified net charge; preserve the native rate/benefit separately as audit evidence.
       calculated = await this.replaceShipping(
         credentials,
         calculated,
-        shippingRepricing.title,
-        shippingRepricing.netCents,
+        orderEditShippingCharges(shippingRepricing),
       );
       shippingFinancials = {
         grossCents: shippingRepricing.netCents,
@@ -2442,12 +2444,17 @@ export class ShopifyOrderEditProvider
     return this.credentials(connectionId);
   }
 
+  /** Replace every delivery charge with the given ones: one custom charge per delivery group. */
   private async replaceShipping(
     credentials: OrderEditCredentials,
     calculated: Calculated,
-    title: string,
-    grossCents: number,
+    charges: ReadonlyArray<{ title: string; netCents: number }>,
   ): Promise<Calculated> {
+    if (charges.length === 0)
+      fail(
+        "SHIPPING_REPLACEMENT_UNVERIFIED",
+        "An order needs at least one delivery charge.",
+      );
     const originalId = calculated.originalOrder.id;
     for (const line of calculated.shippingLines.filter(
       (line) => line.stagedStatus !== "REMOVED",
@@ -2469,30 +2476,39 @@ export class ShopifyOrderEditProvider
         originalId,
       );
     }
-    calculated = readCalculated(
-      (
-        await this.mutate(
-          credentials,
-          gql.ADD_SHIPPING_MUTATION,
-          {
-            id: calculated.id,
-            shippingLine: {
-              title,
-              price: { amount: decimal(grossCents), currencyCode: "USD" },
+    for (const charge of charges)
+      calculated = readCalculated(
+        (
+          await this.mutate(
+            credentials,
+            gql.ADD_SHIPPING_MUTATION,
+            {
+              id: calculated.id,
+              shippingLine: {
+                title: charge.title,
+                price: {
+                  amount: decimal(charge.netCents),
+                  currencyCode: "USD",
+                },
+              },
             },
-          },
-          "orderEditAddShippingLine",
-        )
-      ).calculatedOrder,
-      originalId,
-    );
+            "orderEditAddShippingLine",
+          )
+        ).calculatedOrder,
+        originalId,
+      );
     const active = calculated.shippingLines.filter(
       (line) => line.stagedStatus !== "REMOVED",
     );
     if (
-      active.length !== 1 ||
-      active[0].title !== title ||
-      money(active[0].price) !== grossCents
+      active.length !== charges.length ||
+      active.some((line) => !line.title) ||
+      orderEditShippingChargeKey(
+        active.map((line) => ({
+          title: line.title!,
+          netCents: money(line.price),
+        })),
+      ) !== orderEditShippingChargeKey(charges)
     )
       fail(
         "SHIPPING_REPLACEMENT_UNVERIFIED",
@@ -3062,7 +3078,7 @@ export class ShopifyOrderEditProvider
     if (shippingReplaced) {
       if (
         !baseline.shippingContext ||
-        baseline.shippingContext.lines.length !== 1 ||
+        baseline.shippingContext.lines.length === 0 ||
         !baseline.financials
       )
         fail(
@@ -3070,11 +3086,11 @@ export class ShopifyOrderEditProvider
           "The original delivery charge cannot be restored exactly.",
           "unknown",
         );
+      // Each original delivery charge returns as a custom charge at the amount the customer paid.
       calculated = await this.replaceShipping(
         credentials,
         calculated,
-        baseline.shippingContext.lines[0].title,
-        baseline.shippingCents,
+        baseline.shippingContext.lines,
       );
     }
     verifyCalculated(
@@ -3167,15 +3183,10 @@ export class ShopifyOrderEditProvider
       shippingCents: baseline.shippingCents,
       ...(shippingReplaced && baseline.shippingContext
         ? {
-            shippingRepricing: {
-              title: baseline.shippingContext.lines[0].title,
-              code: baseline.shippingContext.lines[0].code ?? "",
-              source: baseline.shippingContext.lines[0].source ?? "",
-              grossCents: baseline.financials!.shippingGrossCents,
-              netCents: baseline.shippingCents,
-              discountCents: baseline.financials!.shippingDiscountCents,
-              discountLabels: baseline.financials!.shippingDiscountLabels,
-            },
+            shippingRepricing: restoredShippingRepricing(
+              baseline.shippingContext,
+              baseline.financials!,
+            ),
           }
         : {}),
       financials: financialsForQuotedLines(financials, expected),
@@ -4299,6 +4310,34 @@ function verifyCalculatedFinancials(
     taxesIncluded: baseline.financials.taxesIncluded,
     totalCents: money(calculated.totalPriceSet),
   });
+}
+
+/** The original delivery charges, as the repricing a recovery edit restores. */
+function restoredShippingRepricing(
+  context: NonNullable<OrderEditSnapshot["shippingContext"]>,
+  financials: OrderEditFinancials,
+): OrderEditShippingRepricing {
+  const groups = context.lines.map((line) => ({
+    deliveryProfileId: null,
+    title: line.title,
+    code: line.code ?? "",
+    source: line.source ?? "",
+    grossCents: line.grossCents,
+    netCents: line.netCents,
+    discountCents: subtract(line.grossCents, line.netCents),
+    discountLabels:
+      line.grossCents > line.netCents ? financials.shippingDiscountLabels : [],
+  }));
+  return {
+    title: orderEditShippingTitle(groups.map((group) => group.title)),
+    code: groups[0].code,
+    source: groups[0].source,
+    grossCents: financials.shippingGrossCents,
+    netCents: financials.shippingCents,
+    discountCents: financials.shippingDiscountCents,
+    discountLabels: financials.shippingDiscountLabels,
+    ...(groups.length > 1 ? { groups } : {}),
+  };
 }
 
 function shippingItems(

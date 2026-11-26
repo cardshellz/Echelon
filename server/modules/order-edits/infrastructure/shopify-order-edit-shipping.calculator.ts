@@ -7,8 +7,11 @@ import {
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   orderEditShippingRepricingSchema,
+  orderEditShippingTitle,
+  type OrderEditShippingGroup,
   type OrderEditShippingRepricing,
 } from "@shared/order-edits/order-edit-shipping";
+import type { OrderEditTaxLine } from "@shared/order-edits/order-edit-taxes";
 import {
   OrderEditProviderError,
   type OrderEditSnapshot,
@@ -80,6 +83,26 @@ const calculationSchema = z.object({
   }),
 });
 
+const deliveryGroupsSchema = z.object({
+  nodes: z.array(
+    z.object({
+      id: z.string().min(1),
+      deliveryProfile: z.object({ id: z.string().min(1) }).nullable(),
+      product: z.object({
+        shippingGroup: z.object({ value: z.string() }).nullable(),
+      }),
+    }),
+  ),
+});
+interface DeliveryGroup {
+  deliveryProfileId: string;
+  items: OrderEditShippingItem[];
+}
+
+// The label is the one the checkout shipping Function reads to total each group's spend.
+const DELIVERY_GROUPS_QUERY = `query EchelonEditDeliveryGroups($ids: [ID!]!) {
+  nodes(ids: $ids) { ... on ProductVariant { id deliveryProfile { id } product { shippingGroup: metafield(namespace: "cardshellz", key: "shipping_group") { value } } } }
+}`;
 const SHIPPING_OPTIONS_QUERY = `query EchelonEditShippingOptions($input: DraftOrderAvailableDeliveryOptionsInput!) {
   draftOrderAvailableDeliveryOptions(input: $input) { availableShippingRates { handle title code source price { amount currencyCode } } }
 }`;
@@ -196,15 +219,29 @@ export class ShopifyOrderEditShippingCalculator
     const context = snapshot.shippingContext;
     if (
       !context ||
-      context.lines.length !== 1 ||
+      context.lines.length === 0 ||
       !snapshot.financials ||
       !snapshot.customerId
     )
       fail(
         "SHIPPING_CONTEXT_UNAVAILABLE",
-        "A complete shipping address, customer, and one original delivery service are required to reprice this order.",
+        "A complete shipping address, customer, and original delivery service are required to reprice this order.",
       );
+    // Every delivery group is repriced on the service the customer chose at
+    // checkout, so the order's charges must all name that one service.
     const original = context.lines[0];
+    const byCode = context.lines.every((line) => line.code && line.source);
+    if (
+      context.lines.some((line) =>
+        byCode
+          ? line.code !== original.code || line.source !== original.source
+          : line.title !== original.title,
+      )
+    )
+      fail(
+        "SHIPPING_SERVICE_UNAVAILABLE",
+        "This order's delivery charges use different services. Staff must review the shipping choice.",
+      );
     const destination = context.address;
     if (
       destination.countryCodeV2 !== "US" ||
@@ -225,8 +262,6 @@ export class ShopifyOrderEditShippingCalculator
       zip: destination.zip,
       countryCode: destination.countryCodeV2,
     };
-    const lineItems = shippingCalculationLines(items);
-    const purchasingEntity = { customerId: snapshot.customerId };
     const shippingCodes = (snapshot.discountRules ?? [])
       .filter(
         (rule) =>
@@ -234,11 +269,163 @@ export class ShopifyOrderEditShippingCalculator
           rule.targetType === "SHIPPING_LINE",
       )
       .map((rule) => rule.label);
+    // Reject invalid items before any request is sent.
+    shippingCalculationLines(items);
+    const groups = await this.deliveryGroups(snapshot, items);
+    if (groups.length > 1 && shippingCodes.length > 0)
+      fail(
+        "SHIPPING_GROUPS_UNSUPPORTED",
+        "A shipping code on an order with more than one delivery charge needs staff review.",
+      );
+    const results: Array<
+      Awaited<
+        ReturnType<ShopifyOrderEditShippingCalculator["groupCalculation"]>
+      >
+    > = [];
+    // Shopify's calculation returns one delivery charge per request, so each
+    // delivery group is priced by its own native calculation, as checkout does.
+    for (const group of groups)
+      results.push(
+        await this.groupCalculation(snapshot, group, {
+          shippingAddress,
+          purchasingEntity: { customerId: snapshot.customerId },
+          discountCodes: shippingCodes,
+          taxesIncluded: snapshot.financials.taxesIncluded,
+          matches: (rate) =>
+            byCode
+              ? rate.code === original.code && rate.source === original.source
+              : rate.title === original.title,
+        }),
+      );
+    const first = results[0].charge;
+    if (
+      results.some(
+        ({ charge }) =>
+          charge.code !== first.code || charge.source !== first.source,
+      )
+    )
+      fail(
+        "SHIPPING_SERVICE_UNAVAILABLE",
+        "The delivery groups cannot be priced on one delivery service. Staff must review the shipping choice.",
+      );
+    const total = (read: (charge: OrderEditShippingGroup) => number) =>
+      results.reduce((sum, { charge }) => sum + read(charge), 0);
+    const { deliveryProfileId: _profile, ...single } = first;
+    const shippingRepricing = parse(
+      orderEditShippingRepricingSchema,
+      results.length === 1
+        ? single
+        : {
+            title: orderEditShippingTitle(
+              results.map(({ charge }) => charge.title),
+            ),
+            code: first.code,
+            source: first.source,
+            grossCents: total((charge) => charge.grossCents),
+            netCents: total((charge) => charge.netCents),
+            discountCents: total((charge) => charge.discountCents),
+            discountLabels: [
+              ...new Set(
+                results.flatMap(({ charge }) => charge.discountLabels),
+              ),
+            ],
+            groups: results.map(({ charge }) => charge),
+          },
+    );
+    const amounts = (
+      read: (result: (typeof results)[number]) => number | null,
+    ) =>
+      results.reduce<number | null>((sum, result) => {
+        const value = read(result);
+        return sum === null || value === null ? null : sum + value;
+      }, 0);
+    return {
+      shippingRepricing,
+      taxCents: amounts((result) => result.taxCents),
+      taxLines:
+        results.length === 1
+          ? results[0].taxLines
+          : mergeTaxLines(results.map((result) => result.taxLines)),
+      totalCents: amounts((result) => result.totalCents),
+    };
+  }
+
+  /** Split the revised items the way checkout does: one delivery group per shipping profile. */
+  private async deliveryGroups(
+    snapshot: OrderEditSnapshot,
+    items: OrderEditShippingItem[],
+  ): Promise<DeliveryGroup[]> {
+    const ids = [...new Set(items.map((item) => item.variantId))];
+    const nodes = parse(
+      deliveryGroupsSchema,
+      await this.request(snapshot, DELIVERY_GROUPS_QUERY, { ids }),
+    ).nodes;
+    if (
+      nodes.length !== ids.length ||
+      nodes.some((node, index) => node.id !== ids[index])
+    )
+      fail(
+        "SHIPPING_RESPONSE_INVALID",
+        "Shopify did not return the delivery group of every revised item.",
+      );
+    const groups = new Map<string, DeliveryGroup>();
+    const profilesByLabel = new Map<string | null, Set<string>>();
+    for (const node of nodes) {
+      if (!node.deliveryProfile)
+        fail(
+          "SHIPPING_GROUPS_UNSUPPORTED",
+          "A revised item has no shipping profile. Staff must review the shipping.",
+        );
+      const profile = node.deliveryProfile.id;
+      const label = node.product.shippingGroup?.value.trim() || null;
+      profilesByLabel.set(
+        label,
+        (profilesByLabel.get(label) ?? new Set<string>()).add(profile),
+      );
+      const group = groups.get(profile) ?? {
+        deliveryProfileId: profile,
+        items: [],
+      };
+      group.items.push(...items.filter((item) => item.variantId === node.id));
+      groups.set(profile, group);
+    }
+    // Free-shipping thresholds total each label's spend across the whole cart.
+    // A per-group calculation sees that total only while every label, including
+    // "no label", ships inside a single delivery group.
+    if (
+      groups.size > 1 &&
+      [...profilesByLabel.values()].some((profiles) => profiles.size > 1)
+    )
+      fail(
+        "SHIPPING_GROUPS_UNSUPPORTED",
+        "These items share a free-shipping group across more than one delivery charge. Staff must review the shipping.",
+      );
+    return [...groups.values()].sort((left, right) =>
+      left.deliveryProfileId < right.deliveryProfileId
+        ? -1
+        : left.deliveryProfileId > right.deliveryProfileId
+          ? 1
+          : 0,
+    );
+  }
+
+  private async groupCalculation(
+    snapshot: OrderEditSnapshot,
+    group: DeliveryGroup,
+    checkout: {
+      shippingAddress: Record<string, string | null>;
+      purchasingEntity: { customerId: string };
+      discountCodes: string[];
+      taxesIncluded: boolean;
+      matches: (rate: z.infer<typeof rateSchema>) => boolean;
+    },
+  ) {
+    const items = group.items;
     const input = {
-      lineItems,
-      shippingAddress,
-      purchasingEntity,
-      discountCodes: shippingCodes,
+      lineItems: shippingCalculationLines(items),
+      shippingAddress: checkout.shippingAddress,
+      purchasingEntity: checkout.purchasingEntity,
+      discountCodes: checkout.discountCodes,
     };
     // Products already include verified coupons/rewards/member pricing. Rate selection does not apply them again.
     const rates = parse(
@@ -247,11 +434,7 @@ export class ShopifyOrderEditShippingCalculator
         input: { ...input, acceptAutomaticDiscounts: false },
       }),
     ).draftOrderAvailableDeliveryOptions.availableShippingRates;
-    const matching = rates.filter((rate) =>
-      original.code && original.source
-        ? rate.code === original.code && rate.source === original.source
-        : rate.title === original.title,
-    );
+    const matching = rates.filter(checkout.matches);
     if (matching.length !== 1)
       fail(
         "SHIPPING_SERVICE_UNAVAILABLE",
@@ -280,7 +463,7 @@ export class ShopifyOrderEditShippingCalculator
         "Shopify could not calculate shipping for the revised items.",
       );
     const calculated = result.calculatedDraftOrder;
-    if (calculated.taxesIncluded !== snapshot.financials.taxesIncluded)
+    if (calculated.taxesIncluded !== checkout.taxesIncluded)
       fail(
         "SHIPPING_TAX_CONTEXT_CHANGED",
         "The shipping calculation does not use this order's tax treatment.",
@@ -346,7 +529,8 @@ export class ShopifyOrderEditShippingCalculator
         "SHIPPING_DISCOUNT_UNVERIFIED",
         "Shipping discounts do not reconcile to the checkout charge.",
       );
-    const shippingRepricing = parse(orderEditShippingRepricingSchema, {
+    const charge: OrderEditShippingGroup = {
+      deliveryProfileId: group.deliveryProfileId,
       title: selected.title,
       code: selected.code,
       source: selected.source,
@@ -358,9 +542,9 @@ export class ShopifyOrderEditShippingCalculator
           discounts.map((discount) => discount.code ?? discount.title),
         ),
       ],
-    });
+    };
     return {
-      shippingRepricing,
+      charge,
       taxCents: calculated.totalTaxSet ? amount(calculated.totalTaxSet) : null,
       taxLines: readShopifyOrderEditTaxLines(calculated.taxLines),
       totalCents: calculated.totalPriceSet
@@ -368,4 +552,23 @@ export class ShopifyOrderEditShippingCalculator
         : null,
     };
   }
+}
+
+/** One tax breakdown for the order: the same tax in several delivery groups is added together. */
+function mergeTaxLines(
+  groups: Array<OrderEditTaxLine[] | undefined>,
+): OrderEditTaxLine[] | undefined {
+  if (groups.some((lines) => lines === undefined)) return undefined;
+  const merged = new Map<string, OrderEditTaxLine>();
+  for (const line of groups.flatMap((lines) => lines!)) {
+    const key = canonicalJson([line.title, line.ratePercentage]);
+    const previous = merged.get(key);
+    merged.set(
+      key,
+      previous
+        ? { ...previous, amountCents: previous.amountCents + line.amountCents }
+        : { ...line },
+    );
+  }
+  return [...merged.values()];
 }
