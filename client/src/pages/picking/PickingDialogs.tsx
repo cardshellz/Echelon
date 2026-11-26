@@ -40,6 +40,37 @@ export type FoundOnShelfPromptState = {
   replenSourceLocationId?: number;
 };
 
+export type CaseBreakPromptSourceOption = {
+  locationId: number;
+  locationCode: string;
+  variantId: number;
+  variantSku: string | null;
+  variantName: string | null;
+  availableQty: number;
+  unitsPerVariant: number;
+  qtySourceUnits: number;
+  qtyTargetUnits: number;
+  replenMethod: string;
+};
+
+export type CaseBreakPromptState = {
+  itemId: number;
+  sku: string;
+  locationCode: string;
+  systemQty: number;
+  status: "pending" | "in_progress" | "completed" | "short";
+  pickedQuantity: number;
+  pickMethod: "scan" | "manual" | "pick_all" | "button";
+  sourceLocationId: number | null;
+  sourceLocationCode: string;
+  sourceVariantSku: string | null;
+  sourceVariantName: string | null;
+  qtySourceUnits: number;
+  qtyTargetUnits: number;
+  replenMethod: string;
+  availableSources?: CaseBreakPromptSourceOption[];
+};
+
 export interface PickingDialogsProps {
   multiQtyOpen: boolean;
   setMultiQtyOpen: (open: boolean) => void;
@@ -52,6 +83,12 @@ export interface PickingDialogsProps {
   setFoundOnShelfPrompt?: (prompt: FoundOnShelfPromptState | null) => void;
   onConfirmFoundOnShelf?: () => void;
   onShortFromFoundOnShelf?: () => void;
+  caseBreakPrompt?: CaseBreakPromptState | null;
+  setCaseBreakPrompt?: (prompt: CaseBreakPromptState | null) => void;
+  onSelectCaseBreakSource?: (locationId: number) => void;
+  onConfirmCaseBreakYes?: () => void;
+  onConfirmCaseBreakNo?: () => void;
+  onShortFromCaseBreak?: () => void;
   editQtyOpen: boolean;
   setEditQtyOpen: (open: boolean) => void;
   editQtyIdx: number | null;
@@ -113,6 +150,12 @@ export function PickingDialogs({
   setFoundOnShelfPrompt,
   onConfirmFoundOnShelf,
   onShortFromFoundOnShelf,
+  caseBreakPrompt,
+  setCaseBreakPrompt,
+  onSelectCaseBreakSource,
+  onConfirmCaseBreakYes,
+  onConfirmCaseBreakNo,
+  onShortFromCaseBreak,
   editQtyOpen,
   setEditQtyOpen,
   editQtyIdx,
@@ -750,6 +793,93 @@ export function PickingDialogs({
             >
               Cancel
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Inline Case-Break Yes / No Confirmation Dialog */}
+      <Dialog
+        open={Boolean(caseBreakPrompt)}
+        onOpenChange={(open) => {
+          if (!open && setCaseBreakPrompt) setCaseBreakPrompt(null);
+        }}
+      >
+        <DialogContent className="w-[95vw] max-w-sm p-4" data-testid="dialog-case-break-confirm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-center gap-2 text-primary text-xl">
+              <PackageCheck className="h-5 w-5" />
+              Did a Case Break Happen?
+            </DialogTitle>
+            {caseBreakPrompt && (
+              <DialogDescription className="text-center space-y-2 pt-1">
+                <div>
+                  System shows <span className="font-bold text-foreground">{caseBreakPrompt.systemQty}</span> in{" "}
+                  <span className="font-mono font-bold text-foreground">{caseBreakPrompt.locationCode}</span> for{" "}
+                  <span className="font-mono font-semibold text-foreground">{caseBreakPrompt.sku}</span>.
+                </div>
+                <div className="text-sm font-medium text-foreground">
+                  Did you break{" "}
+                  <span className="font-bold">{caseBreakPrompt.qtySourceUnits}</span>{" "}
+                  {caseBreakPrompt.sourceVariantName || caseBreakPrompt.sourceVariantSku || "Case"} from{" "}
+                  <span className="font-mono font-bold">{caseBreakPrompt.sourceLocationCode}</span>?
+                </div>
+                {caseBreakPrompt.availableSources && caseBreakPrompt.availableSources.length > 1 && (
+                  <div className="pt-1 space-y-1">
+                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Reserve Bin Pulled From
+                    </div>
+                    <div className="flex flex-wrap justify-center gap-1.5">
+                      {caseBreakPrompt.availableSources.map((src) => {
+                        const selected = src.locationId === caseBreakPrompt.sourceLocationId;
+                        return (
+                          <button
+                            key={src.locationId}
+                            type="button"
+                            onClick={() => onSelectCaseBreakSource && onSelectCaseBreakSource(src.locationId)}
+                            className={cn(
+                              "px-2.5 py-1.5 rounded-md text-xs font-mono font-bold border transition-colors min-h-[36px]",
+                              selected
+                                ? "bg-primary text-primary-foreground border-primary"
+                                : "bg-muted/50 text-foreground border-border hover:bg-muted",
+                            )}
+                          >
+                            {src.locationCode} ({src.availableQty})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </DialogDescription>
+            )}
+          </DialogHeader>
+
+          <DialogFooter className="flex-col gap-2.5 sm:flex-col pt-2">
+            <Button
+              className="w-full h-14 min-h-[48px] text-base font-semibold bg-emerald-600 hover:bg-emerald-700"
+              onClick={() => onConfirmCaseBreakYes && onConfirmCaseBreakYes()}
+              data-testid="button-case-break-yes"
+            >
+              YES — Broke {caseBreakPrompt?.qtySourceUnits ?? 1} from {caseBreakPrompt?.sourceLocationCode || "Reserve"}
+            </Button>
+            <Button
+              variant="secondary"
+              className="w-full h-14 min-h-[48px] text-base font-semibold border border-border"
+              onClick={() => onConfirmCaseBreakNo && onConfirmCaseBreakNo()}
+              data-testid="button-case-break-no"
+            >
+              NO — Stock Was in {caseBreakPrompt?.locationCode || "Bin"}
+            </Button>
+            {onShortFromCaseBreak && (
+              <Button
+                variant="outline"
+                className="w-full h-11 min-h-[44px] text-amber-700 border-amber-300 text-xs"
+                onClick={onShortFromCaseBreak}
+                data-testid="button-short-from-case-break"
+              >
+                Both Empty — Short Pick
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

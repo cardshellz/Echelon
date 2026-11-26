@@ -130,6 +130,7 @@ export function usePickingFocusAndRefs({
   replenGuidanceOpen = false,
   soundSettingsOpen = false,
   foundOnShelfOpen = false,
+  caseBreakOpen = false,
   activeWork,
 }: {
   view: PickingViewState;
@@ -141,6 +142,7 @@ export function usePickingFocusAndRefs({
   replenGuidanceOpen?: boolean;
   soundSettingsOpen?: boolean;
   foundOnShelfOpen?: boolean;
+  caseBreakOpen?: boolean;
   activeWork: PickBatch | SingleOrder | undefined;
 }) {
   const manualInputRef = useRef<HTMLInputElement>(null);
@@ -156,7 +158,8 @@ export function usePickingFocusAndRefs({
     editQtyOpen ||
     replenGuidanceOpen ||
     soundSettingsOpen ||
-    foundOnShelfOpen;
+    foundOnShelfOpen ||
+    caseBreakOpen;
 
   const maintainFocus = useCallback(() => {
     if (view === "picking" && !anyDialogOpen) {
@@ -234,6 +237,7 @@ export function usePickingScanHandlers({
   replenGuidanceOpen = false,
   soundSettingsOpen = false,
   foundOnShelfOpen = false,
+  caseBreakOpen = false,
   setScanInput,
   setScanStatus,
   setDebugLog,
@@ -260,6 +264,7 @@ export function usePickingScanHandlers({
   replenGuidanceOpen?: boolean;
   soundSettingsOpen?: boolean;
   foundOnShelfOpen?: boolean;
+  caseBreakOpen?: boolean;
   setScanInput: React.Dispatch<React.SetStateAction<string>>;
   setScanStatus: React.Dispatch<React.SetStateAction<"idle" | "success" | "error">>;
   setDebugLog: React.Dispatch<React.SetStateAction<string[]>>;
@@ -286,7 +291,8 @@ export function usePickingScanHandlers({
     editQtyOpen ||
     replenGuidanceOpen ||
     soundSettingsOpen ||
-    foundOnShelfOpen;
+    foundOnShelfOpen ||
+    caseBreakOpen;
 
   useEffect(() => {
     if (view !== "picking" || anyDialogOpen) {

@@ -56,7 +56,11 @@ import {
   PickingQueueView,
 } from "./picking/PickingQueueViews";
 import { PickingActiveItemView } from "./picking/PickingActiveItemView";
-import { PickingDialogs, type FoundOnShelfPromptState } from "./picking/PickingDialogs";
+import {
+  PickingDialogs,
+  type CaseBreakPromptState,
+  type FoundOnShelfPromptState,
+} from "./picking/PickingDialogs";
 
 export * from "./picking/picking-types-and-helpers";
 export * from "./picking/PickingBadges";
@@ -219,6 +223,7 @@ function PickingWorkspace() {
   const [pickQty, setPickQty] = useState(1);
   const [selectedReplenSourceByItem, setSelectedReplenSourceByItem] = useState<Record<number, number>>({});
   const [foundOnShelfPrompt, setFoundOnShelfPrompt] = useState<FoundOnShelfPromptState | null>(null);
+  const [caseBreakPrompt, setCaseBreakPrompt] = useState<CaseBreakPromptState | null>(null);
   const [allocationDialogOpen, setAllocationDialogOpen] = useState(false);
   const [allocationTargetIndex, setAllocationTargetIndex] = useState<number | null>(null);
   const [allocationBinCode, setAllocationBinCode] = useState("");
@@ -381,6 +386,7 @@ function PickingWorkspace() {
       pickMethod,
       replenSourceLocationId,
       confirmFoundOnShelf,
+      confirmCaseBreak,
     }: {
       itemId: number;
       status: ItemStatus;
@@ -389,6 +395,7 @@ function PickingWorkspace() {
       pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short";
       replenSourceLocationId?: number;
       confirmFoundOnShelf?: boolean;
+      confirmCaseBreak?: boolean;
     }) => {
       const item = singleQueue.flatMap(order => order.items).find(item => item.id === itemId)
         ?? queue.flatMap(batch => batch.items).find(item => item.id === itemId);
@@ -404,6 +411,7 @@ function PickingWorkspace() {
       return updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod, source, {
         replenSourceLocationId: effectiveReplenSourceId,
         confirmFoundOnShelf: effectiveConfirmFoundOnShelf,
+        confirmCaseBreak,
       });
     },
     onSuccess: (data: PickResponse) => {
@@ -488,6 +496,39 @@ function PickingWorkspace() {
 
       const errCode = (error as any)?.code;
       const errDetails = (error as any)?.details ?? {};
+      if (
+        errCode === "case_break_confirmation_required" &&
+        variables.status !== "short" &&
+        typeof setCaseBreakPrompt === "function"
+      ) {
+        const matchedItem =
+          singleQueue.flatMap((o) => o.items).find((it) => it.id === variables.itemId) ??
+          queue.flatMap((b) => b.items).find((it) => it.id === variables.itemId);
+        const cb = errDetails.caseBreak ?? {};
+        setCaseBreakPrompt({
+          itemId: variables.itemId,
+          sku: matchedItem?.sku || "SKU",
+          locationCode: String(errDetails.locationCode || matchedItem?.location || "Bin"),
+          systemQty: Number(errDetails.systemQty ?? 0),
+          status: variables.status === "in_progress" ? "in_progress" : "completed",
+          pickedQuantity: Number(variables.pickedQuantity ?? matchedItem?.qty ?? 1),
+          pickMethod:
+            variables.pickMethod && variables.pickMethod !== "short"
+              ? variables.pickMethod
+              : "manual",
+          sourceLocationId: cb.sourceLocationId ?? variables.replenSourceLocationId ?? null,
+          sourceLocationCode: String(cb.sourceLocationCode || "Reserve"),
+          sourceVariantSku: cb.sourceVariantSku ?? null,
+          sourceVariantName: cb.sourceVariantName ?? null,
+          qtySourceUnits: Math.max(1, Number(cb.qtySourceUnits ?? 1)),
+          qtyTargetUnits: Math.max(1, Number(cb.qtyTargetUnits ?? 1)),
+          replenMethod: String(cb.replenMethod || "case_break"),
+          availableSources: Array.isArray(cb.availableSources) ? cb.availableSources : undefined,
+        });
+        playSound("error");
+        return;
+      }
+
       if (
         errCode === "found_on_shelf_confirmation_required" &&
         variables.status !== "short" &&
@@ -738,6 +779,7 @@ function PickingWorkspace() {
     replenGuidanceOpen,
     soundSettingsOpen,
     foundOnShelfOpen: Boolean(foundOnShelfPrompt),
+    caseBreakOpen: Boolean(caseBreakPrompt),
     activeWork,
   });
 
@@ -1338,6 +1380,7 @@ function PickingWorkspace() {
     replenGuidanceOpen,
     soundSettingsOpen,
     foundOnShelfOpen: Boolean(foundOnShelfPrompt),
+    caseBreakOpen: Boolean(caseBreakPrompt),
     setScanInput,
     setScanStatus,
     setDebugLog,
@@ -1564,6 +1607,66 @@ function PickingWorkspace() {
           const targetIdx = activeWork?.items.findIndex((it) => it.id === foundOnShelfPrompt.itemId) ?? -1;
           const target = targetIdx >= 0 ? activeWork?.items[targetIdx] : currentItem;
           setFoundOnShelfPrompt(null);
+          setShortPickListIndex(pickerViewMode === "list" && targetIdx >= 0 ? targetIdx : null);
+          setShortPickQty(String(target?.picked || 0));
+          setShortPickReason("out_of_stock");
+          setShortPickOpen(true);
+        }}
+        caseBreakPrompt={caseBreakPrompt}
+        setCaseBreakPrompt={setCaseBreakPrompt}
+        onSelectCaseBreakSource={(locationId) => {
+          setCaseBreakPrompt((prev) => {
+            if (!prev) return prev;
+            const chosen = prev.availableSources?.find((s) => s.locationId === locationId);
+            return {
+              ...prev,
+              sourceLocationId: locationId,
+              ...(chosen
+                ? {
+                    sourceLocationCode: chosen.locationCode,
+                    sourceVariantSku: chosen.variantSku,
+                    sourceVariantName: chosen.variantName,
+                    qtySourceUnits: chosen.qtySourceUnits,
+                    qtyTargetUnits: chosen.qtyTargetUnits,
+                    replenMethod: chosen.replenMethod,
+                  }
+                : {}),
+            };
+          });
+        }}
+        onConfirmCaseBreakYes={() => {
+          if (!caseBreakPrompt) return;
+          const prompt = caseBreakPrompt;
+          setCaseBreakPrompt(null);
+          updateItemMutation.mutate({
+            itemId: prompt.itemId,
+            status: prompt.status,
+            pickedQuantity: prompt.pickedQuantity,
+            pickMethod: prompt.pickMethod,
+            replenSourceLocationId: prompt.sourceLocationId ?? undefined,
+            confirmFoundOnShelf: false,
+            confirmCaseBreak: true,
+          });
+        }}
+        onConfirmCaseBreakNo={() => {
+          if (!caseBreakPrompt) return;
+          const prompt = caseBreakPrompt;
+          setCaseBreakPrompt(null);
+          updateItemMutation.mutate({
+            itemId: prompt.itemId,
+            status: prompt.status,
+            pickedQuantity: prompt.pickedQuantity,
+            pickMethod: prompt.pickMethod,
+            replenSourceLocationId: prompt.sourceLocationId ?? undefined,
+            confirmFoundOnShelf: false,
+            confirmCaseBreak: false,
+          });
+        }}
+        onShortFromCaseBreak={() => {
+          if (!caseBreakPrompt) return;
+          const targetIdx = activeWork?.items.findIndex((it) => it.id === caseBreakPrompt.itemId) ?? -1;
+          const target = targetIdx >= 0 ? activeWork?.items[targetIdx] : currentItem;
+          setCaseBreakPrompt(null);
           setShortPickListIndex(pickerViewMode === "list" && targetIdx >= 0 ? targetIdx : null);
           setShortPickQty(String(target?.picked || 0));
           setShortPickReason("out_of_stock");

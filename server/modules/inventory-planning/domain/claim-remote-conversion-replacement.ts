@@ -71,8 +71,9 @@ export function isReplaceableRemoteConversion(
   candidate: RemoteConversionCandidate,
   pickWarehouseId: number,
   targetVariantId: number,
+  allowSameWarehouse = false,
 ): boolean {
-  if (candidate.warehouseId === pickWarehouseId) return false;
+  if (!allowSameWarehouse && candidate.warehouseId === pickWarehouseId) return false;
   if (!REPLACEABLE_OPERATION_TYPES.has(candidate.operationType)) return false;
   if (!REPLACEABLE_OPERATION_STATES.has(candidate.status)) return false;
   if (candidate.parentOperationKey !== null) return false;
@@ -103,10 +104,17 @@ export function selectRemoteConversionsToReplace(input: {
   pickWarehouseId: number;
   targetVariantId: number;
   requiredQty: bigint;
+  allowSameWarehouse?: boolean;
 }): RemoteConversionSelection | null {
   if (input.requiredQty <= BigInt(0)) return null;
   const eligible = input.candidates
-    .filter((candidate) => isReplaceableRemoteConversion(candidate, input.pickWarehouseId, input.targetVariantId))
+    .filter((candidate) =>
+      isReplaceableRemoteConversion(
+        candidate,
+        input.pickWarehouseId,
+        input.targetVariantId,
+        input.allowSameWarehouse === true,
+      ))
     .sort((left, right) => left.operationKey.localeCompare(right.operationKey, "en"));
   const operationKeys: string[] = [];
   let replacedTargetQty = BigInt(0);

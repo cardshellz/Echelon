@@ -21,4 +21,7 @@ export {
   updateDefaultProcurementPolicySettingsWithCasInTx,
   updateWarehouseAutoDraftAndForecastSettingsInTx,
   relocateSlotReplenPointersInInventory,
+  createDraftDiscrepancyCycleCountInInventory,
+  createInProgressShortPickSpotCountInInventory,
+  finalizeShortPickSpotCountInInventory,
 } from "./infrastructure/cross-module-inventory-mutations.repository";

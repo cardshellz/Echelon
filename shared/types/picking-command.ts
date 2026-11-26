@@ -12,6 +12,7 @@ export const pickingCommandSchema = z
     warehouseLocationId: quantity.positive().optional(),
     replenSourceLocationId: quantity.positive().optional(),
     confirmFoundOnShelf: z.boolean().optional(),
+    confirmCaseBreak: z.boolean().optional(),
   })
   .strict();
 export const unpickingCommandSchema = z

@@ -2877,19 +2877,10 @@ export default function Replenishment() {
                 />
               </div>
               <div>
-                <Label className="text-xs md:text-sm">Max Qty (Fill To)</Label>
-                <Input
-                  type="number"
-                  className="h-10"
-                  value={tierDefaultForm.maxQty}
-                  onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, maxQty: e.target.value })}
-                  placeholder="Auto (bin capacity)"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                  data-testid="input-tier-max-qty"
-                />
+                <Label className="text-xs md:text-sm">Batch Size</Label>
+                <div className="h-10 px-3 flex items-center rounded-md border bg-muted/40 text-xs text-muted-foreground">
+                  1 source unit per move
+                </div>
               </div>
             </div>
 
@@ -3090,19 +3081,10 @@ export default function Replenishment() {
                 />
               </div>
               <div>
-                <Label className="text-xs md:text-sm">Max Qty Override</Label>
-                <Input
-                  type="number"
-                  className="h-10"
-                  value={overrideForm.maxQty}
-                  onChange={(e) => setOverrideForm({ ...overrideForm, maxQty: e.target.value })}
-                  placeholder="Use default"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                  data-testid="input-override-max-qty"
-                />
+                <Label className="text-xs md:text-sm">Batch Size</Label>
+                <div className="h-10 px-3 flex items-center rounded-md border bg-muted/40 text-xs text-muted-foreground">
+                  1 source unit per move
+                </div>
               </div>
 
               <div>
@@ -3359,15 +3341,10 @@ export default function Replenishment() {
                 />
               </div>
               <div>
-                <Label className="text-xs md:text-sm">Max Qty</Label>
-                <Input
-                  type="number"
-                  className="h-10"
-                  value={locConfigForm.maxQty}
-                  onChange={(e) => setLocConfigForm({ ...locConfigForm, maxQty: e.target.value })}
-                  placeholder="Optional"
-                  autoComplete="off"
-                />
+                <Label className="text-xs md:text-sm">Batch Size</Label>
+                <div className="h-10 px-3 flex items-center rounded-md border bg-muted/40 text-xs text-muted-foreground">
+                  1 source unit per move
+                </div>
               </div>
             </div>
 

@@ -165,6 +165,17 @@ const canonicalAvailabilityClaimPickCommandBaseSchema = z.object({
    */
   wmsProgress: canonicalWmsPickProgressSchema.optional(),
   assemblyWork: assemblyOutputPickFenceSchema.optional(),
+  /**
+   * When true, picker confirmed physical stock was already in the pick bin (`[ NO ]`
+   * on inline case-break prompt), so untouched package conversions for this line
+   * are skipped and replaced by direct stock at the pick location.
+   */
+  skipPackageConversions: z.literal(true).optional(),
+  /**
+   * Optional reserve location selected by the picker (`R-11` instead of `R-10`)
+   * when confirming an inline case break (`[ YES ]`).
+   */
+  preferredConversionSourceLocationId: positiveInteger.optional(),
 });
 
 export const canonicalAvailabilityClaimPickCommandSchema = z.discriminatedUnion("locationStrategy", [
