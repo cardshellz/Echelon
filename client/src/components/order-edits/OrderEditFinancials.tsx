@@ -5,7 +5,10 @@ import type {
   OrderEditFinancials,
   OrderEditSettlement,
 } from "@shared/order-edits/order-edit-financials";
-import type { OrderEditShippingRepricing } from "@shared/order-edits/order-edit-shipping";
+import {
+  orderEditShippingCharges,
+  type OrderEditShippingRepricing,
+} from "@shared/order-edits/order-edit-shipping";
 import { formatOrderEditMoney } from "@/lib/order-edits";
 import {
   orderEditDiscountBreakdown,
@@ -195,18 +198,37 @@ export function OrderEditCalculationDetails({
           className="oe-shipping-rate"
           aria-label="Recalculated shipping"
         >
-          <h3>{shipping.title}</h3>
+          {/* An order whose items ship under more than one shipping profile has one delivery charge per profile. */}
+          {orderEditShippingCharges(shipping).map((charge, index, charges) => (
+            <div key={index}>
+              <h3>
+                {charges.length > 1
+                  ? `Delivery ${index + 1} of ${charges.length}: ${charge.title}`
+                  : charge.title}
+              </h3>
+              <dl className="oe-money-list">
+                <dt>Current checkout rate</dt>
+                <dd>{money(charge.grossCents)}</dd>
+                {charge.discountCents > 0 && (
+                  <>
+                    <dt className="oe-saving">
+                      {charge.discountLabels.join(", ") || "Shipping savings"}
+                    </dt>
+                    <dd className="oe-saving">
+                      −{money(charge.discountCents)}
+                    </dd>
+                  </>
+                )}
+                {charges.length > 1 && (
+                  <>
+                    <dt>Delivery charged</dt>
+                    <dd>{money(charge.netCents)}</dd>
+                  </>
+                )}
+              </dl>
+            </div>
+          ))}
           <dl className="oe-money-list">
-            <dt>Current checkout rate</dt>
-            <dd>{money(shipping.grossCents)}</dd>
-            {shipping.discountCents > 0 && (
-              <>
-                <dt className="oe-saving">
-                  {shipping.discountLabels.join(", ") || "Shipping savings"}
-                </dt>
-                <dd className="oe-saving">−{money(shipping.discountCents)}</dd>
-              </>
-            )}
             <dt className="oe-net">Shipping charged</dt>
             <dd className="oe-net">{money(shipping.netCents)}</dd>
           </dl>

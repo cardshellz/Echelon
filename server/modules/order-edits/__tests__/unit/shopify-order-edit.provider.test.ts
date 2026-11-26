@@ -6715,3 +6715,447 @@ describe("saved Club reward on an order with a used checkout reward", () => {
     ).toHaveLength(1);
   });
 });
+
+describe("orders with two delivery charges", () => {
+  const page = { pageInfo: { hasNextPage: false } };
+  const service = {
+    title: "Standard Shipping",
+    code: "standard",
+    source: "Echelon Shipping",
+  };
+  /** A checkout charge: both delivery groups carry the same service identity. */
+  const charge = (n: number, amount: string) => ({
+    id: id("ShippingLine", n),
+    ...service,
+    isRemoved: false,
+    originalPriceSet: bag(amount),
+    currentDiscountedPriceSet: bag(amount),
+  });
+  /** A charge the editor added: a custom fee with the service name only. */
+  const custom = (n: number, amount: string) => ({
+    ...charge(n, amount),
+    code: null,
+    source: null,
+  });
+  function order(
+    total: string,
+    shipping: string,
+    tax: string,
+    subtotal: string,
+    outstanding: string,
+    orderLines: ReturnType<typeof line>[],
+    charges: Array<ReturnType<typeof charge> | ReturnType<typeof custom>>,
+  ) {
+    return rawOrder({
+      currentTotalPriceSet: bag(total),
+      currentSubtotalPriceSet: bag(subtotal),
+      currentTotalTaxSet: bag(tax),
+      currentShippingPriceSet: bag(shipping),
+      netPaymentSet: bag("29.50"),
+      totalOutstandingSet: bag(outstanding),
+      fullyPaid: outstanding === "0.00",
+      transactions: [tx(1, "29.50")],
+      lineItems: { nodes: orderLines, ...page },
+      shippingLines: { nodes: charges, ...page },
+    });
+  }
+  const original = () =>
+    order("29.50", "8.00", "1.50", "20.00", "0.00", [line()], [
+      charge(1, "5.00"),
+      charge(2, "3.00"),
+    ]);
+  function calc(
+    total: string,
+    tax: string,
+    subtotal: string,
+    outstanding: string,
+    lines: ReturnType<typeof calcLine>[],
+    added: ReturnType<typeof calcLine>[],
+    charges: Array<[number, string, string]>,
+  ) {
+    return {
+      ...shippingCalculated(
+        total,
+        "0.00",
+        tax,
+        subtotal,
+        outstanding,
+        lines,
+        added,
+      ),
+      shippingLines: charges.map(([n, price, stagedStatus]) => ({
+        id: id("CalculatedShippingLine", n),
+        title: service.title,
+        price: bag(price),
+        stagedStatus,
+      })),
+    };
+  }
+  const group = (profile: number, gross: number, net: number) => ({
+    deliveryProfileId: id("DeliveryProfile", profile),
+    ...service,
+    grossCents: gross,
+    discountCents: gross - net,
+    netCents: net,
+    discountLabels: gross > net ? ["Member free shipping"] : [],
+  });
+  /** The larger group now ships free; the other group's charge is unchanged. */
+  const repriced = {
+    ...service,
+    grossCents: 800,
+    discountCents: 500,
+    netCents: 300,
+    discountLabels: ["Member free shipping"],
+    groups: [group(1, 500, 0), group(2, 300, 300)],
+  };
+  const unchanged = {
+    ...service,
+    grossCents: 800,
+    discountCents: 0,
+    netCents: 800,
+    discountLabels: [],
+    groups: [group(1, 500, 500), group(2, 300, 300)],
+  };
+  const added = [calcLine(2, 10, 1)];
+  const afterItems = () =>
+    calc("39.50", "1.50", "30.00", "10.00", [calcLine()], added, [
+      [1, "5.00", "NONE"],
+      [2, "3.00", "NONE"],
+    ]);
+  const replaced = (...steps: Array<Array<[number, string, string]>>) =>
+    steps.map((charges, index) => {
+      const result = calc(
+        "34.80",
+        "1.80",
+        "30.00",
+        "5.30",
+        [calcLine()],
+        added,
+        charges,
+      );
+      return index < 2
+        ? { orderEditRemoveShippingLine: { userErrors: [], calculatedOrder: result } }
+        : { orderEditAddShippingLine: { userErrors: [], calculatedOrder: result } };
+    });
+  const replacement = () =>
+    replaced(
+      [
+        [1, "5.00", "REMOVED"],
+        [2, "3.00", "NONE"],
+      ],
+      [
+        [1, "5.00", "REMOVED"],
+        [2, "3.00", "REMOVED"],
+      ],
+      [
+        [1, "5.00", "REMOVED"],
+        [2, "3.00", "REMOVED"],
+        [3, "0.00", "ADDED"],
+      ],
+      [
+        [1, "5.00", "REMOVED"],
+        [2, "3.00", "REMOVED"],
+        [3, "0.00", "ADDED"],
+        [4, "3.00", "ADDED"],
+      ],
+    );
+  async function increase(
+    shippingCalculator: OrderEditShippingCalculator,
+    staged: unknown[] = replacement(),
+    extra: unknown[] = [],
+  ) {
+    const h = harness(
+      [
+        original(),
+        original(),
+        { nodes: [variant(10, "10.00")] },
+        begin(
+          calc("29.50", "1.50", "20.00", "0.00", [calcLine()], [], [
+            [1, "5.00", "NONE"],
+            [2, "3.00", "NONE"],
+          ]),
+        ),
+        {
+          orderEditAddVariant: {
+            userErrors: [],
+            calculatedLineItem: { id: id("CalculatedLineItem", 2) },
+            calculatedOrder: afterItems(),
+          },
+        },
+        ...staged,
+        ...extra,
+      ],
+      {},
+      shippingCalculator,
+    );
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      { changes: [], additions: [{ variantId: "10", quantity: 1 }] },
+      "edit-two-charges",
+    );
+    return { ...h, baseline, quote };
+  }
+  const sent = (
+    h: { requests: Array<{ query: string; variables: Record<string, unknown> }> },
+    mutation: string,
+  ) => h.requests.filter((request) => request.query.includes(mutation));
+  const committed = () =>
+    order(
+      "34.80",
+      "3.00",
+      "1.80",
+      "30.00",
+      "5.30",
+      [line(), line(2, 10, 1)],
+      [custom(3, "0.00"), custom(4, "3.00")],
+    );
+
+  it("reads both delivery charges of the order", async () => {
+    const h = harness([original()]);
+    const baseline = await h.provider.readOrder(4, "100");
+    expect(baseline.shippingCents).toBe(800);
+    expect(baseline.shippingContext?.lines).toMatchObject([
+      { title: service.title, grossCents: 500, netCents: 500 },
+      { title: service.title, grossCents: 300, netCents: 300 },
+    ]);
+  });
+  it("stages one charge per delivery group when a group's charge changes", async () => {
+    const calculate = vi.fn(async () => repriced);
+    const h = await increase({ calculate });
+    expect(h.quote).toMatchObject({
+      totalCents: 3480,
+      outstandingCents: 530,
+      deltaCents: 530,
+      shippingCents: 300,
+      shippingRepricing: repriced,
+      financials: {
+        itemsNetCents: 3000,
+        shippingGrossCents: 300,
+        shippingCents: 300,
+        shippingDiscountCents: 0,
+        taxCents: 180,
+      },
+    });
+    expect(
+      sent(h, "orderEditRemoveShippingLine").map(
+        (request) => request.variables.shippingLineId,
+      ),
+    ).toEqual([
+      id("CalculatedShippingLine", 1),
+      id("CalculatedShippingLine", 2),
+    ]);
+    expect(
+      sent(h, "orderEditAddShippingLine").map(
+        (request) => request.variables.shippingLine,
+      ),
+    ).toEqual([
+      {
+        title: service.title,
+        price: { amount: "0.00", currencyCode: "USD" },
+      },
+      {
+        title: service.title,
+        price: { amount: "3.00", currencyCode: "USD" },
+      },
+    ]);
+    expect(sent(h, "orderEditCommit")).toHaveLength(0);
+  });
+  it("leaves both charges untouched when no group's charge changed", async () => {
+    const h = await increase({ calculate: async () => unchanged }, []);
+    expect(h.quote).toMatchObject({
+      totalCents: 3950,
+      shippingCents: 800,
+      shippingRepricing: unchanged,
+      financials: { shippingGrossCents: 800, shippingCents: 800 },
+    });
+    expect(sent(h, "orderEditRemoveShippingLine")).toHaveLength(0);
+    expect(sent(h, "orderEditAddShippingLine")).toHaveLength(0);
+  });
+  it("refuses a staged result that does not carry exactly the quoted charges", async () => {
+    const merged = replacement();
+    // Shopify reports the second charge with the wrong amount.
+    merged[3] = replaced(
+      [],
+      [],
+      [],
+      [
+        [1, "5.00", "REMOVED"],
+        [2, "3.00", "REMOVED"],
+        [3, "0.00", "ADDED"],
+        [4, "3.01", "ADDED"],
+      ],
+    )[3];
+    await expect(
+      increase({ calculate: async () => repriced }, merged),
+    ).rejects.toMatchObject({ code: "SHIPPING_REPLACEMENT_UNVERIFIED" });
+  });
+  it("reprices again before committing and proves both charges on the order", async () => {
+    const calculate = vi.fn(async () => repriced);
+    const h = await increase({ calculate }, replacement(), [
+      original(),
+      { nodes: [variant(10, "10.00")] },
+      { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+      committed(),
+    ]);
+    expect(
+      (await h.provider.commit(4, h.quote, "edit-two-charges")).shippingCents,
+    ).toBe(300);
+    expect(calculate).toHaveBeenCalledTimes(2);
+  });
+  it("does not accept a committed order whose two charges came back as one", async () => {
+    const merged = order(
+      "34.80",
+      "3.00",
+      "1.80",
+      "30.00",
+      "5.30",
+      [line(), line(2, 10, 1)],
+      [custom(3, "3.00")],
+    );
+    const h = await increase({ calculate: async () => repriced }, replacement(), [
+      original(),
+      { nodes: [variant(10, "10.00")] },
+      { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+      merged,
+    ]);
+    const error = await h.provider
+      .commit(4, h.quote, "edit-two-charges")
+      .then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+    // Same shipping total, but not the quoted charges: the edit is not confirmed.
+    expect(error).toMatchObject({ code: "COMMIT_UNCONFIRMED" });
+  });
+  it("does not commit when a delivery group's charge changed after review", async () => {
+    let calls = 0;
+    const h = await increase(
+      {
+        calculate: async () =>
+          ++calls === 1
+            ? repriced
+            : {
+                ...repriced,
+                grossCents: 900,
+                netCents: 400,
+                groups: [group(1, 500, 0), group(2, 400, 400)],
+              },
+      },
+      replacement(),
+      [original()],
+    );
+    await expect(
+      h.provider.commit(4, h.quote, "edit-two-charges"),
+    ).rejects.toBeInstanceOf(OrderEditCommitNotSentError);
+    expect(sent(h, "orderEditCommit")).toHaveLength(0);
+  });
+  it("restores both original charges when an unpaid increase expires", async () => {
+    const first = await increase({ calculate: async () => repriced });
+    const current: Array<[number, string, string]> = [
+      [3, "0.00", "NONE"],
+      [4, "3.00", "NONE"],
+    ];
+    const lines = [calcLine(), calcLine(2, 10, 0)];
+    const removed = (count: number): Array<[number, string, string]> =>
+      current.map(([n, price], index) => [
+        n,
+        price,
+        index < count ? "REMOVED" : "NONE",
+      ]);
+    const restoredOrder = order(
+      "29.50",
+      "8.00",
+      "1.50",
+      "20.00",
+      "0.00",
+      [line(), line(2, 10, 0)],
+      [custom(5, "5.00"), custom(6, "3.00")],
+    );
+    const calculate = vi.fn(async () => {
+      throw new Error("Recovery must use the saved original charges");
+    });
+    const h = harness(
+      [
+        committed(),
+        begin(
+          calc(
+            "34.80",
+            "1.80",
+            "30.00",
+            "5.30",
+            [calcLine(), calcLine(2, 10, 1)],
+            [],
+            current,
+          ),
+        ),
+        quantity(calc("24.50", "1.50", "20.00", "-5.00", lines, [], current)),
+        {
+          orderEditRemoveShippingLine: {
+            userErrors: [],
+            calculatedOrder: calc("24.50", "1.50", "20.00", "-5.00", lines, [], removed(1)),
+          },
+        },
+        {
+          orderEditRemoveShippingLine: {
+            userErrors: [],
+            calculatedOrder: calc("21.50", "1.50", "20.00", "-8.00", lines, [], removed(2)),
+          },
+        },
+        {
+          orderEditAddShippingLine: {
+            userErrors: [],
+            calculatedOrder: calc("26.50", "1.50", "20.00", "-3.00", lines, [], [
+              ...removed(2),
+              [5, "5.00", "ADDED"],
+            ]),
+          },
+        },
+        {
+          orderEditAddShippingLine: {
+            userErrors: [],
+            calculatedOrder: calc("29.50", "1.50", "20.00", "0.00", lines, [], [
+              ...removed(2),
+              [5, "5.00", "ADDED"],
+              [6, "3.00", "ADDED"],
+            ]),
+          },
+        },
+        committed(),
+        { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+        restoredOrder,
+      ],
+      {},
+      { calculate },
+    );
+    const result = await h.provider.recoverUnpaid(
+      4,
+      first.baseline,
+      first.quote,
+      "two-charge-expiry",
+    );
+    expect(result).toMatchObject({
+      totalCents: 2950,
+      shippingCents: 800,
+      taxCents: 150,
+      outstandingCents: 0,
+      netPaidCents: 2950,
+    });
+    expect(calculate).not.toHaveBeenCalled();
+    expect(
+      sent(h, "orderEditAddShippingLine").map(
+        (request) => request.variables.shippingLine,
+      ),
+    ).toEqual([
+      {
+        title: service.title,
+        price: { amount: "5.00", currencyCode: "USD" },
+      },
+      {
+        title: service.title,
+        price: { amount: "3.00", currencyCode: "USD" },
+      },
+    ]);
+  });
+});
