@@ -71,6 +71,7 @@ import {
   sendInventoryLegacyAdminControlError,
 } from "../../../inventory-planning/legacy-admin-control.api";
 import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work.api";
+import { syncProductPackagingTransformationModelBestEffort } from "../../../inventory-planning/catalog-packaging-model-sync.api";
 import {
   assignProductsShippingGroupInTx,
   clearPrimaryProductAssetsForProduct,
@@ -994,6 +995,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
             createProduct,
           )
         : await db.transaction((tx) => createProduct(tx));
+      if (created?.id && Array.isArray(created.variants) && created.variants.length > 0) {
+        await syncProductPackagingTransformationModelBestEffort(created.id, {
+          actor: req.session?.user?.id ? `user:${req.session.user.id}` : undefined,
+          reason: `Auto-synced same-product package hierarchy after creating product #${created.id}.`,
+        });
+      }
       res.json(created);
     } catch (error: any) {
       if (sendSelectionBusy(res, error)) return;
@@ -1779,6 +1786,11 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         logger.info("catalog.routes", { message: `[SKU CASCADE] Variant ${id} cached references synchronized atomically` });
       }
 
+      await syncProductPackagingTransformationModelBestEffort(updateResult.variant.productId, {
+        actor,
+        reason: `Auto-synced same-product package hierarchy after updating variant #${id}.`,
+      });
+
       res.json(updateResult.variant);
     } catch (error: any) {
       if (sendSelectionBusy(res, error)) return;
@@ -2498,9 +2510,20 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const transferToVariantId = req.body?.transferToVariantId == null ? null : Number(req.body.transferToVariantId);
 
       if (force) {
+        const beforeArchive = await storage.getProductVariantById(id);
         const owner = createCatalogInventoryCommandService(db, req.app.locals.services.inventoryCore);
-        return res.json(await owner.execute({ operation: "variant_archive", sourceId: id,
-          targetVariantId: transferToVariantId, commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
+        const archivedResponse = await owner.execute({
+          operation: "variant_archive",
+          sourceId: id,
+          targetVariantId: transferToVariantId,
+          commandKey: req.body.commandKey,
+          actor: req.session.user?.id ?? "",
+        });
+        await syncProductPackagingTransformationModelBestEffort(beforeArchive?.productId, {
+          actor: req.session.user?.id ? `user:${req.session.user.id}` : undefined,
+          reason: `Auto-synced same-product package hierarchy after archiving variant #${id}.`,
+        });
+        return res.json(archivedResponse);
       }
 
       const variant = await storage.getProductVariantById(id);

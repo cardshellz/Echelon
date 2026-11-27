@@ -853,7 +853,14 @@ export async function executePackageClaimOperation(
           { claimId: claimId.toString() },
         );
       }
-      const result = await executeLockedPackageOperation(deps, client, claim, command, occurredAt);
+      const result = await executeLockedPackageOperation(
+        deps,
+        client,
+        claim,
+        command,
+        occurredAt,
+        command.preferredSourceLocationId,
+      );
       await client.query("COMMIT");
       return result;
     } catch (error) {

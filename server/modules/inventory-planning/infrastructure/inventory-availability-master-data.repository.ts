@@ -214,6 +214,16 @@ implements InventoryAvailabilityMasterDataAdminStore {
   ) {
     return retrySerializableMasterDataTransaction("create_transformation_draft", () => this.database.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
+      return this.createTransformationModelDraftInsideTransaction(tx, command);
+    }));
+  }
+
+  async createTransformationModelDraftInsideTransaction(
+    tx: StatementTransaction,
+    command: Parameters<
+      InventoryAvailabilityMasterDataAdminStore["createTransformationModelDraft"]
+    >[0],
+  ) {
       const productId = command.definition.productId;
       await lockIdempotencyKey(tx, command.idempotencyKey);
       await tx.execute(sql`
@@ -253,7 +263,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
           "The active product rules changed. Reload before creating a draft.");
       }
       if (command.backfillEvidence) {
-        const [source] = await loadInventoryAvailabilityBackfillSources(tx, [productId]);
+        const [source] = await loadInventoryAvailabilityBackfillSources(tx as any, [productId]);
         if (!source) {
           throw new InventoryAvailabilityMasterDataError(
             409,
@@ -360,7 +370,6 @@ implements InventoryAvailabilityMasterDataAdminStore {
         definitionHash,
         alreadyApplied: false,
       };
-    }));
   }
 
   async updateTransformationModelDraft(
@@ -953,7 +962,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
 }
 
 async function replaceTransformationMembers(
-  tx: Transaction,
+  tx: StatementTransaction,
   modelId: number,
   definition: TransformationModelDefinition,
   occurredAt: Date,
@@ -1079,8 +1088,8 @@ async function loadAdminRecipes(
   }));
 }
 
-async function loadTransformationModel(
-  executor: Executor,
+export async function loadTransformationModel(
+  executor: Executor | StatementTransaction,
   modelId: number,
 ): Promise<TransformationAdminModel | null> {
   const [model] = await executor
@@ -1183,7 +1192,7 @@ async function loadTransformationModel(
 }
 
 async function assertTransformationReferences(
-  tx: Transaction,
+  tx: StatementTransaction,
   definition: TransformationModelDefinition,
 ): Promise<void> {
   // Deadlock-safe order shared with catalog writers: owner state first.
@@ -1328,13 +1337,13 @@ async function assertTransformationReferences(
   }
 }
 
-async function captureOperatorInputHash(tx: Transaction, productId: number): Promise<string> {
-  const [source] = await loadInventoryAvailabilityBackfillSources(tx, [productId]);
+async function captureOperatorInputHash(tx: StatementTransaction, productId: number): Promise<string> {
+  const [source] = await loadInventoryAvailabilityBackfillSources(tx as any, [productId]);
   if (!source) throw invalidReference("The active catalog product no longer exists.");
   return calculateInventoryAvailabilityBackfillInputHash(source);
 }
 
-async function findTransformationReplay(tx: Transaction, idempotencyKey: string) {
+async function findTransformationReplay(tx: StatementTransaction, idempotencyKey: string) {
   const [row] = await tx
     .select({
       id: transformationModelVersions.id,
@@ -1519,7 +1528,7 @@ async function assertIdempotencyKeyUnusedByOtherType(
   }
 }
 
-async function latestTransformationModel(tx: Transaction, productId: number) {
+async function latestTransformationModel(tx: StatementTransaction, productId: number) {
   const [row] = await tx
     .select({
       id: transformationModelVersions.id,
@@ -1534,7 +1543,7 @@ async function latestTransformationModel(tx: Transaction, productId: number) {
 }
 
 async function pointTransformationDraftHead(
-  tx: Transaction,
+  tx: StatementTransaction,
   input: {
     productId: number;
     modelId: number;

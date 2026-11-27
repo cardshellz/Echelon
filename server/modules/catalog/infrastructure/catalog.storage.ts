@@ -36,6 +36,7 @@ import {
   cancelProductReplenishmentTasksInTx,
   deactivateProductReplenishmentRulesInTx,
 } from "../../inventory/catalog-inventory.api";
+import { syncProductPackagingTransformationModelBestEffort } from "../../inventory-planning/catalog-packaging-model-sync.api";
 import type {
   Product,
   InsertProduct,
@@ -234,7 +235,13 @@ export const productMethods: IProductStorage = {
 
   async createProductVariant(variant: InsertProductVariant, executor: any = db): Promise<ProductVariant> {
     assertEbayPolicyWriteOwned(variant, { operation: "create" });
-    if (executor === db) return db.transaction(tx => productMethods.createProductVariant(variant, tx));
+    if (executor === db) {
+      const created = await db.transaction(tx => productMethods.createProductVariant(variant, tx));
+      await syncProductPackagingTransformationModelBestEffort(created?.productId, {
+        reason: "Auto-synced same-product package hierarchy after variant creation.",
+      });
+      return created;
+    }
     const policy = await prepareVariantInventoryTracking(executor, variant);
     const result = await executor.insert(productVariants).values({ ...variant, ...policy }).returning();
     return result[0];
@@ -245,7 +252,15 @@ export const productMethods: IProductStorage = {
     const policyChanged = ["trackInventory", "inventoryTrackingOverride", "requiresShipping"].some(key => Object.prototype.hasOwnProperty.call(updates, key));
     let policy: Partial<InsertProductVariant> = {};
     if (policyChanged) {
-      if (executor === db) return db.transaction(tx => productMethods.updateProductVariant(id, updates, tx));
+      if (executor === db) {
+        const updated = await db.transaction(tx => productMethods.updateProductVariant(id, updates, tx));
+        if (updated?.productId) {
+          await syncProductPackagingTransformationModelBestEffort(updated.productId, {
+            reason: "Auto-synced same-product package hierarchy after variant update.",
+          });
+        }
+        return updated;
+      }
       const existing = await productMethods.getProductVariantById(id, executor);
       if (!existing) return null;
       policy = await prepareVariantInventoryTracking(executor, { ...updates, productId: existing.productId }, id);
@@ -254,11 +269,22 @@ export const productMethods: IProductStorage = {
       .set({ ...updates, ...policy, updatedAt: new Date() })
       .where(eq(productVariants.id, id))
       .returning();
-    return result[0] || null;
+    const updated = result[0] || null;
+    if (executor === db && updated?.productId) {
+      await syncProductPackagingTransformationModelBestEffort(updated.productId, {
+        reason: "Auto-synced same-product package hierarchy after variant update.",
+      });
+    }
+    return updated;
   },
 
   async deleteProductVariant(id: number, executor: any = db): Promise<boolean> {
     const result = await executor.delete(productVariants).where(eq(productVariants.id, id)).returning();
+    if (executor === db && result[0]?.productId) {
+      await syncProductPackagingTransformationModelBestEffort(result[0].productId, {
+        reason: "Auto-synced same-product package hierarchy after variant deletion.",
+      });
+    }
     return result.length > 0;
   },
 

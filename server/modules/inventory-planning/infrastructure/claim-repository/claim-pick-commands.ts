@@ -29,6 +29,7 @@ import {
   reconcileObservedPickLocation,
   reconcilePickLocation,
   selectPickResources,
+  tryReplaceUntouchedConversionWithAvailablePickBinStock,
 } from "./claim-pick-reconciliation";
 import {
   hash,
@@ -186,9 +187,35 @@ export async function executePickClaimLine(
           { claimLineId: line.id.toString(), requestedQty: quantity.toString(), openQty: openTarget.toString() },
         );
       }
-      if (command.wmsProgress && !command.assemblyWork && command.skipPackageConversions !== true
-        && await materializePickPackageConversions(deps, client, claim, line, command, quantity, pickWarehouseId, occurredAt)) {
-        line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
+      if (command.wmsProgress && !command.assemblyWork && command.skipPackageConversions !== true) {
+        // When an earlier case break (inline or queued replen) already deposited enough
+        // unreserved packs into this pick bin, fulfill directly from those loose packs and
+        // release this order's untouched case reservation instead of breaking a 2nd case.
+        if (command.preferredConversionSourceLocationId === undefined
+          && await tryReplaceUntouchedConversionWithAvailablePickBinStock(client, deps.inventoryWriter, {
+            commandKey: `canonical:surplus-reconcile:${command.idempotencyKey}`,
+            claim,
+            line,
+            orderWarehouseId: order.warehouseId,
+            warehouseLocationId: command.warehouseLocationId,
+            quantity,
+            actor: command.actor,
+            reason: command.reason,
+            occurredAt,
+          })) {
+          line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
+        } else if (await materializePickPackageConversions(
+          deps,
+          client,
+          claim,
+          line,
+          command,
+          quantity,
+          pickWarehouseId,
+          occurredAt,
+        )) {
+          line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
+        }
       }
       const selectedOpen = line.resources
         .filter((resource) => resource.warehouseLocationId === command.warehouseLocationId)

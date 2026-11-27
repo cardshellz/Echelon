@@ -86,6 +86,13 @@ export class PostgresProductDefinitionStore implements ProductDefinitionStore {
   }
 }
 
+export async function captureProductDefinitionReviewInsideTransaction(
+  client: PoolClient,
+  selection: ProductDefinitionSelection,
+): Promise<ProductDefinitionReview> {
+  return captureReview(client, selection);
+}
+
 async function captureReview(client: PoolClient, selection: ProductDefinitionSelection): Promise<ProductDefinitionReview> {
   const authority = (await client.query<{ authority: string; revision: string; activation_run_id: string | null }>(
     "SELECT authority, revision::text, activation_run_id::text FROM inventory.availability_runtime_authority WHERE singleton_key=true FOR SHARE",

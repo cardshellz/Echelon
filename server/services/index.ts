@@ -307,6 +307,17 @@ export function createServices(
         announce: async (variantId, triggeredBy) => {
           const productIds = await inventorySupplyDependencies.getAffectedProductIds(variantId);
           await inventoryPublicationWork.recordInventoryChange(productIds, `inventory_change:${triggeredBy}`);
+          if (triggeredBy === "claim_order" || triggeredBy === "replace_order_claim") {
+            void replenishment
+              .syncQueuedClaimConversionTasks({ pickProductVariantId: variantId })
+              .catch((error) => {
+                platformLogger.error("canonical_claim_replen_sync", {
+                  product_variant_id: variantId,
+                  triggered_by: triggeredBy,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              });
+          }
         },
       },
     ),
@@ -352,6 +363,7 @@ export function createServices(
     inventoryCore,
     systemCanonicalClaimClock,
     transformationExecutionAuthority,
+    inventoryAvailabilityClaims,
   );
   const returns = createReturnsService(db, inventoryCore);
 

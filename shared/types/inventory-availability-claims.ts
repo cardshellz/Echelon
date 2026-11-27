@@ -139,6 +139,11 @@ export const canonicalAvailabilityClaimOperationExecutionCommandSchema = z.objec
   actor: nonblank(100),
   reason: nonblank(1000),
   work: assemblyWorkFenceSchema.optional(),
+  /**
+   * Optional reserve location selected by the warehouse worker (`R-11` instead of `R-10`)
+   * when executing a queued replenishment case-break operation.
+   */
+  preferredSourceLocationId: positiveInteger.optional(),
 }).strict();
 
 export const canonicalAvailabilityClaimBuildHandoffCommandSchema = z.object({

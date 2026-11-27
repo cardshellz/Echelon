@@ -347,6 +347,39 @@ import {
 } from "../domain/transformation-execution-authority";
 import { readReplenishmentTrigger, recordReplenishmentTrigger } from "../infrastructure/replenishment-trigger.repository";
 
+export interface CanonicalClaimPackageOperationExecutorPort {
+  executePackageOperation(input: {
+    claimId: string;
+    operationKey: string;
+    idempotencyKey: string;
+    actor: string;
+    reason: string;
+    preferredSourceLocationId?: number;
+  }): Promise<unknown>;
+}
+
+export type ActiveClaimConversionSource = {
+  claimId: string;
+  operationKey: string;
+  warehouseId: number | null;
+  outputLocationId: number | null;
+  committedOutputQty: number;
+  locationId: number;
+  locationCode: string;
+  variantId: number;
+  variantSku: string | null;
+  variantName: string | null;
+  unitsPerVariant: number;
+  destUnitsPerVariant: number;
+  destProductId: number | null;
+  claimedQty: number;
+  freeQty: number;
+  outputQty: number;
+  replenMethod: string;
+  executionMode: "inline" | "queue";
+  shouldAutoExecute: boolean;
+};
+
 /**
  * Replenishment use cases for the Echelon WMS.
  *
@@ -361,8 +394,13 @@ export class ReplenishmentUseCases {
     private readonly inventoryUseCases: InventoryUseCases,
     private readonly clock: () => Date = () => new Date(),
     private readonly transformationAuthority: TransformationExecutionAuthorityPort,
+    private claimPackageExecutor?: CanonicalClaimPackageOperationExecutorPort,
   ) {
     if (!transformationAuthority) throw new Error("Replenishment requires an explicit runtime transformation authority.");
+  }
+
+  setClaimPackageExecutor(executor: CanonicalClaimPackageOperationExecutorPort): void {
+    this.claimPackageExecutor = executor;
   }
 
   /** Lock only the create/reuse decision. All queries under this lock use the
@@ -1422,6 +1460,11 @@ export class ReplenishmentUseCases {
    */
   async runProactiveReplenSweep(limit = 100): Promise<{ scanned: number; triggered: number; taskIds: number[] }> {
     const safeLimit = Math.min(500, Math.max(1, Math.trunc(limit)));
+    const syncedClaimQueue = await this.syncQueuedClaimConversionTasks({ limit: safeLimit }).catch(() => ({
+      createdTaskIds: [] as number[],
+      existingTaskIds: [] as number[],
+      cancelledRedundantTaskIds: [] as number[],
+    }));
     const candidatesRes = await this.db.execute(sql`
       SELECT
         pv.id AS variant_id,
@@ -1506,7 +1549,7 @@ export class ReplenishmentUseCases {
       location_id: number | string;
       pending_demand_units?: number | string | null;
     }>;
-    const taskIds: number[] = [];
+    const taskIds: number[] = [...syncedClaimQueue.createdTaskIds];
     for (const row of rows) {
       const variantId = Number(row.variant_id);
       const locationId = Number(row.location_id);
@@ -1670,9 +1713,16 @@ export class ReplenishmentUseCases {
 
     let executionSnapshot = task as ReplenTask;
     try {
+      const plannedRuntime = await this.transformationAuthority.readRuntime();
+      if (plannedRuntime.authority === "canonical" && this.claimPackageExecutor) {
+        const matchedClaimOp = await this.findOpenClaimOperationForReplenTask(executionSnapshot);
+        if (matchedClaimOp) {
+          return await this.executeClaimBackedReplenTask(executionSnapshot, matchedClaimOp, userId);
+        }
+      }
+
       const resolvedTask = await this.reResolveTaskSourceBeforeExecute(executionSnapshot, userId);
       executionSnapshot = resolvedTask;
-      const plannedRuntime = await this.transformationAuthority.readRuntime();
       const canonicalPlan = plannedRuntime.authority === "canonical"
         ? await this.planCanonicalTaskExecution(resolvedTask, plannedRuntime)
         : null;
@@ -1863,6 +1913,9 @@ export class ReplenishmentUseCases {
     warehouseId?: number,
     status?: string,
   ): Promise<ReplenTask[]> {
+    if (!status || status === "pending") {
+      await this.syncQueuedClaimConversionTasks({ warehouseId }).catch(() => null);
+    }
     const conditions: any[] = [];
 
     if (warehouseId != null) {
@@ -2668,7 +2721,7 @@ export class ReplenishmentUseCases {
       pickVariantId: productVariantId, qtySourceUnits: 0, qtyTargetUnits: 0,
       replenMethod: eval_?.params?.replenMethod ?? "full_case",
       executionMode: "queue",
-      taskNotes: "",
+      taskNotes: this.describeReplenSkipReason(reason),
       triggerValue: eval_?.triggerValue ?? null,
       autoReplen: eval_?.params?.autoReplen ?? 0,
       evaluatedQty: eval_?.evaluatedQty ?? null,
@@ -2776,22 +2829,52 @@ export class ReplenishmentUseCases {
     };
   }
 
-  async loadActiveClaimInlineConversionSource(
+  private describeReplenSkipReason(reason: string): string {
+    switch (reason) {
+      case "no_bin_assignment":
+        return "Setup required: no active pick-bin assignment (warehouse.product_locations) exists for this variant and location. Assign a primary pick bin in Slotting / Bin Assignments.";
+      case "location_not_pickable":
+        return "Setup required: destination location does not exist or is not marked pickable (is_pickable = 1).";
+      case "no_trigger_value":
+        return "Setup required: no replenishment trigger threshold is configured on this bin, SKU rule, or hierarchy tier default.";
+      case "variant_not_found":
+        return "Setup required: product variant does not exist in catalog.";
+      default:
+        return "";
+    }
+  }
+
+  private async resolveClaimConversionAutoExec(params: {
+    destinationVariantId: number;
+    destHierarchyLevel: number;
+    destUnitsPerVariant: number;
+    warehouseId: number | null;
+    outputQty: number;
+    replenMethod: string;
+  }): Promise<{ shouldAutoExecute: boolean; executionMode: "inline" | "queue"; autoReplen: number }> {
+    const rule = await this.findRuleForVariant(params.destinationVariantId);
+    const tierDefault = await this.findTierDefaultForVariant(
+      params.destHierarchyLevel,
+      params.warehouseId ?? undefined,
+    );
+    const settings = await this.getSettingsForWarehouse(params.warehouseId ?? undefined);
+    const autoReplen = rule?.autoReplen ?? tierDefault?.autoReplen ?? 0;
+    const baseUnits = Math.max(1, params.outputQty * Math.max(1, params.destUnitsPerVariant));
+    const decision = resolveReplenishmentAutoExecution(
+      autoReplen,
+      null,
+      settings,
+      baseUnits,
+      params.replenMethod,
+    );
+    return { ...decision, autoReplen };
+  }
+
+  async loadActiveClaimConversionSource(
     orderId: number | null | undefined,
     orderItemId: number | null | undefined,
     pickVariantId: number,
-  ): Promise<{
-    locationId: number;
-    locationCode: string;
-    variantId: number;
-    variantSku: string | null;
-    variantName: string | null;
-    unitsPerVariant: number;
-    claimedQty: number;
-    freeQty: number;
-    outputQty: number;
-    replenMethod: string;
-  } | null> {
+  ): Promise<ActiveClaimConversionSource | null> {
     if (!orderId || !orderItemId || typeof this.db?.execute !== "function") return null;
     try {
       const res = await this.db.execute(sql`
@@ -2805,16 +2888,31 @@ export class ReplenishmentUseCases {
 
       const opRes = await this.db.execute(sql`
         SELECT
+          c.id::text AS claim_id,
+          co.operation_key,
+          co.warehouse_id,
+          co.output_location_id,
+          COALESCE(co.committed_output_qty, co.output_qty)::int AS committed_output_qty,
           cr.warehouse_location_id AS location_id,
           wl.code AS location_code,
           cr.source_variant_id AS variant_id,
           pv.sku AS variant_sku,
           pv.name AS variant_name,
           GREATEST(COALESCE(pv.units_per_variant, 1), 1)::int AS units_per_variant,
+          GREATEST(COALESCE(pv_dest.units_per_variant, 1), 1)::int AS dest_units_per_variant,
+          COALESCE(pv_dest.hierarchy_level, 1)::int AS dest_hierarchy_level,
+          pv_dest.product_id AS dest_product_id,
           GREATEST(cr.claimed_qty - cr.released_qty - cr.consumed_qty - cr.picked_qty, 0)::int AS claimed_qty,
           GREATEST(COALESCE(il.variant_qty, 0) - COALESCE(il.reserved_qty, 0), 0)::int AS free_qty,
           co.output_qty::int AS output_qty,
-          co.operation_type
+          co.operation_type,
+          EXISTS (
+            SELECT 1
+            FROM inventory.availability_claim_operations co_build
+            WHERE co_build.claim_id = c.id
+              AND co_build.claim_line_id = cl.id
+              AND co_build.operation_type = 'component_build'
+          ) AS has_component_build
         FROM inventory.availability_claims c
         JOIN inventory.availability_claim_lines cl
           ON cl.claim_id = c.id
@@ -2829,6 +2927,8 @@ export class ReplenishmentUseCases {
           ON wl.id = cr.warehouse_location_id
         JOIN catalog.product_variants pv
           ON pv.id = cr.source_variant_id
+        JOIN catalog.product_variants pv_dest
+          ON pv_dest.id = co.destination_variant_id
         LEFT JOIN inventory.inventory_levels il
           ON il.id = cr.inventory_level_id
         WHERE c.order_id = ${orderId}
@@ -2846,21 +2946,486 @@ export class ReplenishmentUseCases {
       `);
       const row = opRes?.rows?.[0] as any;
       if (!row) return null;
+      const replenMethod = String(row.operation_type) === "break_pack" ? "case_break" : "package_conversion";
+      const assemblesAtPick = row.has_component_build === true || row.has_component_build === "t" || row.has_component_build === 1;
+      const autoExec = assemblesAtPick
+        ? { shouldAutoExecute: true, executionMode: "inline" as const, autoReplen: 1 }
+        : await this.resolveClaimConversionAutoExec({
+            destinationVariantId: pickVariantId,
+            destHierarchyLevel: Number(row.dest_hierarchy_level ?? 1),
+            destUnitsPerVariant: Number(row.dest_units_per_variant ?? 1),
+            warehouseId: row.warehouse_id != null ? Number(row.warehouse_id) : null,
+            outputQty: Number(row.output_qty ?? 1),
+            replenMethod,
+          });
       return {
+        claimId: String(row.claim_id),
+        operationKey: String(row.operation_key),
+        warehouseId: row.warehouse_id != null ? Number(row.warehouse_id) : null,
+        outputLocationId: row.output_location_id != null ? Number(row.output_location_id) : null,
+        committedOutputQty: Number(row.committed_output_qty ?? row.output_qty ?? 1),
         locationId: Number(row.location_id),
         locationCode: String(row.location_code),
         variantId: Number(row.variant_id),
         variantSku: row.variant_sku ? String(row.variant_sku) : null,
         variantName: row.variant_name ? String(row.variant_name) : row.variant_sku ? String(row.variant_sku) : null,
         unitsPerVariant: Number(row.units_per_variant ?? 1),
+        destUnitsPerVariant: Number(row.dest_units_per_variant ?? 1),
+        destProductId: row.dest_product_id != null ? Number(row.dest_product_id) : null,
         claimedQty: Number(row.claimed_qty ?? 1),
         freeQty: Number(row.free_qty ?? 0),
         outputQty: Number(row.output_qty ?? 1),
-        replenMethod: String(row.operation_type) === "break_pack" ? "case_break" : "package_conversion",
+        replenMethod,
+        executionMode: autoExec.executionMode,
+        shouldAutoExecute: autoExec.shouldAutoExecute,
       };
     } catch {
       return null;
     }
+  }
+
+  async loadActiveClaimInlineConversionSource(
+    orderId: number | null | undefined,
+    orderItemId: number | null | undefined,
+    pickVariantId: number,
+  ): Promise<
+    | (Pick<
+        ActiveClaimConversionSource,
+        | "locationId"
+        | "locationCode"
+        | "variantId"
+        | "variantSku"
+        | "variantName"
+        | "unitsPerVariant"
+        | "claimedQty"
+        | "freeQty"
+        | "outputQty"
+        | "replenMethod"
+      > &
+        Partial<ActiveClaimConversionSource>)
+    | null
+  > {
+    const resolved = await this.loadActiveClaimConversionSource(orderId, orderItemId, pickVariantId);
+    return resolved?.shouldAutoExecute ? resolved : null;
+  }
+
+  async syncQueuedClaimConversionTasks(filter: {
+    orderId?: number | null;
+    orderItemId?: number | null;
+    warehouseId?: number | null;
+    toLocationId?: number | null;
+    pickProductVariantId?: number | null;
+    limit?: number;
+  } = {}): Promise<{
+    createdTaskIds: number[];
+    existingTaskIds: number[];
+    cancelledRedundantTaskIds: number[];
+  }> {
+    const empty = {
+      createdTaskIds: [] as number[],
+      existingTaskIds: [] as number[],
+      cancelledRedundantTaskIds: [] as number[],
+    };
+    if (typeof this.db?.execute !== "function" || typeof this.db?.transaction !== "function") {
+      return empty;
+    }
+    const tableCheck = await this.db.execute(sql`
+      SELECT
+        CASE
+          WHEN to_regclass('inventory.availability_claims') IS NULL
+            OR to_regclass('inventory.replen_tasks') IS NULL
+          THEN NULL
+          ELSE 1
+        END AS ok
+    `).catch(() => null);
+    if (!(tableCheck?.rows?.[0] as any)?.ok) return empty;
+
+    const runtime = await this.transformationAuthority.readRuntime().catch(() => null);
+    if (runtime?.authority !== "canonical") return empty;
+
+    const safeLimit = Math.min(250, Math.max(1, Math.trunc(filter.limit ?? 100)));
+    const orderCond = filter.orderId != null ? sql`AND c.order_id = ${filter.orderId}` : sql``;
+    const itemCond = filter.orderItemId != null ? sql`AND cl.order_item_id = ${filter.orderItemId}` : sql``;
+    const whCond = filter.warehouseId != null ? sql`AND co.warehouse_id = ${filter.warehouseId}` : sql``;
+    const locCond = filter.toLocationId != null ? sql`AND co.output_location_id = ${filter.toLocationId}` : sql``;
+    const varCond = filter.pickProductVariantId != null
+      ? sql`AND co.destination_variant_id = ${filter.pickProductVariantId}`
+      : sql``;
+
+    // 1. Clean up any unstarted auto-queued claim tasks whose underlying claim operation
+    // was already completed/released (e.g. fulfilled via surplus loose packs) or where
+    // the pick bin already holds enough free stock to cover all waiting queued claims.
+    const staleRes = await this.db.execute(sql`
+      SELECT rt.id, rt.revision
+      FROM inventory.replen_tasks rt
+      LEFT JOIN inventory.inventory_levels il_dest
+        ON il_dest.warehouse_location_id = rt.to_location_id
+       AND il_dest.product_variant_id = rt.pick_product_variant_id
+      WHERE rt.triggered_by = 'canonical_claim_queue'
+        AND rt.status = 'pending'
+        AND COALESCE(rt.qty_completed, 0) = 0
+        ${filter.warehouseId != null ? sql`AND rt.warehouse_id = ${filter.warehouseId}` : sql``}
+        ${filter.toLocationId != null ? sql`AND rt.to_location_id = ${filter.toLocationId}` : sql``}
+        ${filter.pickProductVariantId != null ? sql`AND rt.pick_product_variant_id = ${filter.pickProductVariantId}` : sql``}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM inventory.availability_claims c
+          JOIN wms.orders o ON o.id = c.order_id
+          JOIN inventory.availability_claim_operations co ON co.claim_id = c.id
+          WHERE c.status = 'active'
+            AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled', 'completed')
+            AND co.status IN ('pending', 'ready')
+            AND co.executed_executions = 0
+            AND co.released_executions = 0
+            AND co.output_location_id = rt.to_location_id
+            AND co.destination_variant_id = rt.pick_product_variant_id
+            AND co.operation_type IN ('break_pack', 'assemble_pack', 'directed_conversion')
+            AND GREATEST(COALESCE(il_dest.variant_qty, 0) - COALESCE(il_dest.reserved_qty, 0), 0)
+                < COALESCE(co.committed_output_qty, co.output_qty)
+        )
+      LIMIT ${safeLimit}
+    `).catch(() => ({ rows: [] }));
+
+    for (const stale of (staleRes?.rows ?? []) as Array<{ id: unknown; revision: unknown }>) {
+      const staleId = Number(stale.id);
+      const staleRev = Number(stale.revision ?? 0);
+      if (!Number.isInteger(staleId)) continue;
+      const updated = await this.db
+        .update(replenTasks)
+        .set({
+          status: "cancelled",
+          blocksShipment: false,
+          completedAt: this.clock(),
+          notes: sql`TRIM(BOTH E'\n' FROM COALESCE(${replenTasks.notes}, '') || E'\nAuto-cancelled: queued claim conversion already satisfied by pick-bin stock or claim release.')`,
+        })
+        .where(
+          and(
+            eq(replenTasks.id, staleId),
+            eq(replenTasks.status, "pending"),
+            eq(replenTasks.revision, staleRev),
+          ),
+        )
+        .returning({ id: replenTasks.id });
+      if (updated.length > 0) empty.cancelledRedundantTaskIds.push(staleId);
+    }
+
+    // 2. Discover active claims with open package conversions that require queued replenishment.
+    const candidatesRes = await this.db.execute(sql`
+      SELECT
+        c.id::text AS claim_id,
+        c.order_id,
+        o.order_number,
+        cl.order_item_id,
+        co.operation_key,
+        co.operation_type,
+        co.warehouse_id,
+        co.output_location_id,
+        co.destination_variant_id,
+        co.output_qty::int AS output_qty,
+        COALESCE(co.committed_output_qty, co.output_qty)::int AS committed_output_qty,
+        cr.warehouse_location_id AS source_location_id,
+        cr.source_variant_id,
+        GREATEST(cr.claimed_qty - cr.released_qty - cr.consumed_qty - cr.picked_qty, 0)::int AS claimed_source_qty,
+        pv_dest.product_id AS dest_product_id,
+        GREATEST(COALESCE(pv_dest.units_per_variant, 1), 1)::int AS dest_units_per_variant,
+        COALESCE(pv_dest.hierarchy_level, 1)::int AS dest_hierarchy_level,
+        GREATEST(COALESCE(il_dest.variant_qty, 0) - COALESCE(il_dest.reserved_qty, 0), 0)::int AS free_dest_qty
+      FROM inventory.availability_claims c
+      JOIN wms.orders o
+        ON o.id = c.order_id
+       AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled', 'completed')
+      JOIN inventory.availability_claim_lines cl
+        ON cl.claim_id = c.id
+      JOIN inventory.availability_claim_operations co
+        ON co.claim_id = c.id
+       AND co.claim_line_id = cl.id
+      JOIN inventory.availability_claim_resources cr
+        ON cr.claim_id = c.id
+       AND cr.consumer_operation_key = co.operation_key
+      JOIN warehouse.warehouse_locations wl_src
+        ON wl_src.id = cr.warehouse_location_id
+       AND wl_src.is_active = 1
+       AND wl_src.cycle_count_freeze_id IS NULL
+      JOIN warehouse.warehouse_locations wl_dest
+        ON wl_dest.id = co.output_location_id
+       AND wl_dest.is_active = 1
+       AND wl_dest.cycle_count_freeze_id IS NULL
+      JOIN catalog.product_variants pv_dest
+        ON pv_dest.id = co.destination_variant_id
+      LEFT JOIN inventory.inventory_levels il_dest
+        ON il_dest.warehouse_location_id = co.output_location_id
+       AND il_dest.product_variant_id = co.destination_variant_id
+      WHERE c.status = 'active'
+        AND co.status IN ('pending', 'ready')
+        AND co.executed_executions = 0
+        AND co.released_executions = 0
+        AND co.output_location_id IS NOT NULL
+        AND co.operation_type IN ('break_pack', 'assemble_pack', 'directed_conversion')
+        AND cr.claimed_qty - cr.released_qty - cr.consumed_qty - cr.picked_qty > 0
+        AND NOT EXISTS (
+          SELECT 1
+          FROM inventory.availability_claim_operations co_build
+          WHERE co_build.claim_id = c.id
+            AND co_build.claim_line_id = cl.id
+            AND co_build.operation_type = 'component_build'
+        )
+        ${orderCond}
+        ${itemCond}
+        ${whCond}
+        ${locCond}
+        ${varCond}
+      ORDER BY c.id ASC, co.operation_key ASC, cr.id ASC
+      LIMIT ${safeLimit}
+    `);
+
+    const rows = (candidatesRes?.rows ?? []) as Array<Record<string, any>>;
+    const seenBins = new Set<string>();
+    for (const row of rows) {
+      const destVariantId = Number(row.destination_variant_id);
+      const outputLocationId = Number(row.output_location_id);
+      const sourceLocationId = Number(row.source_location_id);
+      const sourceVariantId = Number(row.source_variant_id);
+      const claimedSourceQty = Number(row.claimed_source_qty ?? 0);
+      const outputQty = Number(row.output_qty ?? 0);
+      const committedOutputQty = Number(row.committed_output_qty ?? outputQty);
+      const freeDestQty = Number(row.free_dest_qty ?? 0);
+      if (
+        !Number.isInteger(destVariantId) ||
+        !Number.isInteger(outputLocationId) ||
+        !Number.isInteger(sourceLocationId) ||
+        !Number.isInteger(sourceVariantId) ||
+        claimedSourceQty <= 0 ||
+        outputQty <= 0
+      ) {
+        continue;
+      }
+
+      // Surplus loose packs in the pick bin already cover this claim's committed demand;
+      // `executePickClaimLine` will fulfill directly from those loose packs and release this claim's case!
+      if (freeDestQty >= committedOutputQty) continue;
+
+      const binKey = `${destVariantId}:${outputLocationId}`;
+      if (seenBins.has(binKey)) continue;
+
+      const replenMethod = sourceVariantId !== destVariantId ? "case_break" : "full_case";
+      const autoExec = await this.resolveClaimConversionAutoExec({
+        destinationVariantId: destVariantId,
+        destHierarchyLevel: Number(row.dest_hierarchy_level ?? 1),
+        destUnitsPerVariant: Number(row.dest_units_per_variant ?? 1),
+        warehouseId: row.warehouse_id != null ? Number(row.warehouse_id) : null,
+        outputQty,
+        replenMethod,
+      });
+      if (autoExec.shouldAutoExecute) continue;
+
+      seenBins.add(binKey);
+      const destUnitsPerVariant = Math.max(1, Number(row.dest_units_per_variant ?? 1));
+      const qtyTargetBaseUnits = outputQty * destUnitsPerVariant;
+      const rule = await this.findRuleForVariant(destVariantId);
+      const priority = rule?.priority ?? 3;
+      const orderRef = row.order_number ? String(row.order_number) : `order #${row.order_id}`;
+
+      const createdOrExisting = await this.db.transaction(async (tx: DrizzleDb) => {
+        await this.lockPickBinTaskCreation(tx, destVariantId, outputLocationId);
+        const existing = await tx
+          .select({ id: replenTasks.id })
+          .from(replenTasks)
+          .where(
+            and(
+              eq(replenTasks.pickProductVariantId, destVariantId),
+              eq(replenTasks.toLocationId, outputLocationId),
+              inArray(replenTasks.status, ["pending", "assigned", "in_progress"]),
+            ),
+          )
+          .limit(1);
+        if (existing[0]?.id != null) {
+          return { kind: "existing" as const, id: Number(existing[0].id) };
+        }
+
+        const [inserted] = await tx
+          .insert(replenTasks)
+          .values({
+            replenRuleId: rule?.id ?? null,
+            fromLocationId: sourceLocationId,
+            toLocationId: outputLocationId,
+            productId: row.dest_product_id != null ? Number(row.dest_product_id) : null,
+            orderId: Number(row.order_id),
+            orderItemId: Number(row.order_item_id),
+            sourceProductVariantId: sourceVariantId,
+            pickProductVariantId: destVariantId,
+            qtySourceUnits: claimedSourceQty,
+            qtyTargetUnits: qtyTargetBaseUnits,
+            qtyCompleted: 0,
+            status: "pending",
+            priority,
+            triggeredBy: "canonical_claim_queue",
+            executionMode: "queue",
+            replenMethod,
+            autoReplen: autoExec.autoReplen || 2,
+            blocksShipment: true,
+            warehouseId: row.warehouse_id != null ? Number(row.warehouse_id) : null,
+            notes: `Queued canonical claim conversion (${row.operation_key}) for ${orderRef} item #${row.order_item_id}`,
+          })
+          .returning({ id: replenTasks.id });
+        return { kind: "created" as const, id: Number(inserted.id) };
+      });
+
+      if (createdOrExisting.kind === "created") {
+        empty.createdTaskIds.push(createdOrExisting.id);
+      } else {
+        empty.existingTaskIds.push(createdOrExisting.id);
+      }
+    }
+
+    return empty;
+  }
+
+  private async findOpenClaimOperationForReplenTask(task: ReplenTask): Promise<{
+    claimId: string;
+    operationKey: string;
+    orderId: number;
+    orderItemId: number;
+    sourceLocationId: number;
+    sourceVariantId: number;
+    claimedSourceQty: number;
+    outputQty: number;
+    outputBaseUnits: number;
+  } | null> {
+    if (!task.pickProductVariantId || !task.toLocationId || typeof this.db?.execute !== "function") {
+      return null;
+    }
+    const tableCheck = await this.db.execute(sql`
+      SELECT CASE WHEN to_regclass('inventory.availability_claims') IS NULL THEN NULL ELSE 1 END AS ok
+    `).catch(() => null);
+    if (!(tableCheck?.rows?.[0] as any)?.ok) return null;
+
+    const sourceVarCond = task.sourceProductVariantId != null
+      ? sql`AND cr.source_variant_id = ${task.sourceProductVariantId}`
+      : sql``;
+    const orderMatchScore = task.orderId != null
+      ? sql`CASE WHEN c.order_id = ${task.orderId} AND (${task.orderItemId ?? null}::int IS NULL OR cl.order_item_id = ${task.orderItemId ?? null}) THEN 0 ELSE 1 END`
+      : sql`1`;
+
+    const res = await this.db.execute(sql`
+      SELECT
+        c.id::text AS claim_id,
+        c.order_id,
+        cl.order_item_id,
+        co.operation_key,
+        cr.warehouse_location_id AS source_location_id,
+        cr.source_variant_id,
+        GREATEST(cr.claimed_qty - cr.released_qty - cr.consumed_qty - cr.picked_qty, 0)::int AS claimed_source_qty,
+        co.output_qty::int AS output_qty,
+        (co.output_qty * GREATEST(COALESCE(pv_dest.units_per_variant, 1), 1))::int AS output_base_units
+      FROM inventory.availability_claims c
+      JOIN wms.orders o
+        ON o.id = c.order_id
+       AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+      JOIN inventory.availability_claim_lines cl
+        ON cl.claim_id = c.id
+      JOIN inventory.availability_claim_operations co
+        ON co.claim_id = c.id
+       AND co.claim_line_id = cl.id
+      JOIN inventory.availability_claim_resources cr
+        ON cr.claim_id = c.id
+       AND cr.consumer_operation_key = co.operation_key
+      JOIN catalog.product_variants pv_dest
+        ON pv_dest.id = co.destination_variant_id
+      WHERE c.status = 'active'
+        AND co.status IN ('pending', 'ready')
+        AND co.executed_executions = 0
+        AND co.released_executions = 0
+        AND co.destination_variant_id = ${task.pickProductVariantId}
+        AND (co.output_location_id = ${task.toLocationId} OR co.output_location_id IS NULL)
+        AND co.operation_type IN ('break_pack', 'assemble_pack', 'directed_conversion')
+        AND cr.claimed_qty - cr.released_qty - cr.consumed_qty - cr.picked_qty > 0
+        ${sourceVarCond}
+      ORDER BY ${orderMatchScore} ASC, c.id ASC, co.operation_key ASC, cr.id ASC
+      LIMIT 1
+    `).catch(() => null);
+
+    const row = res?.rows?.[0] as any;
+    if (!row) return null;
+    return {
+      claimId: String(row.claim_id),
+      operationKey: String(row.operation_key),
+      orderId: Number(row.order_id),
+      orderItemId: Number(row.order_item_id),
+      sourceLocationId: Number(row.source_location_id),
+      sourceVariantId: Number(row.source_variant_id),
+      claimedSourceQty: Number(row.claimed_source_qty ?? 1),
+      outputQty: Number(row.output_qty ?? 1),
+      outputBaseUnits: Number(row.output_base_units ?? row.output_qty ?? 1),
+    };
+  }
+
+  private async executeClaimBackedReplenTask(
+    task: ReplenTask,
+    match: {
+      claimId: string;
+      operationKey: string;
+      orderId: number;
+      orderItemId: number;
+      sourceLocationId: number;
+      sourceVariantId: number;
+      claimedSourceQty: number;
+      outputQty: number;
+      outputBaseUnits: number;
+    },
+    userId?: string,
+  ): Promise<{ moved: number }> {
+    const taskId = task.id;
+    const actor = userId ?? "system:auto-replen";
+    const preferredSourceLocationId = task.fromLocationId ?? match.sourceLocationId;
+
+    await this.claimPackageExecutor!.executePackageOperation({
+      claimId: match.claimId,
+      operationKey: match.operationKey,
+      idempotencyKey: `replen-task-claim-op:${taskId}:${match.claimId}:${match.operationKey}`,
+      actor,
+      reason: `Replen task #${taskId} (${task.replenMethod})`,
+      preferredSourceLocationId,
+    });
+
+    const movedBaseUnits = await this.db.transaction(async (tx: any) => {
+      const lockedTaskResult = await tx.execute(sql`
+        SELECT *
+        FROM inventory.replen_tasks
+        WHERE id = ${taskId}
+        FOR UPDATE
+      `);
+      const lockedTask = lockedTaskResult.rows?.[0];
+      if (!lockedTask) throw new Error(`Replen task ${taskId} not found`);
+      if (lockedTask.status === "completed") return Number(lockedTask.execution_moved_base_units ?? 0);
+
+      const occurredAt = this.clock();
+      const completedBase = Number(lockedTask.qty_completed ?? 0);
+      const moved = match.outputBaseUnits;
+
+      await tx
+        .update(replenTasks)
+        .set({
+          status: "completed",
+          qtyCompleted: completedBase + moved,
+          executionMovedBaseUnits: moved,
+          exceptionReason: null,
+          blocksShipment: false,
+          completedAt: occurredAt,
+          assignedTo: userId ?? lockedTask.assigned_to ?? null,
+        })
+        .where(eq(replenTasks.id, taskId));
+
+      await recordReplenishmentFollowup(tx, taskId, actor, occurredAt);
+      return moved;
+    });
+
+    await this.recoverReplenishmentFollowup(taskId);
+    await this.syncQueuedClaimConversionTasks({
+      toLocationId: task.toLocationId,
+      pickProductVariantId: task.pickProductVariantId,
+    }).catch(() => null);
+
+    return { moved: movedBaseUnits };
   }
 
   async listEligibleReplenSources(
@@ -3048,27 +3613,55 @@ export class ReplenishmentUseCases {
     // Include cases already reserved by THIS order's own active Canonical Claim so
     // the last case in Reserve never displays a false "No source stock" banner.
     if (systemQty < Math.max(1, pickedQty) && (guidance.stockout || !guidance.needed)) {
-      const claimOwnedSource = await this.loadActiveClaimInlineConversionSource(
-        orderContext?.orderId,
-        orderContext?.orderItemId,
-        productVariantId,
-      );
-      if (claimOwnedSource) {
-        const availableSources = await this.listEligibleReplenSources(
+      const claimOwnedSource =
+        (await this.loadActiveClaimConversionSource(
+          orderContext?.orderId,
+          orderContext?.orderItemId,
           productVariantId,
-          warehouseLocationId,
-          undefined,
-          orderContext,
-        ).catch(() => undefined);
+        )) ??
+        (await this.loadActiveClaimInlineConversionSource(
+          orderContext?.orderId,
+          orderContext?.orderItemId,
+          productVariantId,
+        ));
+      if (claimOwnedSource) {
+        const mode: "inline" | "queue" = claimOwnedSource.executionMode ?? "inline";
+        let existingTaskId = guidance.existingTaskId ?? null;
+        let existingTaskStatus = guidance.existingTaskStatus ?? null;
+        let existingTaskExecutionMode = guidance.existingTaskExecutionMode ?? null;
+        let existingTaskBlocksShipment = guidance.existingTaskBlocksShipment === true;
+        if (mode === "queue" && existingTaskId == null) {
+          const synced = await this.syncQueuedClaimConversionTasks({
+            orderId: orderContext?.orderId,
+            orderItemId: orderContext?.orderItemId,
+            toLocationId: warehouseLocationId,
+            pickProductVariantId: productVariantId,
+          }).catch(() => null);
+          const taskId = synced?.createdTaskIds?.[0] ?? synced?.existingTaskIds?.[0] ?? null;
+          if (taskId != null) {
+            existingTaskId = taskId;
+            existingTaskStatus = "pending";
+            existingTaskExecutionMode = "queue";
+            existingTaskBlocksShipment = true;
+          }
+        }
+        const availableSources = mode === "inline"
+          ? await this.listEligibleReplenSources(
+              productVariantId,
+              warehouseLocationId,
+              undefined,
+              orderContext,
+            ).catch(() => undefined)
+          : undefined;
         return {
           systemQty,
           postPickQty,
           triggerValue: guidance.triggerValue,
           replenNeeded: true,
           replenMethod: claimOwnedSource.replenMethod,
-          autoReplen: guidance.autoReplen,
+          autoReplen: mode === "queue" ? (guidance.autoReplen || 2) : guidance.autoReplen,
           stockout: false,
-          executionMode: "inline",
+          executionMode: mode,
           sourceLocationId: claimOwnedSource.locationId,
           sourceLocationCode: claimOwnedSource.locationCode,
           sourceQty: claimOwnedSource.freeQty + claimOwnedSource.claimedQty,
@@ -3076,10 +3669,10 @@ export class ReplenishmentUseCases {
           qtySourceUnits: claimOwnedSource.claimedQty,
           qtyTargetUnits: claimOwnedSource.claimedQty * claimOwnedSource.unitsPerVariant,
           ...(availableSources && availableSources.length > 0 ? { availableSources } : {}),
-          existingTaskId: guidance.existingTaskId ?? null,
-          existingTaskStatus: guidance.existingTaskStatus ?? null,
-          existingTaskExecutionMode: guidance.existingTaskExecutionMode ?? null,
-          existingTaskBlocksShipment: guidance.existingTaskBlocksShipment === true,
+          existingTaskId,
+          existingTaskStatus,
+          existingTaskExecutionMode,
+          existingTaskBlocksShipment,
         };
       }
     }
@@ -4639,6 +5232,13 @@ export function createReplenishmentService(
   inventoryUseCases: any,
   clock: () => Date = () => new Date(),
   transformationAuthority: TransformationExecutionAuthorityPort,
+  claimPackageExecutor?: CanonicalClaimPackageOperationExecutorPort,
 ) {
-  return new ReplenishmentUseCases(db, inventoryUseCases, clock, transformationAuthority);
+  return new ReplenishmentUseCases(
+    db,
+    inventoryUseCases,
+    clock,
+    transformationAuthority,
+    claimPackageExecutor,
+  );
 }
