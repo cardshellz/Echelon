@@ -1930,7 +1930,53 @@ export class PickingUseCases {
     };
     let claim = await loadActiveClaim();
 
-    if (currentBinQty < remainingPickQuantity && !recordsConfirmedShipment(input) && locationIsPickerSafe) {
+    if (
+      currentBinQty >= remainingPickQuantity &&
+      !recordsConfirmedShipment(input) &&
+      locationIsPickerSafe &&
+      input.confirmCaseBreak !== true &&
+      input.replenSourceLocationId == null
+    ) {
+      // Surplus reuse across concurrent orders: if an earlier order's inline or queued
+      // case break already deposited enough unreserved loose packs into this pick bin
+      // to cover this order's untouched conversion, fulfill directly from those loose
+      // packs (`skipPackageConversions: true`) and release the redundant Reserve case!
+      const lineKey = `order-item:${input.itemId}`;
+      const plannedConversion = claim.plan?.operations?.find?.(
+        (op: any) =>
+          op.lineKey === lineKey &&
+          ["break_pack", "assemble_pack", "directed_conversion"].includes(String(op.operationType)),
+      );
+      const hasBuildOp = claim.plan?.operations?.some?.(
+        (op: any) => op.lineKey === lineKey && String(op.operationType) === "component_build",
+      );
+      const hasDirectResource = claim.plan?.resourceClaims?.some?.(
+        (res: any) =>
+          res.lineKey === lineKey &&
+          !res.consumerOperationKey &&
+          Number(res.sourceVariantId) === target.productVariantId,
+      );
+      if (plannedConversion && !hasBuildOp && !hasDirectResource) {
+        const openConversion =
+          typeof this.replenishment?.loadActiveClaimConversionSource === "function"
+            ? await this.replenishment.loadActiveClaimConversionSource(
+                input.beforeItem.orderId,
+                input.itemId,
+                target.productVariantId,
+              )
+            : null;
+        if (openConversion) {
+          const freeInPickBin = Math.max(0, currentBinQty - currentBinReservedQty);
+          const requiredFree = Math.max(
+            remainingPickQuantity,
+            Number(openConversion.committedOutputQty ?? plannedConversion.committedOutputQty ?? remainingPickQuantity),
+          );
+          if (freeInPickBin >= requiredFree) {
+            skipCanonicalConversion = true;
+          }
+        }
+      }
+    } else if (currentBinQty < remainingPickQuantity && !recordsConfirmedShipment(input) && locationIsPickerSafe) {
       // If the claim line was planned short when the order arrived and a Case was
       // received into Reserve later, refresh claim supply first so the claim can
       // own that single Case break cleanly without dual-engine collisions.

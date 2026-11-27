@@ -401,6 +401,46 @@ describe("WH-8: Queue-Mode Canonical Claim Case Breaks, Surplus Reuse & Packagin
         toLocationId: 101,
         pickProductVariantId: 11,
       });
+
+      // Now simulate Order #2 arriving after Order #1's replen task deposited 18 free packs in A-01:
+      // PickingUseCases automatically sets skipPackageConversions=true (`reconcile_recorded_stock`)
+      // so Order #2 fulfills from A-01's loose packs and releases its Reserve case reservation!
+      inventoryCore.getLevel.mockResolvedValueOnce({
+        productVariantId: 11,
+        warehouseLocationId: 101,
+        variantQty: 18,
+        reservedQty: 0,
+      });
+      storage.getInventoryLevelsByProductVariantId.mockResolvedValueOnce([
+        { warehouseLocationId: 101, variantQty: 18, reservedQty: 0 },
+      ]);
+      storage.getOrderItemById.mockResolvedValueOnce({
+        ...beforeItem,
+        pickedQuantity: 2,
+        status: "completed",
+      });
+      pickClaimLine.mockResolvedValueOnce({
+        outcome: "picked",
+        warehouseLocationIds: [101],
+      });
+
+      const order2Res = await (service as any).applyCanonicalPickProgress(context, {
+        itemId: 6001,
+        beforeItem,
+        status: "completed",
+        effectivePickedQuantity: 2,
+        warehouseId: 1,
+        userId: "picker-1",
+        pickMethod: "scan",
+        confirmFoundOnShelf: false,
+      });
+      expect(order2Res.deductResult?.success).toBe(true);
+      expect(pickClaimLine).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          locationStrategy: "reconcile_recorded_stock",
+          skipPackageConversions: true,
+        }),
+      );
     });
   });
 
