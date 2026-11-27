@@ -725,6 +725,84 @@ async function replaceRemoteConversionsAtPickLocation(
   );
 }
 
+export async function tryReplaceUntouchedConversionWithAvailablePickBinStock(
+  client: PoolClient,
+  inventoryWriter: CanonicalClaimInventoryMutationPort,
+  input: {
+    commandKey: string;
+    claim: FulfillmentClaim;
+    line: FulfillmentClaimLine;
+    orderWarehouseId: number | null;
+    warehouseLocationId: number;
+    quantity: bigint;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  },
+): Promise<boolean> {
+  const selectedOpen = input.line.resources
+    .filter((resource) => resource.warehouseLocationId === input.warehouseLocationId)
+    .reduce((total, resource) => total + openResourceQty(resource), BigInt(0));
+  if (selectedOpen >= input.quantity) return false;
+  const directOpenElsewhere = input.line.resources
+    .filter((resource) => resource.warehouseLocationId !== input.warehouseLocationId)
+    .reduce((total, resource) => total + openResourceQty(resource), BigInt(0));
+  if (directOpenElsewhere !== BigInt(0)) return false;
+
+  const targetRow = rows(await client.query(
+    `SELECT level.id AS inventory_level_id
+     FROM warehouse.warehouse_locations AS location
+     LEFT JOIN inventory.inventory_levels AS level
+       ON level.warehouse_location_id = location.id
+      AND level.product_variant_id = $2
+     WHERE location.id = $1`,
+    [input.warehouseLocationId, input.line.targetVariantId],
+  ))[0];
+  if (!targetRow || targetRow.inventory_level_id == null) return false;
+
+  const targetWarehouseId = await requirePickableLocation(
+    client,
+    input.warehouseLocationId,
+    input.orderWarehouseId,
+  );
+  const neededFromBin = input.quantity - selectedOpen;
+  const replacement = await planRemoteConversionReplacement(
+    client,
+    input.claim,
+    input.line,
+    targetWarehouseId,
+    neededFromBin,
+    true,
+  );
+  if (!replacement) return false;
+
+  const targetInventoryLevelId = positiveInteger(targetRow.inventory_level_id, "inventoryLevel.id");
+  const levelRow = rows(await client.query(
+    `SELECT variant_qty, reserved_qty
+     FROM inventory.inventory_levels
+     WHERE id = $1`,
+    [targetInventoryLevelId],
+  ))[0];
+  const freeQty = levelRow
+    ? BigInt(Number(levelRow.variant_qty)) - BigInt(Number(levelRow.reserved_qty))
+    : BigInt(0);
+  if (freeQty < replacement.replacedTargetQty) return false;
+
+  await replaceRemoteConversionsAtPickLocation(client, inventoryWriter, {
+    commandKey: input.commandKey,
+    claim: input.claim,
+    line: input.line,
+    pickWarehouseId: targetWarehouseId,
+    warehouseLocationId: input.warehouseLocationId,
+    targetInventoryLevelId,
+    requestedQty: neededFromBin,
+    actor: input.actor,
+    reason: input.reason,
+    occurredAt: input.occurredAt,
+  }, replacement);
+  return true;
+}
+
 export async function reconcilePickLocation(
   client: PoolClient,
   inventoryWriter: CanonicalClaimInventoryMutationPort,

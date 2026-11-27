@@ -160,6 +160,31 @@ type ReplenishmentService = {
     qtyTargetUnits: number;
     replenMethod: string;
   }>>;
+  loadActiveClaimConversionSource?: (
+    orderId: number | null | undefined,
+    orderItemId: number | null | undefined,
+    pickVariantId: number,
+  ) => Promise<{
+    claimId?: string;
+    operationKey?: string;
+    warehouseId?: number | null;
+    outputLocationId?: number | null;
+    committedOutputQty?: number;
+    locationId: number;
+    locationCode: string;
+    variantId: number;
+    variantSku: string | null;
+    variantName: string | null;
+    unitsPerVariant: number;
+    destUnitsPerVariant?: number;
+    destProductId?: number | null;
+    claimedQty: number;
+    freeQty: number;
+    outputQty: number;
+    replenMethod: string;
+    executionMode?: "inline" | "queue";
+    shouldAutoExecute?: boolean;
+  } | null>;
   loadActiveClaimInlineConversionSource?: (
     orderId: number | null | undefined,
     orderItemId: number | null | undefined,
@@ -175,7 +200,21 @@ type ReplenishmentService = {
     freeQty: number;
     outputQty: number;
     replenMethod: string;
+    executionMode?: "inline" | "queue";
+    shouldAutoExecute?: boolean;
   } | null>;
+  syncQueuedClaimConversionTasks?: (filter?: {
+    orderId?: number | null;
+    orderItemId?: number | null;
+    warehouseId?: number | null;
+    toLocationId?: number | null;
+    pickProductVariantId?: number | null;
+    limit?: number;
+  }) => Promise<{
+    createdTaskIds: number[];
+    existingTaskIds: number[];
+    cancelledRedundantTaskIds: number[];
+  }>;
   resolveDedicatedReplenBin?: (productVariantId: number, warehouseLocationId: number) => Promise<{ locationId: number; locationCode: string } | null>;
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number, triggeredBy?: string, context?: ReplenOrderContext) => Promise<any>;
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number, options?: { forceWhenAtOrBelowZero?: boolean; currentQtyOverride?: number; minDestinationQty?: number }) => Promise<{ needed: boolean; stockout: boolean; sourceLocationId?: number | null; sourceLocationCode: string | null; sourceVariantId?: number | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtySourceUnits?: number; qtyTargetUnits: number; [key: string]: any }>;
@@ -1891,7 +1930,53 @@ export class PickingUseCases {
     };
     let claim = await loadActiveClaim();
 
-    if (currentBinQty < remainingPickQuantity && !recordsConfirmedShipment(input) && locationIsPickerSafe) {
+    if (
+      currentBinQty >= remainingPickQuantity &&
+      !recordsConfirmedShipment(input) &&
+      locationIsPickerSafe &&
+      input.confirmCaseBreak !== true &&
+      input.replenSourceLocationId == null
+    ) {
+      // Surplus reuse across concurrent orders: if an earlier order's inline or queued
+      // case break already deposited enough unreserved loose packs into this pick bin
+      // to cover this order's untouched conversion, fulfill directly from those loose
+      // packs (`skipPackageConversions: true`) and release the redundant Reserve case!
+      const lineKey = `order-item:${input.itemId}`;
+      const plannedConversion = claim.plan?.operations?.find?.(
+        (op: any) =>
+          op.lineKey === lineKey &&
+          ["break_pack", "assemble_pack", "directed_conversion"].includes(String(op.operationType)),
+      );
+      const hasBuildOp = claim.plan?.operations?.some?.(
+        (op: any) => op.lineKey === lineKey && String(op.operationType) === "component_build",
+      );
+      const hasDirectResource = claim.plan?.resourceClaims?.some?.(
+        (res: any) =>
+          res.lineKey === lineKey &&
+          !res.consumerOperationKey &&
+          Number(res.sourceVariantId) === target.productVariantId,
+      );
+      if (plannedConversion && !hasBuildOp && !hasDirectResource) {
+        const openConversion =
+          typeof this.replenishment?.loadActiveClaimConversionSource === "function"
+            ? await this.replenishment.loadActiveClaimConversionSource(
+                input.beforeItem.orderId,
+                input.itemId,
+                target.productVariantId,
+              )
+            : null;
+        if (openConversion) {
+          const freeInPickBin = Math.max(0, currentBinQty - currentBinReservedQty);
+          const requiredFree = Math.max(
+            remainingPickQuantity,
+            Number(openConversion.committedOutputQty ?? plannedConversion.committedOutputQty ?? remainingPickQuantity),
+          );
+          if (freeInPickBin >= requiredFree) {
+            skipCanonicalConversion = true;
+          }
+        }
+      }
+    } else if (currentBinQty < remainingPickQuantity && !recordsConfirmedShipment(input) && locationIsPickerSafe) {
       // If the claim line was planned short when the order arrived and a Case was
       // received into Reserve later, refresh claim supply first so the claim can
       // own that single Case break cleanly without dual-engine collisions.
@@ -1916,18 +2001,39 @@ export class PickingUseCases {
           op.lineKey === lineKey &&
           ["break_pack", "assemble_pack", "directed_conversion"].includes(String(op.operationType)),
       );
-      const claimOwnedSource =
-        typeof this.replenishment?.loadActiveClaimInlineConversionSource === "function"
+      const claimConversionSource =
+        typeof this.replenishment?.loadActiveClaimConversionSource === "function"
+          ? await this.replenishment.loadActiveClaimConversionSource(
+              input.beforeItem.orderId,
+              input.itemId,
+              target.productVariantId,
+            )
+          : typeof this.replenishment?.loadActiveClaimInlineConversionSource === "function"
           ? await this.replenishment.loadActiveClaimInlineConversionSource(
               input.beforeItem.orderId,
               input.itemId,
               target.productVariantId,
             )
           : null;
-      const claimOwnsConversion = Boolean(claimOwnedSource || plannedConversion);
+      const claimConversionIsQueued = claimConversionSource?.executionMode === "queue";
+      if (claimConversionIsQueued && typeof this.replenishment?.syncQueuedClaimConversionTasks === "function") {
+        await this.replenishment
+          .syncQueuedClaimConversionTasks({
+            orderId: input.beforeItem.orderId,
+            orderItemId: input.itemId,
+            toLocationId: target.locationId,
+            pickProductVariantId: target.productVariantId,
+          })
+          .catch(() => null);
+      }
+      const claimOwnedSource =
+        claimConversionSource && claimConversionSource.executionMode !== "queue"
+          ? claimConversionSource
+          : null;
+      const claimOwnsConversion = Boolean(claimConversionSource || plannedConversion);
 
       const availableSources =
-        typeof this.replenishment?.listEligibleReplenSources === "function"
+        !claimConversionIsQueued && typeof this.replenishment?.listEligibleReplenSources === "function"
           ? await this.replenishment
               .listEligibleReplenSources(target.productVariantId, target.locationId, remainingPickQuantity, {
                 orderId: input.beforeItem.orderId,
@@ -1964,7 +2070,7 @@ export class PickingUseCases {
           replenMethod: preferred?.replenMethod ?? claimOwnedSource.replenMethod,
           ...(availableSources.length > 0 ? { availableSources } : {}),
         };
-      } else if (plannedConversion) {
+      } else if (plannedConversion && !claimConversionIsQueued) {
         const planInputResource = claim.plan?.resourceClaims?.find?.(
           (res) => res.consumerOperationKey === plannedConversion.operationKey,
         );
