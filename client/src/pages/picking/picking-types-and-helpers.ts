@@ -332,6 +332,7 @@ export async function updateOrderItem(
   options?: {
     replenSourceLocationId?: number;
     confirmFoundOnShelf?: boolean;
+    confirmCaseBreak?: boolean;
   },
 ): Promise<PickResponse> {
   return sendPickingCommand(
@@ -348,6 +349,9 @@ export async function updateOrderItem(
         : {}),
       ...(options?.confirmFoundOnShelf !== undefined
         ? { confirmFoundOnShelf: options.confirmFoundOnShelf }
+        : {}),
+      ...(options?.confirmCaseBreak !== undefined
+        ? { confirmCaseBreak: options.confirmCaseBreak }
         : {}),
     },
     async ({ commandId, payload }) => {

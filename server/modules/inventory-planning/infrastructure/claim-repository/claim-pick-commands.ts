@@ -186,7 +186,7 @@ export async function executePickClaimLine(
           { claimLineId: line.id.toString(), requestedQty: quantity.toString(), openQty: openTarget.toString() },
         );
       }
-      if (command.wmsProgress && !command.assemblyWork
+      if (command.wmsProgress && !command.assemblyWork && command.skipPackageConversions !== true
         && await materializePickPackageConversions(deps, client, claim, line, command, quantity, pickWarehouseId, occurredAt)) {
         line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
       }
@@ -250,6 +250,7 @@ export async function executePickClaimLine(
             orderWarehouseId: order.warehouseId,
             warehouseLocationId: command.warehouseLocationId,
             quantity: reconciledQuantity,
+            allowSameWarehouseConversionReplacement: command.skipPackageConversions === true,
             actor: command.actor,
             reason: command.reason,
             occurredAt,

@@ -1,5 +1,7 @@
 import {
   adjustmentReasons,
+  cycleCountItems,
+  cycleCounts,
   inventoryLevels,
   inventoryTransactions,
   warehouseSettings,
@@ -419,4 +421,165 @@ export async function relocateSlotReplenPointersInInventory(
   }
 
   return { migratedConfigs, migratedTasks };
+}
+
+/**
+ * Queues a non-freezing `draft` Cycle Count for one or more discrepancy bins
+ * (e.g. when a picker skips an expected inline case break because stock was
+ * physically found in the pick bin, or when an `out_of_stock` short pick occurs
+ * while Reserve still shows stock). Because status is `draft`, neither bin has
+ * `cycle_count_freeze_id` set while active picking continues.
+ */
+export async function createDraftDiscrepancyCycleCountInInventory(
+  executor: {
+    execute?: (query: any) => Promise<any>;
+    insert: (...args: any[]) => any;
+  },
+  input: {
+    name: string;
+    description: string;
+    warehouseId?: number | null;
+    locationCodes: readonly string[];
+    createdBy?: string | null;
+  },
+): Promise<{ id: number; deduplicated: boolean } | null> {
+  const normalizedCodes = Array.from(
+    new Set(
+      input.locationCodes
+        .map((code) => String(code ?? "").trim().toUpperCase())
+        .filter((code) => code.length > 0 && code !== "U" && code !== "UNASSIGNED"),
+    ),
+  );
+  if (normalizedCodes.length === 0) return null;
+  const locationCodesCsv = normalizedCodes.join(",");
+
+  if (typeof executor.execute === "function") {
+    try {
+      const regRes = await executor.execute(sql`SELECT to_regclass('inventory.cycle_counts') AS reg`);
+      if ((regRes?.rows ?? []).length > 0 && !(regRes.rows[0] as any)?.reg) {
+        return null;
+      }
+      const existing = await executor.execute(sql`
+        SELECT id
+        FROM inventory.cycle_counts
+        WHERE status IN ('draft', 'in_progress')
+          AND UPPER(COALESCE(location_codes, '')) = ${locationCodesCsv}
+          AND (${input.warehouseId ?? null}::int IS NULL OR warehouse_id = ${input.warehouseId ?? null} OR warehouse_id IS NULL)
+        ORDER BY id DESC
+        LIMIT 1
+      `);
+      const existingId = Number((existing?.rows?.[0] as any)?.id ?? 0);
+      if (Number.isInteger(existingId) && existingId > 0) {
+        return { id: existingId, deduplicated: true };
+      }
+    } catch {
+      // Fall through to insert if dedup probe is mocked or unavailable in unit tests
+    }
+  }
+
+  const inserted = await executor
+    .insert(cycleCounts)
+    .values({
+      name: input.name.slice(0, 100),
+      description: input.description,
+      status: "draft",
+      warehouseId: input.warehouseId ?? null,
+      locationCodes: locationCodesCsv,
+      totalBins: normalizedCodes.length,
+      countedBins: 0,
+      varianceCount: 0,
+      approvedVariances: 0,
+      createdBy: input.createdBy ? String(input.createdBy).slice(0, 100) : "system:pick-discrepancy",
+    })
+    .returning?.({ id: cycleCounts.id });
+
+  const id = Number(inserted?.[0]?.id ?? 0);
+  return id > 0 ? { id, deduplicated: false } : null;
+}
+
+/**
+ * Creates a transient 1-item `in_progress` spot count WITHOUT setting
+ * `warehouse_locations.cycle_count_freeze_id`, allowing `reconcileCycleCountInventory`
+ * to atomically displace shorted Canonical Claim reservations and zero phantom stock.
+ */
+export async function createInProgressShortPickSpotCountInInventory(
+  executor: {
+    insert: (...args: any[]) => any;
+  },
+  input: {
+    name: string;
+    description: string;
+    warehouseId?: number | null;
+    warehouseLocationId: number;
+    locationCode: string;
+    productVariantId: number;
+    productId?: number | null;
+    sku: string;
+    expectedQty: number;
+    countedQty: number;
+    varianceReason: string;
+    varianceNotes: string;
+    actor?: string | null;
+  },
+): Promise<{ cycleCountId: number; cycleCountItemId: number } | null> {
+  const actor = input.actor ? String(input.actor).slice(0, 100) : "system:short-pick";
+  const countRows = await executor
+    .insert(cycleCounts)
+    .values({
+      name: input.name.slice(0, 100),
+      description: input.description,
+      status: "in_progress",
+      warehouseId: input.warehouseId ?? null,
+      locationCodes: input.locationCode,
+      totalBins: 1,
+      countedBins: 1,
+      varianceCount: input.countedQty !== input.expectedQty ? 1 : 0,
+      approvedVariances: 0,
+      startedAt: new Date(),
+      createdBy: actor,
+    })
+    .returning?.({ id: cycleCounts.id });
+  const cycleCountId = Number(countRows?.[0]?.id ?? 0);
+  if (cycleCountId <= 0) return null;
+
+  const varianceQty = input.countedQty - input.expectedQty;
+  const itemRows = await executor
+    .insert(cycleCountItems)
+    .values({
+      cycleCountId,
+      warehouseLocationId: input.warehouseLocationId,
+      productVariantId: input.productVariantId,
+      productId: input.productId ?? null,
+      expectedSku: input.sku.slice(0, 100),
+      expectedQty: input.expectedQty,
+      countedSku: input.sku.slice(0, 100),
+      countedQty: input.countedQty,
+      varianceQty,
+      varianceType: varianceQty < 0 ? "quantity_under" : varianceQty > 0 ? "quantity_over" : null,
+      varianceReason: input.varianceReason.slice(0, 50),
+      varianceNotes: input.varianceNotes,
+      status: "variance",
+      requiresApproval: 0,
+    })
+    .returning?.({ id: cycleCountItems.id });
+  const cycleCountItemId = Number(itemRows?.[0]?.id ?? 0);
+  if (cycleCountItemId <= 0) return null;
+
+  return { cycleCountId, cycleCountItemId };
+}
+
+export async function finalizeShortPickSpotCountInInventory(
+  executor: {
+    execute: (query: any) => Promise<any>;
+  },
+  cycleCountId: number,
+): Promise<void> {
+  await executor.execute(sql`
+    UPDATE inventory.cycle_counts
+    SET status = 'completed',
+        approved_variances = variance_count,
+        completed_at = NOW(),
+        updated_at = NOW()
+    WHERE id = ${cycleCountId}
+  `);
 }

@@ -124,6 +124,8 @@ export type ReplenOrderContext = {
   forceWhenAtOrBelowZero?: boolean;
   triggeredBy?: string;
   preferredSourceLocationId?: number | null;
+  minDestinationQty?: number | null;
+  queueOnly?: boolean;
 };
 
 export type ReplenSourceEmptyReport = {
@@ -245,6 +247,7 @@ type ReplenEvaluationOptions = {
   currentQtyOverride?: number;
   ignoreTaskId?: number;
   forceWhenAtOrBelowZero?: boolean;
+  minDestinationQty?: number;
 };
 
 type ReplenEvaluationContext = {
@@ -914,8 +917,19 @@ export class ReplenishmentUseCases {
     };
   }
 
-  calculateQtyNeeded(maxQty: number | null, triggerValue: number, currentQty: number): number {
-    return (maxQty ?? triggerValue * 2) - currentQty;
+  /**
+   * Replenishment moves 1 source unit per trigger (or enough source units to
+   * cover an explicit active pick shortfall when `minDestinationQty` exceeds 1
+   * source batch). Legacy `max_qty` over-breaking is intentionally retired so
+   * inline case breaks and queued drops never pull multiple cases unexpectedly.
+   */
+  calculateQtyNeeded(
+    _maxQty: number | null,
+    _triggerValue: number,
+    _currentQty: number,
+    minDestinationQty?: number,
+  ): number {
+    return Math.max(1, Math.trunc(minDestinationQty ?? 1));
   }
 
   async checkThreshold(
@@ -1165,7 +1179,7 @@ export class ReplenishmentUseCases {
     if (!threshold.thresholdMet) return { status: "skip", skipReason: "above_threshold", params, triggerValue, evaluatedQty };
     logger.debug("replenishment.threshold_met", { productVariantId, warehouseLocationId, method: resolvedReplenMethod });
 
-    const qtyNeeded = this.calculateQtyNeeded(maxQty, triggerValue!, evaluatedQty);
+    const qtyNeeded = this.calculateQtyNeeded(maxQty, triggerValue!, evaluatedQty, options?.minDestinationQty);
     const sourceDecision = await this.resolveReplenSourceForNeed({
       tag: _tag,
       pickVariant: variant,
@@ -2455,6 +2469,19 @@ export class ReplenishmentUseCases {
   // 5. CHECK AND TRIGGER AFTER PICK -- inline auto-trigger
   // ---------------------------------------------------------------------------
 
+  private isBackgroundQueueOnlyTrigger(triggeredBy: string, context?: ReplenOrderContext): boolean {
+    return (
+      context?.queueOnly === true ||
+      triggeredBy === "proactive_sweep" ||
+      triggeredBy === "event_driven" ||
+      triggeredBy === "stock_arrival_recovery" ||
+      (context?.orderId != null &&
+        context?.forceWhenAtOrBelowZero !== true &&
+        context?.triggeredBy == null &&
+        context?.blocksShipment !== true)
+    );
+  }
+
   async checkAndTriggerAfterPick(
     productVariantId: number,
     warehouseLocationId: number,
@@ -2462,11 +2489,16 @@ export class ReplenishmentUseCases {
     context?: ReplenOrderContext,
   ): Promise<ReplenTask | null> {
     validateReplenishmentTrigger(triggeredBy);
+    const queueOnly = this.isBackgroundQueueOnlyTrigger(triggeredBy, context);
     const _tag = `[Replen checkAndTrigger] variant=${productVariantId} loc=${warehouseLocationId}`;
     const prior = await this.priorTriggeredTask(productVariantId, warehouseLocationId, context);
     if (prior) {
-      if (prior.task?.executionMode === "inline" && supportsInlineReplenishment(prior.task.replenMethod)
-        && EXECUTABLE_REPLEN_TASK_STATUSES.includes(prior.task.status)) {
+      if (
+        !queueOnly &&
+        prior.task?.executionMode === "inline" &&
+        supportsInlineReplenishment(prior.task.replenMethod) &&
+        EXECUTABLE_REPLEN_TASK_STATUSES.includes(prior.task.status)
+      ) {
         return (await this.executeInlineTaskAutomatically(prior.task, "system:auto-replen", _tag)).task;
       }
       return prior.task;
@@ -2474,6 +2506,7 @@ export class ReplenishmentUseCases {
 
     const eval_ = await this.evaluateReplenNeed(productVariantId, warehouseLocationId, {
       forceWhenAtOrBelowZero: context?.forceWhenAtOrBelowZero === true,
+      minDestinationQty: context?.minDestinationQty ?? undefined,
     });
 
     if (eval_.status === "skip") {
@@ -2485,6 +2518,7 @@ export class ReplenishmentUseCases {
       logger.info("inventory.replenishment_use_cases", { message: `${_tag} EXIT: dedup — existing task #${eval_.existingTaskId}` });
       await this.rememberTriggeredTask(productVariantId, warehouseLocationId, eval_.existingTask, context);
       if (
+        !queueOnly &&
         eval_.existingTask.executionMode === "inline" &&
         supportsInlineReplenishment(eval_.existingTask.replenMethod) &&
         EXECUTABLE_REPLEN_TASK_STATUSES.includes(eval_.existingTask.status)
@@ -2492,6 +2526,14 @@ export class ReplenishmentUseCases {
         return (await this.executeInlineTaskAutomatically(eval_.existingTask, "system:auto-replen", _tag)).task;
       }
       return eval_.existingTask;
+    }
+
+    if (queueOnly && eval_.executionMode === "inline" && context?.blocksShipment !== true) {
+      logger.info("inventory.replenishment_use_cases", {
+        message: `${_tag} EXIT: skipping background/post-pick inline replenishment (${triggeredBy}); inline breaks execute only on active pick confirmation`,
+      });
+      await this.rememberTriggeredTask(productVariantId, warehouseLocationId, null, context);
+      return null;
     }
 
     const { location, variant, whSettings, params, taskNotes, sourceResolutionIssue, rule, resolvedSourceVariantId } = eval_;
@@ -2734,10 +2776,98 @@ export class ReplenishmentUseCases {
     };
   }
 
+  async loadActiveClaimInlineConversionSource(
+    orderId: number | null | undefined,
+    orderItemId: number | null | undefined,
+    pickVariantId: number,
+  ): Promise<{
+    locationId: number;
+    locationCode: string;
+    variantId: number;
+    variantSku: string | null;
+    variantName: string | null;
+    unitsPerVariant: number;
+    claimedQty: number;
+    freeQty: number;
+    outputQty: number;
+    replenMethod: string;
+  } | null> {
+    if (!orderId || !orderItemId || typeof this.db?.execute !== "function") return null;
+    try {
+      const res = await this.db.execute(sql`
+        SELECT
+          CASE
+            WHEN to_regclass('inventory.availability_claims') IS NULL THEN NULL
+            ELSE 1
+          END AS has_claims
+      `);
+      if (!(res?.rows?.[0] as any)?.has_claims) return null;
+
+      const opRes = await this.db.execute(sql`
+        SELECT
+          cr.warehouse_location_id AS location_id,
+          wl.code AS location_code,
+          cr.source_variant_id AS variant_id,
+          pv.sku AS variant_sku,
+          pv.name AS variant_name,
+          GREATEST(COALESCE(pv.units_per_variant, 1), 1)::int AS units_per_variant,
+          GREATEST(cr.claimed_qty - cr.released_qty - cr.consumed_qty - cr.picked_qty, 0)::int AS claimed_qty,
+          GREATEST(COALESCE(il.variant_qty, 0) - COALESCE(il.reserved_qty, 0), 0)::int AS free_qty,
+          co.output_qty::int AS output_qty,
+          co.operation_type
+        FROM inventory.availability_claims c
+        JOIN inventory.availability_claim_lines cl
+          ON cl.claim_id = c.id
+         AND cl.order_item_id = ${orderItemId}
+        JOIN inventory.availability_claim_operations co
+          ON co.claim_id = c.id
+         AND co.claim_line_id = cl.id
+        JOIN inventory.availability_claim_resources cr
+          ON cr.claim_id = c.id
+         AND cr.consumer_operation_key = co.operation_key
+        JOIN warehouse.warehouse_locations wl
+          ON wl.id = cr.warehouse_location_id
+        JOIN catalog.product_variants pv
+          ON pv.id = cr.source_variant_id
+        LEFT JOIN inventory.inventory_levels il
+          ON il.id = cr.inventory_level_id
+        WHERE c.order_id = ${orderId}
+          AND c.status = 'active'
+          AND co.status IN ('pending', 'ready')
+          AND co.executed_executions = 0
+          AND co.released_executions = 0
+          AND co.destination_variant_id = ${pickVariantId}
+          AND co.operation_type IN ('break_pack', 'assemble_pack', 'directed_conversion')
+          AND cr.claimed_qty - cr.released_qty - cr.consumed_qty - cr.picked_qty > 0
+          AND wl.is_active = 1
+          AND wl.cycle_count_freeze_id IS NULL
+        ORDER BY co.operation_key ASC, cr.id ASC
+        LIMIT 1
+      `);
+      const row = opRes?.rows?.[0] as any;
+      if (!row) return null;
+      return {
+        locationId: Number(row.location_id),
+        locationCode: String(row.location_code),
+        variantId: Number(row.variant_id),
+        variantSku: row.variant_sku ? String(row.variant_sku) : null,
+        variantName: row.variant_name ? String(row.variant_name) : row.variant_sku ? String(row.variant_sku) : null,
+        unitsPerVariant: Number(row.units_per_variant ?? 1),
+        claimedQty: Number(row.claimed_qty ?? 1),
+        freeQty: Number(row.free_qty ?? 0),
+        outputQty: Number(row.output_qty ?? 1),
+        replenMethod: String(row.operation_type) === "break_pack" ? "case_break" : "package_conversion",
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async listEligibleReplenSources(
     productVariantId: number,
     warehouseLocationId: number,
     qtyNeededOverride?: number,
+    orderContext?: { orderId?: number | null; orderItemId?: number | null },
   ): Promise<ReplenSourceCandidateOption[]> {
     const contextResult = await this.loadReplenEvaluationContext(productVariantId, warehouseLocationId);
     if (contextResult.status === "skip") return [];
@@ -2860,6 +2990,36 @@ export class ReplenishmentUseCases {
       }
     }
 
+    const claimOwnedSource = await this.loadActiveClaimInlineConversionSource(
+      orderContext?.orderId,
+      orderContext?.orderItemId,
+      productVariantId,
+    );
+    if (claimOwnedSource && claimOwnedSource.locationId !== warehouseLocationId) {
+      const existingIdx = results.findIndex(
+        (r) => r.locationId === claimOwnedSource.locationId && r.variantId === claimOwnedSource.variantId,
+      );
+      const option: ReplenSourceCandidateOption = {
+        locationId: claimOwnedSource.locationId,
+        locationCode: claimOwnedSource.locationCode,
+        variantId: claimOwnedSource.variantId,
+        variantSku: claimOwnedSource.variantSku,
+        variantName: claimOwnedSource.variantName,
+        availableQty: claimOwnedSource.freeQty + claimOwnedSource.claimedQty,
+        unitsPerVariant: claimOwnedSource.unitsPerVariant,
+        qtySourceUnits: claimOwnedSource.claimedQty,
+        qtyTargetUnits: claimOwnedSource.outputQty * claimOwnedSource.unitsPerVariant > 0
+          ? claimOwnedSource.claimedQty * claimOwnedSource.unitsPerVariant
+          : claimOwnedSource.outputQty,
+        replenMethod: claimOwnedSource.replenMethod,
+      };
+      if (existingIdx >= 0) {
+        results[existingIdx] = option;
+      } else {
+        results.unshift(option);
+      }
+    }
+
     return results;
   }
 
@@ -2867,6 +3027,7 @@ export class ReplenishmentUseCases {
     productVariantId: number,
     warehouseLocationId: number,
     pickedQty: number,
+    orderContext?: { orderId?: number | null; orderItemId?: number | null },
   ): Promise<ReplenPickPrediction | null> {
     const [level] = await this.db
       .select()
@@ -2883,6 +3044,46 @@ export class ReplenishmentUseCases {
       currentQtyOverride: postPickQty,
       ...(systemQty < Math.max(1, pickedQty) ? { forceWhenAtOrBelowZero: true } : {}),
     });
+
+    // Include cases already reserved by THIS order's own active Canonical Claim so
+    // the last case in Reserve never displays a false "No source stock" banner.
+    if (systemQty < Math.max(1, pickedQty) && (guidance.stockout || !guidance.needed)) {
+      const claimOwnedSource = await this.loadActiveClaimInlineConversionSource(
+        orderContext?.orderId,
+        orderContext?.orderItemId,
+        productVariantId,
+      );
+      if (claimOwnedSource) {
+        const availableSources = await this.listEligibleReplenSources(
+          productVariantId,
+          warehouseLocationId,
+          undefined,
+          orderContext,
+        ).catch(() => undefined);
+        return {
+          systemQty,
+          postPickQty,
+          triggerValue: guidance.triggerValue,
+          replenNeeded: true,
+          replenMethod: claimOwnedSource.replenMethod,
+          autoReplen: guidance.autoReplen,
+          stockout: false,
+          executionMode: "inline",
+          sourceLocationId: claimOwnedSource.locationId,
+          sourceLocationCode: claimOwnedSource.locationCode,
+          sourceQty: claimOwnedSource.freeQty + claimOwnedSource.claimedQty,
+          sourceVariantName: claimOwnedSource.variantName,
+          qtySourceUnits: claimOwnedSource.claimedQty,
+          qtyTargetUnits: claimOwnedSource.claimedQty * claimOwnedSource.unitsPerVariant,
+          ...(availableSources && availableSources.length > 0 ? { availableSources } : {}),
+          existingTaskId: guidance.existingTaskId ?? null,
+          existingTaskStatus: guidance.existingTaskStatus ?? null,
+          existingTaskExecutionMode: guidance.existingTaskExecutionMode ?? null,
+          existingTaskBlocksShipment: guidance.existingTaskBlocksShipment === true,
+        };
+      }
+    }
+
     if (!level && !guidance.needed && !guidance.existingTaskId) return null;
 
     let sourceQty = 0;
@@ -2898,7 +3099,12 @@ export class ReplenishmentUseCases {
         .limit(1);
       sourceQty = Math.max(0, Number(sourceLevel?.variantQty ?? 0) - Number(sourceLevel?.reservedQty ?? 0));
       if (guidance.needed && !guidance.stockout) {
-        availableSources = await this.listEligibleReplenSources(productVariantId, warehouseLocationId).catch(() => undefined);
+        availableSources = await this.listEligibleReplenSources(
+          productVariantId,
+          warehouseLocationId,
+          undefined,
+          orderContext,
+        ).catch(() => undefined);
       }
     }
 
@@ -2940,14 +3146,16 @@ export class ReplenishmentUseCases {
     userId?: string,
     context?: ReplenOrderContext,
   ): Promise<{ task: ReplenTask; moved: number } | null> {
-    validateReplenishmentTrigger(context?.triggeredBy ?? "inline_pick");
+    const triggeredBy = context?.triggeredBy ?? "inline_pick";
+    validateReplenishmentTrigger(triggeredBy);
+    const queueOnly = this.isBackgroundQueueOnlyTrigger(triggeredBy, context);
     const _tag = `[Replen createAndExecute] variant=${pickVariantId} loc=${toLocationId}`;
 
     const prior = await this.priorTriggeredTask(pickVariantId, toLocationId, context);
     if (prior) {
       if (!prior.task) return null;
       if (prior.task.status === "completed") return { task: prior.task, moved: Number(prior.task.executionMovedBaseUnits ?? 0) };
-      if (prior.task.executionMode === "inline" && supportsInlineReplenishment(prior.task.replenMethod) && EXECUTABLE_REPLEN_TASK_STATUSES.includes(prior.task.status)) return this.executeInlineTaskAutomatically(prior.task, userId, _tag);
+      if (!queueOnly && prior.task.executionMode === "inline" && supportsInlineReplenishment(prior.task.replenMethod) && EXECUTABLE_REPLEN_TASK_STATUSES.includes(prior.task.status)) return this.executeInlineTaskAutomatically(prior.task, userId, _tag);
       return { task: prior.task, moved: 0 };
     }
     const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
@@ -2963,7 +3171,7 @@ export class ReplenishmentUseCases {
         Number(currentTask.qtyCompleted ?? 0) === 0 &&
         EXECUTABLE_REPLEN_TASK_STATUSES.includes(currentTask.status)
       ) {
-        const candidates = await this.listEligibleReplenSources(pickVariantId, toLocationId);
+        const candidates = await this.listEligibleReplenSources(pickVariantId, toLocationId, context?.minDestinationQty ?? undefined);
         const preferred = candidates.find((c) => c.locationId === preferredSourceLocationId);
         if (preferred) {
           const [replanned] = await this.db
@@ -2989,6 +3197,7 @@ export class ReplenishmentUseCases {
       }
       logger.info("inventory.replenishment_use_cases", { message: `${_tag} reusing active task ${currentTask.id} status=${currentTask.status}` });
       if (
+        !queueOnly &&
         currentTask.executionMode === "inline" &&
         supportsInlineReplenishment(currentTask.replenMethod) &&
         EXECUTABLE_REPLEN_TASK_STATUSES.includes(currentTask.status)
@@ -2999,9 +3208,9 @@ export class ReplenishmentUseCases {
     }
 
     // Re-derive guidance from current DB state (fresh, not stale)
-    const triggeredBy = context?.triggeredBy ?? "inline_pick";
     const guidance = await this.checkReplenNeeded(pickVariantId, toLocationId, {
       forceWhenAtOrBelowZero: context?.forceWhenAtOrBelowZero === true,
+      minDestinationQty: context?.minDestinationQty ?? undefined,
     });
     if (guidance.needed && guidance.stockout && context?.blocksShipment) {
       const blockedTask = await this.checkAndTriggerAfterPick(
@@ -3017,6 +3226,13 @@ export class ReplenishmentUseCases {
       await this.rememberTriggeredTask(pickVariantId, toLocationId, null, context);
       return null;
     }
+    if (queueOnly && guidance.executionMode === "inline") {
+      logger.info("inventory.replenishment_use_cases", {
+        message: `${_tag} skipping post-pick/background inline replen (${triggeredBy}); inline breaks only run at active pick confirmation`,
+      });
+      await this.rememberTriggeredTask(pickVariantId, toLocationId, null, context);
+      return null;
+    }
 
     let selectedSourceLocationId = guidance.sourceLocationId;
     let selectedSourceVariantId = guidance.sourceVariantId ?? pickVariantId;
@@ -3025,7 +3241,7 @@ export class ReplenishmentUseCases {
     let selectedReplenMethod = guidance.replenMethod;
 
     if (preferredSourceLocationId != null && preferredSourceLocationId !== selectedSourceLocationId) {
-      const candidates = await this.listEligibleReplenSources(pickVariantId, toLocationId);
+      const candidates = await this.listEligibleReplenSources(pickVariantId, toLocationId, context?.minDestinationQty ?? undefined);
       const preferred = candidates.find((c) => c.locationId === preferredSourceLocationId);
       if (preferred) {
         selectedSourceLocationId = preferred.locationId;

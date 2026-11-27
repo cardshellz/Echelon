@@ -44,7 +44,9 @@ import {
   MAX_SERIALIZATION_ATTEMPTS,
   openResourceQty,
   positiveBigInt,
+  positiveInteger,
   rollback,
+  rows,
   type ClaimRepositoryDependencies,
   type FulfillmentClaimLine,
   type PersistedClaim,
@@ -499,16 +501,173 @@ async function executeLockedPickBuildOperation(
   }
 }
 
+async function rebindPackageOperationInputSourceIfRequested(
+  deps: ClaimRepositoryDependencies,
+  client: PoolClient,
+  claim: PersistedClaim,
+  operation: Awaited<ReturnType<typeof lockPackageOperation>>,
+  resources: Awaited<ReturnType<typeof loadOperationExecutionResources>>,
+  preferredLocationId: number | undefined,
+  commandKey: string,
+  actor: string,
+  reason: string,
+  occurredAt: Date,
+): Promise<boolean> {
+  if (
+    preferredLocationId == null ||
+    resources.length !== 1 ||
+    resources[0].warehouseLocationId === preferredLocationId
+  ) {
+    return false;
+  }
+  const source = resources[0];
+  const targetRow = rows(await client.query(
+    `SELECT level.id AS inventory_level_id, level.variant_qty, level.reserved_qty
+     FROM warehouse.warehouse_locations AS location
+     JOIN inventory.inventory_levels AS level
+       ON level.warehouse_location_id = location.id
+      AND level.product_variant_id = $2
+     WHERE location.id = $1
+       AND location.warehouse_id = $3
+       AND location.is_active = 1
+       AND location.cycle_count_freeze_id IS NULL
+     FOR UPDATE OF level`,
+    [preferredLocationId, source.sourceVariantId, operation.warehouseId],
+  ))[0];
+  if (!targetRow || targetRow.inventory_level_id == null) return false;
+  const freeQty = BigInt(Number(targetRow.variant_qty)) - BigInt(Number(targetRow.reserved_qty));
+  if (freeQty < source.consumeQty) return false;
+
+  const targetLevelId = positiveInteger(targetRow.inventory_level_id, "targetInventoryLevel.id");
+  await deps.inventoryWriter.releaseResources({
+    client,
+    commandKey: `${commandKey}:source-rebind-release`,
+    claimId: claim.id,
+    resources: [{
+      claimResourceId: source.claimResourceId,
+      inventoryLevelId: source.inventoryLevelId,
+      warehouseLocationId: source.warehouseLocationId,
+      sourceVariantId: source.sourceVariantId,
+      releaseQty: source.consumeQty,
+      lotAllocations: source.lotAllocations.map((lot) => ({
+        inventoryLotId: lot.inventoryLotId,
+        releaseQty: lot.consumeQty,
+      })),
+      orderItemId: operation.orderItemId,
+    }],
+    orderId: claim.orderId,
+    actor,
+    reason,
+    occurredAt,
+  });
+
+  for (const lot of source.lotAllocations) {
+    await client.query(
+      `UPDATE inventory.availability_claim_lot_allocations
+       SET released_qty = released_qty + $1, updated_at = $3
+       WHERE id = $2`,
+      [lot.consumeQty.toString(), lot.claimLotAllocationId.toString(), occurredAt],
+    );
+  }
+  await client.query(
+    `UPDATE inventory.availability_claim_resources
+     SET released_qty = released_qty + $1, updated_at = $3
+     WHERE id = $2`,
+    [source.consumeQty.toString(), source.claimResourceId.toString(), occurredAt],
+  );
+
+  const newResourceRow = rows(await client.query(
+    `INSERT INTO inventory.availability_claim_resources (
+       claim_id, claim_line_id, consumer_operation_key, producer_operation_key,
+       warehouse_id, warehouse_location_id, inventory_level_id, source_variant_id, claimed_qty
+     ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8)
+     ON CONFLICT (
+       claim_line_id, warehouse_id, warehouse_location_id, inventory_level_id,
+       source_variant_id, COALESCE(consumer_operation_key, ''), COALESCE(producer_operation_key, '')
+     ) DO UPDATE
+       SET claimed_qty = inventory.availability_claim_resources.claimed_qty + EXCLUDED.claimed_qty,
+           updated_at = $9
+     RETURNING id`,
+    [
+      claim.id.toString(),
+      operation.claimLineId.toString(),
+      operation.operationKey,
+      operation.warehouseId,
+      preferredLocationId,
+      targetLevelId,
+      source.sourceVariantId,
+      source.consumeQty.toString(),
+      occurredAt,
+    ],
+  ))[0];
+  const newClaimResourceId = positiveBigInt(newResourceRow?.id, "newClaimResource.id");
+
+  const reservedLots = await deps.inventoryWriter.reserveResource({
+    client,
+    commandKey: `${commandKey}:source-rebind-reserve`,
+    claimId: claim.id,
+    claimResourceId: newClaimResourceId,
+    inventoryLevelId: targetLevelId,
+    warehouseLocationId: preferredLocationId,
+    sourceVariantId: source.sourceVariantId,
+    claimedQty: Number(source.consumeQty),
+    orderId: claim.orderId,
+    orderItemId: operation.orderItemId,
+    consumerOperationKey: operation.operationKey,
+    actor,
+    occurredAt,
+  });
+
+  for (const allocation of reservedLots) {
+    await client.query(
+      `INSERT INTO inventory.availability_claim_lot_allocations (
+         claim_id, claim_resource_id, inventory_lot_id, claimed_qty, unit_cost_mills,
+         po_unit_cost_mills, packaging_unit_cost_mills, landed_unit_cost_mills
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (claim_resource_id, inventory_lot_id) DO UPDATE
+         SET claimed_qty = inventory.availability_claim_lot_allocations.claimed_qty + EXCLUDED.claimed_qty,
+             updated_at = $9`,
+      [
+        claim.id.toString(),
+        newClaimResourceId.toString(),
+        allocation.inventoryLotId,
+        allocation.qty,
+        allocation.unitCostMills.toString(),
+        allocation.poUnitCostMills.toString(),
+        allocation.packagingUnitCostMills.toString(),
+        allocation.landedUnitCostMills.toString(),
+        occurredAt,
+      ],
+    );
+  }
+  return true;
+}
+
 async function executeLockedPackageOperation(
   deps: ClaimRepositoryDependencies,
   client: PoolClient,
   claim: PersistedClaim,
   command: CanonicalAvailabilityClaimOperationExecutionCommand,
   occurredAt: Date,
+  preferredSourceLocationId?: number,
 ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
   const operation = await lockPackageOperation(client, claim.id, command.operationKey);
   const plannedOperation = assertOperationMatchesPlan(claim, operation);
-  const resources = await loadOperationExecutionResources(client, claim.id, operation, plannedOperation);
+  let resources = await loadOperationExecutionResources(client, claim.id, operation, plannedOperation);
+  if (await rebindPackageOperationInputSourceIfRequested(
+    deps,
+    client,
+    claim,
+    operation,
+    resources,
+    preferredSourceLocationId,
+    command.idempotencyKey,
+    command.actor,
+    command.reason,
+    occurredAt,
+  )) {
+    resources = await loadOperationExecutionResources(client, claim.id, operation, plannedOperation);
+  }
   const execution = await deps.inventoryWriter.executePackageOperation({
     client, claimId: claim.id, claimOperationId: operation.id,
     operationKey: operation.operationKey, operationType: operation.operationType, resources,
@@ -611,7 +770,14 @@ export async function materializePickPackageConversions(
       actor: command.actor,
       reason: command.reason,
     });
-    await executeLockedPackageOperation(deps, client, claim, executionCommand, occurredAt);
+    await executeLockedPackageOperation(
+      deps,
+      client,
+      claim,
+      executionCommand,
+      occurredAt,
+      command.preferredConversionSourceLocationId,
+    );
   }
   return operations.length > 0;
 }

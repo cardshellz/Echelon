@@ -341,6 +341,7 @@ async function planRemoteConversionReplacement(
   line: FulfillmentClaimLine,
   pickWarehouseId: number,
   requiredQty: bigint,
+  allowSameWarehouse = false,
 ): Promise<PlannedRemoteConversionReplacement | null> {
   const operationRows = rows(await client.query(
     `SELECT id, operation_key, parent_operation_key, warehouse_id, operation_type, status,
@@ -421,6 +422,7 @@ async function planRemoteConversionReplacement(
     pickWarehouseId,
     targetVariantId: line.targetVariantId,
     requiredQty,
+    allowSameWarehouse,
   });
   if (!selection) return null;
 
@@ -733,6 +735,7 @@ export async function reconcilePickLocation(
     orderWarehouseId: number | null;
     warehouseLocationId: number;
     quantity: bigint;
+    allowSameWarehouseConversionReplacement?: boolean;
     actor: string;
     reason: string;
     occurredAt: Date;
@@ -774,6 +777,7 @@ export async function reconcilePickLocation(
       input.line,
       targetWarehouseId,
       input.quantity,
+      input.allowSameWarehouseConversionReplacement === true,
     );
     if (replacement) {
       await replaceRemoteConversionsAtPickLocation(client, inventoryWriter, {

@@ -144,27 +144,27 @@ suite(
         input,
       );
       expect(result).toMatchObject({
-        moved: 10,
+        moved: 5,
         task: {
           status: "completed",
           executionMode: "inline",
           replenMethod: "full_case",
-          qtySourceUnits: 2,
-          qtyTargetUnits: 10,
+          qtySourceUnits: 1,
+          qtyTargetUnits: 5,
         },
       });
       const beforeReplay = await context.state();
       expect(
         await owner().createAndExecuteReplen(101, 200, "picker", input),
       ).toMatchObject({
-        moved: 10,
+        moved: 5,
         task: { id: result!.task.id, status: "completed" },
       });
       expect(await context.state()).toEqual(beforeReplay);
       expect(await transfers()).toHaveLength(1);
       expect((await transfers())[0]).toMatchObject({
         product_variant_id: 101,
-        variant_qty_delta: 2,
+        variant_qty_delta: 1,
         units_per_variant_snapshot: 5,
       });
       expect(
@@ -173,14 +173,14 @@ suite(
             "SELECT variant_qty,reserved_qty,picked_qty FROM inventory.inventory_levels WHERE warehouse_location_id=100",
           )
         ).rows[0],
-      ).toEqual({ variant_qty: 18, reserved_qty: 3, picked_qty: 2 });
+      ).toEqual({ variant_qty: 19, reserved_qty: 3, picked_qty: 2 });
       expect(
         (
           await context.pool.query(
             "SELECT variant_qty FROM inventory.inventory_levels WHERE warehouse_location_id=200",
           )
         ).rows[0].variant_qty,
-      ).toBe(2);
+      ).toBe(1);
       expect(
         (
           await context.pool.query(
@@ -430,7 +430,7 @@ suite(
       await owner().recoverReplenishmentFollowups();
       expect(await readTask(task.id)).toMatchObject({
         status: "completed",
-        qty_completed: 10,
+        qty_completed: 5,
       });
       expect(await transfers()).toHaveLength(1);
     });
