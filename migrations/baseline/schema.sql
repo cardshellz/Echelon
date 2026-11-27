@@ -19,8 +19,8 @@
 --
 
 
--- Dumped from database version 17.10 (Ubuntu 17.10-1.pgdg20.04+heroku2)
--- Dumped by pg_dump version 17.11
+-- Dumped from database version 17.11 (Ubuntu 17.11-1.pgdg20.04+heroku1)
+-- Dumped by pg_dump version 18.7 (Ubuntu 18.7-1.pgdg24.04+2)
 
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
@@ -397,6 +397,107 @@ END $$;
 
 
 --
+-- Name: enqueue_variant_pack_metafields(text); Type: FUNCTION; Schema: catalog; Owner: -
+--
+
+CREATE FUNCTION catalog.enqueue_variant_pack_metafields(target_shopify_variant_id text) RETURNS integer
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog'
+    AS $_$
+DECLARE
+  variant_gid TEXT;
+  owner_found BOOLEAN := FALSE;
+  owner_uom_type TEXT;
+  owner_units INTEGER;
+  pack_label TEXT;
+  units_value JSONB;
+  label_value JSONB;
+BEGIN
+  IF target_shopify_variant_id IS NULL OR target_shopify_variant_id !~ '^[0-9]+$' THEN
+    RETURN 0;
+  END IF;
+
+  -- Only the shared production database has the club app's outbox.
+  IF to_regclass('membership.shopify_metafield_outbox') IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  variant_gid := 'gid://shopify/ProductVariant/' || target_shopify_variant_id;
+
+  -- Shopify already said this variant is gone; the worker would only be told
+  -- again. Nested so the table is not read where it does not exist.
+  IF to_regclass('membership.shopify_dead_owners') IS NOT NULL THEN
+    IF EXISTS (
+      SELECT 1
+      FROM membership.shopify_dead_owners AS dead_owner
+      WHERE dead_owner.target_type = 'productvariant'
+        AND dead_owner.target_id = variant_gid
+        AND dead_owner.cleared_at IS NULL
+    ) THEN
+      RETURN 0;
+    END IF;
+  END IF;
+
+  -- One Shopify variant can be linked from more than one catalog row (a
+  -- retired duplicate). The active row speaks for it, then the oldest.
+  SELECT TRUE, variant_row.uom_type, variant_row.units_per_variant
+  INTO owner_found, owner_uom_type, owner_units
+  FROM catalog.product_variants AS variant_row
+  WHERE variant_row.shopify_variant_id = target_shopify_variant_id
+  ORDER BY (variant_row.is_active IS TRUE) DESC, variant_row.id ASC
+  LIMIT 1;
+
+  IF owner_found THEN
+    -- Labels from shared/catalog/variant-uom.ts, with "Box / Inner Pack"
+    -- shortened to "Box" so the card reads "Box of 500".
+    pack_label := CASE owner_uom_type
+      WHEN 'piece' THEN 'Piece'
+      WHEN 'each' THEN 'Each'
+      WHEN 'pack' THEN 'Pack'
+      WHEN 'inner_pack' THEN 'Box'
+      WHEN 'case' THEN 'Case'
+      WHEN 'skid' THEN 'Skid'
+    END;
+    IF owner_units IS NOT NULL AND owner_units > 0 THEN
+      units_value := to_jsonb(owner_units);
+    END IF;
+    IF pack_label IS NOT NULL THEN
+      label_value := to_jsonb(pack_label);
+    END IF;
+  END IF;
+
+  -- No catalog row links this Shopify variant any more: its values are no
+  -- longer known, so both metafields are removed rather than left stale.
+  INSERT INTO membership.shopify_metafield_outbox
+    (target_type, target_id, namespace, key, value, operation, dedupe_key, scheduled_for)
+  VALUES
+    ('productvariant', variant_gid, 'cardshellz', 'units_per_variant',
+     units_value, CASE WHEN units_value IS NULL THEN 'delete' ELSE 'set' END,
+     'productvariant:' || variant_gid || ':cardshellz:units_per_variant', now()),
+    ('productvariant', variant_gid, 'cardshellz', 'pack_type',
+     label_value, CASE WHEN label_value IS NULL THEN 'delete' ELSE 'set' END,
+     'productvariant:' || variant_gid || ':cardshellz:pack_type', now())
+  ON CONFLICT (dedupe_key) WHERE status = 'pending'
+  DO UPDATE SET
+    value = EXCLUDED.value,
+    operation = EXCLUDED.operation,
+    scheduled_for = EXCLUDED.scheduled_for,
+    attempts = 0,
+    last_error = NULL;
+
+  RETURN 2;
+END;
+$_$;
+
+
+--
+-- Name: FUNCTION enqueue_variant_pack_metafields(target_shopify_variant_id text); Type: COMMENT; Schema: catalog; Owner: -
+--
+
+COMMENT ON FUNCTION catalog.enqueue_variant_pack_metafields(target_shopify_variant_id text) IS 'Queues cardshellz.units_per_variant and cardshellz.pack_type for one Shopify variant id into membership.shopify_metafield_outbox. Returns the number of rows queued (0 when skipped).';
+
+
+--
 -- Name: guard_cleanup_history_immutable(); Type: FUNCTION; Schema: catalog; Owner: -
 --
 
@@ -657,6 +758,33 @@ BEGIN
   END LOOP;
   RETURN NEW;
 END $$;
+
+
+--
+-- Name: product_variants_enqueue_pack_metafields(); Type: FUNCTION; Schema: catalog; Owner: -
+--
+
+CREATE FUNCTION catalog.product_variants_enqueue_pack_metafields() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog'
+    AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    PERFORM catalog.enqueue_variant_pack_metafields(OLD.shopify_variant_id);
+    RETURN OLD;
+  END IF;
+
+  PERFORM catalog.enqueue_variant_pack_metafields(NEW.shopify_variant_id);
+
+  -- A variant moved to another Shopify variant: the old one is recomputed too
+  -- (another catalog row may still link it, or it loses both values).
+  IF TG_OP = 'UPDATE' AND OLD.shopify_variant_id IS DISTINCT FROM NEW.shopify_variant_id THEN
+    PERFORM catalog.enqueue_variant_pack_metafields(OLD.shopify_variant_id);
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
 
 
 --
@@ -4014,6 +4142,29 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+
+
+--
+-- Name: guard_interwarehouse_transfer_event(); Type: FUNCTION; Schema: inventory; Owner: -
+--
+
+CREATE FUNCTION inventory.guard_interwarehouse_transfer_event() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF ROW(NEW.transfer_id,NEW.event_type,NEW.command_key,NEW.request_hash,NEW.quantity,
+         NEW.damaged_quantity,NEW.inventory_transaction_id,NEW.adjustment_transaction_id,NEW.actor,NEW.detail,NEW.occurred_at)
+     IS DISTINCT FROM
+     ROW(OLD.transfer_id,OLD.event_type,OLD.command_key,OLD.request_hash,OLD.quantity,
+         OLD.damaged_quantity,OLD.inventory_transaction_id,OLD.adjustment_transaction_id,OLD.actor,OLD.detail,OLD.occurred_at) THEN
+    RAISE EXCEPTION 'Inter-warehouse transfer event evidence is immutable' USING ERRCODE='23514';
+  END IF;
+  IF OLD.effects_completed_at IS NOT NULL AND NEW.effects_completed_at IS DISTINCT FROM OLD.effects_completed_at THEN
+    RAISE EXCEPTION 'Completed inter-warehouse transfer effects are immutable' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
 
 
 --
@@ -25536,6 +25687,140 @@ CREATE TABLE inventory.integrity_monitor_state (
 
 
 --
+-- Name: interwarehouse_transfer_events; Type: TABLE; Schema: inventory; Owner: -
+--
+
+CREATE TABLE inventory.interwarehouse_transfer_events (
+    id bigint NOT NULL,
+    transfer_id integer NOT NULL,
+    event_type text NOT NULL,
+    command_key text NOT NULL,
+    request_hash character varying(64) NOT NULL,
+    quantity integer DEFAULT 0 NOT NULL,
+    damaged_quantity integer DEFAULT 0 NOT NULL,
+    inventory_transaction_id integer,
+    adjustment_transaction_id integer,
+    actor text NOT NULL,
+    detail jsonb DEFAULT '{}'::jsonb NOT NULL,
+    occurred_at timestamp with time zone NOT NULL,
+    effects_claim_token uuid,
+    effects_claimed_at timestamp with time zone,
+    effects_completed_at timestamp with time zone,
+    last_error text,
+    CONSTRAINT interwarehouse_transfer_events_actor_check CHECK ((btrim(actor) <> ''::text)),
+    CONSTRAINT interwarehouse_transfer_events_command_key_check CHECK (((length(command_key) >= 8) AND (length(command_key) <= 120))),
+    CONSTRAINT interwarehouse_transfer_events_damaged_quantity_check CHECK ((damaged_quantity >= 0)),
+    CONSTRAINT interwarehouse_transfer_events_detail_check CHECK ((jsonb_typeof(detail) = 'object'::text)),
+    CONSTRAINT interwarehouse_transfer_events_event_type_check CHECK ((event_type = ANY (ARRAY['dispatched'::text, 'received'::text, 'reconciled'::text, 'cancelled'::text]))),
+    CONSTRAINT interwarehouse_transfer_events_quantity_check CHECK ((quantity >= 0)),
+    CONSTRAINT interwarehouse_transfer_events_request_hash_check CHECK (((request_hash)::text ~ '^[a-f0-9]{64}$'::text))
+);
+
+
+--
+-- Name: interwarehouse_transfer_events_id_seq; Type: SEQUENCE; Schema: inventory; Owner: -
+--
+
+ALTER TABLE inventory.interwarehouse_transfer_events ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME inventory.interwarehouse_transfer_events_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: interwarehouse_transfer_lines; Type: TABLE; Schema: inventory; Owner: -
+--
+
+CREATE TABLE inventory.interwarehouse_transfer_lines (
+    id integer NOT NULL,
+    transfer_id integer NOT NULL,
+    product_variant_id integer NOT NULL,
+    requested_qty integer NOT NULL,
+    dispatched_qty integer DEFAULT 0 NOT NULL,
+    received_qty integer DEFAULT 0 NOT NULL,
+    damaged_qty integer DEFAULT 0 NOT NULL,
+    lost_qty integer DEFAULT 0 NOT NULL,
+    cancelled_qty integer DEFAULT 0 NOT NULL,
+    CONSTRAINT interwarehouse_transfer_lines_cancelled_qty_check CHECK ((cancelled_qty >= 0)),
+    CONSTRAINT interwarehouse_transfer_lines_check CHECK (((dispatched_qty + cancelled_qty) <= requested_qty)),
+    CONSTRAINT interwarehouse_transfer_lines_check1 CHECK ((((received_qty + damaged_qty) + lost_qty) <= dispatched_qty)),
+    CONSTRAINT interwarehouse_transfer_lines_damaged_qty_check CHECK ((damaged_qty >= 0)),
+    CONSTRAINT interwarehouse_transfer_lines_dispatched_qty_check CHECK ((dispatched_qty >= 0)),
+    CONSTRAINT interwarehouse_transfer_lines_lost_qty_check CHECK ((lost_qty >= 0)),
+    CONSTRAINT interwarehouse_transfer_lines_received_qty_check CHECK ((received_qty >= 0)),
+    CONSTRAINT interwarehouse_transfer_lines_requested_qty_check CHECK ((requested_qty > 0))
+);
+
+
+--
+-- Name: interwarehouse_transfer_lines_id_seq; Type: SEQUENCE; Schema: inventory; Owner: -
+--
+
+ALTER TABLE inventory.interwarehouse_transfer_lines ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME inventory.interwarehouse_transfer_lines_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: interwarehouse_transfers; Type: TABLE; Schema: inventory; Owner: -
+--
+
+CREATE TABLE inventory.interwarehouse_transfers (
+    id integer NOT NULL,
+    create_command_key text NOT NULL,
+    request_hash character varying(64) NOT NULL,
+    source_warehouse_id integer NOT NULL,
+    destination_warehouse_id integer NOT NULL,
+    source_location_id integer NOT NULL,
+    destination_location_id integer NOT NULL,
+    transit_location_id integer,
+    status text DEFAULT 'ready'::text NOT NULL,
+    notes text,
+    exception_notes text,
+    created_by text NOT NULL,
+    dispatched_by text,
+    completed_by text,
+    cancelled_by text,
+    created_at timestamp with time zone NOT NULL,
+    dispatched_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    cancelled_at timestamp with time zone,
+    updated_at timestamp with time zone NOT NULL,
+    revision integer DEFAULT 0 NOT NULL,
+    CONSTRAINT interwarehouse_transfers_check CHECK ((source_warehouse_id <> destination_warehouse_id)),
+    CONSTRAINT interwarehouse_transfers_check1 CHECK ((source_location_id <> destination_location_id)),
+    CONSTRAINT interwarehouse_transfers_create_command_key_check CHECK (((length(create_command_key) >= 8) AND (length(create_command_key) <= 120))),
+    CONSTRAINT interwarehouse_transfers_created_by_check CHECK ((btrim(created_by) <> ''::text)),
+    CONSTRAINT interwarehouse_transfers_request_hash_check CHECK (((request_hash)::text ~ '^[a-f0-9]{64}$'::text)),
+    CONSTRAINT interwarehouse_transfers_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT interwarehouse_transfers_status_check CHECK ((status = ANY (ARRAY['ready'::text, 'in_transit'::text, 'partially_received'::text, 'exception'::text, 'completed'::text, 'closed_with_variance'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: interwarehouse_transfers_id_seq; Type: SEQUENCE; Schema: inventory; Owner: -
+--
+
+ALTER TABLE inventory.interwarehouse_transfers ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME inventory.interwarehouse_transfers_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: inventory_levels; Type: TABLE; Schema: inventory; Owner: -
 --
 
@@ -31356,6 +31641,7 @@ CREATE TABLE membership.plans (
     rewards_code_expiry_days integer DEFAULT 2 NOT NULL,
     tier_level integer DEFAULT 0 NOT NULL,
     is_available_for_purchase boolean DEFAULT false NOT NULL,
+    points_expiry_notice_days integer DEFAULT 30 NOT NULL,
     CONSTRAINT plans_purchase_availability_check CHECK (((is_available_for_purchase = false) OR ((is_active = true) AND (is_free_tier = false))))
 );
 
@@ -31365,6 +31651,24 @@ CREATE TABLE membership.plans (
 --
 
 COMMENT ON COLUMN membership.plans.upgrade_to_plan_id IS 'The plan this one upgrades to (defines upgrade path in member portal)';
+
+
+--
+-- Name: points_expiry_notices; Type: TABLE; Schema: membership; Owner: -
+--
+
+CREATE TABLE membership.points_expiry_notices (
+    id character varying DEFAULT gen_random_uuid() NOT NULL,
+    member_id character varying NOT NULL,
+    plan_id character varying NOT NULL,
+    points numeric(12,2) NOT NULL,
+    earned_before timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    notified_at timestamp with time zone DEFAULT now() NOT NULL,
+    dedupe_key text NOT NULL,
+    expired_at timestamp with time zone,
+    expired_points numeric(12,2)
+);
 
 
 --
@@ -31482,6 +31786,31 @@ CREATE TABLE membership.product_collections (
     id character varying DEFAULT gen_random_uuid() NOT NULL,
     product_id text NOT NULL,
     collection_id text NOT NULL
+);
+
+
+--
+-- Name: promotions; Type: TABLE; Schema: membership; Owner: -
+--
+
+CREATE TABLE membership.promotions (
+    id character varying DEFAULT gen_random_uuid() NOT NULL,
+    slug text NOT NULL,
+    label text NOT NULL,
+    status text DEFAULT 'draft'::text NOT NULL,
+    starts_on date NOT NULL,
+    ends_on date NOT NULL,
+    starts_time text,
+    ends_time text,
+    effects jsonb NOT NULL,
+    messages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    created_by text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT promotions_ends_time_format CHECK (((ends_time IS NULL) OR (ends_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'::text))),
+    CONSTRAINT promotions_starts_time_format CHECK (((starts_time IS NULL) OR (starts_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'::text))),
+    CONSTRAINT promotions_status_known CHECK ((status = ANY (ARRAY['draft'::text, 'scheduled'::text, 'cancelled'::text]))),
+    CONSTRAINT promotions_window_order CHECK ((starts_on <= ends_on))
 );
 
 
@@ -48855,6 +49184,62 @@ ALTER TABLE ONLY inventory.integrity_monitor_state
 
 
 --
+-- Name: interwarehouse_transfer_events interwarehouse_transfer_events_command_key_key; Type: CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_events
+    ADD CONSTRAINT interwarehouse_transfer_events_command_key_key UNIQUE (command_key);
+
+
+--
+-- Name: interwarehouse_transfer_events interwarehouse_transfer_events_pkey; Type: CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_events
+    ADD CONSTRAINT interwarehouse_transfer_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: interwarehouse_transfer_lines interwarehouse_transfer_lines_pkey; Type: CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_lines
+    ADD CONSTRAINT interwarehouse_transfer_lines_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: interwarehouse_transfer_lines interwarehouse_transfer_lines_transfer_id_key; Type: CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_lines
+    ADD CONSTRAINT interwarehouse_transfer_lines_transfer_id_key UNIQUE (transfer_id);
+
+
+--
+-- Name: interwarehouse_transfers interwarehouse_transfers_create_command_key_key; Type: CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfers
+    ADD CONSTRAINT interwarehouse_transfers_create_command_key_key UNIQUE (create_command_key);
+
+
+--
+-- Name: interwarehouse_transfers interwarehouse_transfers_pkey; Type: CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfers
+    ADD CONSTRAINT interwarehouse_transfers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: interwarehouse_transfers interwarehouse_transfers_transit_location_id_key; Type: CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfers
+    ADD CONSTRAINT interwarehouse_transfers_transit_location_id_key UNIQUE (transit_location_id);
+
+
+--
 -- Name: inventory_levels inventory_levels_pkey; Type: CONSTRAINT; Schema: inventory; Owner: -
 --
 
@@ -51230,6 +51615,22 @@ ALTER TABLE ONLY membership.plans
 
 
 --
+-- Name: points_expiry_notices points_expiry_notices_dedupe_key_key; Type: CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.points_expiry_notices
+    ADD CONSTRAINT points_expiry_notices_dedupe_key_key UNIQUE (dedupe_key);
+
+
+--
+-- Name: points_expiry_notices points_expiry_notices_pkey; Type: CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.points_expiry_notices
+    ADD CONSTRAINT points_expiry_notices_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: portal_config_audit_events portal_config_audit_events_pkey; Type: CONSTRAINT; Schema: membership; Owner: -
 --
 
@@ -51259,6 +51660,22 @@ ALTER TABLE ONLY membership.subscription_contracts
 
 ALTER TABLE ONLY membership.product_collections
     ADD CONSTRAINT product_collections_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: promotions promotions_pkey; Type: CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.promotions
+    ADD CONSTRAINT promotions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: promotions promotions_slug_key; Type: CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.promotions
+    ADD CONSTRAINT promotions_slug_key UNIQUE (slug);
 
 
 --
@@ -58798,6 +59215,20 @@ CREATE INDEX idx_warehouse_pick_zones_warehouse_id ON inventory.warehouse_pick_z
 
 
 --
+-- Name: interwarehouse_transfer_events_pending_idx; Type: INDEX; Schema: inventory; Owner: -
+--
+
+CREATE INDEX interwarehouse_transfer_events_pending_idx ON inventory.interwarehouse_transfer_events USING btree (effects_claimed_at, occurred_at, id) WHERE (effects_completed_at IS NULL);
+
+
+--
+-- Name: interwarehouse_transfers_status_updated_idx; Type: INDEX; Schema: inventory; Owner: -
+--
+
+CREATE INDEX interwarehouse_transfers_status_updated_idx ON inventory.interwarehouse_transfers USING btree (status, updated_at DESC);
+
+
+--
 -- Name: inventory_lots_build_order_idx; Type: INDEX; Schema: inventory; Owner: -
 --
 
@@ -59960,10 +60391,24 @@ CREATE INDEX plan_channel_access_plan_idx ON membership.plan_channel_access USIN
 
 
 --
+-- Name: points_expiry_notices_member_expires; Type: INDEX; Schema: membership; Owner: -
+--
+
+CREATE INDEX points_expiry_notices_member_expires ON membership.points_expiry_notices USING btree (member_id, expires_at);
+
+
+--
 -- Name: portal_config_singleton_key_uidx; Type: INDEX; Schema: membership; Owner: -
 --
 
 CREATE UNIQUE INDEX portal_config_singleton_key_uidx ON membership.portal_config USING btree (singleton_key);
+
+
+--
+-- Name: promotions_status_window; Type: INDEX; Schema: membership; Owner: -
+--
+
+CREATE INDEX promotions_status_window ON membership.promotions USING btree (status, starts_on, ends_on);
 
 
 --
@@ -64298,6 +64743,27 @@ CREATE TRIGGER product_variants_guard_internal_only_transition BEFORE UPDATE OF 
 
 
 --
+-- Name: product_variants product_variants_pack_metafields_delete; Type: TRIGGER; Schema: catalog; Owner: -
+--
+
+CREATE TRIGGER product_variants_pack_metafields_delete AFTER DELETE ON catalog.product_variants FOR EACH ROW WHEN ((old.shopify_variant_id IS NOT NULL)) EXECUTE FUNCTION catalog.product_variants_enqueue_pack_metafields();
+
+
+--
+-- Name: product_variants product_variants_pack_metafields_insert; Type: TRIGGER; Schema: catalog; Owner: -
+--
+
+CREATE TRIGGER product_variants_pack_metafields_insert AFTER INSERT ON catalog.product_variants FOR EACH ROW WHEN ((new.shopify_variant_id IS NOT NULL)) EXECUTE FUNCTION catalog.product_variants_enqueue_pack_metafields();
+
+
+--
+-- Name: product_variants product_variants_pack_metafields_update; Type: TRIGGER; Schema: catalog; Owner: -
+--
+
+CREATE TRIGGER product_variants_pack_metafields_update AFTER UPDATE OF uom_type, units_per_variant, shopify_variant_id, is_active ON catalog.product_variants FOR EACH ROW WHEN ((((old.uom_type)::text IS DISTINCT FROM (new.uom_type)::text) OR (old.units_per_variant IS DISTINCT FROM new.units_per_variant) OR ((old.shopify_variant_id)::text IS DISTINCT FROM (new.shopify_variant_id)::text) OR (old.is_active IS DISTINCT FROM new.is_active))) EXECUTE FUNCTION catalog.product_variants_enqueue_pack_metafields();
+
+
+--
 -- Name: products products_inventory_tracking_projection; Type: TRIGGER; Schema: catalog; Owner: -
 --
 
@@ -66766,6 +67232,13 @@ CREATE CONSTRAINT TRIGGER initial_scope_mapping_imports_complete AFTER INSERT ON
 --
 
 CREATE TRIGGER integrity_finding_observations_immutable_guard BEFORE DELETE OR UPDATE ON inventory.integrity_finding_observations FOR EACH ROW EXECUTE FUNCTION inventory.reject_integrity_observation_mutation();
+
+
+--
+-- Name: interwarehouse_transfer_events interwarehouse_transfer_event_guard; Type: TRIGGER; Schema: inventory; Owner: -
+--
+
+CREATE TRIGGER interwarehouse_transfer_event_guard BEFORE UPDATE ON inventory.interwarehouse_transfer_events FOR EACH ROW EXECUTE FUNCTION inventory.guard_interwarehouse_transfer_event();
 
 
 --
@@ -75559,6 +76032,86 @@ ALTER TABLE ONLY inventory.integrity_monitor_state
 
 
 --
+-- Name: interwarehouse_transfer_events interwarehouse_transfer_events_adjustment_transaction_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_events
+    ADD CONSTRAINT interwarehouse_transfer_events_adjustment_transaction_id_fkey FOREIGN KEY (adjustment_transaction_id) REFERENCES inventory.inventory_transactions(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfer_events interwarehouse_transfer_events_inventory_transaction_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_events
+    ADD CONSTRAINT interwarehouse_transfer_events_inventory_transaction_id_fkey FOREIGN KEY (inventory_transaction_id) REFERENCES inventory.inventory_transactions(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfer_events interwarehouse_transfer_events_transfer_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_events
+    ADD CONSTRAINT interwarehouse_transfer_events_transfer_id_fkey FOREIGN KEY (transfer_id) REFERENCES inventory.interwarehouse_transfers(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfer_lines interwarehouse_transfer_lines_product_variant_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_lines
+    ADD CONSTRAINT interwarehouse_transfer_lines_product_variant_id_fkey FOREIGN KEY (product_variant_id) REFERENCES catalog.product_variants(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfer_lines interwarehouse_transfer_lines_transfer_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfer_lines
+    ADD CONSTRAINT interwarehouse_transfer_lines_transfer_id_fkey FOREIGN KEY (transfer_id) REFERENCES inventory.interwarehouse_transfers(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfers interwarehouse_transfers_destination_location_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfers
+    ADD CONSTRAINT interwarehouse_transfers_destination_location_id_fkey FOREIGN KEY (destination_location_id) REFERENCES warehouse.warehouse_locations(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfers interwarehouse_transfers_destination_warehouse_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfers
+    ADD CONSTRAINT interwarehouse_transfers_destination_warehouse_id_fkey FOREIGN KEY (destination_warehouse_id) REFERENCES warehouse.warehouses(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfers interwarehouse_transfers_source_location_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfers
+    ADD CONSTRAINT interwarehouse_transfers_source_location_id_fkey FOREIGN KEY (source_location_id) REFERENCES warehouse.warehouse_locations(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfers interwarehouse_transfers_source_warehouse_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfers
+    ADD CONSTRAINT interwarehouse_transfers_source_warehouse_id_fkey FOREIGN KEY (source_warehouse_id) REFERENCES warehouse.warehouses(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: interwarehouse_transfers interwarehouse_transfers_transit_location_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
+--
+
+ALTER TABLE ONLY inventory.interwarehouse_transfers
+    ADD CONSTRAINT interwarehouse_transfers_transit_location_id_fkey FOREIGN KEY (transit_location_id) REFERENCES warehouse.warehouse_locations(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: inventory_levels inventory_levels_product_variant_id_fkey; Type: FK CONSTRAINT; Schema: inventory; Owner: -
 --
 
@@ -78116,6 +78669,14 @@ ALTER TABLE ONLY membership.plan_variant_overrides
 
 ALTER TABLE ONLY membership.plans
     ADD CONSTRAINT plans_upgrade_to_plan_id_fkey FOREIGN KEY (upgrade_to_plan_id) REFERENCES membership.plans(id);
+
+
+--
+-- Name: points_expiry_notices points_expiry_notices_member_id_fkey; Type: FK CONSTRAINT; Schema: membership; Owner: -
+--
+
+ALTER TABLE ONLY membership.points_expiry_notices
+    ADD CONSTRAINT points_expiry_notices_member_id_fkey FOREIGN KEY (member_id) REFERENCES membership.members(id);
 
 
 --

@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "capturedAt": "2026-11-17",
-  "serverVersion": "17.10",
-  "schemaSha256": "7dcfd5464c8416337538210e0c1595db699e265c8700a9c637dd2a2147841cce",
+  "capturedAt": "2026-11-27",
+  "serverVersion": "17.11",
+  "schemaSha256": "41545abd9889ce6f963b4bf14e49e8e7b3f0bf26f11a05a441e200513fc2ac6b",
   "covers": [
     "0000_melodic_mathemanic.sql",
     "0001_past_molly_hayes.sql",
@@ -607,6 +607,8 @@
     "900000066000020930001_legacy_performance_indexes.sql",
     "900000067000020940001_product_types_seed_and_listing_rule_scope_check.sql",
     "900000068000020990001_channels_sync_mode_check.sql",
-    "900000069000021040001_ebay_category_aspects_table.sql"
+    "900000069000021040001_ebay_category_aspects_table.sql",
+    "900000070000021140001_interwarehouse_transfer_orders.sql",
+    "900000071000021260001_variant_pack_shopify_metafields.sql"
   ]
 }

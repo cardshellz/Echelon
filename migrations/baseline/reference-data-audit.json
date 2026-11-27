@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "reviewedAt": "2026-11-19",
-  "baselineCapturedAt": "2026-11-17",
-  "referenceDataSha256": "22be2b3e0e62ca374d133dde75412be447928a6acf04592a39e0b85703404daf",
+  "reviewedAt": "2026-11-27",
+  "baselineCapturedAt": "2026-11-27",
+  "referenceDataSha256": "23862e85d8378094d395469b5814d1482546d254eb4fc10bb48bba0241ad50bd",
   "coveredInsertMigrations": [
     "0072_override_priority_permission.sql",
     "0081_pick_zones_infrastructure.sql",
@@ -77,7 +77,9 @@
     "900000040000019450002_purchase_return_receiving.sql",
     "900000045000019690001_customer_order_progress_capture.sql",
     "900000056000020040001_staff_credential_state.sql",
-    "900000067000020940001_product_types_seed_and_listing_rule_scope_check.sql"
+    "900000067000020940001_product_types_seed_and_listing_rule_scope_check.sql",
+    "900000070000021140001_interwarehouse_transfer_orders.sql",
+    "900000071000021260001_variant_pack_shopify_metafields.sql"
   ],
   "tables": [
     {
@@ -360,7 +362,8 @@
       "disposition": "baseline_reference_seed",
       "rationale": "Singleton writer-admission fence (epoch=1) required by BEFORE INSERT triggers on catalog/channels/wms tables.",
       "sourceMigrations": [
-        "236_inventory_cutover_admission.sql"
+        "236_inventory_cutover_admission.sql",
+        "900000070000021140001_interwarehouse_transfer_orders.sql"
       ]
     },
     {
@@ -402,6 +405,14 @@
       "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
       "sourceMigrations": [
         "900000018000018580002_listing_intent_propagation.sql"
+      ]
+    },
+    {
+      "table": "membership.shopify_metafield_outbox",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "Runtime trigger outbox INSERT inside catalog.enqueue_variant_pack_metafields(); intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000071000021260001_variant_pack_shopify_metafields.sql"
       ]
     },
     {
@@ -753,6 +764,14 @@
       "rationale": "4 pick-priority base score and SLA default settings ('priority.*').",
       "sourceMigrations": [
         "0559_pick_priority_settings.sql"
+      ]
+    },
+    {
+      "table": "warehouse.warehouses",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Canonical active 'SYSTEM-TRANSIT' ('system_transit') custody warehouse required by interwarehouse transfer dispatch.",
+      "sourceMigrations": [
+        "900000070000021140001_interwarehouse_transfer_orders.sql"
       ]
     },
     {
