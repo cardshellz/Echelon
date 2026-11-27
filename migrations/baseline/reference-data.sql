@@ -292,7 +292,25 @@ INSERT INTO catalog.shipping_groups (code, name, description, sort_order) VALUES
   )
 ON CONFLICT (code) DO NOTHING;
 
--- ── 5. Warehouse Pick-Priority Settings, Notifications & Permissions ────────
+-- ── 5. Warehouse System Transit Node, Pick-Priority Settings, Notifications & Permissions ──
+INSERT INTO warehouse.warehouses (
+  code,
+  name,
+  warehouse_type,
+  is_active,
+  is_default,
+  inventory_source_type,
+  feed_enabled
+) VALUES (
+  'SYSTEM-TRANSIT',
+  'Inventory in transit',
+  'system_transit',
+  1,
+  0,
+  'internal',
+  false
+) ON CONFLICT (code) DO NOTHING;
+
 INSERT INTO warehouse.echelon_settings (key, value, type, category, description) VALUES
   (
     'priority.shipping_base.standard',
