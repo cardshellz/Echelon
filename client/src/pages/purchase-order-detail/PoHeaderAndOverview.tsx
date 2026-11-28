@@ -868,266 +868,266 @@ export function PoStatusBannersAndSummary(props: {
         invoiceHref={(invoiceId) => procurementNavigation.childHref(`/ap-invoices/${invoiceId}`)}
       />
 
+      <DualTrackHeader po={po} history={history} />
+
+      {/* Charge summary cards — always visible across Lifecycle and detail tabs */}
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-2 md:gap-4">
+        <Card>
+          <CardContent className="p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground" title="Over-Receipt Tolerance %">Tolerance</div>
+              {canEditHeader && !charges.editingTolerance && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5"
+                  onClick={() => { charges.setToleranceVal(String(Number(po.overReceiptTolerancePct) || 0)); charges.setEditingTolerance(true); }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            {charges.editingTolerance ? (
+              <div className="flex gap-1 mt-1">
+                <Input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={charges.toleranceVal}
+                  onChange={e => charges.setToleranceVal(e.target.value)}
+                  className="h-7 text-sm font-mono w-16 px-1"
+                  autoFocus
+                  onKeyDown={e => {
+                    if (e.key === "Enter") charges.updateChargesMutation.mutate({ overReceiptTolerancePct: parseFloat(charges.toleranceVal || "0") });
+                    if (e.key === "Escape") charges.setEditingTolerance(false);
+                  }}
+                />
+                <Button
+                  size="sm"
+                  className="h-7 px-1"
+                  disabled={charges.updateChargesMutation.isPending}
+                  onClick={() => charges.updateChargesMutation.mutate({ overReceiptTolerancePct: parseFloat(charges.toleranceVal || "0") })}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-1" onClick={() => charges.setEditingTolerance(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <div className="font-mono font-medium">{Number(po.overReceiptTolerancePct) || 0}%</div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Subtotal — always read-only */}
+        <Card>
+          <CardContent className="p-3">
+            <div className="text-xs text-muted-foreground">Subtotal</div>
+            <div className="font-mono font-medium">{formatCents(po.subtotalCents)}</div>
+          </CardContent>
+        </Card>
+
+        {/* Discount — editable in draft */}
+        <Card>
+          <CardContent className="p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">Discount</div>
+              {canEditLines && !charges.editingDiscount && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5"
+                  aria-label="Edit discount"
+                  onClick={() => { charges.setDiscountDollars(((Number(po.discountCents) || 0) / 100).toFixed(2)); charges.setEditingDiscount(true); }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            {charges.editingDiscount ? (
+              <div className="flex gap-1 mt-1">
+                <Input
+                  aria-label="Discount"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={charges.discountDollars}
+                  onChange={e => charges.setDiscountDollars(e.target.value)}
+                  className="h-7 text-sm font-mono"
+                  autoFocus
+                  onKeyDown={e => {
+                    if (e.key === "Enter") charges.submitDollarCharge("discountCents", charges.discountDollars, "Discount");
+                    if (e.key === "Escape") charges.setEditingDiscount(false);
+                  }}
+                />
+                <Button
+                  size="sm"
+                  className="h-7 px-2"
+                  disabled={charges.updateChargesMutation.isPending}
+                  aria-label="Save discount"
+                  onClick={() => charges.submitDollarCharge("discountCents", charges.discountDollars, "Discount")}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => charges.setEditingDiscount(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <div className="font-mono font-medium">{formatCents(po.discountCents)}</div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Combined duties; the edit action changes only the supplier charge. */}
+        <Card data-testid="po-duty-summary-card">
+          <CardContent className="p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">{charges.editingTax ? "Edit supplier tax / duties" : "Tax / Duties"}</div>
+              {charges.taxApplicable && canEditHeader && !charges.editingTax && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5"
+                  aria-label="Edit supplier tax / duties"
+                  onClick={() => { charges.setTaxDollars(((Number(po.taxCents) || 0) / 100).toFixed(2)); charges.setEditingTax(true); }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            {charges.editingTax ? (
+              <div className="flex gap-1 mt-1">
+                <Input
+                  aria-label="Supplier tax / duties"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={charges.taxDollars}
+                  onChange={e => charges.setTaxDollars(e.target.value)}
+                  className="h-7 text-sm font-mono"
+                  autoFocus
+                  onKeyDown={e => {
+                    if (e.key === "Enter") charges.submitDollarCharge("taxCents", charges.taxDollars, "Supplier tax / duties");
+                    if (e.key === "Escape") charges.setEditingTax(false);
+                  }}
+                />
+                <Button
+                  size="sm"
+                  className="h-7 px-2"
+                  disabled={charges.updateChargesMutation.isPending}
+                  aria-label="Save supplier tax / duties"
+                  onClick={() => charges.submitDollarCharge("taxCents", charges.taxDollars, "Supplier tax / duties")}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => charges.setEditingTax(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <div className="font-mono font-medium">{costCardAmount(shipmentCosts.data?.totals.dutyCents)}</div>
+            )}
+            {shipmentCosts.isSuccess && (
+              <div className="text-xs text-muted-foreground mt-1">
+                Supplier: {formatIntegerCents(shipmentCosts.data.supplier.dutyCents, shipmentCosts.data.summary.currency)}<br />
+                Shipment: {formatIntegerCents(shipmentCosts.data.summary.dutyCents, shipmentCosts.data.summary.currency)}
+              </div>
+            )}
+            {!charges.taxApplicable && charges.poIncoterms && (
+              <div className="text-xs text-muted-foreground mt-0.5">Supplier charge N/A — {charges.poIncoterms}</div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Combined freight; supplier edits retain their incoterm restrictions. */}
+        <Card data-testid="po-freight-summary-card">
+          <CardContent className="p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">{charges.editingShipping ? "Edit supplier freight" : "Freight"}</div>
+              {charges.shippingApplicable && canEditHeader && !charges.editingShipping && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5"
+                  aria-label="Edit supplier freight"
+                  onClick={() => { charges.setShippingDollars(((Number(po.shippingCostCents) || 0) / 100).toFixed(2)); charges.setEditingShipping(true); }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            {charges.editingShipping ? (
+              <div className="flex gap-1 mt-1">
+                <Input
+                  aria-label="Supplier freight"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={charges.shippingDollars}
+                  onChange={e => charges.setShippingDollars(e.target.value)}
+                  className="h-7 text-sm font-mono"
+                  autoFocus
+                  onKeyDown={e => {
+                    if (e.key === "Enter") charges.submitDollarCharge("shippingCostCents", charges.shippingDollars, "Supplier freight");
+                    if (e.key === "Escape") charges.setEditingShipping(false);
+                  }}
+                />
+                <Button
+                  size="sm"
+                  className="h-7 px-2"
+                  disabled={charges.updateChargesMutation.isPending}
+                  aria-label="Save supplier freight"
+                  onClick={() => charges.submitDollarCharge("shippingCostCents", charges.shippingDollars, "Supplier freight")}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => charges.setEditingShipping(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <div className="font-mono font-medium">{costCardAmount(shipmentCosts.data?.totals.freightCents)}</div>
+            )}
+            {shipmentCosts.isSuccess && (
+              <div className="text-xs text-muted-foreground mt-1">
+                Supplier: {formatIntegerCents(shipmentCosts.data.supplier.freightCents, shipmentCosts.data.summary.currency)}<br />
+                Shipment: {formatIntegerCents(shipmentCosts.data.summary.freightCents, shipmentCosts.data.summary.currency)}
+              </div>
+            )}
+            {!charges.shippingApplicable && charges.poIncoterms && (
+              <div className="text-xs text-muted-foreground mt-0.5">
+                Supplier charge N/A — {charges.poIncoterms}
+                <button
+                  className="ml-1 text-primary underline"
+                  onClick={() => setActiveTab("shipments")}
+                >
+                  Log on shipment
+                </button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Total — always read-only */}
+        <Card data-testid="po-total-cost-summary-card">
+          <CardContent className="p-3">
+            <div className="text-xs text-muted-foreground">Total landed cost</div>
+            <div className="font-mono font-bold text-lg">{costCardAmount(shipmentCosts.data?.totals.combinedCostCents)}</div>
+            {shipmentCosts.isSuccess && (
+              <div className="text-xs text-muted-foreground mt-1">
+                Supplier PO: {formatIntegerCents(shipmentCosts.data.summary.poAmountCents, shipmentCosts.data.summary.currency)}<br />
+                Shipment charges: {formatIntegerCents(shipmentCosts.data.summary.totalCents, shipmentCosts.data.summary.currency)}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
       {activeTab !== "lifecycle" && (
         <>
-          <DualTrackHeader po={po} history={history} />
-
-          {/* Charge summary cards */}
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 md:gap-4">
-            <Card>
-              <CardContent className="p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs text-muted-foreground" title="Over-Receipt Tolerance %">Tolerance</div>
-                  {canEditHeader && !charges.editingTolerance && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-5 w-5"
-                      onClick={() => { charges.setToleranceVal(String(Number(po.overReceiptTolerancePct) || 0)); charges.setEditingTolerance(true); }}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </Button>
-                  )}
-                </div>
-                {charges.editingTolerance ? (
-                  <div className="flex gap-1 mt-1">
-                    <Input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="1"
-                      value={charges.toleranceVal}
-                      onChange={e => charges.setToleranceVal(e.target.value)}
-                      className="h-7 text-sm font-mono w-16 px-1"
-                      autoFocus
-                      onKeyDown={e => {
-                        if (e.key === "Enter") charges.updateChargesMutation.mutate({ overReceiptTolerancePct: parseFloat(charges.toleranceVal || "0") });
-                        if (e.key === "Escape") charges.setEditingTolerance(false);
-                      }}
-                    />
-                    <Button
-                      size="sm"
-                      className="h-7 px-1"
-                      disabled={charges.updateChargesMutation.isPending}
-                      onClick={() => charges.updateChargesMutation.mutate({ overReceiptTolerancePct: parseFloat(charges.toleranceVal || "0") })}
-                    >
-                      <Check className="h-3 w-3" />
-                    </Button>
-                    <Button variant="ghost" size="sm" className="h-7 px-1" onClick={() => charges.setEditingTolerance(false)}>
-                      <XCircle className="h-3 w-3" />
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="font-mono font-medium">{Number(po.overReceiptTolerancePct) || 0}%</div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Subtotal — always read-only */}
-            <Card>
-              <CardContent className="p-3">
-                <div className="text-xs text-muted-foreground">Subtotal</div>
-                <div className="font-mono font-medium">{formatCents(po.subtotalCents)}</div>
-              </CardContent>
-            </Card>
-
-            {/* Discount — editable in draft */}
-            <Card>
-              <CardContent className="p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs text-muted-foreground">Discount</div>
-                  {canEditLines && !charges.editingDiscount && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-5 w-5"
-                      aria-label="Edit discount"
-                      onClick={() => { charges.setDiscountDollars(((Number(po.discountCents) || 0) / 100).toFixed(2)); charges.setEditingDiscount(true); }}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </Button>
-                  )}
-                </div>
-                {charges.editingDiscount ? (
-                  <div className="flex gap-1 mt-1">
-                    <Input
-                      aria-label="Discount"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={charges.discountDollars}
-                      onChange={e => charges.setDiscountDollars(e.target.value)}
-                      className="h-7 text-sm font-mono"
-                      autoFocus
-                      onKeyDown={e => {
-                        if (e.key === "Enter") charges.submitDollarCharge("discountCents", charges.discountDollars, "Discount");
-                        if (e.key === "Escape") charges.setEditingDiscount(false);
-                      }}
-                    />
-                    <Button
-                      size="sm"
-                      className="h-7 px-2"
-                      disabled={charges.updateChargesMutation.isPending}
-                      aria-label="Save discount"
-                      onClick={() => charges.submitDollarCharge("discountCents", charges.discountDollars, "Discount")}
-                    >
-                      <Check className="h-3 w-3" />
-                    </Button>
-                    <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => charges.setEditingDiscount(false)}>
-                      <XCircle className="h-3 w-3" />
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="font-mono font-medium">{formatCents(po.discountCents)}</div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Combined duties; the edit action changes only the supplier charge. */}
-            <Card data-testid="po-duty-summary-card">
-              <CardContent className="p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs text-muted-foreground">{charges.editingTax ? "Edit supplier tax / duties" : "Tax / Duties"}</div>
-                  {charges.taxApplicable && canEditHeader && !charges.editingTax && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-5 w-5"
-                      aria-label="Edit supplier tax / duties"
-                      onClick={() => { charges.setTaxDollars(((Number(po.taxCents) || 0) / 100).toFixed(2)); charges.setEditingTax(true); }}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </Button>
-                  )}
-                </div>
-                {charges.editingTax ? (
-                  <div className="flex gap-1 mt-1">
-                    <Input
-                      aria-label="Supplier tax / duties"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={charges.taxDollars}
-                      onChange={e => charges.setTaxDollars(e.target.value)}
-                      className="h-7 text-sm font-mono"
-                      autoFocus
-                      onKeyDown={e => {
-                        if (e.key === "Enter") charges.submitDollarCharge("taxCents", charges.taxDollars, "Supplier tax / duties");
-                        if (e.key === "Escape") charges.setEditingTax(false);
-                      }}
-                    />
-                    <Button
-                      size="sm"
-                      className="h-7 px-2"
-                      disabled={charges.updateChargesMutation.isPending}
-                      aria-label="Save supplier tax / duties"
-                      onClick={() => charges.submitDollarCharge("taxCents", charges.taxDollars, "Supplier tax / duties")}
-                    >
-                      <Check className="h-3 w-3" />
-                    </Button>
-                    <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => charges.setEditingTax(false)}>
-                      <XCircle className="h-3 w-3" />
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="font-mono font-medium">{costCardAmount(shipmentCosts.data?.totals.dutyCents)}</div>
-                )}
-                {shipmentCosts.isSuccess && (
-                  <div className="text-xs text-muted-foreground mt-1">
-                    Supplier: {formatIntegerCents(shipmentCosts.data.supplier.dutyCents, shipmentCosts.data.summary.currency)}<br />
-                    Shipment: {formatIntegerCents(shipmentCosts.data.summary.dutyCents, shipmentCosts.data.summary.currency)}
-                  </div>
-                )}
-                {!charges.taxApplicable && charges.poIncoterms && (
-                  <div className="text-xs text-muted-foreground mt-0.5">Supplier charge N/A — {charges.poIncoterms}</div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Combined freight; supplier edits retain their incoterm restrictions. */}
-            <Card data-testid="po-freight-summary-card">
-              <CardContent className="p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs text-muted-foreground">{charges.editingShipping ? "Edit supplier freight" : "Freight"}</div>
-                  {charges.shippingApplicable && canEditHeader && !charges.editingShipping && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-5 w-5"
-                      aria-label="Edit supplier freight"
-                      onClick={() => { charges.setShippingDollars(((Number(po.shippingCostCents) || 0) / 100).toFixed(2)); charges.setEditingShipping(true); }}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </Button>
-                  )}
-                </div>
-                {charges.editingShipping ? (
-                  <div className="flex gap-1 mt-1">
-                    <Input
-                      aria-label="Supplier freight"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={charges.shippingDollars}
-                      onChange={e => charges.setShippingDollars(e.target.value)}
-                      className="h-7 text-sm font-mono"
-                      autoFocus
-                      onKeyDown={e => {
-                        if (e.key === "Enter") charges.submitDollarCharge("shippingCostCents", charges.shippingDollars, "Supplier freight");
-                        if (e.key === "Escape") charges.setEditingShipping(false);
-                      }}
-                    />
-                    <Button
-                      size="sm"
-                      className="h-7 px-2"
-                      disabled={charges.updateChargesMutation.isPending}
-                      aria-label="Save supplier freight"
-                      onClick={() => charges.submitDollarCharge("shippingCostCents", charges.shippingDollars, "Supplier freight")}
-                    >
-                      <Check className="h-3 w-3" />
-                    </Button>
-                    <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => charges.setEditingShipping(false)}>
-                      <XCircle className="h-3 w-3" />
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="font-mono font-medium">{costCardAmount(shipmentCosts.data?.totals.freightCents)}</div>
-                )}
-                {shipmentCosts.isSuccess && (
-                  <div className="text-xs text-muted-foreground mt-1">
-                    Supplier: {formatIntegerCents(shipmentCosts.data.supplier.freightCents, shipmentCosts.data.summary.currency)}<br />
-                    Shipment: {formatIntegerCents(shipmentCosts.data.summary.freightCents, shipmentCosts.data.summary.currency)}
-                  </div>
-                )}
-                {!charges.shippingApplicable && charges.poIncoterms && (
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    Supplier charge N/A — {charges.poIncoterms}
-                    <button
-                      className="ml-1 text-primary underline"
-                      onClick={() => setActiveTab("shipments")}
-                    >
-                      Log on shipment
-                    </button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Total — always read-only */}
-            <Card data-testid="po-total-cost-summary-card">
-              <CardContent className="p-3">
-                <div className="text-xs text-muted-foreground">Total landed cost</div>
-                <div className="font-mono font-bold text-lg">{costCardAmount(shipmentCosts.data?.totals.combinedCostCents)}</div>
-                {shipmentCosts.isSuccess && (
-                  <div className="text-xs text-muted-foreground mt-1">
-                    Supplier PO: {formatIntegerCents(shipmentCosts.data.summary.poAmountCents, shipmentCosts.data.summary.currency)}<br />
-                    Shipment charges: {formatIntegerCents(shipmentCosts.data.summary.totalCents, shipmentCosts.data.summary.currency)}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-
           {poId && (
             <div className="space-y-3">
               <PoShipmentCostSummary purchaseOrderId={poId} query={shipmentCosts} onViewShipments={() => setActiveTab("shipments")} />
