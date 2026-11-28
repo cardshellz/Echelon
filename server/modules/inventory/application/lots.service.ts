@@ -1018,7 +1018,12 @@ export class InventoryLotService {
         });
     }
     if (newOnHandOrderCosts.length > 0) {
-      await this.db.insert(orderItemCosts).values(newOnHandOrderCosts);
+      const oicReg = await this.db.execute(sql`SELECT to_regclass('oms.order_item_costs') AS reg`);
+      const firstRow = oicReg?.rows?.[0] as Record<string, unknown> | undefined;
+      const hasOrderItemCosts = !firstRow || !("reg" in firstRow) || firstRow.reg !== null;
+      if (hasOrderItemCosts) {
+        await this.db.insert(orderItemCosts).values(newOnHandOrderCosts);
+      }
     }
   }
 
