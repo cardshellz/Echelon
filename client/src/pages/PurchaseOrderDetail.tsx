@@ -61,6 +61,7 @@ import {
   PoShipmentsTab,
   usePoShipmentsAndReceipts,
 } from "./purchase-order-detail/PoShipmentsAndReceiptsSection";
+import { PoLinearLifecycleStages } from "./purchase-order-detail/PoLinearLifecycleStages";
 
 export type { StageTooltipInfo } from "./purchase-order-detail/po-detail-types-and-helpers";
 
@@ -1129,7 +1130,66 @@ export default function PurchaseOrderDetail() {
 
             <TabsContent value="lifecycle" className="space-y-4">
               {poId && activeTab === "lifecycle" && (
-                <PurchaseLifecycleWorkspace purchaseOrderId={poId} navigation={procurementNavigation} />
+                <>
+                  <PoLinearLifecycleStages
+                    po={po}
+                    poId={poId}
+                    lines={lines}
+                    shippingByLine={shippingByLine}
+                    linkedShipments={linkedShipments}
+                    linkedReceipts={relatedDocuments?.receipts ?? []}
+                    invoices={invoicesData?.invoices ?? []}
+                    financialEvidence={financialEvidence}
+                    financialCompletionSupported={financialCompletionSupported}
+                    financialReviewRequired={financialReviewRequired}
+                    shipmentCosts={shipmentCosts}
+                    procurementNavigation={procurementNavigation}
+                    setActiveTab={setActiveTab}
+                    canEditHeader={canEditHeader}
+                    canCreatePurchasing={canCreatePurchasing}
+                    hasPurchasingEdit={hasPermission("purchasing", "edit")}
+                    isSoloMode={isSoloMode}
+                    useNewPoEditor={procurementSettings?.useNewPoEditor !== false}
+                    canSendPoToVendor={canSendPoToVendor}
+                    entryBlocked={entryBlocked}
+                    canPreparePurchaseEntry={purchaseEntry.allowed("prepare")}
+                    sendToVendorPending={sendToVendorMutation.isPending}
+                    onSendToVendor={() => sendToVendorMutation.mutate()}
+                    canSendPo={canSendPo}
+                    onOpenEmailDialog={() => {
+                      docAndEmail.setEmailForm((f) => ({
+                        ...f,
+                        toEmail: po?.vendor?.email || po?.vendorContactEmail || "",
+                      }));
+                      docAndEmail.setShowEmailDialog(true);
+                    }}
+                    canAcknowledgePo={canAcknowledgePo}
+                    onOpenAckDialog={() => setShowAckDialog(true)}
+                    canMarkPoShipped={canMarkPoShipped}
+                    markShippedPending={markShippedMutation.isPending}
+                    onMarkShipped={() => markShippedMutation.mutate()}
+                    canMarkPoInTransit={canMarkPoInTransit}
+                    markInTransitPending={markInTransitMutation.isPending}
+                    onMarkInTransit={() => markInTransitMutation.mutate()}
+                    canMarkPoArrived={canMarkPoArrived}
+                    markArrivedPending={markArrivedMutation.isPending}
+                    onMarkArrived={() => markArrivedMutation.mutate()}
+                    onOpenCreateShipmentDialog={() => {
+                      shipmentsController.setNewShipmentForm({
+                        mode: "sea_fcl",
+                        shipmentNumber: "",
+                        shipperName: po?.vendor?.name || "",
+                        forwarderName: "",
+                        carrierName: "",
+                      });
+                      shipmentsController.setShowCreateShipmentDialog(true);
+                    }}
+                    canCreateReceiptForPo={canCreateReceiptForPo}
+                    onOpenReceivePicker={() => shipmentsController.setShowReceivePicker(true)}
+                    onOpenCreateInvoiceDialog={docAndEmail.openCreateInvoiceDialogFromPo}
+                  />
+                  <PurchaseLifecycleWorkspace purchaseOrderId={poId} navigation={procurementNavigation} />
+                </>
               )}
             </TabsContent>
 

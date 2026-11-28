@@ -11,6 +11,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
 import {
+  buildInvoiceSchedulePresetNote,
+  type InvoiceSchedulePreset,
+} from "@/features/purchasing/po-linear-workspace-helpers";
+import {
   type ExternalSendReview,
   genPoEmailIdempotencyKey,
   type NavigationSnapshot,
@@ -775,6 +779,40 @@ export function PoLifecycleDialogs(props: {
                   value={docAndEmail.invoiceForm.dueDate}
                   onChange={(e) => docAndEmail.setInvoiceForm(f => ({ ...f, dueDate: e.target.value }))}
                 />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Payment Schedule / Deposit Tag</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {(["full", "deposit_30", "deposit_50", "balance_70"] as InvoiceSchedulePreset[]).map((preset) => {
+                  const built = buildInvoiceSchedulePresetNote(
+                    preset,
+                    po?.poNumber || `PO #${po?.id ?? ""}`,
+                    po?.totalCents,
+                    po?.currency || "USD",
+                  );
+                  const isActive =
+                    preset === "full"
+                      ? !docAndEmail.invoiceForm.notes.includes("deposit schedule") && !docAndEmail.invoiceForm.notes.includes("balance schedule")
+                      : docAndEmail.invoiceForm.notes === built.note;
+                  return (
+                    <Button
+                      key={preset}
+                      type="button"
+                      size="sm"
+                      variant={isActive ? "default" : "outline"}
+                      className="h-7 text-xs"
+                      onClick={() =>
+                        docAndEmail.setInvoiceForm((f) => ({
+                          ...f,
+                          notes: built.note,
+                        }))
+                      }
+                    >
+                      {built.label}
+                    </Button>
+                  );
+                })}
               </div>
             </div>
             <div className="space-y-2">

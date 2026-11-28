@@ -1,4 +1,5 @@
 import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
+import { computeShipmentDeliverySteps } from "@/features/purchasing/po-linear-workspace-helpers";
 import { PurchaseTaxReview } from "@/features/purchasing/PurchaseTaxReview";
 import { usePurchaseTaxTypes } from "@/features/purchasing/PurchaseTaxTypes";
 import { ShipmentHistoryCorrection } from "@/features/purchasing/ShipmentHistoryCorrection";
@@ -834,6 +835,39 @@ export default function InboundShipmentDetail() {
   const startCostingMutation = createTransitionMutation("start-costing");
   const closeMutation = createTransitionMutation("close");
 
+  const fastForwardDeliveredMutation = useMutation({
+    onMutate: () => captureNavigation(),
+    mutationFn: async (currentStatus: string) => {
+      const steps = computeShipmentDeliverySteps(currentStatus);
+      for (const endpoint of steps) {
+        if (endpoint === "book" || endpoint === "in-transit") {
+          await financialCommandFetchJson(`/api/inbound-shipments/${shipmentId}/${endpoint}`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+        } else {
+          await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/${endpoint}`, {});
+        }
+      }
+    },
+    onSuccess: (_res, _status, context) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+      invalidatePoViews();
+      if (!context?.isCurrent()) return;
+      toast({ title: "Delivered at dock", description: "Shipment advanced to Delivered and ready for receiving." });
+    },
+    onError: (err: Error, _status, context) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidatePoViews();
+      if (!context?.isCurrent()) return;
+      void receivingSetup.refetch();
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const cancelMutation = useMutation({
     retry: false,
     onMutate: () => { setCancelError(null); return captureNavigation(); },
@@ -1306,6 +1340,23 @@ export default function InboundShipmentDetail() {
               Delivered
             </Button>
           )}
+
+          {hasPermission("purchasing", "edit") &&
+            ["draft", "booked", "at_port"].includes(shipment.status) && (
+              <Button
+                variant="outline"
+                onClick={() => fastForwardDeliveredMutation.mutate(shipment.status)}
+                disabled={
+                  fastForwardDeliveredMutation.isPending ||
+                  (["draft", "booked"].includes(shipment.status) &&
+                    (receivingSetup.isFetching || !receivingSetup.data?.ready || receivingSetup.isError))
+                }
+                className="flex-1 sm:flex-none min-h-[44px]"
+              >
+                <CheckCircle className="h-4 w-4 mr-2" />
+                {fastForwardDeliveredMutation.isPending ? "Advancing..." : "Fast-Forward to Delivered"}
+              </Button>
+            )}
 
           {/* Create Receipt from shipment lines — available once delivered */}
           {["delivered", "costing", "closed"].includes(shipment.status) && lines.length > 0 && (
