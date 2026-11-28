@@ -81,6 +81,8 @@ import {
   Plus,
   ShoppingCart,
   AlertCircle,
+  Send,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -867,6 +869,157 @@ export function receiveConfigurationLinePatch(
   };
 }
 
+export function defaultReceiveConfigurationOption(
+  options: readonly ReceiveConfigurationOption[],
+  pricingDraft: PoLinePricingEditorDraft | null | undefined,
+): ReceiveConfigurationOption | null {
+  if (options.length === 0) return null;
+  if (options.length === 1) return options[0];
+  if (pricingDraft?.basis === "per_purchase_uom") {
+    const piecesPerUom = Number(pricingDraft.piecesPerUom);
+    if (Number.isSafeInteger(piecesPerUom) && piecesPerUom > 0) {
+      const exactMatch = options.find((opt) => opt.unitsPerVariant === piecesPerUom);
+      if (exactMatch) return exactMatch;
+    }
+    return options[options.length - 1];
+  }
+  return options[0];
+}
+
+export function todayQuoteTimestampIso(now: Date = new Date()): string {
+  return `${now.toISOString().slice(0, 10)}T00:00:00.000Z`;
+}
+
+export function applyInlinePoQuantityChange(
+  line: Pick<LineDraft, "pricingDraft" | "catalogWrite" | "quotedAt">,
+  nextQuantity: number,
+  now: Date = new Date(),
+): Partial<LineDraft> {
+  const safeQty = Math.max(1, Math.floor(Number(nextQuantity) || 1));
+  const current = line.pricingDraft ?? createEmptyPoLinePricingDraft();
+  const nextDraft: PoLinePricingEditorDraft =
+    current.basis === "per_purchase_uom"
+      ? { ...current, uomQuantity: String(safeQty) }
+      : { ...current, quantityPieces: String(safeQty) };
+  const evaluation = evaluatePoLinePricingDraft(nextDraft);
+  return {
+    pricingDraft: nextDraft,
+    orderQty: evaluation.normalized
+      ? evaluation.normalized.orderQty
+      : current.basis === "per_purchase_uom"
+        ? safeQty * Math.max(1, Number(current.piecesPerUom) || 1)
+        : safeQty,
+    ...(evaluation.normalized
+      ? {
+          hasExplicitPricing: true,
+          preserveLegacyPricing: false,
+          pricingSource: "manual" as const,
+          unitCostMills: evaluation.normalized.unitCostMills,
+          totalProductCostCents: evaluation.normalized.totalProductCostCents,
+          ...(line.catalogWrite && !line.quotedAt
+            ? { quotedAt: todayQuoteTimestampIso(now) }
+            : {}),
+        }
+      : {}),
+  };
+}
+
+export function applyInlinePoUnitPriceChange(
+  line: Pick<LineDraft, "pricingDraft" | "orderQty" | "catalogWrite" | "quotedAt">,
+  nextMills: number,
+  now: Date = new Date(),
+): Partial<LineDraft> {
+  const safeMills = Math.max(0, Math.round(Number(nextMills) || 0));
+  const dollarStr = millsToDollarString(safeMills);
+  const baseDraft =
+    line.pricingDraft ??
+    createEmptyPoLinePricingDraft({
+      quantityPieces: String(Math.max(1, Number(line.orderQty) || 1)),
+    });
+  const nextDraft: PoLinePricingEditorDraft =
+    baseDraft.basis === "per_purchase_uom"
+      ? {
+          ...baseDraft,
+          purchaseUom: baseDraft.purchaseUom.trim() || "case",
+          uomQuantity: String(Math.max(1, Number(baseDraft.uomQuantity) || 1)),
+          piecesPerUom: String(Math.max(1, Number(baseDraft.piecesPerUom) || 1)),
+          pricePerUomDollars: dollarStr,
+        }
+      : {
+          ...baseDraft,
+          basis: "per_piece",
+          quantityPieces: String(Math.max(1, Number(baseDraft.quantityPieces || line.orderQty) || 1)),
+          unitPriceDollars: dollarStr,
+          quotedTotalDollars: "",
+        };
+  return {
+    ...normalizedPricingPatch(nextDraft, "manual"),
+    ...(line.catalogWrite && !line.quotedAt
+      ? { quotedAt: todayQuoteTimestampIso(now) }
+      : {}),
+  };
+}
+
+export function toggleInlinePoPurchaseBasis(
+  line: Pick<LineDraft, "pricingDraft" | "orderQty" | "unitCostMills" | "catalogWrite" | "quotedAt">,
+  targetBasis: "per_piece" | "per_purchase_uom",
+  packUnits: number,
+  packLabel = "case",
+  now: Date = new Date(),
+): Partial<LineDraft> {
+  const safePackUnits = Math.max(1, Math.floor(Number(packUnits) || 1));
+  const current =
+    line.pricingDraft ??
+    createEmptyPoLinePricingDraft({
+      quantityPieces: String(Math.max(1, Number(line.orderQty) || 1)),
+    });
+  const currentPieces = Math.max(1, Number(line.orderQty) || 1);
+  const currentPerPieceMills = Math.max(0, Math.round(Number(line.unitCostMills) || 0));
+
+  let nextDraft: PoLinePricingEditorDraft;
+  if (targetBasis === "per_purchase_uom" && safePackUnits > 1) {
+    const uomQty = Math.max(1, Math.ceil(currentPieces / safePackUnits));
+    const perPackMills = currentPerPieceMills * safePackUnits;
+    nextDraft = {
+      ...current,
+      basis: "per_purchase_uom",
+      purchaseUom: packLabel.trim() || "case",
+      uomQuantity: String(uomQty),
+      piecesPerUom: String(safePackUnits),
+      pricePerUomDollars: perPackMills > 0 ? millsToDollarString(perPackMills) : current.pricePerUomDollars,
+    };
+  } else {
+    nextDraft = {
+      ...current,
+      basis: "per_piece",
+      quantityPieces: String(currentPieces),
+      unitPriceDollars: currentPerPieceMills > 0 ? millsToDollarString(currentPerPieceMills) : current.unitPriceDollars,
+    };
+  }
+
+  const evaluation = evaluatePoLinePricingDraft(nextDraft);
+  return {
+    pricingDraft: nextDraft,
+    orderQty: evaluation.normalized
+      ? evaluation.normalized.orderQty
+      : targetBasis === "per_purchase_uom"
+        ? Math.max(1, Number(nextDraft.uomQuantity) || 1) * safePackUnits
+        : currentPieces,
+    ...(evaluation.normalized
+      ? {
+          hasExplicitPricing: true,
+          preserveLegacyPricing: false,
+          pricingSource: "manual" as const,
+          unitCostMills: evaluation.normalized.unitCostMills,
+          totalProductCostCents: evaluation.normalized.totalProductCostCents,
+          ...(line.catalogWrite && !line.quotedAt
+            ? { quotedAt: todayQuoteTimestampIso(now) }
+            : {}),
+        }
+      : {}),
+  };
+}
+
 /**
  * The Receive As problem on a product line, or null when it may be saved.
  * Until the product's variants have loaded only the unanswered case can be
@@ -1518,6 +1671,36 @@ export default function PurchaseOrderEdit() {
     return byProductId;
   }, [lineProductIds, lineProductQueries]);
 
+  // Auto-select Receive As when active product variants finish loading so the
+  // buyer never has to manually click a dropdown for obvious/lone variants.
+  useEffect(() => {
+    if (editorBlocked) return;
+    let needsAutoFill = false;
+    for (const line of lines) {
+      if (line.lineType !== "product" || !line.productId || line.expectedReceiveVariantId !== null) {
+        continue;
+      }
+      const state = receiveOptionsByProductId.get(Number(line.productId));
+      if (state?.status === "ready" && state.options.length > 0) {
+        needsAutoFill = true;
+        break;
+      }
+    }
+    if (!needsAutoFill) return;
+    setLines((prev) =>
+      prev.map((line) => {
+        if (line.lineType !== "product" || !line.productId || line.expectedReceiveVariantId !== null) {
+          return line;
+        }
+        const state = receiveOptionsByProductId.get(Number(line.productId));
+        if (state?.status !== "ready" || state.options.length === 0) return line;
+        const chosen = defaultReceiveConfigurationOption(state.options, line.pricingDraft);
+        if (!chosen) return line;
+        return { ...line, ...receiveConfigurationLinePatch(chosen) };
+      }),
+    );
+  }, [lines, receiveOptionsByProductId, editorBlocked]);
+
   // ── Client-side line validation ──────────────────────────────
   //
   // Mirrors the server-side validateCreateWithLinesInput rules from
@@ -1627,6 +1810,17 @@ export default function PurchaseOrderEdit() {
   const noVendor = !selectedVendor;
   const canSave = !editorBlocked && !immutableExistingPo && !saving && !hasLineErrors && !hasNoLines && !noVendor;
   const canSaveDraft = canSave && (!isEditMode || dirty);
+  const isSoloFastTrack = settings?.requireApproval !== true;
+  const firstValidationHint = noVendor
+    ? "Select a supplier to continue"
+    : hasNoLines
+      ? "Add at least one line item"
+      : hasLineErrors
+        ? (() => {
+            const idx = lines.findIndex((l) => Boolean(lineErrors[l.clientId]));
+            return idx >= 0 ? `Line ${idx + 1}: ${lineErrors[lines[idx].clientId]}` : "Fix line errors to continue";
+          })()
+        : null;
 
   // ── Dirty nav prompt ──────────────────────────────────────────────────
   useEffect(() => {
@@ -1834,7 +2028,7 @@ export default function PurchaseOrderEdit() {
     setReadbackRequired(false);
   }
 
-  async function handleSave(prepareForSupplier: boolean) {
+  async function handleSave(prepareForSupplier: boolean, markSentImmediately = false) {
     if (editorBlocked || (isEditMode && !prepareForSupplier && !dirty)) return;
     if (immutableExistingPo) {
       if (existingPo?.id) navigate(`/purchase-orders/${existingPo.id}`);
@@ -1851,6 +2045,34 @@ export default function PurchaseOrderEdit() {
       if (!visit.isCurrent()) return;
       const { po, preparationError } = parseSupplierSaveResult(result, prepareForSupplier, isEditMode ? Number(editId) : undefined);
       setDirty(false);
+
+      if (markSentImmediately && !preparationError && po.status === "approved" && po.updatedAt) {
+        try {
+          const sendKey = typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? crypto.randomUUID()
+            : `po-send-${po.id}-${Date.now()}`;
+          const sendRes = await fetch(`/api/purchase-orders/${po.id}/send`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": sendKey,
+            },
+            body: JSON.stringify({
+              confirmedSentExternally: true,
+              expectedUpdatedAt: po.updatedAt,
+            }),
+          });
+          if (sendRes.ok) {
+            toast({
+              title: "PO saved & marked sent",
+              description: `${po.poNumber} is active and ready for shipping, deposits, or dock receiving.`,
+            });
+            navigate(`/purchase-orders/${po.id}`);
+            return;
+          }
+        } catch {}
+      }
+
       toast({ title: preparationError ? "PO saved; supplier review needs attention"
         : po.status === "pending_approval" ? "Submitted for approval"
         : prepareForSupplier ? "PO ready for supplier review" : "PO saved as draft",
@@ -1867,7 +2089,8 @@ export default function PurchaseOrderEdit() {
   }
 
   const handleSaveDraft = () => handleSave(false);
-  const handleSaveAndReview = () => handleSave(true);
+  const handleSaveAndReview = () => handleSave(true, false);
+  const handleSaveAndSend = () => handleSave(true, true);
 
   async function recoverPurchaseEntry() {
     const recovery = purchaseEntry.recovery;
@@ -1958,7 +2181,13 @@ export default function PurchaseOrderEdit() {
             Draft {dirty ? "· unsaved changes" : "· saved"}
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {firstValidationHint && !saving && (
+            <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs text-amber-800" data-testid="po-validation-hint">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+              {firstValidationHint}
+            </span>
+          )}
           <Button variant="ghost" onClick={handleCancel} disabled={saving}>
             Cancel
           </Button>
@@ -1966,35 +2195,26 @@ export default function PurchaseOrderEdit() {
             variant="secondary"
             onClick={handleSaveDraft}
             disabled={!canSaveDraft}
-            title={
-              hasLineErrors
-                ? "Fix line errors before saving"
-                : noVendor
-                ? "Pick a vendor before saving"
-                : hasNoLines
-                ? "Add at least one line before saving"
-                : isEditMode && !dirty
-                ? "No unsaved changes"
-                : undefined
-            }
           >
             Save draft
           </Button>
           <Button
+            variant={isSoloFastTrack ? "outline" : "default"}
             onClick={handleSaveAndReview}
             disabled={!canSave}
-            title={
-              hasLineErrors
-                ? "Fix line errors before supplier review"
-                : noVendor
-                ? "Pick a vendor before supplier review"
-                : hasNoLines
-                ? "Add at least one line before supplier review"
-                : undefined
-            }
           >
-            Save &amp; Review
+            {isSoloFastTrack ? "Save & Review" : "Submit for Approval"}
           </Button>
+          {isSoloFastTrack && (
+            <Button
+              onClick={handleSaveAndSend}
+              disabled={!canSave}
+              data-testid="button-save-and-send"
+            >
+              <Send className="mr-1.5 h-4 w-4" />
+              Save &amp; Mark Sent
+            </Button>
+          )}
         </div>
       </div>
 
@@ -2176,15 +2396,15 @@ export default function PurchaseOrderEdit() {
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium px-5 py-2.5">
                                 SKU
                               </TableHead>
-                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-24 px-3 py-2.5">
-                                Pieces
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-32 px-3 py-2.5">
+                                Order Qty
                               </TableHead>
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium w-48 px-3 py-2.5">
                                 Receive As
                               </TableHead>
-                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
-                                <div>Vendor Quote</div>
-                                <div className="text-[10px] font-normal text-slate-400 normal-case">original basis preserved</div>
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-44 px-3 py-2.5">
+                                <div>Unit Price ($)</div>
+                                <div className="text-[10px] font-normal text-slate-400 normal-case">type inline or open quote</div>
                               </TableHead>
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
                                 <div>Packaging</div>
@@ -2486,21 +2706,23 @@ export default function PurchaseOrderEdit() {
           Save draft
         </Button>
         <Button
+          variant={isSoloFastTrack ? "outline" : "default"}
           onClick={handleSaveAndReview}
           disabled={!canSave}
           className="flex-1"
-          title={
-            hasLineErrors
-              ? "Fix line errors before supplier review"
-              : noVendor
-              ? "Pick a vendor before supplier review"
-              : hasNoLines
-              ? "Add at least one line before supplier review"
-              : undefined
-          }
         >
-          Save & Review
+          {isSoloFastTrack ? "Save & Review" : "Submit"}
         </Button>
+        {isSoloFastTrack && (
+          <Button
+            onClick={handleSaveAndSend}
+            disabled={!canSave}
+            className="flex-1"
+            data-testid="button-save-and-send-mobile"
+          >
+            Save & Sent
+          </Button>
+        )}
       </div>
 
     </div>
@@ -2884,6 +3106,10 @@ function ProductLineTableRow({
       ? {
           ...current,
           pricingSource: "manual",
+          metadata:
+            enabled && !current.metadata.quotedAt
+              ? { ...current.metadata, quotedAt: new Date().toISOString().slice(0, 10) }
+              : current.metadata,
           catalogWrite: enabled
             ? {
                 mode: "upsert",
@@ -3030,7 +3256,7 @@ function ProductLineTableRow({
                                 preserveLegacyPricing: false,
                                 pricingSource: "manual",
                                 quoteReference: null,
-                                quotedAt: null,
+                                quotedAt: vendorId ? todayQuoteTimestampIso() : null,
                                 quoteValidUntil: null,
                                 unitCostMills: 0,
                                 totalProductCostCents: 0,
@@ -3073,15 +3299,55 @@ function ProductLineTableRow({
           ) : null}
         </TableCell>
 
-        {/* Piece quantity is derived from the quote basis. */}
+        {/* Inline Order Qty + 1-click Pack/Piece basis toggle */}
         <TableCell className="px-3 py-3 text-right">
-          <div className="font-mono text-sm tabular-nums py-2" data-testid={`line-qty-${idx}`}>
-            {qty > 0 ? qty.toLocaleString() : "—"}
-          </div>
-          <div className="text-[10px] text-slate-400">from quote</div>
+          {hasProduct ? (
+            <div className="space-y-1">
+              <QuantityInput
+                qty={
+                  pricingDraft.basis === "per_purchase_uom"
+                    ? Math.max(1, Number(pricingDraft.uomQuantity) || 1)
+                    : Math.max(1, qty || 1)
+                }
+                onChangeQty={(nextQty) => onChange(applyInlinePoQuantityChange(line, nextQty))}
+                ariaLabel={`Line ${idx + 1} order quantity`}
+                className="h-9 text-right font-mono tabular-nums"
+              />
+              <div className="flex items-center justify-between gap-1 text-[10px] text-slate-500">
+                {chosenReceiveOption && chosenReceiveOption.unitsPerVariant > 1 ? (
+                  <button
+                    type="button"
+                    className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-medium text-slate-600 hover:bg-slate-100"
+                    onClick={() =>
+                      onChange(
+                        toggleInlinePoPurchaseBasis(
+                          line,
+                          pricingDraft.basis === "per_purchase_uom" ? "per_piece" : "per_purchase_uom",
+                          chosenReceiveOption.unitsPerVariant,
+                          chosenReceiveOption.name || "case",
+                        ),
+                      )
+                    }
+                    data-testid={`toggle-uom-basis-${idx}`}
+                  >
+                    {pricingDraft.basis === "per_purchase_uom" ? "Packs" : "Pieces"}
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <span className="font-mono tabular-nums" data-testid={`line-qty-${idx}`}>
+                  {qty > 0 ? `${qty.toLocaleString()} pcs` : "—"}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="font-mono text-sm tabular-nums py-2 text-slate-400" data-testid={`line-qty-${idx}`}>
+              —
+            </div>
+          )}
         </TableCell>
 
-        {/* Receive As: the package the goods arrive in. Required, never inferred. */}
+        {/* Receive As: auto-defaulted from active variants, editable inline */}
         <TableCell className="px-3 py-3">
           {!hasProduct ? (
             <div className="text-sm text-slate-400 py-2">—</div>
@@ -3127,40 +3393,106 @@ function ProductLineTableRow({
           )}
         </TableCell>
 
-        {/* Vendor quote cell */}
+        {/* Inline Unit Price + Expandable Quote Details Popover */}
         <TableCell className="px-3 py-3">
-          <Popover
-            open={quotePopoverOpen}
-            onOpenChange={handleQuotePopoverOpenChange}
-          >
-            <PopoverTrigger asChild>
-              <button
-                type="button"
-                className={`w-full rounded-md border px-3 py-2 text-left hover:bg-slate-50 ${
-                  line.hasExplicitPricing ? "border-slate-200" : "border-amber-300 bg-amber-50/40"
-                }`}
-                aria-label={`Edit vendor quote for line ${idx + 1}`}
+          <div className="space-y-1">
+            {hasProduct && pricingDraft.basis !== "extended_total" ? (
+              <div className="relative w-full">
+                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">
+                  $
+                </span>
+                <Input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder={pricingDraft.basis === "per_purchase_uom" ? "0.00 / pack" : "0.0000"}
+                  aria-label={`Line ${idx + 1} unit price`}
+                  data-testid={`input-inline-price-${idx}`}
+                  className={`h-9 pl-6 pr-2 text-right font-mono text-sm tabular-nums ${
+                    line.hasExplicitPricing || line.preserveLegacyPricing
+                      ? ""
+                      : "border-amber-300 bg-amber-50/40"
+                  }`}
+                  value={
+                    pricingDraft.basis === "per_purchase_uom"
+                      ? pricingDraft.pricePerUomDollars
+                      : pricingDraft.unitPriceDollars
+                  }
+                  onChange={(event) => {
+                    const raw = event.target.value;
+                    if (raw !== "" && !/^\d*(?:\.\d{0,4})?$/.test(raw)) return;
+                    const nextDraft: PoLinePricingEditorDraft =
+                      pricingDraft.basis === "per_purchase_uom"
+                        ? {
+                            ...pricingDraft,
+                            purchaseUom: pricingDraft.purchaseUom.trim() || "case",
+                            uomQuantity: String(Math.max(1, Number(pricingDraft.uomQuantity) || 1)),
+                            piecesPerUom: String(
+                              Math.max(
+                                1,
+                                Number(pricingDraft.piecesPerUom) ||
+                                  chosenReceiveOption?.unitsPerVariant ||
+                                  1,
+                              ),
+                            ),
+                            pricePerUomDollars: raw,
+                          }
+                        : {
+                            ...pricingDraft,
+                            basis: "per_piece",
+                            quantityPieces: String(Math.max(1, Number(pricingDraft.quantityPieces || qty) || 1)),
+                            unitPriceDollars: raw,
+                          };
+                    const evaluated = evaluatePoLinePricingDraft(nextDraft);
+                    onChange({
+                      pricingDraft: nextDraft,
+                      ...(evaluated.normalized
+                        ? {
+                            hasExplicitPricing: true,
+                            preserveLegacyPricing: false,
+                            pricingSource: "manual" as const,
+                            orderQty: evaluated.normalized.orderQty,
+                            unitCostMills: evaluated.normalized.unitCostMills,
+                            totalProductCostCents: evaluated.normalized.totalProductCostCents,
+                            ...(line.catalogWrite && !line.quotedAt
+                              ? { quotedAt: todayQuoteTimestampIso() }
+                              : {}),
+                          }
+                        : {
+                            hasExplicitPricing: false,
+                          }),
+                    });
+                  }}
+                />
+              </div>
+            ) : null}
+
+            <div className="flex items-center justify-between gap-1">
+              <Popover
+                open={quotePopoverOpen}
+                onOpenChange={handleQuotePopoverOpenChange}
               >
-                <span className="block text-xs text-slate-500">
-                  {line.hasExplicitPricing
-                    ? pricingBasisLabel(pricingDraft.basis)
-                    : line.preserveLegacyPricing
-                      ? "Legacy pricing — review"
-                      : "Enter vendor quote"}
-                </span>
-                <span className="block text-right font-mono text-sm font-medium tabular-nums">
-                  {!pricingEvaluation.normalized && !line.preserveLegacyPricing
-                    ? "—"
-                    : formatCents(totalProduct)}
-                </span>
-              </button>
-            </PopoverTrigger>
-            <PopoverContent
-              align="end"
-              collisionPadding={VENDOR_QUOTE_VIEWPORT_MARGIN_PX}
-              onWheel={handleVendorQuoteWheel}
-              className="w-[min(42rem,calc(100vw-2rem))] max-h-[min(calc(100dvh-2rem),var(--radix-popover-content-available-height))] overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable]"
-            >
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                    aria-label={`Edit vendor quote for line ${idx + 1}`}
+                  >
+                    <SlidersHorizontal className="h-3 w-3" />
+                    <span>
+                      {pricingDraft.basis === "extended_total"
+                        ? `Total quote (${formatCents(totalProduct)})`
+                        : line.preserveLegacyPricing
+                          ? "Review legacy"
+                          : "Quote details"}
+                    </span>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="end"
+                  collisionPadding={VENDOR_QUOTE_VIEWPORT_MARGIN_PX}
+                  onWheel={handleVendorQuoteWheel}
+                  className="w-[min(42rem,calc(100vw-2rem))] max-h-[min(calc(100dvh-2rem),var(--radix-popover-content-available-height))] overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable]"
+                >
               <div className="space-y-5">
                 <div>
                   <div className="font-semibold">Vendor quote</div>
@@ -3294,10 +3626,12 @@ function ProductLineTableRow({
                   </div>
                 </div>
               </div>
-            </PopoverContent>
-          </Popover>
-          <div className="text-xs text-slate-400 text-right mt-1 tabular-nums">
-            {formatPerUnit(productPerUnit)}/piece
+                </PopoverContent>
+              </Popover>
+              <div className="text-[11px] text-slate-400 text-right tabular-nums">
+                {formatPerUnit(productPerUnit)}/pc
+              </div>
+            </div>
           </div>
         </TableCell>
 

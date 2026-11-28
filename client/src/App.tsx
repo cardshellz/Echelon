@@ -133,6 +133,7 @@ const OutboundShipments = lazyPage(() => import("@/pages/OutboundShipments"));
 const ShipmentOrderContext = lazyPage(() => import("@/pages/ShipmentOrderContext"));
 const InboundShipmentDetail = lazyPage(() => import("@/pages/InboundShipmentDetail"));
 const CostDashboard = lazyPage(() => import("@/pages/CostDashboard"));
+const PurchasingBillsHub = lazyPage(() => import("@/pages/PurchasingBillsHub"));
 const APDashboard = lazyPage(() => import("@/pages/APDashboard"));
 const APInvoices = lazyPage(() => import("@/pages/APInvoices"));
 const APInvoiceDetail = lazyPage(() => import("@/pages/APInvoiceDetail"));
@@ -726,6 +727,9 @@ function Router() {
           <ProtectedRoute component={APPayments} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         {/* Redirects for old procurement URLs */}
+        <Route path="/purchasing/bills">
+          <ProtectedRoute component={PurchasingBillsHub} requiredPermission={PURCHASING_READ_PERMISSION} />
+        </Route>
         <Route path="/purchasing/catalog"><Redirect to="/reorder-analysis" /></Route>
         <Route path="/purchasing/:id"><Redirect to="/purchase-orders/:id" /></Route>
         <Route path="/purchasing">

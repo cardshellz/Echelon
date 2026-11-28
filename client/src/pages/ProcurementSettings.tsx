@@ -31,9 +31,9 @@ const SETTING_META: SettingMeta[] = [
   {
     // purchasing.service.ts:sendWithLockedEconomics/getMatchingApprovalTierTx
     key: "requireApproval",
-    label: "Require approval",
+    label: "Team Approval Mode (require PO approval tiers)",
     description:
-      "When on, sending a PO at or above a configured approval tier requires an approval that covers its current value. POs without a matching tier can proceed without that extra step.",
+      "Leave off for Solo Fast-Track mode (1-person purchasing). Turn on when you want POs at or above configured dollar thresholds to require multi-person approval before sending.",
     category: "Approvals",
     active: true,
   },
@@ -241,7 +241,7 @@ export default function ProcurementSettings() {
       )}
 
       {settings && CATEGORY_ORDER.map((category) => {
-        const items = SETTING_META.filter((meta) => meta.category === category);
+        const items = SETTING_META.filter((meta) => meta.category === category && meta.active);
         if (items.length === 0) return null;
         return (
           <div key={category} className="space-y-2">

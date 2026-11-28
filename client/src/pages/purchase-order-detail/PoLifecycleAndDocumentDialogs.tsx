@@ -154,9 +154,32 @@ export function usePoDocumentAndEmail(params: {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       const presentation = poEmailDeliveryPresentation(data.delivery);
+      let markedSent = false;
+      if (!presentation.needsAttention && po?.status === "approved" && po?.updatedAt) {
+        try {
+          const sendRes = await fetch(`/api/purchase-orders/${poId}/send`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": `${emailIdempotencyKey}-mark-sent`,
+            },
+            body: JSON.stringify({
+              confirmedSentExternally: true,
+              expectedUpdatedAt: po.updatedAt,
+            }),
+          });
+          if (sendRes.ok) {
+            markedSent = true;
+            queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+            queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+          }
+        } catch {}
+      }
       toast({
-        title: presentation.label,
-        description: presentation.description,
+        title: markedSent ? "PO emailed & marked sent" : presentation.label,
+        description: markedSent
+          ? `${po.poNumber} was queued to ${emailForm.toEmail} and advanced to Sent.`
+          : presentation.description,
         variant: presentation.needsAttention ? "destructive" : "default",
       });
       setEmailIdempotencyKey(genPoEmailIdempotencyKey());
