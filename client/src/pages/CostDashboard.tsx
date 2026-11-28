@@ -1,4 +1,4 @@
-import { centsToMills, dollarsToMills, millsToCents, millsToDollarString, perUnitMills } from "@shared/utils/money";
+import { readIntegerCents, centsToMills, dollarsToMills, millsToCents } from "@shared/utils/money";
 import React, { useState, useMemo } from "react";
 import { HistoricalCostAdjustments } from "@/features/purchasing/HistoricalCostAdjustments";
 import { useInventoryQuantityCapabilities } from "@/hooks/use-inventory-quantity-capabilities";
@@ -94,23 +94,16 @@ function isLandedPendingLot(lot: any): boolean {
   return Number(lot?.cost_provisional || 0) === 1 && Boolean(lot?.inbound_shipment_id);
 }
 
-function formatLotPerBasePiece(lot: CostLotReport): string | null {
-  const upv = Number(lot.units_per_variant || 1);
-  if (!Number.isSafeInteger(upv) || upv <= 1) return null;
-  const rawMills = lot.total_unit_cost_mills ?? lot.unit_cost_mills;
-  let totalMills: number | null = null;
-  if (rawMills !== null && rawMills !== undefined && Number(rawMills) > 0 && Number.isSafeInteger(Number(rawMills))) {
-    totalMills = Number(rawMills);
-  } else {
-    const rawCents = lot.total_unit_cost_cents ?? lot.unit_cost_cents;
-    if (rawCents !== null && rawCents !== undefined && Number.isSafeInteger(Number(rawCents)) && Number(rawCents) >= 0) {
-      totalMills = centsToMills(Number(rawCents));
-    } else if (rawMills !== null && rawMills !== undefined && Number(rawMills) === 0) {
-      totalMills = 0;
-    }
+function parseManualCostInput(raw: string, fieldLabel: string): { cents: number; mills: number } {
+  const cleaned = raw.trim().replace(/[$,\s]/g, "");
+  if (cleaned.includes(".")) {
+    // Decimal input (e.g. "0.0120" or "0.0038") is parsed as exact 4-decimal USD mills.
+    const mills = dollarsToMills(cleaned);
+    return { cents: millsToCents(mills), mills };
   }
-  if (totalMills === null) return null;
-  return formatDashboardMills(perUnitMills(totalMills, upv));
+  // Whole-integer input preserves the legacy integer-cents contract.
+  const cents = readIntegerCents(cleaned, fieldLabel);
+  return { cents, mills: centsToMills(cents) };
 }
 
 // ─── Main Component ─────────────────────────────────────────────────
@@ -589,10 +582,6 @@ function CostExplorer() {
           {grouped.map(({ product, lots: productLots }) => {
             const isExpanded = expandedLots.has(product.id);
             const totalQty = productLots.reduce((sum, lot) => sum + lot.qty_on_hand, 0);
-            const totalBasePieces = productLots.reduce(
-              (sum, lot) => sum + lot.qty_on_hand * Math.max(1, Number(lot.units_per_variant || 1)),
-              0,
-            );
             const totalValue = formatDashboardLotValue(productLots);
             const hasLandedPending = productLots.some(isLandedPendingLot);
 
@@ -623,11 +612,6 @@ function CostExplorer() {
                       <div className="text-right">
                         <p className="font-mono">{totalQty.toLocaleString()}</p>
                         <p className="text-xs text-muted-foreground">lot units</p>
-                        {totalBasePieces !== totalQty && (
-                          <p className="text-[11px] font-mono text-muted-foreground">
-                            ({totalBasePieces.toLocaleString()} pcs)
-                          </p>
-                        )}
                       </div>
                       <div className="text-right">
                         <p className="font-mono font-medium">{totalValue}</p>
@@ -663,7 +647,6 @@ function CostExplorer() {
                         <TableBody>
                           {productLots.map((lot) => {
                             const landedPending = isLandedPendingLot(lot);
-                            const perPieceFormatted = formatLotPerBasePiece(lot);
                             return (
                               <TableRow key={lot.id} className={landedPending ? "bg-amber-50/50 dark:bg-amber-950/10" : ""}>
                                 <TableCell className="font-mono text-xs">
@@ -672,12 +655,7 @@ function CostExplorer() {
                                     <span className="text-muted-foreground ml-1">({lot.batch_number})</span>
                                   )}
                                 </TableCell>
-                                <TableCell className="font-mono text-xs">
-                                  {lot.sku}
-                                  {lot.units_per_variant > 1 && (
-                                    <span className="text-muted-foreground ml-1">({lot.units_per_variant}/unit)</span>
-                                  )}
-                                </TableCell>
+                                <TableCell className="font-mono text-xs">{lot.sku}</TableCell>
                                 <TableCell className="text-xs">{formatDate(lot.received_at instanceof Date ? lot.received_at.toISOString() : lot.received_at)}</TableCell>
                                 <TableCell className="text-right font-mono text-xs">
                                   {formatDashboardLotCost(lot, "product")}
@@ -687,23 +665,13 @@ function CostExplorer() {
                                   {formatDashboardLotCost(lot, "landed")}
                                 </TableCell>
                                 <TableCell className="text-right font-mono text-xs font-medium">
-                                  <div>{formatDashboardLotCost(lot)}</div>
-                                  {perPieceFormatted && (
-                                    <div className="text-[11px] font-normal text-muted-foreground">
-                                      {perPieceFormatted}/pc
-                                    </div>
-                                  )}
+                                  {formatDashboardLotCost(lot)}
                                 </TableCell>
                                 <TableCell className="text-right font-mono text-xs">
                                   {lot.qty_received === null ? "Not recorded" : lot.qty_received.toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-right font-mono text-xs">
-                                  <div>{lot.qty_on_hand.toLocaleString()}</div>
-                                  {lot.units_per_variant > 1 && (
-                                    <div className="text-[11px] text-muted-foreground">
-                                      {(lot.qty_on_hand * lot.units_per_variant).toLocaleString()} pcs
-                                    </div>
-                                  )}
+                                  {lot.qty_on_hand.toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-xs">
                                   <SourceBadge lot={lot} />
@@ -1125,18 +1093,18 @@ function ManualEntrySection() {
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      const parsedUnitCostMills = dollarsToMills(unitCost.replace(/[$,\s]/g, ""));
-      const parsedLandedCostMills = landedCost.trim()
-        ? dollarsToMills(landedCost.replace(/[$,\s]/g, ""))
+      const parsedUnit = parseManualCostInput(unitCost, "unit cost");
+      const parsedLanded = landedCost.trim()
+        ? parseManualCostInput(landedCost, "landed cost")
         : undefined;
       const res = await apiRequest("POST", "/api/cogs/manual-entry", {
         productVariantId: parseInt(variantId),
         warehouseLocationId: parseInt(locationId),
         qty: parseInt(qty),
-        unitCostMills: parsedUnitCostMills,
-        unitCostCents: millsToCents(parsedUnitCostMills),
-        landedCostMills: parsedLandedCostMills,
-        landedCostCents: parsedLandedCostMills !== undefined ? millsToCents(parsedLandedCostMills) : undefined,
+        unitCostMills: parsedUnit.mills,
+        unitCostCents: parsedUnit.cents,
+        landedCostMills: parsedLanded?.mills,
+        landedCostCents: parsedLanded?.cents,
         batchNumber: batchNumber || undefined,
         receivedAt: receivedAt || undefined,
         notes: notes || undefined,
@@ -1186,7 +1154,7 @@ function ManualEntrySection() {
               <CardTitle className="text-lg">Manual Cost Entry</CardTitle>
               <CardDescription>
                 Create cost lots for existing inventory without PO linkage.
-                Enter USD dollar costs per lot unit (up to 4 decimal places, e.g. 0.0038).
+                All costs in cents per piece (or 4-decimal USD with a decimal point, e.g. 0.0038).
               </CardDescription>
             </div>
             <Button variant="outline" size="sm" disabled={!legacyQuantityImportAllowed} onClick={() => setShowBulkDialog(true)}>
@@ -1236,7 +1204,7 @@ function ManualEntrySection() {
             </div>
 
             <div>
-              <Label>Quantity (lot units)</Label>
+              <Label>Quantity (pieces)</Label>
               <Input
                 type="number"
                 value={qty}
@@ -1248,20 +1216,20 @@ function ManualEntrySection() {
             </div>
 
             <div>
-              <Label>Unit Cost ($ per lot unit, up to 4 decimals)</Label>
+              <Label>Unit Cost (cents per piece)</Label>
               <Input
                 type="number"
                 step="0.0001"
                 value={unitCost}
                 onChange={(e) => setUnitCost(e.target.value)}
-                placeholder="0.0125"
+                placeholder="0.0120"
                 className="mt-1.5"
                 min={0}
               />
             </div>
 
             <div>
-              <Label>Landed Cost ($ per lot unit, optional)</Label>
+              <Label>Landed Cost (cents per piece, optional)</Label>
               <Input
                 type="number"
                 step="0.0001"
@@ -1495,23 +1463,16 @@ function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
 function EditManualLotDialog({ lot, onClose }: { lot: any; onClose: () => void }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const initialMills = Number(
-    lot.total_unit_cost_mills ??
-    lot.po_unit_cost_mills ??
-    centsToMills(Number(lot.total_unit_cost_cents || lot.po_unit_cost_cents || 0)),
-  );
-  const [unitCost, setUnitCost] = useState(
-    Number.isSafeInteger(initialMills) && initialMills >= 0 ? millsToDollarString(initialMills) : "0.0000",
-  );
+  const [unitCost, setUnitCost] = useState(String(lot.total_unit_cost_cents || lot.po_unit_cost_cents || 0));
   const [batchNumber, setBatchNumber] = useState(lot.batch_number || "");
   const [notes, setNotes] = useState(lot.notes || "");
 
   const updateMutation = useMutation({
     mutationFn: async () => {
-      const parsedMills = dollarsToMills(unitCost.replace(/[$,\s]/g, ""));
+      const parsed = parseManualCostInput(unitCost, "unit cost");
       const res = await apiRequest("PATCH", `/api/cogs/manual-lots/${lot.id}`, {
-        unitCostMills: parsedMills,
-        unitCostCents: millsToCents(parsedMills),
+        unitCostMills: parsed.mills,
+        unitCostCents: parsed.cents,
         batchNumber: batchNumber || undefined,
         notes: notes || undefined,
       });
@@ -1537,7 +1498,7 @@ function EditManualLotDialog({ lot, onClose }: { lot: any; onClose: () => void }
         </DialogHeader>
         <div className="space-y-4">
           <div>
-            <Label>Unit Cost ($ per lot unit, up to 4 decimals)</Label>
+            <Label>Unit Cost (cents per piece)</Label>
             <Input
               type="number"
               step="0.0001"

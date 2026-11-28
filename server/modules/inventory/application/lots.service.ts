@@ -33,7 +33,10 @@ import {
   calculateLotPickableOnHand,
   calculateUnreservedLotOnHand,
 } from "../domain/inventory.domain";
-import { updateVariantReceiptCostRollupInCatalog } from "../../catalog/cross-module-product-mutations.api";
+import {
+  syncVariantCostRollupFromLotsInCatalog,
+  updateVariantReceiptCostRollupInCatalog,
+} from "../../catalog/cross-module-product-mutations.api";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 import { AppError, IntegrityError, ValidationError } from "../../../../shared/errors";
 import { normalizeLotCosts as normalizeBuildLotCosts, lotCostRecord, recordedUnitCostMills,
@@ -913,20 +916,8 @@ export class InventoryLotService {
         qtyPicked: inventoryLots.qtyPicked,
         receivedAt: inventoryLots.receivedAt,
         status: inventoryLots.status,
-        unitCostCents: inventoryLots.unitCostCents,
-        unitCostMills: inventoryLots.unitCostMills,
-        totalUnitCostMills: inventoryLots.totalUnitCostMills,
-        poUnitCostMills: inventoryLots.poUnitCostMills,
-        packagingCostMills: inventoryLots.packagingCostMills,
-        landedCostMills: inventoryLots.landedCostMills,
-        poUnitCostCents: inventoryLots.poUnitCostCents,
-        packagingCostCents: inventoryLots.packagingCostCents,
-        landedCostCents: inventoryLots.landedCostCents,
-        costPrecisionVersion: inventoryLots.costPrecisionVersion,
         costBasisQty: sql<string | null>`to_jsonb(inventory_lots)->>'cost_basis_qty'`,
-        productTotalCostMills: sql<string | null>`to_jsonb(inventory_lots)->>'product_total_cost_mills'`,
-        packagingTotalCostMills: sql<string | null>`to_jsonb(inventory_lots)->>'packaging_total_cost_mills'`,
-        landedTotalCostMills: sql<string | null>`to_jsonb(inventory_lots)->>'landed_total_cost_mills'`,
+        lotJson: sql<Record<string, unknown>>`to_jsonb(inventory_lots)`,
       })
       .from(inventoryLots)
       .where(
@@ -975,22 +966,7 @@ export class InventoryLotService {
           )
         : null;
       if (lot && orderContext?.orderId && orderContext?.orderItemId && typeof this.db.insert === "function") {
-        const record = {
-          unit_cost_cents: lot.unitCostCents,
-          unit_cost_mills: lot.unitCostMills,
-          total_unit_cost_mills: lot.totalUnitCostMills,
-          po_unit_cost_mills: lot.poUnitCostMills,
-          packaging_cost_mills: lot.packagingCostMills,
-          landed_cost_mills: lot.landedCostMills,
-          po_unit_cost_cents: lot.poUnitCostCents,
-          packaging_cost_cents: lot.packagingCostCents,
-          landed_cost_cents: lot.landedCostCents,
-          cost_precision_version: lot.costPrecisionVersion,
-          cost_basis_qty: lot.costBasisQty,
-          product_total_cost_mills: lot.productTotalCostMills,
-          packaging_total_cost_mills: lot.packagingTotalCostMills,
-          landed_total_cost_mills: lot.landedTotalCostMills,
-        };
+        const record = lot.lotJson ?? {};
         const lotUnitMills = safeMillsNumber(normalizeBuildLotCosts(record).totalMills, "lot.unitCostMills");
         const totalCostMills = safeMillsNumber(
           exactAllocation?.costs.totalMills ?? BigInt(portion.fromOnHand) * BigInt(lotUnitMills),
@@ -1468,7 +1444,15 @@ export class InventoryLotService {
       if (agg?.totalCostMills !== undefined && agg.totalCostMills !== null) {
         const sumMills = BigInt(String(agg.totalCostMills));
         const qtyBig = BigInt(totalQty);
-        avgCostMills = moneyToSafeNumber((sumMills * BigInt(2) + qtyBig) / (qtyBig * BigInt(2)), "variant.avgCostMills");
+        const avgMillsBig = (sumMills * BigInt(2) + qtyBig) / (qtyBig * BigInt(2));
+        if (avgMillsBig > BigInt(Number.MAX_SAFE_INTEGER) && typeof this.db.execute === "function") {
+          await syncVariantCostRollupFromLotsInCatalog(this.db, {
+            productVariantId,
+            lastCostMills: explicitLastMills ?? null,
+          });
+          return;
+        }
+        avgCostMills = moneyToSafeNumber(avgMillsBig, "variant.avgCostMills");
         avgCostCents = millsToCents(avgCostMills);
       } else {
         const sumCents = BigInt(String(agg?.totalCost ?? 0));

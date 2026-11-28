@@ -21,7 +21,10 @@ export async function updateVariantBackfillCostsInCatalog(
   unitCostCents: number,
   unitCostMills?: number,
 ): Promise<void> {
-  const resolvedMills = unitCostMills ?? unitCostCents * 100;
+  const resolvedMillsStr = (
+    unitCostMills !== undefined ? BigInt(unitCostMills) : BigInt(unitCostCents) * BigInt(100)
+  ).toString();
+  const unitCostCentsStr = BigInt(unitCostCents).toString();
   await executor.execute(sql`
     WITH lot_rollup AS (
       SELECT
@@ -40,18 +43,18 @@ export async function updateVariantBackfillCostsInCatalog(
         AND qty_on_hand > 0
     )
     UPDATE catalog.product_variants pv
-    SET last_cost_cents = ${unitCostCents},
-        last_cost_mills = ${resolvedMills},
-        avg_cost_mills = COALESCE(lot_rollup.avg_mills, ${resolvedMills}),
-        avg_cost_cents = ROUND(COALESCE(lot_rollup.avg_mills, ${resolvedMills})::numeric / 100, 0)::integer,
+    SET last_cost_cents = ${unitCostCentsStr}::bigint,
+        last_cost_mills = ${resolvedMillsStr}::bigint,
+        avg_cost_mills = COALESCE(lot_rollup.avg_mills, ${resolvedMillsStr}::bigint),
+        avg_cost_cents = ROUND(COALESCE(lot_rollup.avg_mills, ${resolvedMillsStr}::bigint)::numeric / 100, 0)::bigint,
         standard_cost_cents = CASE
           WHEN pv.standard_cost_cents IS NULL OR pv.standard_cost_cents = 0
-          THEN ${unitCostCents}
+          THEN ${unitCostCentsStr}::bigint
           ELSE pv.standard_cost_cents
         END,
         standard_cost_mills = CASE
           WHEN pv.standard_cost_mills IS NULL OR pv.standard_cost_mills = 0
-          THEN ${resolvedMills}
+          THEN ${resolvedMillsStr}::bigint
           ELSE pv.standard_cost_mills
         END,
         updated_at = NOW()
@@ -64,13 +67,18 @@ export async function syncVariantCostRollupFromLotsInCatalog(
   executor: { execute: (...args: any[]) => any },
   input: {
     productVariantId: number;
-    lastCostMills?: number | null;
+    lastCostMills?: number | bigint | null;
     updatedAt?: Date;
   },
 ): Promise<void> {
-  const hasExplicitLast = input.lastCostMills !== undefined && input.lastCostMills !== null && input.lastCostMills > 0;
-  const explicitLastMills = hasExplicitLast ? input.lastCostMills! : null;
-  const explicitLastCents = hasExplicitLast ? Math.round((explicitLastMills! + 50) / 100) : null;
+  const hasExplicitLast =
+    input.lastCostMills !== undefined &&
+    input.lastCostMills !== null &&
+    BigInt(input.lastCostMills) > BigInt(0);
+  const explicitLastMills = hasExplicitLast ? BigInt(input.lastCostMills!).toString() : null;
+  const explicitLastCents = hasExplicitLast
+    ? ((BigInt(input.lastCostMills!) + BigInt(50)) / BigInt(100)).toString()
+    : null;
   const ts = input.updatedAt ?? new Date();
   await executor.execute(sql`
     WITH lot_rollup AS (
@@ -90,10 +98,10 @@ export async function syncVariantCostRollupFromLotsInCatalog(
         AND qty_on_hand > 0
     )
     UPDATE catalog.product_variants pv
-    SET avg_cost_mills = COALESCE(lot_rollup.avg_mills, ${explicitLastMills}, pv.avg_cost_mills),
+    SET avg_cost_mills = COALESCE(lot_rollup.avg_mills, ${explicitLastMills}::bigint, pv.avg_cost_mills),
         avg_cost_cents = CASE
-          WHEN COALESCE(lot_rollup.avg_mills, ${explicitLastMills}) IS NOT NULL
-          THEN ROUND(COALESCE(lot_rollup.avg_mills, ${explicitLastMills})::numeric / 100, 0)::integer
+          WHEN COALESCE(lot_rollup.avg_mills, ${explicitLastMills}::bigint) IS NOT NULL
+          THEN ROUND(COALESCE(lot_rollup.avg_mills, ${explicitLastMills}::bigint)::numeric / 100, 0)::bigint
           ELSE pv.avg_cost_cents
         END,
         last_cost_mills = CASE
@@ -101,7 +109,7 @@ export async function syncVariantCostRollupFromLotsInCatalog(
           ELSE pv.last_cost_mills
         END,
         last_cost_cents = CASE
-          WHEN ${explicitLastCents}::integer IS NOT NULL THEN ${explicitLastCents}::integer
+          WHEN ${explicitLastCents}::bigint IS NOT NULL THEN ${explicitLastCents}::bigint
           ELSE pv.last_cost_cents
         END,
         updated_at = ${ts}

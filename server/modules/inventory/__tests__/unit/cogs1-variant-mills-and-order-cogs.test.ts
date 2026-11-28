@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PoolClient } from "pg";
 import { updateVariantReceiptCostRollupInCatalog } from "../../../catalog/cross-module-product-mutations.api";
 vi.mock("../../../catalog/cross-module-product-mutations.api", () => ({
+  syncVariantCostRollupFromLotsInCatalog: vi.fn().mockResolvedValue(undefined),
   updateVariantReceiptCostRollupInCatalog: vi.fn().mockResolvedValue(undefined),
 }));
 import { resolveCost } from "../../application/cost-resolver";
@@ -257,20 +258,20 @@ describe("COGS-1 — Direct shipFromLots records oms.order_item_costs & updateVa
       qtyPicked: 20,
       receivedAt: new Date("2026-09-01T00:00:00Z"),
       status: "active",
-      unitCostCents: 0,
-      unitCostMills: 38,
-      totalUnitCostMills: 38,
-      poUnitCostMills: 38,
-      packagingCostMills: 0,
-      landedCostMills: 0,
-      poUnitCostCents: 0,
-      packagingCostCents: 0,
-      landedCostCents: 0,
-      costPrecisionVersion: 1,
       costBasisQty: null,
-      productTotalCostMills: null,
-      packagingTotalCostMills: null,
-      landedTotalCostMills: null,
+      lotJson: {
+        unit_cost_cents: 0,
+        unit_cost_mills: 38,
+        total_unit_cost_mills: 38,
+        po_unit_cost_mills: 38,
+        packaging_cost_mills: 0,
+        landed_cost_mills: 0,
+        po_unit_cost_cents: 0,
+        packaging_cost_cents: 0,
+        landed_cost_cents: 0,
+        cost_precision_version: 1,
+        cost_basis_qty: null,
+      },
     };
 
     const tx = {
