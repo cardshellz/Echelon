@@ -106,6 +106,33 @@ function navHrefHasQueryOrHash(href: string): boolean {
 
 function navHrefBelongsToLocation(pathname: string, href: string): boolean {
   const hrefPath = navPath(href);
+  if (hrefPath === "/purchasing") {
+    return pathname === "/purchasing";
+  }
+  if (hrefPath === "/purchasing/bills") {
+    return (
+      pathname === "/purchasing/bills" ||
+      pathname.startsWith("/purchasing/bills/") ||
+      pathname === "/ap" ||
+      pathname === "/ap-invoices" ||
+      pathname.startsWith("/ap-invoices/") ||
+      pathname === "/ap-payments" ||
+      pathname === "/supplier-credits" ||
+      pathname.startsWith("/supplier-credits/") ||
+      pathname === "/supplier-returns" ||
+      pathname.startsWith("/supplier-returns/")
+    );
+  }
+  if (hrefPath === "/reorder-analysis") {
+    return (
+      pathname === "/reorder-analysis" ||
+      pathname.startsWith("/reorder-analysis/") ||
+      pathname === "/demand-planner" ||
+      pathname === "/procurement/automation" ||
+      pathname === "/procurement/runs" ||
+      pathname === "/procurement/rfqs"
+    );
+  }
   return pathname === hrefPath || (hrefPath !== "/" && pathname.startsWith(`${hrefPath}/`));
 }
 
@@ -154,29 +181,18 @@ const navStructure: NavEntry[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/", requiredPermission: { resource: "inventory", action: "view" } },
   { label: "Operations Control Tower", icon: BarChart3, href: "/oms/flow-monitor", requiredPermission: { resource: "operations", action: "view" } },
   {
-    label: "Procurement",
+    label: "Purchasing",
     icon: ShoppingBag,
 
     children: [
-      { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing", allOfPermissions: PURCHASING_DASHBOARD_READ_PERMISSIONS },
-      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
+      { label: "Buying Desk", icon: LayoutDashboard, href: "/purchasing", allOfPermissions: PURCHASING_DASHBOARD_READ_PERMISSIONS },
       { label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF, requiredPermission: { resource: "inventory", action: "view" } },
-      { label: "Demand Planner", icon: TrendingUp, href: "/demand-planner", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
+      { label: "Inbound Shipments", icon: Ship, href: "/shipments", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
       { label: "Receiving", icon: Truck, href: "/receiving", anyOfPermissions: RECEIVING_READ_PERMISSIONS },
-      { label: "Shipments", icon: Ship, href: "/shipments", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
+      { label: "Bills & Payments", icon: Receipt, href: "/purchasing/bills", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
       { label: "Suppliers", icon: Building2, href: "/suppliers", requiredPermission: PURCHASING_READ_PERMISSION },
-    ],
-  },
-  {
-    label: "Accounts Payable",
-    icon: DollarSign,
-
-    children: [
-      { label: "AP Dashboard", icon: BarChart3, href: "/ap", requiredPermission: PURCHASING_READ_PERMISSION },
-      { label: "Invoices", icon: Receipt, href: "/ap-invoices", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
-      { label: "Payments", icon: CreditCard, href: "/ap-payments", requiredPermission: PURCHASING_READ_PERMISSION },
-      { label: "Supplier Credits", icon: Receipt, href: "/supplier-credits", requiredPermission: PURCHASING_READ_PERMISSION },
-      { label: "Supplier Returns", icon: Receipt, href: "/supplier-returns", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Inventory Costs", icon: DollarSign, href: "/inventory/costs", requiredPermission: { resource: "inventory", action: "view" } },
     ],
   },
   {
@@ -205,7 +221,6 @@ const navStructure: NavEntry[] = [
       { label: "Transfers", icon: ArrowLeftRight, href: "/transfers", requiredPermission: { resource: "inventory", action: "view" } },
       { label: "Replenishment", icon: RefreshCw, href: "/replenishment", requiredPermission: { resource: "inventory", action: "view" } },
       { label: "History", icon: History, href: "/inventory/history", requiredPermission: { resource: "inventory", action: "audit" } },
-      { label: "Cost Dashboard", icon: DollarSign, href: "/inventory/costs", requiredPermission: { resource: "inventory", action: "view" } },
     ],
   },
   {
@@ -247,7 +262,7 @@ const navStructure: NavEntry[] = [
     icon: Truck,
 
     children: [
-      { label: "Shipments", icon: Truck, href: "/outbound-shipments", requiredPermission: { resource: "shipments", action: "view" } },
+      { label: "Outbound Shipments", icon: Truck, href: "/outbound-shipments", requiredPermission: { resource: "shipments", action: "view" } },
       { label: "Shipping Groups", icon: Layers, href: "/shipping-groups", requiredPermission: { resource: "inventory", action: "view" } },
       { label: "Service Levels", icon: RouteIcon, href: "/shipping-service-levels", requiredPermission: { resource: "settings", action: "view" } },
       { label: "Settings", icon: Package, href: "/shipping-settings", requiredPermission: { resource: "settings", action: "view" } },
@@ -299,11 +314,11 @@ const navStructure: NavEntry[] = [
     ],
   },
   {
-    label: "Vendors",
+    label: "Dropship Partners",
     icon: Users,
 
     children: [
-      { label: "All Vendors", icon: Users, href: "/vendors", requiredPermission: { resource: "dropship", action: "view" } },
+      { label: "All Partners", icon: Users, href: "/vendors", requiredPermission: { resource: "dropship", action: "view" } },
     ],
   },
 ];
@@ -371,16 +386,41 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
     return null;
   };
 
-  const [expandedGroup, setExpandedGroup] = useState<string | null>(
-    () => getActiveGroupLabel(locationPath)
-  );
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => {
+    const initial = new Set<string>();
+    if (typeof window !== "undefined") {
+      try {
+        const raw = window.localStorage.getItem("echelon.sidebar.expandedGroups");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            for (const item of parsed) {
+              if (typeof item === "string") initial.add(item);
+            }
+          }
+        }
+      } catch {}
+    }
+    const active = getActiveGroupLabel(locationPath);
+    if (active) initial.add(active);
+    return initial;
+  });
 
-  // Auto-expand group when navigating to a page in a different group
+  // Auto-expand group when navigating to a page in another group without collapsing open groups
   useEffect(() => {
     const activeLabel = getActiveGroupLabel(locationPath);
-    if (activeLabel) {
-      setExpandedGroup(activeLabel);
-    }
+    if (!activeLabel) return;
+    setExpandedGroups((prev) => {
+      if (prev.has(activeLabel)) return prev;
+      const next = new Set(prev);
+      next.add(activeLabel);
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem("echelon.sidebar.expandedGroups", JSON.stringify([...next]));
+        } catch {}
+      }
+      return next;
+    });
   }, [locationPath]);
 
   // Verified grants govern named capabilities. Unmapped surfaces retain their
@@ -395,9 +435,28 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
   const handleGroupClick = (label: string) => {
     if (collapsed && !mobile) {
       onExpand?.();
-      setExpandedGroup(label);
+      setExpandedGroups((prev) => {
+        const next = new Set(prev);
+        next.add(label);
+        if (typeof window !== "undefined") {
+          try {
+            window.localStorage.setItem("echelon.sidebar.expandedGroups", JSON.stringify([...next]));
+          } catch {}
+        }
+        return next;
+      });
     } else {
-      setExpandedGroup(prev => prev === label ? null : label);
+      setExpandedGroups((prev) => {
+        const next = new Set(prev);
+        if (next.has(label)) next.delete(label);
+        else next.add(label);
+        if (typeof window !== "undefined") {
+          try {
+            window.localStorage.setItem("echelon.sidebar.expandedGroups", JSON.stringify([...next]));
+          } catch {}
+        }
+        return next;
+      });
     }
   };
 
@@ -471,7 +530,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
             if (visibleChildren.length === 0) return null;
 
             const GroupIcon = entry.icon;
-            const isOpen = expandedGroup === entry.label;
+            const isOpen = expandedGroups.has(entry.label);
             const hasActiveChild = visibleChildren.some(child =>
               navHrefBelongsToLocation(locationPath, child.href)
             );
@@ -611,6 +670,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const isMobile = useIsMobile();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [headerSearch, setHeaderSearch] = useState("");
+  const [, navigate] = useLocation();
   const { user, assignedRoles, hasPermission, hasSystemRole, logout } = useAuth();
   const hasAssignedAccess = !!user && assignedRoles.length > 0;
   const canEditSettings = hasPermission("settings", "edit");
@@ -656,7 +717,23 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <div className="relative w-full max-w-md hidden md:block">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input
-                placeholder="Search..."
+                value={headerSearch}
+                onChange={(e) => setHeaderSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const q = headerSearch.trim();
+                    if (!q) return;
+                    if (/^po[-_#]/i.test(q)) {
+                      navigate(`/purchase-orders?search=${encodeURIComponent(q)}`);
+                    } else if (hasPermission("purchasing", "view") && window.location.pathname.startsWith("/purchas")) {
+                      navigate(`/purchase-orders?search=${encodeURIComponent(q)}`);
+                    } else {
+                      navigate(`/catalog?search=${encodeURIComponent(q)}`);
+                    }
+                  }
+                }}
+                placeholder="Jump to PO # or search SKU (Enter)..."
+                aria-label="Global quick search"
                 className="pl-9 bg-secondary/50 border-transparent focus-visible:bg-background focus-visible:border-input transition-all h-10"
               />
             </div>
@@ -684,7 +761,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   {canViewProcurementSettings && <DropdownMenuItem asChild data-testid="link-procurement-settings">
                     <Link href="/settings/procurement" className="w-full cursor-pointer">
                       <ShoppingBag className="mr-2 h-4 w-4" />
-                      Procurement
+                      Purchasing
                     </Link>
                   </DropdownMenuItem>}
                   {canViewSettings && <DropdownMenuItem asChild data-testid="link-shipping-settings">
@@ -726,16 +803,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" className="gap-2 px-0 md:px-3 min-h-[44px]">
                   <Avatar className="h-8 w-8 md:h-7 md:w-7 border border-sidebar-border">
-                     <AvatarImage src="https://github.com/shadcn.png" />
-                     <AvatarFallback>JD</AvatarFallback>
+                     <AvatarFallback>{user ? (user.displayName || user.username).slice(0, 2).toUpperCase() : "CS"}</AvatarFallback>
                   </Avatar>
-                  <span className="text-sm font-medium hidden md:inline-block">Acme Corp.</span>
+                  <span className="text-sm font-medium hidden md:inline-block">Card Shellz</span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuLabel>Organization</DropdownMenuLabel>
-                <DropdownMenuItem>Settings</DropdownMenuItem>
-                <DropdownMenuItem>Billing</DropdownMenuItem>
+                <DropdownMenuLabel>Account</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild><a href="/staff/password">Change password</a></DropdownMenuItem>
                 <DropdownMenuItem onClick={handleLogout}>Log out</DropdownMenuItem>

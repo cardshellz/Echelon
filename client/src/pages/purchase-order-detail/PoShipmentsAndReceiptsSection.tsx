@@ -877,9 +877,9 @@ export function PoReceiveAndShipmentDialogs(props: {
               ) : sc.vendors.length === 0 ? (
                 <div className="space-y-1">
                   <Button variant="outline" disabled className="w-full justify-between h-10 font-normal">
-                    No vendors found
+                    No suppliers found
                   </Button>
-                  <a href="/vendors" className="text-xs text-primary hover:underline">Add a vendor first.</a>
+                  <a href="/suppliers" className="text-xs text-primary hover:underline">Add a supplier first.</a>
                 </div>
               ) : (
                 <Popover open={sc.shipperOpen} onOpenChange={sc.setShipperOpen}>
@@ -930,7 +930,7 @@ export function PoReceiveAndShipmentDialogs(props: {
                 </Popover>
               )}
               <p className="text-xs text-muted-foreground">
-                Don't see your supplier? <a href="/vendors" className="text-primary hover:underline">Add a vendor.</a>
+                Don&apos;t see your supplier? <a href="/suppliers" className="text-primary hover:underline">Add a supplier.</a>
               </p>
             </div>
 

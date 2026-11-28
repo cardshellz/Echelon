@@ -207,15 +207,17 @@ export default function PurchaseOrders() {
 
   // Filters
   const [statusFilter, setStatusFilter] = useState("active");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("search") ?? "";
+  });
   const [vendorFilter, setVendorFilter] = useState<number | null>(null);
   // Phase 2: dual-track filter chips
   const [physicalFilter, setPhysicalFilter] = useState<string | null>(null);
   const [financialFilter, setFinancialFilter] = useState<PoFinancialWorkflow["state"] | null>(null);
 
-  // Spec A feature flag. When true, '+ New Purchase Order' navigates to the
-  // new full-page editor instead of opening the legacy dialog. Flag lives on
-  // procurement settings so an admin can flip it without a redeploy.
+  // Spec A feature flag. Default to the full-page spreadsheet editor unless an
+  // admin explicitly disables `useNewPoEditor` in Purchasing Settings.
   const { data: procurementSettings } = useQuery<ProcurementSettings>({
     queryKey: ["/api/settings/procurement"],
     queryFn: async () => {
@@ -226,7 +228,7 @@ export default function PurchaseOrders() {
     // Not critical for the rest of the page; default staleTime is fine.
     retry: false,
   });
-  const useNewPoEditor = procurementSettings?.useNewPoEditor === true;
+  const useNewPoEditor = procurementSettings?.useNewPoEditor !== false;
 
   function handleNewPoClick() {
     if (entryBlocked) return;

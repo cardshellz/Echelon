@@ -95,20 +95,23 @@ describe("procurement sidebar grant boundaries", () => {
     expect(hrefs(renderAt(path))).not.toContain(href);
   });
 
-  it("admits explicitly granted procurement children for a custom role regardless of its legacy label", () => {
+  it("admits explicitly granted purchasing children for a custom role regardless of its legacy label", () => {
     const procurementLinks = hrefs(renderAt("/receiving"));
-    expect(procurementLinks).toEqual(expect.arrayContaining(["/receiving", "/purchase-orders", "/shipments"]));
-    expect(procurementLinks).toContain("/demand-planner");
-    const payableLinks = hrefs(renderAt("/ap-invoices"));
-    expect(payableLinks).toEqual(expect.arrayContaining([
-      "/ap", "/ap-invoices", "/ap-payments", "/supplier-credits", "/supplier-returns",
+    expect(procurementLinks).toEqual(expect.arrayContaining([
+      "/receiving",
+      "/purchase-orders",
+      "/shipments",
+      "/purchasing/bills",
+      "/suppliers",
     ]));
+    const payableLinks = hrefs(renderAt("/ap-invoices"));
+    expect(payableLinks).toContain("/purchasing/bills");
   });
 
-  it("does not admit procurement children using unrelated named grants", () => {
+  it("does not admit purchasing children using unrelated named grants", () => {
     identity.permissions = ["inventory_planning:view", "orders:edit", "dropship:manage_operations"];
     expect(hrefs(renderAt("/receiving"))).not.toContain("/receiving");
-    expect(hrefs(renderAt("/ap-invoices"))).not.toContain("/ap-invoices");
+    expect(hrefs(renderAt("/ap-invoices"))).not.toContain("/purchasing/bills");
   });
 
   it("requires both inventory and purchasing reads for the combined dashboard", () => {
@@ -182,7 +185,8 @@ describe("procurement sidebar grant boundaries", () => {
 
   it("uses existing read capabilities for navigation and does not borrow unrelated grants", () => {
     identity.permissions = ["inventory:view", "channels:view", "settings:view", "warehouse_work:assembly"];
-    expect(hrefs(renderAt("/inventory"))).toContain("/inventory/costs");
+    expect(hrefs(renderAt("/inventory/costs"))).toContain("/inventory/costs");
+    expect(hrefs(renderAt("/inventory/costs"))).not.toContain("/purchase-orders");
     expect(hrefs(renderAt("/channels"))).toEqual(expect.arrayContaining(["/channels", "/channel-allocation", "/sync-log"]));
     expect(hrefs(renderAt("/channels"))).not.toContain("/subscriptions");
     expect(hrefs(renderAt("/pick-priority"))).toEqual(expect.arrayContaining(["/pick-priority", "/assembly"]));

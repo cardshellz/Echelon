@@ -67,16 +67,9 @@ async function proveReadAccess(page: Page, backend: Backend, documents: Array<{ 
 async function verifyDocumentSidebar(page: Page): Promise<void> {
   const mobile = (page.viewportSize()?.width ?? 1280) < 768;
   if (mobile) await page.getByRole("button", { name: "Open navigation", exact: true }).click();
-  const procurement = page.getByRole("button", { name: "Procurement", exact: true }).filter({ visible: true });
-  if (await procurement.getAttribute("aria-expanded") !== "true") await procurement.click();
-  for (const name of ["Purchase Orders", "Shipments", "Receiving"]) {
-    await expect(page.getByRole("link", { name, exact: true }).filter({ visible: true })).toBeVisible();
-  }
-  await expect(page.getByRole("link", { name: "Demand Planner", exact: true }).filter({ visible: true })).toBeVisible();
-  const payable = page.getByRole("button", { name: "Accounts Payable", exact: true }).filter({ visible: true });
-  if (await payable.getAttribute("aria-expanded") !== "true") await payable.click();
-  await expect(page.getByRole("link", { name: "Invoices", exact: true }).filter({ visible: true })).toBeVisible();
-  for (const name of ["AP Dashboard", "Payments", "Supplier Credits", "Supplier Returns"]) {
+  const purchasing = page.getByRole("button", { name: "Purchasing", exact: true }).filter({ visible: true });
+  if (await purchasing.getAttribute("aria-expanded") !== "true") await purchasing.click();
+  for (const name of ["Buying Desk", "Purchase Orders", "Inbound Shipments", "Receiving", "Bills & Payments", "Suppliers", "Inventory Costs"]) {
     await expect(page.getByRole("link", { name, exact: true }).filter({ visible: true })).toBeVisible();
   }
   if (mobile) await page.keyboard.press("Escape");
