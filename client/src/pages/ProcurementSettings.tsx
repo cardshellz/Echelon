@@ -31,7 +31,7 @@ const SETTING_META: SettingMeta[] = [
   {
     // purchasing.service.ts:sendWithLockedEconomics/getMatchingApprovalTierTx
     key: "requireApproval",
-    label: "Team Approval Mode (require PO approval tiers)",
+    label: "Require approval",
     description:
       "Leave off for Solo Fast-Track mode (1-person purchasing). Turn on when you want POs at or above configured dollar thresholds to require multi-person approval before sending.",
     category: "Approvals",
@@ -255,19 +255,23 @@ export default function ProcurementSettings() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
                         <Label htmlFor={settingId} className="text-base font-medium">{meta.label}</Label>
-                        <Badge variant="outline" className="text-xs">{meta.active ? "Available" : "Unavailable"}</Badge>
+                        <Badge variant="outline" className="text-xs">Available</Badge>
+                        {meta.key === "requireApproval" && (
+                          <Badge variant={value ? "secondary" : "default"} className="text-xs">
+                            {value ? "Team Approval Mode" : "Solo Fast-Track Mode"}
+                          </Badge>
+                        )}
                       </div>
                       <p id={`${settingId}-description`} className="text-sm text-muted-foreground mt-1">{meta.description}</p>
-                      {!meta.active && <p id={`${settingId}-availability`} className="mt-1 text-xs text-muted-foreground">Saved preference: {value ? "On" : "Off"}. This option has no effect.</p>}
                     </div>
                     <div className="shrink-0 pt-1">
                       <Switch
                         id={settingId}
                         checked={value}
-                        disabled={!meta.active || !canEdit || patchMutation.isPending || query.isFetching || loadFailed || unresolvedIntent !== null}
+                        disabled={!canEdit || patchMutation.isPending || query.isFetching || loadFailed || unresolvedIntent !== null}
                         onCheckedChange={(checked) => onToggle(meta.key, checked)}
                         aria-label={meta.label}
-                        aria-describedby={`${settingId}-description${meta.active ? "" : ` ${settingId}-availability`}`}
+                        aria-describedby={`${settingId}-description`}
                       />
                     </div>
                   </CardContent>
@@ -277,6 +281,42 @@ export default function ProcurementSettings() {
           </div>
         );
       })}
+
+      {settings && (
+        <div className="space-y-2 pt-4 border-t">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Retained Legacy Preferences (Inactive)
+          </h2>
+          {SETTING_META.filter((meta) => !meta.active).map((meta) => {
+            const value = settings[meta.key];
+            const settingId = `procurement-setting-${meta.key}`;
+            return (
+              <Card key={meta.key} data-setting={meta.key} className="opacity-75">
+                <CardContent className="p-3.5 flex items-start justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Label htmlFor={settingId} className="text-sm font-medium text-muted-foreground">{meta.label}</Label>
+                      <Badge variant="outline" className="text-xs">Unavailable</Badge>
+                    </div>
+                    <p id={`${settingId}-description`} className="text-xs text-muted-foreground mt-1">{meta.description}</p>
+                    <p id={`${settingId}-availability`} className="mt-1 text-xs text-muted-foreground">Saved preference: {value ? "On" : "Off"}. This option has no effect.</p>
+                  </div>
+                  <div className="shrink-0 pt-1">
+                    <Switch
+                      id={settingId}
+                      checked={value}
+                      disabled={true}
+                      onCheckedChange={(checked) => onToggle(meta.key, checked)}
+                      aria-label={meta.label}
+                      aria-describedby={`${settingId}-description ${settingId}-availability`}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

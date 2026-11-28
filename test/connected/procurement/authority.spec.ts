@@ -153,9 +153,10 @@ test("a non-lead receiver with identical grants can reach the same receipt as th
   await expect(page.getByTestId("btn-add-line")).toBeHidden();
   if ((page.viewportSize()?.width ?? 1280) < 768) await page.getByRole("button", { name: "Open navigation", exact: true }).click();
   await expect(page.getByRole("link", { name: "Receiving", exact: true })).toBeVisible();
-  // The explicit purchasing:view grant admits the planner regardless of the
+  // The explicit purchasing:view grant admits purchasing links regardless of the
   // compatibility picker label. It does not confer unrelated role administration.
-  await expect(page.getByRole("link", { name: "Demand Planner", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Bills & Payments", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Suppliers", exact: true })).toBeVisible();
   const roleAdministration = await page.request.get(backend.url + "/api/roles");
   expect(roleAdministration.status(), await roleAdministration.text()).toBe(403);
 });
