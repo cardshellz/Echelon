@@ -1,4 +1,10 @@
 import { SupplierSelectionEvidence } from "@/features/purchasing/SupplierSelectionEvidence";
+import { MultiVendorQuoteMatrix } from "@/features/purchasing/MultiVendorQuoteMatrix";
+import {
+  buildSoloConfirmAcknowledgement,
+  hasPendingSoloConfirmRequirements,
+} from "@/features/purchasing/multi-vendor-quote-helpers";
+import type { SupplierSourcingOption } from "@shared/procurement/supplier-sourcing";
 import { useOrderSupplierHandoff } from "@/features/purchasing/use-order-supplier-handoff";
 import { captureOrderSupplierHandoff, orderSupplierSetupHref, restoreOrderSupplierHandoff } from "@/lib/order-supplier-handoff";
 import { useRfqCommands } from "@/features/purchasing/use-rfq-commands";
@@ -32,8 +38,12 @@ import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   Info,
+  Plus,
   RefreshCw,
   ShoppingCart,
   SlidersHorizontal,
@@ -327,7 +337,7 @@ interface OrderLineFailure {
 }
 
 interface OrderSubmissionResult {
-  posCreated: Array<{ poNumber: string; vendorName: string }>;
+  posCreated: Array<{ id: number | null; poNumber: string; vendorName: string }>;
   handedOffCount: number;
   /** create-po `skipped` rows, reasons verbatim from the server. */
   poSkipped: Array<{ sku: string; reason: string }>;
@@ -1260,6 +1270,7 @@ export default function ReorderEngine() {
   // pre-filled cart.
 
   const [orderSelection, setOrderSelection] = useState<OrderSelection>(new Map());
+  const [expandedQuoteRowIds, setExpandedQuoteRowIds] = useState<Set<string>>(new Set());
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderStage, setBuilderStage] = useState<"edit" | "confirm" | "result">("edit");
   const [supplierOverrides, setSupplierOverrides] = useState<Record<string, number>>({});
@@ -1478,6 +1489,97 @@ export default function ReorderEngine() {
     setOrderSelection((current) => toggleOrderLine(current, item.recommendationId, item.suggestedOrderPieces));
   };
 
+  const toggleQuoteRow = (recommendationId: string) => {
+    setExpandedQuoteRowIds((current) => {
+      const next = new Set(current);
+      if (next.has(recommendationId)) next.delete(recommendationId);
+      else next.add(recommendationId);
+      return next;
+    });
+  };
+
+  const selectSupplierOptionForOrder = (item: CockpitItem, option: SupplierSourcingOption) => {
+    if (!option.eligible) return;
+    const defaultVendorProductId =
+      item.supplierBasis.sourcingSelection?.selectedVendorProductId ?? item.supplierBasis.vendorProductId;
+    setSupplierOverrides((current) => {
+      if (option.vendorProductId === defaultVendorProductId) {
+        const { [item.recommendationId]: _removed, ...rest } = current;
+        return rest;
+      }
+      return { ...current, [item.recommendationId]: option.vendorProductId };
+    });
+    const targetPieces =
+      option.proposedPieces > 0
+        ? option.proposedPieces
+        : Math.max(0, Math.floor(item.suggestedOrderPieces));
+    setOrderSelection((current) => {
+      const next = new Map(current);
+      const existing = next.get(item.recommendationId);
+      next.set(item.recommendationId, {
+        pieces: targetPieces,
+        exceedReason: existing?.exceedReason ?? "",
+      });
+      return next;
+    });
+    setPieceDrafts((current) => ({ ...current, [item.recommendationId]: String(targetPieces) }));
+    setRoundedHints(({ [item.recommendationId]: _dropped, ...rest }) => rest);
+  };
+
+  const actionableUnselectedRows = useMemo(
+    () =>
+      visibleRows.filter((item) => {
+        const disposition = purchaseBuyingDisposition(item);
+        return (
+          (disposition === "purchase_now" || disposition === "purchase_soon") &&
+          item.preferredVendorId !== null &&
+          item.suggestedOrderPieces > 0 &&
+          item.skippedReason !== "excluded" &&
+          !orderSelection.has(item.recommendationId)
+        );
+      }),
+    [visibleRows, orderSelection],
+  );
+
+  const selectAllActionableRows = () => {
+    if (actionableUnselectedRows.length === 0) return;
+    setOrderSelection((current) => {
+      const next = new Map(current);
+      for (const item of actionableUnselectedRows) {
+        next.set(item.recommendationId, {
+          pieces: Math.max(0, Math.floor(item.suggestedOrderPieces)),
+          exceedReason: "",
+        });
+      }
+      return next;
+    });
+  };
+
+  const canSoloFastTrackConfirm = useMemo(
+    () =>
+      hasPendingSoloConfirmRequirements({
+        poLines: confirmPoLines,
+        rfqLines: confirmRfqLines,
+        acknowledgedControlKeys: ackedControls,
+        approvedExceptionIds: approvedExceptions,
+        note: decisionNote,
+      }),
+    [confirmPoLines, confirmRfqLines, ackedControls, approvedExceptions, decisionNote],
+  );
+
+  const applySoloFastTrackConfirm = () => {
+    const next = buildSoloConfirmAcknowledgement({
+      poLines: confirmPoLines,
+      rfqLines: confirmRfqLines,
+      currentAckedControls: ackedControls,
+      currentApprovedExceptions: approvedExceptions,
+      currentNote: decisionNote,
+    });
+    setAckedControls(next.ackedControls);
+    setApprovedExceptions(next.approvedExceptions);
+    setDecisionNote(next.decisionNote);
+  };
+
   const removeOrderRow = (recommendationId: string) => {
     setOrderSelection((current) => removeOrderLine(current, recommendationId));
     setPieceDrafts(({ [recommendationId]: _dropped, ...rest }) => rest);
@@ -1551,7 +1653,7 @@ export default function ReorderEngine() {
     submitInFlightRef.current = true;
     setIsSubmitting(true);
     const failures: OrderLineFailure[] = [];
-    const posCreated: Array<{ poNumber: string; vendorName: string }> = [];
+    const posCreated: OrderSubmissionResult["posCreated"] = [];
     const poSkipped: Array<{ sku: string; reason: string }> = [];
     const submittedIds = new Set<string>();
     let handedOffCount = 0;
@@ -1678,7 +1780,11 @@ export default function ReorderEngine() {
             continue;
           }
           for (const po of handoff.body?.pos ?? []) {
-            posCreated.push({ poNumber: String(po?.poNumber ?? po?.id ?? "?"), vendorName: group.vendorName });
+            posCreated.push({
+              id: typeof po?.id === "number" ? po.id : null,
+              poNumber: String(po?.poNumber ?? po?.id ?? "?"),
+              vendorName: group.vendorName,
+            });
           }
           for (const row of handoff.body?.handedOff ?? []) {
             handedOffCount += 1;
@@ -1941,6 +2047,16 @@ export default function ReorderEngine() {
         </div>
         <div className="flex-1" />
         <div className="flex flex-wrap items-center gap-2">
+          {rfqCommands.canEdit && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/purchase-orders/new")}
+            >
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              New PO
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -2198,16 +2314,29 @@ export default function ReorderEngine() {
       <div ref={tableRef}>
         <Card className="overflow-hidden">
           {isQueueView && analysis && (
-            <div className="border-b px-4 py-2.5 text-xs text-zinc-500">
-              Showing order queue ·{" "}
-              <b className="text-zinc-700">
-                {visibleRows.length} of {activeCount} SKUs
-              </b>{" "}
-              ·{" "}
-              <button type="button" className="font-semibold text-blue-600 hover:underline" onClick={selectAllChips}>
-                View all
-              </button>
-              {searchedItems.some((item) => item.supplyTiming?.reviewRequired) && <span className="ml-2 text-amber-800">Includes {searchedItems.filter((item) => item.supplyTiming?.reviewRequired).length} supply evidence review(s), even when no purchase quantity is suggested.</span>}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5 text-xs text-zinc-500">
+              <div>
+                Showing order queue ·{" "}
+                <b className="text-zinc-700">
+                  {visibleRows.length} of {activeCount} SKUs
+                </b>{" "}
+                ·{" "}
+                <button type="button" className="font-semibold text-blue-600 hover:underline" onClick={selectAllChips}>
+                  View all
+                </button>
+                {searchedItems.some((item) => item.supplyTiming?.reviewRequired) && <span className="ml-2 text-amber-800">Includes {searchedItems.filter((item) => item.supplyTiming?.reviewRequired).length} supply evidence review(s), even when no purchase quantity is suggested.</span>}
+              </div>
+              {actionableUnselectedRows.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2.5 text-xs"
+                  onClick={selectAllActionableRows}
+                >
+                  Select ready to order ({actionableUnselectedRows.length})
+                </Button>
+              )}
             </div>
           )}
           <CardContent className="p-0">
@@ -2279,6 +2408,12 @@ export default function ReorderEngine() {
                           onExplain={(item) => setDrawerItem(item)}
                           orderSelection={orderSelection}
                           onToggleOrder={toggleOrder}
+                          expandedQuoteRowIds={expandedQuoteRowIds}
+                          onToggleQuotes={toggleQuoteRow}
+                          supplierOverrides={supplierOverrides}
+                          canEditPurchasing={rfqCommands.canEdit}
+                          onSelectSupplierOption={selectSupplierOptionForOrder}
+                          onNavigate={(href) => navigate(href)}
                         />
                       );
                     })}
@@ -2377,7 +2512,7 @@ export default function ReorderEngine() {
             </SheetDescription>
           </SheetHeader>
 
-          <div className="flex-1 space-y-4 px-5 py-4">
+          <div className="min-w-0 flex-1 space-y-4 px-5 py-4">
             <RfqCommandRecovery commands={rfqCommands} />
             {(supplierHandoffError || supplierHandoff.error) && <p role="alert" className="rounded border border-destructive p-3 text-sm">{supplierHandoffError ?? supplierHandoff.error}</p>}
             {/* ---------------- Stage 1: edit ---------------- */}
@@ -2386,7 +2521,7 @@ export default function ReorderEngine() {
                 {builderGroups.vendorGroups.length === 0 && builderGroups.needsSupplier.length === 0 && (
                   <div className="py-10 text-center text-sm text-zinc-500">No items — add SKUs from the table</div>
                 )}
-                {orderableItems.filter((item) => orderSelection.has(item.recommendationId) && (item.supplierBasis.sourcingSelection?.options.length ?? 0) > 1).map((item) => <div key={`supplier-choice-${item.recommendationId}`} className="rounded border p-3 text-xs">
+                {orderableItems.filter((item) => orderSelection.has(item.recommendationId) && (item.supplierBasis.sourcingSelection?.options.length ?? 0) > 1).map((item) => <div key={`supplier-choice-${item.recommendationId}`} className="min-w-0 space-y-2 rounded border p-3 text-xs">
                   <label className="font-medium" htmlFor={`supplier-choice-${item.recommendationId}`}>Supplier for {item.sku}</label>
                   <select id={`supplier-choice-${item.recommendationId}`} className="mt-1 h-9 w-full rounded border bg-background px-2" value={item.supplierBasis.vendorProductId ?? ""} onChange={(event) => {
                     const mappingId = Number(event.target.value);
@@ -2396,6 +2531,22 @@ export default function ReorderEngine() {
                     setOrderSelection((current) => setOrderLinePieces(setOrderLineExceedReason(current, item.recommendationId, ""), item.recommendationId, option.proposedPieces));
                     setPieceDrafts((current) => ({ ...current, [item.recommendationId]: String(option.proposedPieces) }));
                   }}>{item.supplierBasis.sourcingSelection?.options.map((option) => <option key={option.vendorProductId} value={option.vendorProductId} disabled={!option.eligible}>{option.vendorName} - priority {option.priority} - {option.leadTimeDays} days{option.preferred ? " - preferred" : ""}{!option.eligible ? ` - ${option.rejectionReasons.join(", ")}` : ""}</option>)}</select>
+                  <MultiVendorQuoteMatrix
+                    sku={item.sku}
+                    productVariantId={item.productVariantId}
+                    options={item.supplierBasis.sourcingSelection?.options ?? []}
+                    selectedVendorProductId={item.supplierBasis.vendorProductId}
+                    asOfIsoDate={asOfIsoDate}
+                    canEditPurchasing={rfqCommands.canEdit}
+                    compact
+                    onSelectSupplier={(option) => {
+                      if (!option.eligible) return;
+                      setSupplierOverrides((current) => ({ ...current, [item.recommendationId]: option.vendorProductId }));
+                      setOrderSelection((current) => setOrderLinePieces(setOrderLineExceedReason(current, item.recommendationId, ""), item.recommendationId, option.proposedPieces));
+                      setPieceDrafts((current) => ({ ...current, [item.recommendationId]: String(option.proposedPieces) }));
+                    }}
+                    onNavigate={(href) => navigate(href)}
+                  />
                   <p className="mt-1 text-muted-foreground">An override creates an RFQ for a final quote and leaves the preferred supplier unchanged. Proposed quantities use the selected supplier's lead time and order multiples.</p>
                 </div>)}
                 {builderGroups.vendorGroups.map((group) => {
@@ -2623,6 +2774,23 @@ export default function ReorderEngine() {
             {/* ---------------- Stage 2: confirm ---------------- */}
             {builderStage === "confirm" && (
               <>
+                {canSoloFastTrackConfirm && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs">
+                    <span className="text-emerald-900">
+                      <b>Solo Fast-Track:</b> Acknowledge all warnings and fill the buyer review note in one click.
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 border-emerald-300 bg-white text-xs text-emerald-800 hover:bg-emerald-100"
+                      onClick={applySoloFastTrackConfirm}
+                    >
+                      <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                      Acknowledge all &amp; fill note
+                    </Button>
+                  </div>
+                )}
                 {confirmView.poGroups.length > 0 && (() => {
                   // Risk-proportional confirm (rev 5): clean lines are compact
                   // rows; flagged lines (controls or sourcing exception) carry
@@ -2881,10 +3049,27 @@ export default function ReorderEngine() {
                 {submitResult.posCreated.length > 0 && (
                   <div>
                     <div className="font-semibold">Draft POs created</div>
-                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
+                    <ul className="mt-1 list-disc space-y-1 pl-5 text-xs">
                       {submitResult.posCreated.map((po, index) => (
-                        <li key={`${po.poNumber}-${index}`}>
-                          <span className="font-mono">{po.poNumber}</span> — {po.vendorName}
+                        <li key={`${po.poNumber}-${index}`} className="flex flex-wrap items-center justify-between gap-2">
+                          <span>
+                            <span className="font-mono">{po.poNumber}</span> — {po.vendorName}
+                          </span>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-6 px-2 text-[11px]"
+                            onClick={() =>
+                              navigate(
+                                po.id !== null
+                                  ? `/purchase-orders/${po.id}`
+                                  : "/purchase-orders?status=draft",
+                              )
+                            }
+                          >
+                            Open PO →
+                          </Button>
                         </li>
                       ))}
                     </ul>
@@ -2896,7 +3081,18 @@ export default function ReorderEngine() {
                 )}
                 {submitResult.rfqLineCount > 0 && (
                   <div>
-                    <div className="font-semibold">RFQ drafts</div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-semibold">RFQ drafts</div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        onClick={() => navigate("/procurement/rfqs")}
+                      >
+                        Open RFQs →
+                      </Button>
+                    </div>
                     <div className="mt-1 text-xs text-zinc-600">
                       {submitResult.rfqReused
                         ? "An identical batch already existed for this idempotency key — the existing drafts were reused."
@@ -3047,6 +3243,12 @@ function GroupRows({
   onExplain,
   orderSelection,
   onToggleOrder,
+  expandedQuoteRowIds,
+  onToggleQuotes,
+  supplierOverrides,
+  canEditPurchasing,
+  onSelectSupplierOption,
+  onNavigate,
 }: {
   groupKey: string;
   grouped: boolean;
@@ -3059,6 +3261,12 @@ function GroupRows({
   onExplain: (item: CockpitItem) => void;
   orderSelection: OrderSelection;
   onToggleOrder: (item: CockpitItem) => void;
+  expandedQuoteRowIds: ReadonlySet<string>;
+  onToggleQuotes: (recommendationId: string) => void;
+  supplierOverrides: Record<string, number>;
+  canEditPurchasing: boolean;
+  onSelectSupplierOption: (item: CockpitItem, option: SupplierSourcingOption) => void;
+  onNavigate: (href: string) => void;
 }) {
   return (
     <>
@@ -3109,6 +3317,16 @@ function GroupRows({
             onExplain={() => onExplain(item)}
             inOrder={orderSelection.has(item.recommendationId)}
             onToggleOrder={() => onToggleOrder(item)}
+            quotesExpanded={expandedQuoteRowIds.has(item.recommendationId)}
+            onToggleQuotes={() => onToggleQuotes(item.recommendationId)}
+            selectedVendorProductId={
+              supplierOverrides[item.recommendationId] ??
+              item.supplierBasis.sourcingSelection?.selectedVendorProductId ??
+              item.supplierBasis.vendorProductId
+            }
+            canEditPurchasing={canEditPurchasing}
+            onSelectSupplierOption={(option) => onSelectSupplierOption(item, option)}
+            onNavigate={onNavigate}
           />
         ))}
     </>
@@ -3122,6 +3340,12 @@ function ItemRow({
   onExplain,
   inOrder,
   onToggleOrder,
+  quotesExpanded,
+  onToggleQuotes,
+  selectedVendorProductId,
+  canEditPurchasing,
+  onSelectSupplierOption,
+  onNavigate,
 }: {
   item: CockpitItem;
   highlighted: boolean;
@@ -3129,6 +3353,12 @@ function ItemRow({
   onExplain: () => void;
   inOrder: boolean;
   onToggleOrder: () => void;
+  quotesExpanded: boolean;
+  onToggleQuotes: () => void;
+  selectedVendorProductId: number | null;
+  canEditPurchasing: boolean;
+  onSelectSupplierOption: (option: SupplierSourcingOption) => void;
+  onNavigate: (href: string) => void;
 }) {
   const disposition = purchaseBuyingDisposition(item);
   const purchaseNeeded = disposition === "purchase_now" || disposition === "purchase_soon";
@@ -3141,32 +3371,48 @@ function ItemRow({
   const baseReorderPoint = item.leadTimeBasis.reorderPointPieces;
   const adjustedReorderPoint = item.forwardDemandBasis.adjustedReorderPoint;
   const eventAdjusted = adjustedReorderPoint !== baseReorderPoint;
+  const supplierOptions = item.supplierBasis.sourcingSelection?.options ?? [];
+  const hasMultipleSuppliers = supplierOptions.length > 1;
   return (
-    <TableRow
-      id={rowDomId(item.recommendationId)}
-      className={`${skipped ? "bg-zinc-50/60 text-zinc-400" : ""} ${
-        highlighted ? "bg-blue-50 ring-1 ring-inset ring-blue-300" : ""
-      } ${inOrder ? "bg-emerald-50/50" : ""}`}
-    >
-      <TableCell className="pr-0">
-        {orderable && (
-          <Checkbox
-            checked={inOrder}
-            onCheckedChange={onToggleOrder}
-            aria-label={inOrder ? `Remove ${item.sku} from order` : `Add ${item.sku} to order`}
-          />
-        )}
-      </TableCell>
-      <TableCell className="font-mono text-xs">{item.sku}{item.planningBasis?.essential && <Badge variant="outline" className="ml-1 text-[10px]">Essential</Badge>}</TableCell>
-      <TableCell>
-        <div className="max-w-[220px] truncate text-sm font-medium" title={item.productName}>
-          {item.productName}
-        </div>
-        <div className="max-w-[220px] truncate text-[11px] text-zinc-500">
-          {item.preferredVendorName ?? "No vendor"}
-          {item.productLines.length > 0 ? ` · ${item.productLines.join(", ")}` : ""}
-        </div>
-      </TableCell>
+    <Fragment>
+      <TableRow
+        id={rowDomId(item.recommendationId)}
+        className={`${skipped ? "bg-zinc-50/60 text-zinc-400" : ""} ${
+          highlighted ? "bg-blue-50 ring-1 ring-inset ring-blue-300" : ""
+        } ${inOrder ? "bg-emerald-50/50" : ""}`}
+      >
+        <TableCell className="pr-0">
+          {orderable && (
+            <Checkbox
+              checked={inOrder}
+              onCheckedChange={onToggleOrder}
+              aria-label={inOrder ? `Remove ${item.sku} from order` : `Add ${item.sku} to order`}
+            />
+          )}
+        </TableCell>
+        <TableCell className="font-mono text-xs">{item.sku}{item.planningBasis?.essential && <Badge variant="outline" className="ml-1 text-[10px]">Essential</Badge>}</TableCell>
+        <TableCell>
+          <div className="max-w-[220px] truncate text-sm font-medium" title={item.productName}>
+            {item.productName}
+          </div>
+          <div className="flex max-w-[220px] flex-wrap items-center gap-1.5 text-[11px] text-zinc-500">
+            <span className="truncate">
+              {item.preferredVendorName ?? "No vendor"}
+              {item.productLines.length > 0 ? ` · ${item.productLines.join(", ")}` : ""}
+            </span>
+            {hasMultipleSuppliers && (
+              <button
+                type="button"
+                onClick={onToggleQuotes}
+                aria-expanded={quotesExpanded}
+                className="inline-flex items-center gap-0.5 rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0 text-[10px] font-medium text-zinc-700 hover:bg-zinc-100"
+              >
+                {quotesExpanded ? <ChevronDown className="h-2.5 w-2.5" /> : <ChevronRight className="h-2.5 w-2.5" />}
+                {supplierOptions.length} quotes
+              </button>
+            )}
+          </div>
+        </TableCell>
       <TableCell>
         {item.supplyTiming?.signal === "unverified_receipts" ? <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Receipt review</Badge> : disposition === "supply_review" ? (
           <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Arrival review</Badge>
@@ -3255,6 +3501,35 @@ function ItemRow({
           </Button>
         </div>
       </TableCell>
-    </TableRow>
+      </TableRow>
+      {quotesExpanded && hasMultipleSuppliers && (
+        <TableRow className="bg-zinc-50/80 hover:bg-zinc-50/80">
+          <TableCell colSpan={12} className="px-4 py-3">
+            <div className="mb-1.5 flex items-center justify-between text-xs">
+              <span className="font-semibold text-zinc-700">
+                Multi-vendor quote comparison · <span className="font-mono">{item.sku}</span>
+              </span>
+              <button
+                type="button"
+                onClick={onToggleQuotes}
+                className="text-[11px] text-zinc-500 hover:text-zinc-800"
+              >
+                Hide quotes
+              </button>
+            </div>
+            <MultiVendorQuoteMatrix
+              sku={item.sku}
+              productVariantId={item.productVariantId}
+              options={supplierOptions}
+              selectedVendorProductId={selectedVendorProductId}
+              asOfIsoDate={asOfIsoDate}
+              canEditPurchasing={canEditPurchasing}
+              onSelectSupplier={orderable ? onSelectSupplierOption : undefined}
+              onNavigate={onNavigate}
+            />
+          </TableCell>
+        </TableRow>
+      )}
+    </Fragment>
   );
 }

@@ -15,6 +15,8 @@ import {
   ArrowRight,
   Clock,
   CheckCircle2,
+  Plus,
+  Receipt,
   Zap,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -648,6 +650,7 @@ export default function PurchasingDashboard() {
   // authorize starting the job; the server also requires the assigned system role.
   const canRunAutoDraft = hasSystemRole("admin") && hasPermission("inventory", "adjust");
   const canManagePlanningPolicy = hasPermission("inventory", "adjust") || hasPermission("purchasing", "edit");
+  const canCreatePo = hasPermission("purchasing", "create") || hasPermission("purchasing", "edit");
   const [exclusionModalOpen, setExclusionModalOpen] = useState(false);
   const [runHistorySearch, setRunHistorySearch] = useState("");
 
@@ -803,14 +806,28 @@ export default function PurchasingDashboard() {
               <Filter className="h-3.5 w-3.5 mr-1.5" />
               Planning Policy
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => navigate("/reorder-analysis")}>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/procurement/rfqs")}>
+              <FileText className="h-3.5 w-3.5 mr-1.5" />
+              RFQs &amp; Quotes
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/purchasing/bills")}>
+              <Receipt className="h-3.5 w-3.5 mr-1.5" />
+              Bills &amp; Payments
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => navigate("/reorder-analysis")}>
               <BarChart3 className="h-3.5 w-3.5 mr-1.5" />
               Reorder Engine
             </Button>
-            <Button size="sm" onClick={() => navigate("/purchase-orders")}>
+            <Button variant="outline" size="sm" onClick={() => navigate("/purchase-orders")}>
               <FileText className="h-3.5 w-3.5 mr-1.5" />
               Purchase orders
             </Button>
+            {canCreatePo && (
+              <Button size="sm" onClick={() => navigate("/purchase-orders/new")}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                New PO
+              </Button>
+            )}
           </div>
         </div>
       </div>

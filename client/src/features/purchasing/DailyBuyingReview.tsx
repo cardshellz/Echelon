@@ -7,9 +7,10 @@ import {
   ClipboardList,
   FileText,
   PackageX,
+  Plus,
   ShoppingCart,
 } from "lucide-react";
-import { INFINITE_DAYS_OF_SUPPLY } from "./reorderEngine";
+import { INFINITE_DAYS_OF_SUPPLY, formatMoneyCents } from "./reorderEngine";
 import { Button } from "@/components/ui/button";
 import { isImmutableRecommendationPurchaseOrder } from "@/features/po-edit/purchase-order-editability";
 
@@ -33,6 +34,7 @@ const reviewSchema = z.object({
       poNumber: z.string(),
       vendorName: z.string(),
       lineCount: count,
+      totalCents: z.number().int().nullable().optional(),
       source: z.string(),
     }),
   ),
@@ -188,14 +190,27 @@ export function DailyBuyingReview({
                 {review.draftPoCount}
               </span>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => navigate("/procurement/rfqs")}
-            >
-              <FileText className="mr-1.5 h-3.5 w-3.5" />
-              RFQs &amp; quotes
-            </Button>
+            <div className="flex items-center gap-1.5">
+              {(hasPermission("purchasing", "create") || hasPermission("purchasing", "edit")) && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-xs"
+                  onClick={() => navigate("/purchase-orders/new")}
+                >
+                  <Plus className="mr-1 h-3.5 w-3.5" />
+                  New PO
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => navigate("/procurement/rfqs")}
+              >
+                <FileText className="mr-1.5 h-3.5 w-3.5" />
+                RFQs &amp; quotes
+              </Button>
+            </div>
           </div>
           <div className="divide-y px-4">
             {review.draftPos.slice(0, 3).map((po) => (
@@ -210,6 +225,7 @@ export function DailyBuyingReview({
                   <p className="truncate text-xs text-muted-foreground">
                     {po.poNumber} · {po.lineCount}{" "}
                     {po.lineCount === 1 ? "line" : "lines"}
+                    {po.totalCents != null ? ` · ${formatMoneyCents(po.totalCents)}` : ""}
                   </p>
                 </div>
                 <Button
