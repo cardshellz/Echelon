@@ -300,6 +300,18 @@ export function registerInboundShipmentRoutes(app: Express) {
     }
   });
 
+  app.post("/api/inbound-shipments/:id/reopen-costing", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipmentId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostWorkflowIdSchema).parse(req.params.id);
+      const shipment = await shipmentTracking.reopenCosting(shipmentId, getActorId(req) ?? req.session.user?.id, req.body?.notes);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_REOPEN_ID_INVALID", error: "Choose a valid shipment." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/inbound-shipments/:id/close", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
       const shipmentId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostWorkflowIdSchema).parse(req.params.id);

@@ -11,7 +11,7 @@ import {
 } from "@shared/procurement/shipment-allocation";
 
 const BasisDecimal = Decimal.clone({ precision: 40 });
-const METHODS = new Set(["by_volume", "by_weight", "by_chargeable_weight", "by_value", "by_line_count"]);
+const METHODS = new Set(["by_volume", "by_weight", "by_chargeable_weight", "by_value", "by_quantity", "by_line_count"]);
 const TYPE_OVERRIDES: Record<string, string> = { duty: "by_value", tax: "by_value", brokerage: "by_line_count", inspection: "by_line_count", platform_fee: "by_line_count" };
 export const DIMENSIONAL_ALLOCATION_METHODS = new Set(["by_volume", "by_weight", "by_chargeable_weight"]);
 type Ratio = { numerator: bigint; denominator: bigint };
@@ -195,6 +195,10 @@ export function buildShipmentAllocationBasis(lines: ShipmentAllocationBasisLine[
     if (method === "by_value") {
       const value = resolveShipmentProductValue(line);
       exact = parseRatio(value.ratio); source = value.source;
+    } else if (method === "by_quantity") {
+      const qtyShipped = sourceQuantity(line.qtyShipped, "Shipped pieces");
+      exact = reduceRatio(BigInt(qtyShipped), BigInt(1));
+      source = { kind: "quantity", qtyShipped };
     } else if (DIMENSIONAL_ALLOCATION_METHODS.has(method)) {
       const field = method === "by_volume" ? "totalVolumeCbm" : method === "by_weight" ? "totalWeightKg" : "chargeableWeightKg";
       const measurement = line.physicalSource

@@ -31,6 +31,10 @@ export const shipmentAllocationSourceSchema = z.discriminatedUnion("kind", [
     field: z.enum(["totalVolumeCbm", "totalWeightKg", "chargeableWeightKg"]),
     value: z.string().max(64).nullable(),
   }).strict(),
+  z.object({
+    kind: z.literal("quantity"),
+    qtyShipped: resourceId,
+  }).strict(),
   z.object({ kind: z.literal("line_count") }).strict(),
 ]);
 export type ShipmentAllocationSource = z.infer<typeof shipmentAllocationSourceSchema>;
@@ -38,7 +42,7 @@ export type ShipmentAllocationSource = z.infer<typeof shipmentAllocationSourceSc
 export const shipmentAllocationEvidenceSchema = z.object({
   version: z.literal(2),
   lineId: resourceId,
-  method: z.enum(["by_volume", "by_weight", "by_chargeable_weight", "by_value", "by_line_count"]),
+  method: z.enum(["by_volume", "by_weight", "by_chargeable_weight", "by_value", "by_quantity", "by_line_count"]),
   source: shipmentAllocationSourceSchema,
   rawRatio: shipmentAllocationRatioSchema,
   ratio: shipmentAllocationRatioSchema,

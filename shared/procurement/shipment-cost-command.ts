@@ -7,7 +7,7 @@ export const SHIPMENT_COST_TYPES = [
 ] as const;
 
 export const SHIPMENT_COST_ALLOCATION_METHODS = [
-  "by_volume", "by_weight", "by_chargeable_weight", "by_value", "by_line_count",
+  "by_volume", "by_weight", "by_chargeable_weight", "by_value", "by_quantity", "by_line_count",
 ] as const;
 
 // Existing AP shipment projections accept signed seller credits. Validation must
