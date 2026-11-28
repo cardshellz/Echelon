@@ -692,6 +692,15 @@
   "inventory.integrity_monitor_state": [
     "modules/inventory"
   ],
+  "inventory.interwarehouse_transfer_events": [
+    "modules/inventory"
+  ],
+  "inventory.interwarehouse_transfer_lines": [
+    "modules/inventory"
+  ],
+  "inventory.interwarehouse_transfers": [
+    "modules/inventory"
+  ],
   "inventory.inventory_levels": [
     "modules/inventory"
   ],
@@ -936,15 +945,6 @@
     "modules/inventory"
   ],
   "inventory.tracking_stop_history": [
-    "modules/inventory"
-  ],
-  "inventory.interwarehouse_transfer_events": [
-    "modules/inventory"
-  ],
-  "inventory.interwarehouse_transfer_lines": [
-    "modules/inventory"
-  ],
-  "inventory.interwarehouse_transfers": [
     "modules/inventory"
   ],
   "inventory.transfer_followups": [
@@ -1299,6 +1299,9 @@
     "modules/procurement"
   ],
   "procurement.po_exceptions": [
+    "modules/procurement"
+  ],
+  "procurement.po_landed_costs": [
     "modules/procurement"
   ],
   "procurement.po_receipts": [
