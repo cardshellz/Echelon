@@ -1,6 +1,7 @@
 import { readPurchaseCostSource } from "../infrastructure/purchase-cost-source.repository";
 import { resolvePurchaseCostSource } from "../domain/purchase-cost-source";
 import { recordPurchaseCostRevisions } from "./purchase-cost-application.service";
+import { recordPoLandedCostRevisionForLine } from "./po-landed-cost.service";
 import { recordShipmentCostRevisions } from "./shipment-cost-application.service";
 import { sql } from "drizzle-orm";
 import {
@@ -81,6 +82,28 @@ export async function resolveReceiptCostEvidence(
     if (["estimated", "confirmed"].includes(source.evidence) && source.currency === "USD" && source.totalMills !== null
       && source.totalMills >= 0 && source.basePieces !== null) landedMills = scaledCostMills(source.totalMills, units, source.basePieces);
     freightPending = source.evidence !== "confirmed";
+  } else if (input.inboundShipmentId === null) {
+    const poLandedSource = await recordPoLandedCostRevisionForLine(
+      tx,
+      input.purchaseOrderId,
+      input.purchaseOrderLineId,
+      actorId,
+      now,
+    );
+    if (poLandedSource) {
+      revisions.push(poLandedSource);
+      const source = poLandedSource.contract;
+      if (
+        ["estimated", "confirmed"].includes(source.evidence) &&
+        source.currency === "USD" &&
+        source.totalMills !== null &&
+        source.totalMills >= 0 &&
+        source.basePieces !== null
+      ) {
+        landedMills = scaledCostMills(source.totalMills, units, source.basePieces);
+      }
+      freightPending = source.evidence !== "confirmed";
+    }
   }
   const productMills = scaledCostMills(productTotal, units, qty);
   const packagingMills = scaledCostMills(packagingTotal, units, qty);

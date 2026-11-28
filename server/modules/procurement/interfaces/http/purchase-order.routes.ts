@@ -1,4 +1,5 @@
 import { registerPurchaseOrderEntryRoutes } from "./purchase-order-entry.routes";
+import { registerPoLandedCostRoutes } from "./po-landed-cost.routes";
 import { parseNullableDateInput } from "../../application/purchase-order-entry-input";
 import { getPurchaseOrderWorkList } from "../../application/purchase-order-work-list.service";
 import { purchaseApprovalCommandScope } from "../../application/purchase-approval.commands";
@@ -118,6 +119,7 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 
 export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pick<ReturnType<typeof createPoFinancialEvidenceService>, "readWorkflow"> = createPoFinancialEvidenceService(db)) {
   registerPurchaseOrderEntryRoutes(app);
+  registerPoLandedCostRoutes(app);
   registerPoQuantityAmendmentRoutes(app);
   registerPoVarianceApprovalRoutes(app);
   const { purchasing, shipmentTracking } = app.locals.services;

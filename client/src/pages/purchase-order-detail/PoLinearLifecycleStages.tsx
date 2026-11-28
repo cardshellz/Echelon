@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import {
   CheckCircle2,
@@ -14,9 +14,14 @@ import {
   Plus,
   Send,
   Ship,
+  Trash2,
   Truck,
   AlertTriangle,
 } from "lucide-react";
+import {
+  PoSeamlessFreightDutyDialog,
+  usePoDirectLandedCosts,
+} from "@/features/purchasing/PoSeamlessFreightDutyDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -164,6 +169,7 @@ export function PoLinearLifecycleStages(props: PoLinearLifecycleStagesProps) {
   const queryClient = useQueryClient();
   const [linesExpanded, setLinesExpanded] = useState(() => lines.length <= 8);
   const [fastForwardingShipmentId, setFastForwardingShipmentId] = useState<number | null>(null);
+  const [showSeamlessFreightDialog, setShowSeamlessFreightDialog] = useState(false);
 
   const totalOrderedPieces = lines.reduce(
     (sum: number, l: any) => sum + (Number(shippingByLine.get(l.id)?.line.orderedPieces ?? l.orderQty) || 0),
@@ -174,11 +180,47 @@ export function PoLinearLifecycleStages(props: PoLinearLifecycleStagesProps) {
     0,
   );
   const activeShipments = linkedShipments.filter((s) => s.status !== "cancelled");
+  const poDirectLanded = usePoDirectLandedCosts(
+    poId,
+    activeShipments.length === 0 && (po.currency ?? "USD") === "USD",
+  );
+  const poDirectCharges = poDirectLanded.data?.charges ?? [];
+  const poDirectAllocByLine = new Map(
+    (poDirectLanded.data?.lineAllocations ?? []).map((row) => [row.purchaseOrderLineId, row]),
+  );
+
+  const removePoDirectChargeMutation = useMutation({
+    mutationFn: async (chargeId: number) => {
+      const res = await apiRequest("DELETE", `/api/purchase-orders/${poId}/landed-costs/${chargeId}`);
+      return res.json();
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        predicate: (q) =>
+          typeof q.queryKey[0] === "string" &&
+          (q.queryKey[0].startsWith(`/api/purchase-orders/${poId}`) ||
+            q.queryKey[0] === "/api/purchase-orders"),
+      });
+      toast({
+        title: "Landed charge removed",
+        description: "FIFO inventory lots and order COGS updated.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const allShipmentsDeliveredOrLater =
     activeShipments.length > 0 &&
     activeShipments.every((s) => ["delivered", "costing", "closed"].includes(s.status));
 
   const activeInvoices = invoices.filter((inv: any) => inv.status !== "voided");
+  const effectiveInventoryCostingStatus =
+    activeShipments.length === 0 && poDirectCharges.length > 0
+      ? "applied"
+      : shipmentCosts.data?.summary.inventoryCosting;
+
   const stages = computePoLinearStageStates({
     poStatus: po.status,
     physicalStatus: po.physicalStatus,
@@ -190,7 +232,7 @@ export function PoLinearLifecycleStages(props: PoLinearLifecycleStagesProps) {
     financialCompletionSupported,
     financialReviewRequired,
     linkedInvoicesCount: activeInvoices.length,
-    inventoryCostingStatus: shipmentCosts.data?.summary.inventoryCosting,
+    inventoryCostingStatus: effectiveInventoryCostingStatus,
     costReviewLinesCount: shipmentCosts.data?.summary.reviewLines ?? 0,
     unallocatedChargeCount: shipmentCosts.data?.summary.unallocatedChargeCount ?? 0,
   });
@@ -366,9 +408,17 @@ export function PoLinearLifecycleStages(props: PoLinearLifecycleStagesProps) {
                     const ordered = Number(shipInfo?.line.orderedPieces ?? line.orderQty) || 0;
                     const received = Number(shipInfo?.line.receivedPieces ?? line.receivedQty) || 0;
                     const landedLine = landedByLine.get(line.id);
-                    const landedUnitDisplay = landedLine
-                      ? (formatLandedCostPerPiece(landedLine.totalCents, landedLine.pieces, currency) ?? "—")
-                      : "—";
+                    const poDirectAlloc = poDirectAllocByLine.get(line.id);
+                    const landedUnitDisplay =
+                      activeShipments.length === 0 && poDirectCharges.length > 0 && poDirectAlloc
+                        ? (formatLandedCostPerPiece(
+                            Number(line.lineTotalCents || 0) + poDirectAlloc.totalAllocatedCents,
+                            poDirectAlloc.basePieces,
+                            currency,
+                          ) ?? "—")
+                        : landedLine
+                          ? (formatLandedCostPerPiece(landedLine.totalCents, landedLine.pieces, currency) ?? "—")
+                          : "—";
                     return (
                       <TableRow key={line.id}>
                         <TableCell className="py-2 max-w-[240px]">
@@ -529,6 +579,16 @@ export function PoLinearLifecycleStages(props: PoLinearLifecycleStagesProps) {
                     Mark Arrived at Dock
                   </Button>
                 )}
+                {hasPurchasingEdit && lines.length > 0 && po.status !== "cancelled" && (
+                  <Button
+                    size="sm"
+                    variant="default"
+                    onClick={() => setShowSeamlessFreightDialog(true)}
+                  >
+                    <DollarSign className="h-3.5 w-3.5 mr-1" />
+                    + Add Freight / Duty / Tariff
+                  </Button>
+                )}
                 {hasPurchasingEdit && lines.length > 0 && !["closed", "cancelled"].includes(po.status) && (
                   <Button size="sm" variant="outline" onClick={onOpenCreateShipmentDialog}>
                     <Plus className="h-3.5 w-3.5 mr-1" />
@@ -539,9 +599,57 @@ export function PoLinearLifecycleStages(props: PoLinearLifecycleStagesProps) {
             </div>
 
             {activeShipments.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                Ship direct on this PO (edit supplier freight/tax in the cards above) or create an Inbound Shipment to split container freight, customs duties, and brokerage across SKUs or multiple POs.
-              </p>
+              <div className="space-y-2">
+                {poDirectCharges.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Receive PO-direct and click <strong>+ Add Freight / Duty / Tariff</strong> anytime (before or weeks after dock receipt) to allocate carrier or customs bills into FIFO COGS—or create an Inbound Shipment for multi-PO containers.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {poDirectCharges.map((charge) => (
+                      <div
+                        key={charge.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                          <Badge variant="outline" className="text-[11px] capitalize">
+                            {charge.costType.replace(/_/g, " ")}
+                          </Badge>
+                          <span className="truncate font-medium">
+                            {charge.description || charge.vendorName || "PO Landed Charge"}
+                          </span>
+                          {charge.invoiceNumber && (
+                            <span className="font-mono text-muted-foreground">#{charge.invoiceNumber}</span>
+                          )}
+                          <span className="text-[11px] text-muted-foreground">
+                            ({charge.allocationMethod === "by_value"
+                              ? "By Value"
+                              : charge.allocationMethod === "by_quantity"
+                                ? "By Qty"
+                                : "By Line Count"})
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-semibold">{formatCents(charge.amountCents)}</span>
+                          {hasPurchasingEdit && po.status !== "cancelled" && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 w-6 p-0 text-destructive"
+                              aria-label="Remove PO landed charge"
+                              disabled={removePoDirectChargeMutation.isPending}
+                              onClick={() => removePoDirectChargeMutation.mutate(charge.id)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="space-y-1.5">
                 {activeShipments.map((shipment) => {
@@ -681,47 +789,85 @@ export function PoLinearLifecycleStages(props: PoLinearLifecycleStagesProps) {
               )}
             </div>
 
-            {shipmentCosts.data ? (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 rounded-md bg-muted/40 p-2.5 text-xs">
-                <div>
-                  <div className="text-muted-foreground">Supplier PO</div>
-                  <div className="font-mono font-semibold mt-0.5">
-                    {formatIntegerCents(shipmentCosts.data.summary.poAmountCents, currency)}
+            {(() => {
+              const poSupplierAmountCents =
+                shipmentCosts.data?.summary.poAmountCents ?? Number(po.totalCents ?? 0);
+              const poDirectFreightCents =
+                activeShipments.length === 0 ? (poDirectLanded.data?.freightCents ?? 0) : 0;
+              const poDirectDutyAndOtherCents =
+                activeShipments.length === 0
+                  ? (poDirectLanded.data?.dutyCents ?? 0) + (poDirectLanded.data?.otherCents ?? 0)
+                  : 0;
+              const poDirectTotalCents =
+                activeShipments.length === 0 ? (poDirectLanded.data?.totalCents ?? 0) : 0;
+
+              if (!shipmentCosts.data && poDirectCharges.length === 0) {
+                return (
+                  <p className="text-xs text-muted-foreground">
+                    Landed cost totals combine supplier quotes, freight, duties, and any post-receipt invoice updates into FIFO inventory lots.
+                  </p>
+                );
+              }
+
+              const freightTotal =
+                shipmentCosts.data?.totals.freightCents != null
+                  ? shipmentCosts.data.totals.freightCents + poDirectFreightCents
+                  : activeShipments.length === 0
+                    ? Number(po.shippingCostCents ?? 0) + poDirectFreightCents
+                    : null;
+              const dutyTotal =
+                shipmentCosts.data?.totals.dutyCents != null
+                  ? shipmentCosts.data.totals.dutyCents + poDirectDutyAndOtherCents
+                  : activeShipments.length === 0
+                    ? Number(po.taxCents ?? 0) + poDirectDutyAndOtherCents
+                    : null;
+              const combinedTotal =
+                shipmentCosts.data?.totals.combinedCostCents != null
+                  ? shipmentCosts.data.totals.combinedCostCents + poDirectTotalCents
+                  : activeShipments.length === 0
+                    ? poSupplierAmountCents + poDirectTotalCents
+                    : null;
+
+              return (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 rounded-md bg-muted/40 p-2.5 text-xs">
+                  <div>
+                    <div className="text-muted-foreground">Supplier PO</div>
+                    <div className="font-mono font-semibold mt-0.5">
+                      {formatIntegerCents(poSupplierAmountCents, currency)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Freight</div>
+                    <div className="font-mono font-semibold mt-0.5">
+                      {freightTotal != null ? formatIntegerCents(freightTotal, currency) : "Incomplete"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Duties &amp; Tax</div>
+                    <div className="font-mono font-semibold mt-0.5">
+                      {dutyTotal != null ? formatIntegerCents(dutyTotal, currency) : "Incomplete"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Total Landed</div>
+                    <div className="font-mono font-bold text-primary mt-0.5">
+                      {combinedTotal != null ? formatIntegerCents(combinedTotal, currency) : "Incomplete"}
+                    </div>
                   </div>
                 </div>
-                <div>
-                  <div className="text-muted-foreground">Freight</div>
-                  <div className="font-mono font-semibold mt-0.5">
-                    {shipmentCosts.data.totals.freightCents != null
-                      ? formatIntegerCents(shipmentCosts.data.totals.freightCents, currency)
-                      : "Incomplete"}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-muted-foreground">Duties &amp; Tax</div>
-                  <div className="font-mono font-semibold mt-0.5">
-                    {shipmentCosts.data.totals.dutyCents != null
-                      ? formatIntegerCents(shipmentCosts.data.totals.dutyCents, currency)
-                      : "Incomplete"}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-muted-foreground">Total Landed</div>
-                  <div className="font-mono font-bold text-primary mt-0.5">
-                    {shipmentCosts.data.totals.combinedCostCents != null
-                      ? formatIntegerCents(shipmentCosts.data.totals.combinedCostCents, currency)
-                      : "Incomplete"}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Landed cost totals combine supplier quotes, freight, duties, and any post-receipt invoice updates into FIFO inventory lots.
-              </p>
-            )}
+              );
+            })()}
           </CardContent>
         </Card>
       </div>
+
+      <PoSeamlessFreightDutyDialog
+        open={showSeamlessFreightDialog}
+        onOpenChange={setShowSeamlessFreightDialog}
+        poId={poId}
+        poNumber={po.poNumber || `PO #${poId}`}
+        activeShipments={activeShipments}
+      />
     </div>
   );
 }

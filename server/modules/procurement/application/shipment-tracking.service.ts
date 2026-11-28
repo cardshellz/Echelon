@@ -216,6 +216,7 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   customs_clearance:  ["delivered", "cancelled"],
   delivered:          ["costing", "cancelled"],
   costing:            ["closed", "cancelled"],
+  closed:             ["costing"],
 };
 
 // Every line needs the saved measurements required by its charge's physical
@@ -838,6 +839,10 @@ export function createShipmentTrackingService(
 
   async function startCosting(id: number, userId?: string, notes?: string) {
     return transitionTo(id, "costing", userId, notes || "Costing started");
+  }
+
+  async function reopenCosting(id: number, userId?: string, notes?: string) {
+    return transitionTo(id, "costing", userId, notes || "Reopened shipment costing for late freight or duty charges");
   }
 
   async function close(id: number, userId?: string, notes?: string) {
@@ -1877,7 +1882,7 @@ export function createShipmentTrackingService(
 
       // Closed shipment audit retains the full total delta and distinguishes a
       // product projection correction from changes to actual landed charges.
-      if (shipment.status === "closed") {
+      if (shipment.status === "closed" || shipment.closedAt != null) {
         const oldSnap = oldSnapshotsByLine.get(line.id);
         // Validate existing frozen authority even when compatibility amounts
         // match; replacing malformed evidence must not silently repair it.
@@ -2090,6 +2095,7 @@ export function createShipmentTrackingService(
     markCustomsClearance,
     markDelivered,
     startCosting,
+    reopenCosting,
     close,
     cancel,
 
