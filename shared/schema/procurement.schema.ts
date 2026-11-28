@@ -1722,6 +1722,36 @@ export const insertInboundFreightCostSchema = createInsertSchema(inboundFreightC
 export type InsertInboundFreightCost = z.infer<typeof insertInboundFreightCostSchema>;
 export type InboundFreightCost = typeof inboundFreightCosts.$inferSelect;
 
+export const poLandedCosts = procurementSchema.table("po_landed_costs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  costType: varchar("cost_type", { length: 30 }).notNull(),
+  description: text("description"),
+  amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+  currency: varchar("currency", { length: 3 }).default("USD").notNull(),
+  allocationMethod: varchar("allocation_method", { length: 30 }).default("by_value").notNull(),
+  vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
+  vendorInvoiceId: integer("vendor_invoice_id").references(() => vendorInvoices.id, { onDelete: "set null" }),
+  invoiceNumber: varchar("invoice_number", { length: 100 }),
+  costDate: timestamp("cost_date"),
+  notes: text("notes"),
+  createdBy: text("created_by"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("po_landed_costs_po_idx").on(table.purchaseOrderId),
+  index("po_landed_costs_vendor_idx").on(table.vendorId),
+]);
+
+export const insertPoLandedCostSchema = createInsertSchema(poLandedCosts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertPoLandedCost = z.infer<typeof insertPoLandedCostSchema>;
+export type PoLandedCost = typeof poLandedCosts.$inferSelect;
+
 // ============================================================================
 // 14. SHIPMENT COST ALLOCATIONS (refs shipmentCosts, inboundShipmentLines)
 // ============================================================================

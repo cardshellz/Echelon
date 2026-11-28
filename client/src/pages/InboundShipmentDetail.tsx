@@ -144,6 +144,7 @@ const ALLOCATION_METHOD_LABELS: Record<string, string> = {
   by_weight: "By Weight",
   by_chargeable_weight: "By Chargeable Weight",
   by_value: "By Value",
+  by_quantity: "By Quantity (Pieces)",
   by_line_count: "By Line Count",
 };
 
@@ -162,6 +163,7 @@ const ALLOCATION_METHOD_OPTIONS = [
   { value: "by_weight", label: "By Weight" },
   { value: "by_chargeable_weight", label: "By Chargeable Weight" },
   { value: "by_value", label: "By Value" },
+  { value: "by_quantity", label: "By Quantity (Pieces)" },
   { value: "by_line_count", label: "By Line Count" },
 ];
 
@@ -835,6 +837,38 @@ export default function InboundShipmentDetail() {
   const startCostingMutation = createTransitionMutation("start-costing");
   const closeMutation = createTransitionMutation("close");
 
+  const reopenCostingMutation = useMutation({
+    onMutate: () => captureNavigation(),
+    mutationFn: async (opts?: { openAddCost?: boolean }) => {
+      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/reopen-costing`, {});
+      const data = await res.json();
+      return { data, openAddCost: Boolean(opts?.openAddCost) };
+    },
+    onSuccess: async ({ openAddCost }, _vars, context) => {
+      await refreshShipmentCostingViews();
+      queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+      invalidatePoViews();
+      if (!context?.isCurrent()) return;
+      if (openAddCost) {
+        setActiveTab("costs");
+        setShowAddCostDialog(true);
+        toast({
+          title: "Shipment reopened for late bill",
+          description: "Add the late freight or duty charge, then click Close Shipment to update inventory COGS.",
+        });
+      } else {
+        toast({
+          title: "Costing reopened",
+          description: "Shipment is back in Costing status. Add or edit charges, then close to push landed costs.",
+        });
+      }
+    },
+    onError: (err: Error, _vars, context) => {
+      if (!context?.isCurrent()) return;
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const fastForwardDeliveredMutation = useMutation({
     onMutate: () => captureNavigation(),
     mutationFn: async (currentStatus: string) => {
@@ -1413,6 +1447,18 @@ export default function InboundShipmentDetail() {
             </Button>
           )}
 
+          {shipment.status === "closed" && hasPermission("purchasing", "edit") && (
+            <Button
+              variant="outline"
+              onClick={() => reopenCostingMutation.mutate({ openAddCost: false })}
+              disabled={reopenCostingMutation.isPending}
+              className="flex-1 sm:flex-none min-h-[44px]"
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              {reopenCostingMutation.isPending ? "Reopening..." : "Reopen Costing"}
+            </Button>
+          )}
+
           {isPreClosed && (
             <Button
               variant="outline"
@@ -1709,6 +1755,17 @@ export default function InboundShipmentDetail() {
               <Button variant="outline" onClick={() => setShowAddCostDialog(true)} disabled={!!costCreateRecoveryError} className="min-h-[44px]">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Cost
+              </Button>
+            )}
+            {shipment.status === "closed" && hasPermission("purchasing", "edit") && (
+              <Button
+                variant="outline"
+                onClick={() => reopenCostingMutation.mutate({ openAddCost: true })}
+                disabled={reopenCostingMutation.isPending}
+                className="min-h-[44px]"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                {reopenCostingMutation.isPending ? "Reopening..." : "Add Late Cost (Reopen)"}
               </Button>
             )}
             {shipmentBillingReadVerified && hasPermission("purchasing", "edit") && shipment.status !== "cancelled" && costs.some((cost: any) => {

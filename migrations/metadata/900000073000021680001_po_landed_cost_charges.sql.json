@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000073000021680001_po_landed_cost_charges.sql",
+  "generation": 73,
+  "pr": 2168,
+  "ordinal": 1,
+  "after": [
+    "900000072000021670001_product_variant_cost_mills.sql"
+  ]
+}

@@ -17,6 +17,7 @@ export { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-
 import { readPurchaseCostSource } from "../infrastructure/purchase-cost-source.repository";
 import { resolvePurchaseCostSource } from "../domain/purchase-cost-source";
 import { readLatestSupplierCostRevisions } from "./cost-source-evidence-public";
+import { reconcilePoLandedCostForLine } from "./po-landed-cost.service";
 
 /** Source decisions are shared with status reads. Only this command records
  * the resolved revision under the inventory cost graph lock. */
@@ -38,6 +39,11 @@ export async function reconcilePurchaseCostEvidence(
   const revisions = await recordPurchaseCostRevisions(tx, purchaseOrderLineId, actorId, now);
   const applications: CostRevisionApplicationResult[] = [];
   for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now, options));
+  const poLandedResult = await reconcilePoLandedCostForLine(tx, purchaseOrderLineId, writer, actorId, now, options);
+  if (poLandedResult) {
+    revisions.push(poLandedResult.revision);
+    applications.push(poLandedResult.application);
+  }
   // Invalidated mappings deliberately have no allocatable segments. Their
   // current stock must still lose the confirmed flag when an invoice is voided
   // or disputed, while the cost owner retains its last posted amounts.
