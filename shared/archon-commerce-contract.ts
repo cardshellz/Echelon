@@ -61,7 +61,23 @@ export function salesChannelLabel(key: string): string {
   return salesChannelLabels[key] ?? key;
 }
 const cents = z.number().int().nonnegative().max(2147483647);
+const millsString = z.string().regex(/^\d{1,19}$/);
 const optionalText = z.string().max(500).nullable().optional();
+
+export const archonOrderCostEvidenceSchema = z
+  .object({
+    version: z.literal(1),
+    total_cogs_mills: millsString,
+    total_cogs_cents: cents,
+    product_cost_mills: millsString,
+    packaging_cost_mills: millsString,
+    landed_cost_mills: millsString,
+    provisional_lot_count: z.number().int().nonnegative(),
+    carrier_cost_cents: cents.nullable(),
+  })
+  .strict();
+
+export type ArchonOrderCostEvidence = z.infer<typeof archonOrderCostEvidenceSchema>;
 export const commerceSnapshotSchema = z
   .object({
     event: z.literal("order.snapshot"),
@@ -82,6 +98,10 @@ export const commerceSnapshotSchema = z
         discount_cents: cents,
         discount_evidence: shopifyDiscountEvidenceSchema.optional(),
         refund_cents: cents,
+        cogs_cents: cents.optional(),
+        cogs_mills: millsString.optional(),
+        carrier_cost_cents: cents.optional(),
+        cost_evidence: archonOrderCostEvidenceSchema.optional(),
         currency: z.string().regex(/^[A-Z]{3}$/),
         financial_status: z.string().min(1).max(30),
         fulfillment_status: z.string().max(30),

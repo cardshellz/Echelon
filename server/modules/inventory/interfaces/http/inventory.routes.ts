@@ -1,5 +1,5 @@
 import { protectEbayPolicyWriteBoundary } from "../../../channels/ebay-policy-write-boundary.api";
-import { readIntegerCents, MoneyInputError } from "@shared/money-read";
+import { readIntegerCents, readIntegerMills, MoneyInputError } from "@shared/money-read";
 import { dollarsToMills } from "@shared/utils/money";
 import { lotCostFollowUpQuerySchema } from "@shared/inventory/lot-cost-follow-up";
 import { returnCommandRequestSchema, returnCommandResultFor } from "@shared/inventory/return-command";
@@ -2990,18 +2990,31 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/cogs/manual-entry", requirePermission("inventory", "adjust"), requireLegacyQuantityImport, async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;
-      const { productVariantId, warehouseLocationId, qty, unitCostCents, landedCostCents, batchNumber, receivedAt, notes } = req.body;
+      const {
+        productVariantId,
+        warehouseLocationId,
+        qty,
+        unitCostCents,
+        unitCostMills,
+        landedCostCents,
+        landedCostMills,
+        batchNumber,
+        receivedAt,
+        notes,
+      } = req.body;
 
-      if (!productVariantId || !warehouseLocationId || !qty || unitCostCents === undefined) {
-        return res.status(400).json({ error: "Missing required fields: productVariantId, warehouseLocationId, qty, unitCostCents" });
+      if (!productVariantId || !warehouseLocationId || !qty || (unitCostCents === undefined && unitCostMills === undefined)) {
+        return res.status(400).json({ error: "Missing required fields: productVariantId, warehouseLocationId, qty, unitCostCents (or unitCostMills)" });
       }
 
       const lot = await cogs.manualCostEntry({
         productVariantId,
         warehouseLocationId,
         qty: parseInt(qty),
-        unitCostCents: readIntegerCents(unitCostCents, "unitCostCents"),
+        unitCostCents: unitCostCents == null ? undefined : readIntegerCents(unitCostCents, "unitCostCents"),
+        unitCostMills: unitCostMills == null ? undefined : readIntegerMills(unitCostMills, "unitCostMills"),
         landedCostCents: landedCostCents == null ? undefined : readIntegerCents(landedCostCents, "landedCostCents"),
+        landedCostMills: landedCostMills == null ? undefined : readIntegerMills(landedCostMills, "landedCostMills"),
         batchNumber,
         receivedAt,
         notes,
@@ -3080,9 +3093,14 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const { cogs } = req.app.locals.services;
       const lotId = parseInt(req.params.lotId);
-      const { unitCostCents, batchNumber, notes } = req.body;
+      const { unitCostCents, unitCostMills, batchNumber, notes } = req.body;
 
-      const success = await cogs.updateManualLot(lotId, { unitCostCents, batchNumber, notes });
+      const success = await cogs.updateManualLot(lotId, {
+        unitCostCents: unitCostCents == null ? undefined : readIntegerCents(unitCostCents, "unitCostCents"),
+        unitCostMills: unitCostMills == null ? undefined : readIntegerMills(unitCostMills, "unitCostMills"),
+        batchNumber,
+        notes,
+      });
       if (!success) {
         return res.status(400).json({ error: "Can only edit manual cost lots" });
       }

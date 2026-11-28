@@ -1,4 +1,5 @@
 import { toBasePieces } from "@shared/procurement/unit-quantity";
+import { computeLineTotalCentsFromMills, centsToDollarString, dollarsToMills, formatMills, millsToCents, perUnitMills } from "@shared/utils/money";
 import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
 import { receiptReversalSourceCapability } from "@/lib/receipt-reversal-capability";
 import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
@@ -334,6 +335,8 @@ export default function Receiving() {
     productId: null as number | null,
     productVariantId: null as number | null,
     expectedUnitsPerVariant: null as number | null,
+    unitCostInput: "",
+    unitCostBasis: "per_variant" as "per_variant" | "per_piece",
   });
   const [addLineError, setAddLineError] = useState<string | null>(null);
   const [skuSearch, setSkuSearch] = useState("");
@@ -836,7 +839,7 @@ DEF-456,25,,,5.00,,Location TBD`;
         navigate(procurementNavigation.childHref(`/receiving?open=${result.id}`));
       } else {
         setShowAddLineDialog(false); setAddLineError(null);
-        setNewLine({ sku: "", productName: "", expectedQty: "1", putawayLocationId: "", productId: null, productVariantId: null, expectedUnitsPerVariant: null });
+        setNewLine({ sku: "", productName: "", expectedQty: "1", putawayLocationId: "", productId: null, productVariantId: null, expectedUnitsPerVariant: null, unitCostInput: "", unitCostBasis: "per_variant" });
         setSkuSearch(""); setSkuResults([]);
         // A replay is an immutable historical result. Load the current receipt
         // rather than replacing newer counts with its saved response snapshot.
@@ -1489,7 +1492,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     setShowNewReceiptDialog(false); setShowAddLineDialog(false);
     setEntryError(null); setAddLineError(null);
     setNewReceipt({ sourceType: "blind", vendorId: "", warehouseId: "", poNumber: "", notes: "" });
-    setNewLine({ sku: "", productName: "", expectedQty: "1", putawayLocationId: "", productId: null, productVariantId: null, expectedUnitsPerVariant: null });
+    setNewLine({ sku: "", productName: "", expectedQty: "1", putawayLocationId: "", productId: null, productVariantId: null, expectedUnitsPerVariant: null, unitCostInput: "", unitCostBasis: "per_variant" });
     setSelectedPoId(null); setPoSearch(""); setSkuSearch(""); setSkuResults([]);
   }, [receivingEntry.operatorId]);
 
@@ -3068,6 +3071,60 @@ DEF-456,25,,,5.00,,Location TBD`;
               />
             </div>
 
+            <div className="space-y-2">
+              <Label className="text-sm">Unit Cost ($, optional)</Label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <Input
+                  className="h-11"
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  placeholder={newLine.unitCostBasis === "per_variant" ? "e.g. 25.00" : "e.g. 0.0250"}
+                  value={newLine.unitCostInput}
+                  onChange={(e) => setNewLine({ ...newLine, unitCostInput: e.target.value })}
+                  autoComplete="off"
+                  data-testid="input-add-line-unit-cost"
+                />
+                <Select
+                  value={newLine.unitCostBasis}
+                  onValueChange={(value: "per_variant" | "per_piece") => setNewLine({ ...newLine, unitCostBasis: value })}
+                >
+                  <SelectTrigger className="h-11" data-testid="select-add-line-cost-basis">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="per_variant">
+                      Per receive unit{newLine.expectedUnitsPerVariant && newLine.expectedUnitsPerVariant > 1 ? ` (${newLine.expectedUnitsPerVariant} pcs)` : ""}
+                    </SelectItem>
+                    <SelectItem value="per_piece">Per base piece</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {newLine.unitCostInput.trim() && (() => {
+                try {
+                  const enteredMills = dollarsToMills(newLine.unitCostInput.replace(/[$,\s]/g, ""));
+                  const factor = Math.max(1, newLine.expectedUnitsPerVariant ?? 1);
+                  const perPieceCostMills = newLine.unitCostBasis === "per_variant" && factor > 1
+                    ? perUnitMills(enteredMills, factor)
+                    : enteredMills;
+                  const qtyNum = Number.parseInt(newLine.expectedQty, 10);
+                  const basePieces = Number.isSafeInteger(qtyNum) && qtyNum > 0 ? qtyNum * factor : factor;
+                  const extendedCents = computeLineTotalCentsFromMills(perPieceCostMills, basePieces);
+                  return (
+                    <div className="text-xs text-muted-foreground font-mono" data-testid="add-line-cost-preview">
+                      {formatMills(perPieceCostMills)}/pc · Est. line value ${centsToDollarString(extendedCents)} ({basePieces.toLocaleString()} pcs)
+                    </div>
+                  );
+                } catch {
+                  return (
+                    <div className="text-xs text-destructive">
+                      Enter a valid non-negative dollar cost (up to 4 decimals).
+                    </div>
+                  );
+                }
+              })()}
+            </div>
+
             {addLineError && !receivingEntry.recovery && <div role="alert" className="rounded border border-destructive/40 p-3 text-sm text-destructive">
               {addLineError}
               <Button variant="outline" className="mt-2" disabled={entryMutation.isPending} onClick={() => handleSkuSearch(skuSearch)}>Refresh selected SKU</Button>
@@ -3086,6 +3143,8 @@ DEF-456,25,,,5.00,,Location TBD`;
                   productId: null,
                   productVariantId: null,
                   expectedUnitsPerVariant: null,
+                  unitCostInput: "",
+                  unitCostBasis: "per_variant",
                 });
               }}>
                 Cancel
@@ -3095,8 +3154,24 @@ DEF-456,25,,,5.00,,Location TBD`;
                 onClick={() => {
                   if (!selectedReceipt || !newLine.sku) return;
                   let qty: number;
-                  try { qty = receivingAddQuantity(newLine.expectedQty); if (newLine.productVariantId !== null) receivingSelectedFactor(newLine.expectedUnitsPerVariant); }
-                  catch (cause) { toast({ title: "Invalid quantity", description: cause instanceof Error ? cause.message : "Enter a positive whole quantity.", variant: "destructive" }); return; }
+                  let normalizedCostPayload: { unitCostMills: number; unitCost: number } | undefined;
+                  try {
+                    qty = receivingAddQuantity(newLine.expectedQty);
+                    const factor = newLine.productVariantId !== null ? receivingSelectedFactor(newLine.expectedUnitsPerVariant) : 1;
+                    if (newLine.unitCostInput.trim()) {
+                      const enteredMills = dollarsToMills(newLine.unitCostInput.replace(/[$,\s]/g, ""));
+                      const perPieceCostMills = newLine.unitCostBasis === "per_variant" && factor > 1
+                        ? perUnitMills(enteredMills, factor)
+                        : enteredMills;
+                      normalizedCostPayload = {
+                        unitCostMills: perPieceCostMills,
+                        unitCost: millsToCents(perPieceCostMills),
+                      };
+                    }
+                  } catch (cause) {
+                    toast({ title: "Invalid line input", description: cause instanceof Error ? cause.message : "Enter a valid quantity and unit cost.", variant: "destructive" });
+                    return;
+                  }
                   const isBlind = selectedReceipt.sourceType === "blind";
                   submitEntry({
                     action: "add-line", targetId: selectedReceipt.id,
@@ -3109,6 +3184,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       productId: newLine.productId,
                       productVariantId: newLine.productVariantId,
                       ...(newLine.productVariantId !== null ? { expectedUnitsPerVariant: receivingSelectedFactor(newLine.expectedUnitsPerVariant) } : {}),
+                      ...(normalizedCostPayload ?? {}),
                     },
                   });
                 }}

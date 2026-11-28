@@ -17,44 +17,44 @@ describe("resolveCost", () => {
   it("returns explicit hint when provided", async () => {
     const db = mockDb();
     const result = await resolveCost(db, 1, 500);
-    expect(result).toEqual({ costCents: 500, source: "explicit", provisional: false });
+    expect(result).toEqual({ costCents: 500, costMills: 50000, source: "explicit", provisional: false });
     expect(db.select).not.toHaveBeenCalled();
   });
 
   it("ignores zero/null/undefined hints and falls through", async () => {
     const db = mockDb({ lastCostCents: 300, standardCostCents: null, avgCostCents: null });
-    expect(await resolveCost(db, 1, 0)).toMatchObject({ costCents: 300, source: "last_paid" });
-    expect(await resolveCost(db, 1, null)).toMatchObject({ costCents: 300, source: "last_paid" });
-    expect(await resolveCost(db, 1, undefined)).toMatchObject({ costCents: 300, source: "last_paid" });
+    expect(await resolveCost(db, 1, 0)).toMatchObject({ costCents: 300, costMills: 30000, source: "last_paid" });
+    expect(await resolveCost(db, 1, null)).toMatchObject({ costCents: 300, costMills: 30000, source: "last_paid" });
+    expect(await resolveCost(db, 1, undefined)).toMatchObject({ costCents: 300, costMills: 30000, source: "last_paid" });
   });
 
   it("falls through to last_paid", async () => {
     const db = mockDb({ lastCostCents: 250, standardCostCents: 200, avgCostCents: 180 });
     const result = await resolveCost(db, 1);
-    expect(result).toEqual({ costCents: 250, source: "last_paid", provisional: true });
+    expect(result).toEqual({ costCents: 250, costMills: 25000, source: "last_paid", provisional: true });
   });
 
   it("falls through to standard when last_paid is zero", async () => {
     const db = mockDb({ lastCostCents: 0, standardCostCents: 200, avgCostCents: 180 });
     const result = await resolveCost(db, 1);
-    expect(result).toEqual({ costCents: 200, source: "standard", provisional: true });
+    expect(result).toEqual({ costCents: 200, costMills: 20000, source: "standard", provisional: true });
   });
 
   it("falls through to avg when standard is also zero", async () => {
     const db = mockDb({ lastCostCents: 0, standardCostCents: 0, avgCostCents: 180 });
     const result = await resolveCost(db, 1);
-    expect(result).toEqual({ costCents: 180, source: "avg", provisional: true });
+    expect(result).toEqual({ costCents: 180, costMills: 18000, source: "avg", provisional: true });
   });
 
   it("returns unresolved when all sources are zero", async () => {
     const db = mockDb({ lastCostCents: 0, standardCostCents: 0, avgCostCents: 0 });
     const result = await resolveCost(db, 1);
-    expect(result).toEqual({ costCents: 0, source: "unresolved", provisional: true });
+    expect(result).toEqual({ costCents: 0, costMills: 0, source: "unresolved", provisional: true });
   });
 
   it("returns unresolved when variant not found", async () => {
     const db = mockDb(null);
     const result = await resolveCost(db, 999);
-    expect(result).toEqual({ costCents: 0, source: "unresolved", provisional: true });
+    expect(result).toEqual({ costCents: 0, costMills: 0, source: "unresolved", provisional: true });
   });
 });

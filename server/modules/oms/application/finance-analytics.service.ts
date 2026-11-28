@@ -124,6 +124,40 @@ async function aggregateRange(from: Date, to: Date): Promise<RawAgg> {
   };
 }
 
+async function readReturnCostSchemaPresence(): Promise<{ hasReturns: boolean; hasLots: boolean; hasTx: boolean }> {
+  const res = await db.execute(sql`
+    SELECT
+      to_regclass('inventory.return_cost_allocations') IS NOT NULL AS has_returns,
+      to_regclass('inventory.inventory_lots') IS NOT NULL AS has_lots,
+      to_regclass('inventory.inventory_transactions') IS NOT NULL AS has_tx
+  `);
+  const row = res.rows?.[0] as any;
+  return {
+    hasReturns: Boolean(row?.has_returns) && Boolean(row?.has_lots),
+    hasLots: Boolean(row?.has_lots),
+    hasTx: Boolean(row?.has_tx),
+  };
+}
+
+function sellableReturnGuardSql(hasTx: boolean) {
+  if (!hasTx) return sql`TRUE`;
+  return sql`NOT EXISTS (
+    SELECT 1 FROM inventory.inventory_transactions qtx
+    WHERE qtx.inventory_lot_id = rca.returned_lot_id
+      AND (
+        qtx.reference_type = 'return_quarantine'
+        OR (qtx.transaction_type = 'return' AND qtx.target_state IN ('damaged', 'defective'))
+      )
+  )`;
+}
+
+const RESTOCKED_RETURN_MILLS_EXPR = sql`COALESCE(
+  CASE WHEN rlot.cost_basis_qty IS NOT NULL AND rlot.cost_basis_qty = rca.quantity
+    THEN COALESCE(rlot.product_total_cost_mills, 0) + COALESCE(rlot.packaging_total_cost_mills, 0) + COALESCE(rlot.landed_total_cost_mills, 0)
+    ELSE NULL END,
+  rca.quantity::bigint * COALESCE(rlot.total_unit_cost_mills, rlot.unit_cost_mills, COALESCE(rlot.unit_cost_cents, 0)::bigint * 100)
+)`;
+
 async function aggregateCogs(from: Date, to: Date): Promise<number> {
   const result = await db.execute(sql`
     SELECT COALESCE(SUM(COALESCE(NULLIF(oic.total_cost_mills, 0), oic.total_cost_cents * 100, 0)), 0)::bigint AS cogs_mills
@@ -135,7 +169,25 @@ async function aggregateCogs(from: Date, to: Date): Promise<number> {
       AND oo.ordered_at < ${to}
       AND oo.cancelled_at IS NULL
   `);
-  return millsToCents(Math.round(readIntegerMills((result.rows[0] as any)?.cogs_mills, "cogs", true)));
+  let netMills = Math.round(readIntegerMills((result.rows[0] as any)?.cogs_mills, "cogs", true));
+  const presence = await readReturnCostSchemaPresence();
+  if (presence.hasReturns) {
+    const returnRes = await db.execute(sql`
+      SELECT COALESCE(SUM(${RESTOCKED_RETURN_MILLS_EXPR}), 0)::bigint AS restocked_return_mills
+      FROM inventory.return_cost_allocations rca
+      JOIN inventory.inventory_lots rlot ON rlot.id = rca.returned_lot_id
+      JOIN wms.orders wo ON wo.id = rca.wms_order_id
+      JOIN oms.oms_orders oo ON oo.id = ${WMS_OMS_ORDER_ID}
+      WHERE oo.ordered_at >= ${from}
+        AND oo.ordered_at < ${to}
+        AND oo.cancelled_at IS NULL
+        AND rca.source_order_item_cost_id IS NOT NULL
+        AND ${sellableReturnGuardSql(presence.hasTx)}
+    `);
+    const returnedMills = Math.round(readIntegerMills((returnRes.rows[0] as any)?.restocked_return_mills, "restocked return cogs", true));
+    netMills = Math.max(0, netMills - returnedMills);
+  }
+  return millsToCents(netMills);
 }
 
 async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[]> {
@@ -174,9 +226,36 @@ async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[
       AND oo.cancelled_at IS NULL
     GROUP BY oo.channel_id
   `);
-  const cogsMap = new Map<number, number>();
+  const cogsMillsMap = new Map<number, number>();
   for (const row of cogsResult.rows as any[]) {
-    cogsMap.set(Number(row.channel_id), millsToCents(Math.round(readIntegerMills(row.cogs_mills, "cogs", true))));
+    cogsMillsMap.set(Number(row.channel_id), Math.round(readIntegerMills(row.cogs_mills, "cogs", true)));
+  }
+  const presence = await readReturnCostSchemaPresence();
+  if (presence.hasReturns) {
+    const returnChannelRes = await db.execute(sql`
+      SELECT
+        oo.channel_id,
+        COALESCE(SUM(${RESTOCKED_RETURN_MILLS_EXPR}), 0)::bigint AS restocked_return_mills
+      FROM inventory.return_cost_allocations rca
+      JOIN inventory.inventory_lots rlot ON rlot.id = rca.returned_lot_id
+      JOIN wms.orders wo ON wo.id = rca.wms_order_id
+      JOIN oms.oms_orders oo ON oo.id = ${WMS_OMS_ORDER_ID}
+      WHERE oo.ordered_at >= ${from}
+        AND oo.ordered_at < ${to}
+        AND oo.cancelled_at IS NULL
+        AND rca.source_order_item_cost_id IS NOT NULL
+        AND ${sellableReturnGuardSql(presence.hasTx)}
+      GROUP BY oo.channel_id
+    `);
+    for (const row of returnChannelRes.rows as any[]) {
+      const chId = Number(row.channel_id);
+      const returnedMills = Math.round(readIntegerMills(row.restocked_return_mills, "restocked return cogs", true));
+      cogsMillsMap.set(chId, Math.max(0, (cogsMillsMap.get(chId) ?? 0) - returnedMills));
+    }
+  }
+  const cogsMap = new Map<number, number>();
+  for (const [chId, mills] of cogsMillsMap.entries()) {
+    cogsMap.set(chId, millsToCents(mills));
   }
 
   return (result.rows as any[]).map((r) => {
@@ -300,6 +379,19 @@ export async function getFinanceOrders(opts: {
   const channelFilter = opts.channelId ? sql`AND o.channel_id = ${opts.channelId}` : sql``;
   const statusFilter = opts.financialStatus ? sql`AND o.financial_status = ${opts.financialStatus}` : sql``;
 
+  const presence = await readReturnCostSchemaPresence();
+  const returnCreditJoin = presence.hasReturns
+    ? sql`LEFT JOIN LATERAL (
+        SELECT SUM(${RESTOCKED_RETURN_MILLS_EXPR}) AS returned_cogs
+        FROM inventory.return_cost_allocations rca
+        JOIN inventory.inventory_lots rlot ON rlot.id = rca.returned_lot_id
+        JOIN wms.orders wo ON wo.id = rca.wms_order_id
+        WHERE ${WMS_OMS_ORDER_ID} = o.id
+          AND rca.source_order_item_cost_id IS NOT NULL
+          AND ${sellableReturnGuardSql(presence.hasTx)}
+      ) ret_cogs ON true`
+    : sql`LEFT JOIN LATERAL (SELECT 0::bigint AS returned_cogs) ret_cogs ON true`;
+
   const [dataResult, countResult] = await Promise.all([
     db.execute(sql`
       SELECT
@@ -317,7 +409,7 @@ export async function getFinanceOrders(opts: {
         o.financial_status,
         o.status,
         o.customer_name,
-        COALESCE(cogs.total_cogs, 0)::bigint AS cogs_mills
+        GREATEST(0::bigint, COALESCE(cogs.total_cogs, 0)::bigint - COALESCE(ret_cogs.returned_cogs, 0)::bigint) AS cogs_mills
       FROM oms.oms_orders o
       JOIN channels.channels c ON c.id = o.channel_id
       LEFT JOIN LATERAL (
@@ -327,6 +419,7 @@ export async function getFinanceOrders(opts: {
         JOIN wms.orders wo ON wo.id = wi.order_id
         WHERE ${WMS_OMS_ORDER_ID} = o.id
       ) cogs ON true
+      ${returnCreditJoin}
       WHERE o.ordered_at >= ${from}
         AND o.ordered_at < ${to}
         ${channelFilter}

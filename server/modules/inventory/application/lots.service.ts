@@ -894,18 +894,40 @@ export class InventoryLotService {
   // ---------------------------------------------------------------------------
 
   /** Caller owns the transaction and locked level; failures MUST roll it back. */
-  async shipFromLots(input: ShipmentLotDepletionRequest): Promise<void> {
+  async shipFromLots(
+    input: ShipmentLotDepletionRequest,
+    orderContext?: { orderId: number; orderItemId?: number | null },
+  ): Promise<void> {
     const parsed = shipmentLotDepletionRequestSchema.safeParse(input);
     if (!parsed.success) throw new ValidationError("Invalid shipment bucket request.");
     const params = parsed.data;
     const maxLots = 10_000;
+    const occurredAt = this.clock();
     // Lock by primary key, then plan FIFO in memory. Never infer a second bucket
     // split from lot counters after the aggregate owner has selected its split.
     const lots = await this.db
-      .select({ id: inventoryLots.id, qtyOnHand: inventoryLots.qtyOnHand,
-        qtyReserved: inventoryLots.qtyReserved, qtyPicked: inventoryLots.qtyPicked,
-        receivedAt: inventoryLots.receivedAt, status: inventoryLots.status,
-        costBasisQty:sql<string|null>`to_jsonb(inventory_lots)->>'cost_basis_qty'` })
+      .select({
+        id: inventoryLots.id,
+        qtyOnHand: inventoryLots.qtyOnHand,
+        qtyReserved: inventoryLots.qtyReserved,
+        qtyPicked: inventoryLots.qtyPicked,
+        receivedAt: inventoryLots.receivedAt,
+        status: inventoryLots.status,
+        unitCostCents: inventoryLots.unitCostCents,
+        unitCostMills: inventoryLots.unitCostMills,
+        totalUnitCostMills: inventoryLots.totalUnitCostMills,
+        poUnitCostMills: inventoryLots.poUnitCostMills,
+        packagingCostMills: inventoryLots.packagingCostMills,
+        landedCostMills: inventoryLots.landedCostMills,
+        poUnitCostCents: inventoryLots.poUnitCostCents,
+        packagingCostCents: inventoryLots.packagingCostCents,
+        landedCostCents: inventoryLots.landedCostCents,
+        costPrecisionVersion: inventoryLots.costPrecisionVersion,
+        costBasisQty: sql<string | null>`to_jsonb(inventory_lots)->>'cost_basis_qty'`,
+        productTotalCostMills: sql<string | null>`to_jsonb(inventory_lots)->>'product_total_cost_mills'`,
+        packagingTotalCostMills: sql<string | null>`to_jsonb(inventory_lots)->>'packaging_total_cost_mills'`,
+        landedTotalCostMills: sql<string | null>`to_jsonb(inventory_lots)->>'landed_total_cost_mills'`,
+      })
       .from(inventoryLots)
       .where(
         and(
@@ -925,14 +947,72 @@ export class InventoryLotService {
           productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
         });
     }
-    const plan = planShipmentLotDepletion(params, lots.map((lot:Record<string,unknown>)=>{
-      const {costBasisQty,...position}=lot;
-      return position;
-    }));
+    const plan = planShipmentLotDepletion(params, lots.map((lot: Record<string, unknown>) => ({
+      id: lot.id,
+      qtyOnHand: lot.qtyOnHand,
+      qtyReserved: lot.qtyReserved,
+      qtyPicked: lot.qtyPicked,
+      receivedAt: lot.receivedAt,
+      status: lot.status,
+    })));
+    const newOnHandOrderCosts: Array<typeof orderItemCosts.$inferInsert> = [];
     for (const portion of plan) {
-      if (portion.fromOnHand>0 && lots.find((lot:{id:number})=>lot.id===portion.lotId)?.costBasisQty!=null) {
-        await allocateLotQuantityCost(this.db,portion.lotId,portion.fromOnHand,"system:shipment-lot-depletion",this.clock(),
-          {kind:"legacy_shipment",warehouseLocationId:params.warehouseLocationId});
+      if (portion.fromOnHand <= 0) continue;
+      const lot = lots.find((candidate: { id: number }) => candidate.id === portion.lotId);
+      const exactAllocation = lot?.costBasisQty != null
+        ? await allocateLotQuantityCost(
+            this.db,
+            portion.lotId,
+            portion.fromOnHand,
+            "system:shipment-lot-depletion",
+            occurredAt,
+            {
+              kind: "legacy_shipment",
+              warehouseLocationId: params.warehouseLocationId,
+              ...(orderContext?.orderId ? { orderId: orderContext.orderId } : {}),
+              ...(orderContext?.orderItemId ? { orderItemId: orderContext.orderItemId } : {}),
+            },
+          )
+        : null;
+      if (lot && orderContext?.orderId && orderContext?.orderItemId && typeof this.db.insert === "function") {
+        const record = {
+          unit_cost_cents: lot.unitCostCents,
+          unit_cost_mills: lot.unitCostMills,
+          total_unit_cost_mills: lot.totalUnitCostMills,
+          po_unit_cost_mills: lot.poUnitCostMills,
+          packaging_cost_mills: lot.packagingCostMills,
+          landed_cost_mills: lot.landedCostMills,
+          po_unit_cost_cents: lot.poUnitCostCents,
+          packaging_cost_cents: lot.packagingCostCents,
+          landed_cost_cents: lot.landedCostCents,
+          cost_precision_version: lot.costPrecisionVersion,
+          cost_basis_qty: lot.costBasisQty,
+          product_total_cost_mills: lot.productTotalCostMills,
+          packaging_total_cost_mills: lot.packagingTotalCostMills,
+          landed_total_cost_mills: lot.landedTotalCostMills,
+        };
+        const lotUnitMills = safeMillsNumber(normalizeBuildLotCosts(record).totalMills, "lot.unitCostMills");
+        const totalCostMills = safeMillsNumber(
+          exactAllocation?.costs.totalMills ?? BigInt(portion.fromOnHand) * BigInt(lotUnitMills),
+          "orderItemCost.totalCostMills",
+        );
+        newOnHandOrderCosts.push({
+          orderId: orderContext.orderId,
+          orderItemId: orderContext.orderItemId,
+          inventoryLotId: portion.lotId,
+          productVariantId: params.productVariantId,
+          qty: portion.fromOnHand,
+          unitCostCents: millsToCents(lotUnitMills),
+          totalCostCents: millsToCents(totalCostMills),
+          unitCostMills: lotUnitMills,
+          totalCostMills,
+          costQuantityAllocationId: exactAllocation?.id ?? null,
+          productTotalCostMills: exactAllocation ? moneyToSafeNumber(exactAllocation.costs.poMills, "cogs.productTotal") : null,
+          packagingTotalCostMills: exactAllocation ? moneyToSafeNumber(exactAllocation.costs.packagingMills, "cogs.packagingTotal") : null,
+          landedTotalCostMills: exactAllocation ? moneyToSafeNumber(exactAllocation.costs.landedMills, "cogs.landedTotal") : null,
+          costPrecisionVersion: 1,
+          createdAt: occurredAt,
+        });
       }
     }
     const updated = await this.db.execute(sql`
@@ -960,6 +1040,9 @@ export class InventoryLotService {
         "A lot changed during shipment posting; the complete shipment must roll back.", {
           productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
         });
+    }
+    if (newOnHandOrderCosts.length > 0) {
+      await this.db.insert(orderItemCosts).values(newOnHandOrderCosts);
     }
   }
 
@@ -1006,6 +1089,7 @@ export class InventoryLotService {
         warehouseLocationId: params.warehouseLocationId,
         qty: params.qtyDelta,
         unitCostCents: resolved.costCents,
+        unitCostMills: resolved.costMills,
         costProvisional: resolved.provisional ? 1 : 0,
         notes: params.notes ?? "Manual adjustment",
         quantityPosting: params.quantityPosting,
@@ -1342,34 +1426,71 @@ export class InventoryLotService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Update product variant cost fields after a receipt.
-   * - lastCostCents: from the receipt
-   * - avgCostCents: weighted average across all active lots
+   * Update product variant cost fields after a receipt, conversion, or cost revision.
+   * - lastCostMills / lastCostCents: updated only when an explicit cost is provided
+   *   (never wiped to 0 when refreshing rollups after a package break/assemble).
+   * - avgCostMills / avgCostCents: weighted average across all active on-hand lots.
    */
   async updateVariantCosts(
     productVariantId: number,
-    receiptCostCents: number,
+    receiptCostCents?: number | null,
+    receiptCostMills?: number | null,
   ): Promise<void> {
-    // Compute weighted average from all active lots for this variant
     const [agg] = await this.db
       .select({
         totalQty: sql<number>`COALESCE(SUM(${inventoryLots.qtyOnHand}), 0)`,
         totalCost: sql<number>`COALESCE(SUM(${inventoryLots.qtyOnHand} * ${inventoryLots.unitCostCents}), 0)`,
+        totalCostMills: sql<string>`COALESCE(SUM(${inventoryLots.qtyOnHand}::bigint * COALESCE(${inventoryLots.totalUnitCostMills}, ${inventoryLots.unitCostMills}, COALESCE(${inventoryLots.unitCostCents}, 0)::bigint * 100)), 0)::text`,
       })
       .from(inventoryLots)
       .where(
         and(
           eq(inventoryLots.productVariantId, productVariantId),
           eq(inventoryLots.status, "active"),
+          sql`${inventoryLots.qtyOnHand} > 0`,
         ),
       );
 
-    const avgCost = agg.totalQty > 0 ? Math.round(agg.totalCost / agg.totalQty) : receiptCostCents;
+    const hasExplicitLast =
+      (receiptCostMills !== undefined && receiptCostMills !== null) ||
+      (receiptCostCents !== undefined && receiptCostCents !== null);
+    const explicitLastMills = hasExplicitLast
+      ? (receiptCostMills ?? centsToMills(receiptCostCents!))
+      : undefined;
+    const explicitLastCents = hasExplicitLast
+      ? (receiptCostCents ?? millsToCents(explicitLastMills!))
+      : undefined;
+
+    const totalQty = Number(agg?.totalQty ?? 0);
+    let avgCostMills: number;
+    let avgCostCents: number;
+    if (totalQty > 0) {
+      if (agg?.totalCostMills !== undefined && agg.totalCostMills !== null) {
+        const sumMills = BigInt(String(agg.totalCostMills));
+        const qtyBig = BigInt(totalQty);
+        avgCostMills = moneyToSafeNumber((sumMills * BigInt(2) + qtyBig) / (qtyBig * BigInt(2)), "variant.avgCostMills");
+        avgCostCents = millsToCents(avgCostMills);
+      } else {
+        const sumCents = BigInt(String(agg?.totalCost ?? 0));
+        const qtyBig = BigInt(totalQty);
+        avgCostCents = moneyToSafeNumber((sumCents * BigInt(2) + qtyBig) / (qtyBig * BigInt(2)), "variant.avgCostCents");
+        avgCostMills = centsToMills(avgCostCents);
+      }
+    } else {
+      avgCostMills = explicitLastMills ?? 0;
+      avgCostCents = explicitLastCents ?? 0;
+    }
 
     await updateVariantReceiptCostRollupInCatalog(this.db, {
       productVariantId,
-      lastCostCents: receiptCostCents,
-      avgCostCents: avgCost,
+      ...(hasExplicitLast
+        ? {
+            lastCostCents: explicitLastCents,
+            lastCostMills: explicitLastMills,
+          }
+        : {}),
+      avgCostCents,
+      avgCostMills,
     });
   }
 

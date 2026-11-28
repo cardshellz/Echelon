@@ -264,6 +264,9 @@ export const productVariants = catalogSchema.table("product_variants", {
   standardCostCents: bigint("standard_cost_cents", { mode: "number" }), // Standard cost for valuation
   lastCostCents: bigint("last_cost_cents", { mode: "number" }), // Most recent purchase cost
   avgCostCents: bigint("avg_cost_cents", { mode: "number" }), // Weighted average cost (updated on each receipt)
+  standardCostMills: bigint("standard_cost_mills", { mode: "number" }), // 4-decimal standard cost in mills ($1 = 10,000)
+  lastCostMills: bigint("last_cost_mills", { mode: "number" }), // 4-decimal most recent lot unit cost in mills
+  avgCostMills: bigint("avg_cost_mills", { mode: "number" }), // 4-decimal weighted average lot unit cost in mills
   // Fulfillment identity is independent from inventory management. Digital
   // variants do not ship and must never enter ATP, reservation, picking, or
   // channel inventory quantity workflows.
@@ -305,6 +308,9 @@ export const productVariants = catalogSchema.table("product_variants", {
 }, (table) => [
   uniqueIndex("product_variants_id_product_uidx").on(table.id, table.productId),
   check("product_variants_max_units_per_package_chk", sql`${table.maxUnitsPerPackage} IS NULL OR ${table.maxUnitsPerPackage} > 0`),
+  check("product_variants_standard_cost_mills_chk", sql`${table.standardCostMills} IS NULL OR ${table.standardCostMills} >= 0`),
+  check("product_variants_last_cost_mills_chk", sql`${table.lastCostMills} IS NULL OR ${table.lastCostMills} >= 0`),
+  check("product_variants_avg_cost_mills_chk", sql`${table.avgCostMills} IS NULL OR ${table.avgCostMills} >= 0`),
   check("product_variants_digital_untracked_chk", sql`${table.requiresShipping} = true OR ${table.trackInventory} IS FALSE`),
   check("product_variants_sales_eligibility_chk", sql`${table.salesEligibility} IN ('sellable', 'internal_only')`),
   check("product_variants_internal_only_identity_chk", sql`${table.salesEligibility} = 'sellable' OR (

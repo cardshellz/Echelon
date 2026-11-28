@@ -289,10 +289,16 @@ export class InventoryUseCases {
     await assertReceivingCustodyCountable(quantityTransactionFromDrizzle(this.db), input);
   }
 
-  /** Refresh catalog variant lastCostCents / avgCostCents after a posted conversion. */
-  async refreshVariantCostRollup(productVariantId: number, fallbackCostCents: number): Promise<void> {
+  /** Refresh catalog variant cost rollups after a posted conversion without wiping lastCost to 0. */
+  async refreshVariantCostRollup(
+    productVariantId: number,
+    fallbackCostCents?: number | null,
+    fallbackCostMills?: number | null,
+  ): Promise<void> {
     if (!this.lotService) return;
-    await this.lotService.withTx(this.db).updateVariantCosts(productVariantId, fallbackCostCents);
+    const effectiveCents =
+      fallbackCostCents === 0 && fallbackCostMills == null ? undefined : fallbackCostCents;
+    await this.lotService.withTx(this.db).updateVariantCosts(productVariantId, effectiveCents, fallbackCostMills);
   }
 
   // ---------------------------------------------------------------------------
@@ -394,18 +400,17 @@ export class InventoryUseCases {
       // 3. FIFO Lot Generation — resolve cost via waterfall when not provided
       let lotId: number | undefined;
       let resolvedCostCents: number | undefined;
+      let resolvedCostMills: number | undefined;
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
-        const resolved = await resolveCost(tx, params.productVariantId, params.unitCostCents);
-        // Mills are the cost source of truth. The caller passes the lot-unit mills
-        // directly (receive path); when cost instead came from the resolveCost fallback
-        // waterfall, lift the resolved cents → mills exactly (× 100).
-        const lotUnitCostMills = params.unitCostMills ?? centsToMills(resolved.costCents);
+        const resolved = await resolveCost(tx, params.productVariantId, params.unitCostCents, params.unitCostMills);
+        const lotUnitCostMills = params.unitCostMills ?? resolved.costMills;
+        const lotUnitCostCents = params.unitCostMills != null ? millsToCents(params.unitCostMills) : resolved.costCents;
         const lot = await lotSvc.createLot({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
           qty: params.qty,
-          unitCostCents: resolved.costCents,
+          unitCostCents: lotUnitCostCents,
           unitCostMills: lotUnitCostMills,
           productCostCents: params.productCostCents,
           packagingCostCents: params.packagingCostCents ?? 0,
@@ -420,7 +425,8 @@ export class InventoryUseCases {
           quantityPosting,
         });
         lotId = lot.id;
-        resolvedCostCents = resolved.costCents;
+        resolvedCostCents = lotUnitCostCents;
+        resolvedCostMills = lotUnitCostMills;
         if (params.receivingLineId && params.purchaseOrderLineId && params.unitsPerVariantSnapshot && params.costRecordedAt) {
           await recordReceiptCostOrigin(tx, {
             inventoryLotId: lot.id, receivingLineId: params.receivingLineId, purchaseOrderLineId: params.purchaseOrderLineId,
@@ -429,8 +435,8 @@ export class InventoryUseCases {
           }, params.userId || "system:receiving", params.costRecordedAt);
         }
 
-        if (!quantityPosting && resolved.costCents > 0) {
-          await lotSvc.updateVariantCosts(params.productVariantId, resolved.costCents);
+        if (!quantityPosting && lotUnitCostMills > 0) {
+          await lotSvc.updateVariantCosts(params.productVariantId, lotUnitCostCents, lotUnitCostMills);
         }
       }
 
@@ -460,8 +466,8 @@ export class InventoryUseCases {
             actor: params.userId || "system:receiving", reason: params.notes || "Posted warehouse receipt",
             reference: { type: "inventory_transaction", id: String(receipt.id) }, occurredAt: this.clock().toISOString(),
           });
-          if (resolvedCostCents !== undefined && resolvedCostCents > 0) {
-            await this.lotService!.withTx(tx).updateVariantCosts(params.productVariantId, resolvedCostCents);
+          if (resolvedCostMills !== undefined && resolvedCostMills > 0) {
+            await this.lotService!.withTx(tx).updateVariantCosts(params.productVariantId, resolvedCostCents, resolvedCostMills);
           }
           await quantityPosting.finishOperation({ completed: true });
         }
@@ -1054,18 +1060,26 @@ export class InventoryUseCases {
 
     if (this.lotService) {
       const lotSvc = this.lotService.withTx(tx);
-      await lotSvc.shipFromLots({
+      const shipRequest = {
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
         qty: params.qty,
         fromPicked,
         fromOnHand,
         reservedToRelease,
-      });
+      };
+      if (fromOnHand > 0 && params.orderId && params.orderItemId) {
+        await lotSvc.shipFromLots(shipRequest, {
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+        });
+      } else {
+        await lotSvc.shipFromLots(shipRequest);
+      }
     }
 
-    // Pick owners record COGS in oms.order_item_costs. Shipping releases
-    // physical custody without consuming or costing the lot again.
+    // Picked portions already recorded COGS in oms.order_item_costs at pick time;
+    // any unpicked portion shipped directly from on-hand records COGS inside shipFromLots.
 
     // The pre-write advisory fence handles ordinary replay. A late unique
     // violation must propagate: PostgreSQL has aborted this transaction, and
