@@ -11,7 +11,7 @@ import { WorkListPagination } from "@/features/purchasing/WorkListPagination";
 import { useRfqCommands } from "@/features/purchasing/use-rfq-commands";
 import { RfqCommandRecovery } from "@/features/purchasing/RfqCommandRecovery";
 import { formatMills } from "@shared/utils/money";
-import { ChevronDown, ChevronRight, ClipboardList, ExternalLink, Info } from "lucide-react";
+import { ChevronDown, ChevronRight, ClipboardList, ExternalLink, Info, Plus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -340,6 +340,17 @@ export default function ProcurementRfqs() {
           </div>
         </div>
         <div className="flex-1" />
+        {commands.canEdit && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => navigate("/purchase-orders/new")}
+          >
+            <Plus className="mr-1.5 h-3 w-3" />
+            New editable PO
+          </Button>
+        )}
         {/* Quote requests start in the Order Builder; review continues here. */}
         <Link
           href="/reorder-analysis"
