@@ -111,7 +111,10 @@ export async function allocateReturnCosts(tx: ReturnCostExecutor, input: ReturnC
     // Preserve a documented estimate when one exists. Missing price remains
     // null in financial evidence; the physical return is independently authorized.
     const estimate = await resolveCost(tx,input.productVariantId);
-    const amount = estimate.source === "unresolved" ? null : BigInt(costInteger(estimate.costCents,"estimatedCostCents"))*BigInt(100);
+    const estimatedMills = estimate.costMills !== undefined
+      ? BigInt(costInteger(estimate.costMills,"estimatedCostMills"))
+      : BigInt(costInteger(estimate.costCents,"estimatedCostCents"))*BigInt(100);
+    const amount = estimate.source === "unresolved" ? null : estimatedMills;
     layers.push({ quantity: remaining, sourceOrderItemCostId: null, sourceLotId: null,
       costs: amount === null ? null : { totalMills: amount, poMills: amount, packagingMills: BigInt(0), landedMills: BigInt(0) },
       evidenceState: amount === null ? "unknown" : "estimated", sourceEvidence: { ...input, originalCostMissing: true,

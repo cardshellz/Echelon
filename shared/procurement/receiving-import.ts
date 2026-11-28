@@ -16,6 +16,7 @@ export const receivingImportRowSchema = z.object({
   location: optionalText,
   damaged_qty: countSchema,
   unit_cost: z.union([z.string(), z.number().finite()]).nullish(),
+  unit_cost_basis: z.enum(["per_piece", "per_variant"]).optional(),
   barcode: optionalText,
   notes: optionalText,
 });

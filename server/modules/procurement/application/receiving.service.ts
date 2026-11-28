@@ -2507,7 +2507,7 @@ export class ReceivingService {
         errors.push(`Data row ${row}, SKU ${sku}: ${parsed.error.issues.map((issue) => `${issue.path.join(".")} ${issue.message}`).join("; ")}`);
         continue;
       }
-      const { sku, qty: parsedQty, location, damaged_qty: parsedDamagedQty, unit_cost, barcode, notes } = parsed.data;
+      const { sku, qty: parsedQty, location, damaged_qty: parsedDamagedQty, unit_cost, unit_cost_basis, barcode, notes } = parsed.data;
 
       // Source of truth: product_variants (sellable SKUs with product linkage)
       const lookupKey = sku.toUpperCase();
@@ -2603,7 +2603,12 @@ export class ReceivingService {
       let parsedUnitCost: number | null = null;
       if (unit_cost !== undefined && unit_cost !== null && String(unit_cost).trim() !== "") {
         try {
-          parsedUnitCostMills = dollarsToMills(String(unit_cost));
+          const rawMills = dollarsToMills(String(unit_cost));
+          const upv = Number(productVariant?.unitsPerVariant) || 1;
+          parsedUnitCostMills =
+            unit_cost_basis === "per_variant" && upv > 1
+              ? perUnitMills(rawMills, upv)
+              : rawMills;
           parsedUnitCost = millsToCents(parsedUnitCostMills);
         } catch (err: any) {
           warnings.push(`SKU ${sku}: invalid unit_cost "${unit_cost}" — ignored (${err?.message || "parse error"})`);

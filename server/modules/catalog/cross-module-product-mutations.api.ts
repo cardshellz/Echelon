@@ -8,6 +8,7 @@
 export {
   updateVariantWeightIfNullInCatalog,
   updateVariantBackfillCostsInCatalog,
+  syncVariantCostRollupFromLotsInCatalog,
   updateVariantReceiptCostRollupInCatalog,
   updateProductFromShopifyBackfillInCatalog,
   insertProductFromShopifyBackfillInCatalog,

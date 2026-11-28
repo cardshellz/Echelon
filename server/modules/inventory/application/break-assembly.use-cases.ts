@@ -694,7 +694,7 @@ export class BreakAssemblyUseCases {
         });
         const targetId = typeof params.targetVariantId === "number" ? params.targetVariantId : undefined;
         if (targetId && typeof (this.inventoryUseCases as any).withTx === "function") {
-          await (this.inventoryUseCases.withTx(tx) as any).refreshVariantCostRollup?.(targetId, 0);
+          await (this.inventoryUseCases.withTx(tx) as any).refreshVariantCostRollup?.(targetId);
         }
         await posting.finishOperation({ ...converted });
       }

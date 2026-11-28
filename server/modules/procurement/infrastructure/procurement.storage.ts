@@ -1739,8 +1739,36 @@ export const procurementMethods: IProcurementStorage = {
 
   async getOrderProfitabilityReport(limit: number, offset: number): Promise<any[]> {
     // Boundary note: read-only reporting query that intentionally crosses OMS/WMS/Procurement
-    // boundaries by joining orders, order_items, order_item_financials, and vendor cost data.
-    // This is acceptable for financial reporting — no writes, just aggregation for visibility.
+    // boundaries by joining orders, order_items, order_item_costs, and return_cost_allocations.
+    // Excludes cancelled orders and unpicked orders that have no recorded FIFO COGS yet so
+    // unshipped orders never masquerade as 100% margin.
+    const rcaRegRes = await db.execute(sql`SELECT to_regclass('inventory.return_cost_allocations') AS reg`);
+    const hasReturnAllocations = Boolean((rcaRegRes.rows[0] as { reg?: string | null } | undefined)?.reg);
+    const returnDeductionJoin = hasReturnAllocations
+      ? sql`
+      LEFT JOIN (
+        SELECT
+          rca.order_item_id,
+          SUM(COALESCE(rca.product_cost_mills, 0) + COALESCE(rca.packaging_cost_mills, 0) + COALESCE(rca.landed_cost_mills, 0)) AS return_cogs_mills
+        FROM inventory.return_cost_allocations rca
+        LEFT JOIN inventory.inventory_transactions it ON it.id = rca.inventory_transaction_id
+        WHERE COALESCE(it.transaction_type, 'return') <> 'return_quarantine'
+          AND (
+            to_regclass('oms.return_lines') IS NULL
+            OR rca.return_line_id IS NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM oms.return_lines rl
+              WHERE rl.id = rca.return_line_id
+                AND COALESCE(rl.disposition, '') IN ('quarantine', 'scrap', 'dispose', 'damaged', 'defective')
+            )
+          )
+        GROUP BY rca.order_item_id
+      ) rca_agg ON rca_agg.order_item_id = oi.id`
+      : sql``;
+    const lineCogsExpr = hasReturnAllocations
+      ? sql`GREATEST(0, ROUND((COALESCE(oic_agg.cogs_mills, 0) - COALESCE(rca_agg.return_cogs_mills, 0))::numeric / 100, 0))::bigint`
+      : sql`GREATEST(0, ROUND(COALESCE(oic_agg.cogs_mills, 0)::numeric / 100, 0))::bigint`;
+
     const rows = await db.execute(sql`
       SELECT
         o.id AS order_id,
@@ -1749,22 +1777,29 @@ export const procurementMethods: IProcurementStorage = {
         o.order_placed_at,
         o.warehouse_status,
         COALESCE(SUM(oi.total_price_cents), 0) AS revenue_cents,
-        COALESCE(SUM(oic_agg.cogs_cents), 0) AS cogs_cents,
-        COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(oic_agg.cogs_cents), 0) AS profit_cents,
+        COALESCE(SUM(${lineCogsExpr}), 0) AS cogs_cents,
+        COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(${lineCogsExpr}), 0) AS profit_cents,
         CASE WHEN SUM(oi.total_price_cents) > 0
-          THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(oic_agg.cogs_cents), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
+          THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(${lineCogsExpr}), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
           ELSE 0
         END AS margin_percent,
         COUNT(DISTINCT oi.id) AS line_count
       FROM wms.orders o
       JOIN wms.order_items oi ON oi.order_id = o.id
       LEFT JOIN (
-        SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
+        SELECT
+          order_item_id,
+          SUM(COALESCE(total_cost_mills, total_cost_cents::bigint * 100)) AS cogs_mills,
+          COUNT(*) > 0 AS has_cogs
         FROM oms.order_item_costs
         GROUP BY order_item_id
       ) oic_agg ON oic_agg.order_item_id = oi.id
+      ${returnDeductionJoin}
       WHERE oi.total_price_cents IS NOT NULL
+        AND COALESCE(o.warehouse_status, '') NOT IN ('cancelled', 'canceled')
       GROUP BY o.id, o.order_number, o.customer_name, o.order_placed_at, o.warehouse_status
+      HAVING BOOL_OR(COALESCE(oic_agg.has_cogs, false))
+          OR COALESCE(o.warehouse_status, '') IN ('picked', 'packed', 'ready_to_ship', 'shipped', 'delivered', 'completed')
       ORDER BY o.order_placed_at DESC NULLS LAST
       LIMIT ${limit} OFFSET ${offset}
     `);
@@ -1773,7 +1808,34 @@ export const procurementMethods: IProcurementStorage = {
 
   async getProductProfitabilityReport(limit: number, offset: number): Promise<any[]> {
     // Boundary note: read-only reporting query that intentionally crosses OMS/WMS/Procurement
-    // boundaries. Joins product_variants, order_items, order_item_financials for margin analysis.
+    // boundaries. Joins product_variants, order_items, orders, and FIFO order_item_costs.
+    const rcaRegRes = await db.execute(sql`SELECT to_regclass('inventory.return_cost_allocations') AS reg`);
+    const hasReturnAllocations = Boolean((rcaRegRes.rows[0] as { reg?: string | null } | undefined)?.reg);
+    const returnDeductionJoin = hasReturnAllocations
+      ? sql`
+      LEFT JOIN (
+        SELECT
+          rca.order_item_id,
+          SUM(COALESCE(rca.product_cost_mills, 0) + COALESCE(rca.packaging_cost_mills, 0) + COALESCE(rca.landed_cost_mills, 0)) AS return_cogs_mills
+        FROM inventory.return_cost_allocations rca
+        LEFT JOIN inventory.inventory_transactions it ON it.id = rca.inventory_transaction_id
+        WHERE COALESCE(it.transaction_type, 'return') <> 'return_quarantine'
+          AND (
+            to_regclass('oms.return_lines') IS NULL
+            OR rca.return_line_id IS NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM oms.return_lines rl
+              WHERE rl.id = rca.return_line_id
+                AND COALESCE(rl.disposition, '') IN ('quarantine', 'scrap', 'dispose', 'damaged', 'defective')
+            )
+          )
+        GROUP BY rca.order_item_id
+      ) rca_agg ON rca_agg.order_item_id = oi.id`
+      : sql``;
+    const lineCogsExpr = hasReturnAllocations
+      ? sql`GREATEST(0, ROUND((COALESCE(oic_agg.cogs_mills, 0) - COALESCE(rca_agg.return_cogs_mills, 0))::numeric / 100, 0))::bigint`
+      : sql`GREATEST(0, ROUND(COALESCE(oic_agg.cogs_mills, 0)::numeric / 100, 0))::bigint`;
+
     const rows = await db.execute(sql`
       SELECT
         pv.id AS product_variant_id,
@@ -1781,24 +1843,36 @@ export const procurementMethods: IProcurementStorage = {
         p.title AS product_name,
         SUM(oi.quantity) AS units_sold,
         COALESCE(SUM(oi.total_price_cents), 0) AS revenue_cents,
-        COALESCE(SUM(oic_agg.cogs_cents), 0) AS cogs_cents,
-        COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(oic_agg.cogs_cents), 0) AS profit_cents,
+        COALESCE(SUM(${lineCogsExpr}), 0) AS cogs_cents,
+        COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(${lineCogsExpr}), 0) AS profit_cents,
         CASE WHEN SUM(oi.total_price_cents) > 0
-          THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(oic_agg.cogs_cents), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
+          THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(${lineCogsExpr}), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
           ELSE 0
         END AS margin_percent,
         pv.last_cost_cents,
-        pv.avg_cost_cents
+        pv.avg_cost_cents,
+        pv.last_cost_mills,
+        pv.avg_cost_mills
       FROM wms.order_items oi
+      JOIN wms.orders o ON o.id = oi.order_id
       JOIN catalog.product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
       JOIN catalog.products p ON p.id = pv.product_id
       LEFT JOIN (
-        SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
+        SELECT
+          order_item_id,
+          SUM(COALESCE(total_cost_mills, total_cost_cents::bigint * 100)) AS cogs_mills,
+          COUNT(*) > 0 AS has_cogs
         FROM oms.order_item_costs
         GROUP BY order_item_id
       ) oic_agg ON oic_agg.order_item_id = oi.id
+      ${returnDeductionJoin}
       WHERE oi.total_price_cents IS NOT NULL
-      GROUP BY pv.id, pv.sku, p.title, pv.last_cost_cents, pv.avg_cost_cents
+        AND COALESCE(o.warehouse_status, '') NOT IN ('cancelled', 'canceled')
+        AND (
+          COALESCE(oic_agg.has_cogs, false)
+          OR COALESCE(o.warehouse_status, '') IN ('picked', 'packed', 'ready_to_ship', 'shipped', 'delivered', 'completed')
+        )
+      GROUP BY pv.id, pv.sku, p.title, pv.last_cost_cents, pv.avg_cost_cents, pv.last_cost_mills, pv.avg_cost_mills
       ORDER BY profit_cents DESC
       LIMIT ${limit} OFFSET ${offset}
     `);

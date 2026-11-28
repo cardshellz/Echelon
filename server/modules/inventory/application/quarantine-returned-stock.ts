@@ -25,7 +25,14 @@ export async function quarantineReturnedStock(tx: CostEvidenceTransaction, input
   const before = costInteger(level?.variant_qty,"inventoryLevel.quantity");
   if (before < input.quantity) throw new CostEvidenceError("RETURN_QUARANTINE_STOCK_CONFLICT","Returned level cannot support the exact quarantine quantity.");
   const lots = await tx.execute(sql`SELECT id,product_variant_id,warehouse_location_id,qty_on_hand,qty_reserved,
-    qty_picked,qty_packed,qty_consumed,unit_cost_cents FROM inventory.inventory_lots
+    qty_picked,qty_packed,qty_consumed,unit_cost_cents,
+    COALESCE(
+      CASE WHEN cost_basis_qty IS NOT NULL AND cost_basis_qty > 0
+        THEN COALESCE(product_total_cost_mills, 0) + COALESCE(packaging_total_cost_mills, 0) + COALESCE(landed_total_cost_mills, 0)
+        ELSE NULL END,
+      (qty_on_hand::bigint * COALESCE(total_unit_cost_mills, unit_cost_mills, COALESCE(unit_cost_cents, 0)::bigint * 100))
+    )::text AS exact_total_cost_mills
+    FROM inventory.inventory_lots
     WHERE id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)) ORDER BY id FOR UPDATE`);
   let total = BigInt(0);
   for (const lot of lots.rows) {
@@ -51,9 +58,10 @@ export async function quarantineReturnedStock(tx: CostEvidenceTransaction, input
     else await tx.execute(sql`UPDATE inventory.inventory_lots SET qty_on_hand=0,qty_consumed=qty_consumed+${quantity},status='depleted' WHERE id=${lot.id}`);
     await tx.execute(sql`INSERT INTO inventory.inventory_transactions
       (product_variant_id,from_location_id,transaction_type,variant_qty_delta,variant_qty_before,variant_qty_after,
-       source_state,target_state,inventory_lot_id,unit_cost_cents,reference_type,reference_id,user_id,notes,created_at)
+       source_state,target_state,inventory_lot_id,unit_cost_cents,total_cost_mills,reference_type,reference_id,user_id,notes,created_at)
       VALUES (${input.productVariantId},${input.warehouseLocationId},'adjustment',${-quantity},${running},${running-quantity},
         'customer_return','damaged',${lot.id},${costInteger(lot.unit_cost_cents,"unitCostCents")},
+        ${lot.exact_total_cost_mills != null ? String(lot.exact_total_cost_mills) : null}::bigint,
         'return_quarantine',${input.operationKey},${input.actor},${input.reason},${input.occurredAt})`);
     running-=quantity;
   }

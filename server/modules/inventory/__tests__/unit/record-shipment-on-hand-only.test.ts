@@ -88,10 +88,13 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
       ([, adj]: any[]) => adj && "pickedQty" in adj,
     );
     expect(touchedPicked).toBe(false);
-    expect(lotService.withTx().shipFromLots).toHaveBeenCalledWith({
-      productVariantId: 30, warehouseLocationId: 20, qty: 2,
-      fromPicked: 0, fromOnHand: 2, reservedToRelease: 2,
-    });
+    expect(lotService.withTx().shipFromLots).toHaveBeenCalledWith(
+      {
+        productVariantId: 30, warehouseLocationId: 20, qty: 2,
+        fromPicked: 0, fromOnHand: 2, reservedToRelease: 2,
+      },
+      { orderId: 40, orderItemId: 50 },
+    );
     expect(storage.createInventoryTransaction).toHaveBeenCalledWith(expect.objectContaining({ reservedQtyDelta: -2 }), tx);
   });
 

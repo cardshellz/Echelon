@@ -19,17 +19,102 @@ export async function updateVariantBackfillCostsInCatalog(
   executor: { execute: (...args: any[]) => any },
   variantId: number,
   unitCostCents: number,
+  unitCostMills?: number,
 ): Promise<void> {
+  const resolvedMillsStr = (
+    unitCostMills !== undefined ? BigInt(unitCostMills) : BigInt(unitCostCents) * BigInt(100)
+  ).toString();
+  const unitCostCentsStr = BigInt(unitCostCents).toString();
   await executor.execute(sql`
-    UPDATE catalog.product_variants
-    SET last_cost_cents = ${unitCostCents},
+    WITH lot_rollup AS (
+      SELECT
+        CASE
+          WHEN COALESCE(SUM(qty_on_hand), 0) > 0 THEN
+            ROUND(
+              SUM(qty_on_hand::numeric * COALESCE(total_unit_cost_mills, unit_cost_mills, COALESCE(unit_cost_cents, 0)::numeric * 100))
+              / SUM(qty_on_hand::numeric),
+              0
+            )::bigint
+          ELSE NULL
+        END AS avg_mills
+      FROM inventory.inventory_lots
+      WHERE product_variant_id = ${variantId}
+        AND status = 'active'
+        AND qty_on_hand > 0
+    )
+    UPDATE catalog.product_variants pv
+    SET last_cost_cents = ${unitCostCentsStr}::bigint,
+        last_cost_mills = ${resolvedMillsStr}::bigint,
+        avg_cost_mills = COALESCE(lot_rollup.avg_mills, ${resolvedMillsStr}::bigint),
+        avg_cost_cents = ROUND(COALESCE(lot_rollup.avg_mills, ${resolvedMillsStr}::bigint)::numeric / 100, 0)::bigint,
         standard_cost_cents = CASE
-          WHEN standard_cost_cents IS NULL OR standard_cost_cents = 0
-          THEN ${unitCostCents}
-          ELSE standard_cost_cents
+          WHEN pv.standard_cost_cents IS NULL OR pv.standard_cost_cents = 0
+          THEN ${unitCostCentsStr}::bigint
+          ELSE pv.standard_cost_cents
+        END,
+        standard_cost_mills = CASE
+          WHEN pv.standard_cost_mills IS NULL OR pv.standard_cost_mills = 0
+          THEN ${resolvedMillsStr}::bigint
+          ELSE pv.standard_cost_mills
         END,
         updated_at = NOW()
-    WHERE id = ${variantId}
+    FROM lot_rollup
+    WHERE pv.id = ${variantId}
+  `);
+}
+
+export async function syncVariantCostRollupFromLotsInCatalog(
+  executor: { execute: (...args: any[]) => any },
+  input: {
+    productVariantId: number;
+    lastCostMills?: number | bigint | null;
+    updatedAt?: Date;
+  },
+): Promise<void> {
+  const hasExplicitLast =
+    input.lastCostMills !== undefined &&
+    input.lastCostMills !== null &&
+    BigInt(input.lastCostMills) > BigInt(0);
+  const explicitLastMills = hasExplicitLast ? BigInt(input.lastCostMills!).toString() : null;
+  const explicitLastCents = hasExplicitLast
+    ? ((BigInt(input.lastCostMills!) + BigInt(50)) / BigInt(100)).toString()
+    : null;
+  const ts = input.updatedAt ?? new Date();
+  await executor.execute(sql`
+    WITH lot_rollup AS (
+      SELECT
+        CASE
+          WHEN COALESCE(SUM(qty_on_hand), 0) > 0 THEN
+            ROUND(
+              SUM(qty_on_hand::numeric * COALESCE(total_unit_cost_mills, unit_cost_mills, COALESCE(unit_cost_cents, 0)::numeric * 100))
+              / SUM(qty_on_hand::numeric),
+              0
+            )::bigint
+          ELSE NULL
+        END AS avg_mills
+      FROM inventory.inventory_lots
+      WHERE product_variant_id = ${input.productVariantId}
+        AND status = 'active'
+        AND qty_on_hand > 0
+    )
+    UPDATE catalog.product_variants pv
+    SET avg_cost_mills = COALESCE(lot_rollup.avg_mills, ${explicitLastMills}::bigint, pv.avg_cost_mills),
+        avg_cost_cents = CASE
+          WHEN COALESCE(lot_rollup.avg_mills, ${explicitLastMills}::bigint) IS NOT NULL
+          THEN ROUND(COALESCE(lot_rollup.avg_mills, ${explicitLastMills}::bigint)::numeric / 100, 0)::bigint
+          ELSE pv.avg_cost_cents
+        END,
+        last_cost_mills = CASE
+          WHEN ${explicitLastMills}::bigint IS NOT NULL THEN ${explicitLastMills}::bigint
+          ELSE pv.last_cost_mills
+        END,
+        last_cost_cents = CASE
+          WHEN ${explicitLastCents}::bigint IS NOT NULL THEN ${explicitLastCents}::bigint
+          ELSE pv.last_cost_cents
+        END,
+        updated_at = ${ts}
+    FROM lot_rollup
+    WHERE pv.id = ${input.productVariantId}
   `);
 }
 
@@ -37,16 +122,35 @@ export async function updateVariantReceiptCostRollupInCatalog(
   executor: { update: (...args: any[]) => any },
   input: {
     productVariantId: number;
-    lastCostCents: number;
+    lastCostCents?: number | null;
+    lastCostMills?: number | null;
     avgCostCents: number;
+    avgCostMills?: number | null;
     updatedAt?: Date;
   },
 ): Promise<void> {
+  const resolvedAvgMills = input.avgCostMills ?? input.avgCostCents * 100;
+  const hasExplicitLastCost =
+    (input.lastCostMills !== undefined && input.lastCostMills !== null) ||
+    (input.lastCostCents !== undefined && input.lastCostCents !== null);
+  const resolvedLastMills = hasExplicitLastCost
+    ? (input.lastCostMills ?? (input.lastCostCents! * 100))
+    : undefined;
+  const resolvedLastCents = hasExplicitLastCost
+    ? (input.lastCostCents ?? Math.round((resolvedLastMills! + 50) / 100))
+    : undefined;
+
   await executor
     .update(productVariants)
     .set({
-      lastCostCents: input.lastCostCents,
+      ...(hasExplicitLastCost
+        ? {
+            lastCostCents: resolvedLastCents,
+            lastCostMills: resolvedLastMills,
+          }
+        : {}),
       avgCostCents: input.avgCostCents,
+      avgCostMills: resolvedAvgMills,
       updatedAt: input.updatedAt ?? new Date(),
     })
     .where(eq(productVariants.id, input.productVariantId));

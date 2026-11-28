@@ -33,7 +33,10 @@ import {
 import type { InventoryLot } from "@shared/schema";
 import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";
 import { parseCostLotsReport, parseInventoryValuationReport } from "@shared/inventory/cost-report-read";
-import { updateVariantBackfillCostsInCatalog } from "../../catalog/cross-module-product-mutations.api";
+import {
+  updateVariantBackfillCostsInCatalog,
+  syncVariantCostRollupFromLotsInCatalog,
+} from "../../catalog/cross-module-product-mutations.api";
 import { revalueSupplierReturnAllocations } from "../infrastructure/supplier-return-cost.repository";
 import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
 import { buildOrderCOGSReport, type OrderCOGSResult } from "../domain/order-cogs-read";
@@ -258,6 +261,7 @@ export class COGSService {
     excludedOrderCostIds?: readonly number[];
     recordedAt?: Date;
     sourceRevisionId?: number;
+    skipVariantRollup?: boolean;
   }, client?: any): Promise<LotCostRevalueResult | null> {
     const revalue = async (tx: any): Promise<LotCostRevalueResult | null> => {
       await lockInventoryCostGraph(tx);
@@ -396,6 +400,16 @@ export class COGSService {
         )
       `);
 
+      // Keep catalog.product_variants avg/last cost rollups in sync whenever a lot's
+      // landed, packaging, or invoice product cost is revised.
+      if (!params.skipVariantRollup && typeof tx.execute === "function" && lot.product_variant_id != null) {
+        await syncVariantCostRollupFromLotsInCatalog(tx, {
+          productVariantId: Number(lot.product_variant_id),
+          lastCostMills: totalUnitCostMills > 0 ? totalUnitCostMills : null,
+          updatedAt: now,
+        });
+      }
+
       return {
         lotId: params.lotId,
         lotNumber: lot.lot_number,
@@ -423,8 +437,11 @@ export class COGSService {
     warehouseLocationId: number;
     qtyPieces: number;
     poUnitCostCents?: number;
+    poUnitCostMills?: number;
     packagingCostCents?: number;
+    packagingCostMills?: number;
     landedCostCents?: number;
+    landedCostMills?: number;
     poLineId?: number;
     inboundShipmentId?: number;
     receivingOrderId?: number;
@@ -447,14 +464,14 @@ export class COGSService {
     now: Date,
   ): Promise<InventoryLot> {
     await assertLegacyQuantityImportAllowed(this.db, "Legacy cost-lot import");
-    const poUnitCost = params.poUnitCostCents ?? 0;
-    const packagingCost = params.packagingCostCents ?? 0;
-    const landedCost = params.landedCostCents ?? 0;
-    const totalUnitCost = poUnitCost + packagingCost + landedCost;
-    const poUnitCostMills = centsToMills(poUnitCost);
-    const packagingCostMills = centsToMills(packagingCost);
-    const landedCostMills = centsToMills(landedCost);
+    const poUnitCostMills = params.poUnitCostMills ?? centsToMills(params.poUnitCostCents ?? 0);
+    const packagingCostMills = params.packagingCostMills ?? centsToMills(params.packagingCostCents ?? 0);
+    const landedCostMills = params.landedCostMills ?? centsToMills(params.landedCostCents ?? 0);
     const totalUnitCostMills = poUnitCostMills + packagingCostMills + landedCostMills;
+    const poUnitCost = millsToCents(poUnitCostMills);
+    const packagingCost = millsToCents(packagingCostMills);
+    const landedCost = millsToCents(landedCostMills);
+    const totalUnitCost = millsToCents(totalUnitCostMills);
     const costSource = params.costSource ?? 'manual';
 
     const lotNumber = await this.generateLotNumber(now);
@@ -620,7 +637,58 @@ export class COGSService {
       WHERE olc.order_id = ${orderId}
       ORDER BY olc.id ASC
     `);
-    return buildOrderCOGSReport({ order, items, costs: cogsResult.rows });
+    let combinedCosts = [...(cogsResult.rows || [])];
+    const regResult = await reader.execute(sql`
+      SELECT
+        to_regclass('inventory.return_cost_allocations') IS NOT NULL AS has_returns,
+        to_regclass('inventory.inventory_transactions') IS NOT NULL AS has_tx
+    `);
+    if (regResult.rows?.[0]?.has_returns) {
+      const hasTx = Boolean(regResult.rows?.[0]?.has_tx);
+      const returnRows = await reader.execute(sql`
+        SELECT
+          rca.wms_order_id AS order_id,
+          rca.wms_order_item_id AS order_item_id,
+          COALESCE(src_oic.inventory_lot_id, rca.returned_lot_id) AS lot_id,
+          (-rca.quantity) AS qty_consumed,
+          COALESCE(rlot.unit_cost_cents, 0) AS unit_cost_cents,
+          (-((COALESCE(
+            CASE WHEN rlot.cost_basis_qty IS NOT NULL AND rlot.cost_basis_qty = rca.quantity
+              THEN COALESCE(rlot.product_total_cost_mills, 0) + COALESCE(rlot.packaging_total_cost_mills, 0) + COALESCE(rlot.landed_total_cost_mills, 0)
+              ELSE NULL END,
+            rca.quantity::bigint * COALESCE(rlot.total_unit_cost_mills, rlot.unit_cost_mills, COALESCE(rlot.unit_cost_cents, 0)::bigint * 100)
+          ) + 50) / 100)) AS total_cost_cents,
+          COALESCE(rlot.total_unit_cost_mills, rlot.unit_cost_mills, COALESCE(rlot.unit_cost_cents, 0)::bigint * 100) AS unit_cost_mills,
+          (-(COALESCE(
+            CASE WHEN rlot.cost_basis_qty IS NOT NULL AND rlot.cost_basis_qty = rca.quantity
+              THEN COALESCE(rlot.product_total_cost_mills, 0) + COALESCE(rlot.packaging_total_cost_mills, 0) + COALESCE(rlot.landed_total_cost_mills, 0)
+              ELSE NULL END,
+            rca.quantity::bigint * COALESCE(rlot.total_unit_cost_mills, rlot.unit_cost_mills, COALESCE(rlot.unit_cost_cents, 0)::bigint * 100)
+          ))) AS total_cost_mills,
+          COALESCE(src_lot.lot_number, rlot.lot_number) AS lot_number
+        FROM inventory.return_cost_allocations rca
+        JOIN inventory.inventory_lots rlot ON rlot.id = rca.returned_lot_id
+        LEFT JOIN oms.order_item_costs src_oic ON src_oic.id = rca.source_order_item_cost_id
+        LEFT JOIN inventory.inventory_lots src_lot ON src_lot.id = src_oic.inventory_lot_id
+        WHERE rca.wms_order_id = ${orderId}
+          AND rca.wms_order_item_id IS NOT NULL
+          AND rca.source_order_item_cost_id IS NOT NULL
+          AND (
+            ${!hasTx}
+            OR NOT EXISTS (
+              SELECT 1 FROM inventory.inventory_transactions tx
+              WHERE tx.inventory_lot_id = rca.returned_lot_id
+                AND (
+                  tx.reference_type = 'return_quarantine'
+                  OR (tx.transaction_type = 'return' AND tx.target_state IN ('damaged', 'defective'))
+                )
+            )
+          )
+        ORDER BY rca.returned_lot_id ASC
+      `);
+      combinedCosts = [...combinedCosts, ...(returnRows.rows || [])];
+    }
+    return buildOrderCOGSReport({ order, items, costs: combinedCosts });
   }
 
   // ---------------------------------------------------------------------------
@@ -666,8 +734,10 @@ export class COGSService {
     productVariantId: number;
     warehouseLocationId: number;
     qty: number;
-    unitCostCents: number;
+    unitCostCents?: number;
+    unitCostMills?: number;
     landedCostCents?: number;
+    landedCostMills?: number;
     batchNumber?: string;
     receivedAt?: string | Date;
     notes?: string;
@@ -677,7 +747,9 @@ export class COGSService {
       warehouseLocationId: params.warehouseLocationId,
       qtyPieces: params.qty,
       poUnitCostCents: params.unitCostCents,
+      poUnitCostMills: params.unitCostMills,
       landedCostCents: params.landedCostCents ?? 0,
+      landedCostMills: params.landedCostMills,
       costSource: 'manual',
       batchNumber: params.batchNumber,
       receivedAt: params.receivedAt ? new Date(params.receivedAt) : undefined,
@@ -1002,6 +1074,7 @@ export class COGSService {
 
   async updateManualLot(lotId: number, updates: {
     unitCostCents?: number;
+    unitCostMills?: number;
     batchNumber?: string;
     notes?: string;
   }): Promise<boolean> {
@@ -1013,10 +1086,13 @@ export class COGSService {
       return false;
     }
 
-    if (updates.unitCostCents !== undefined) {
+    if (updates.unitCostMills !== undefined || updates.unitCostCents !== undefined) {
+      const productCostMills = updates.unitCostMills !== undefined
+        ? updates.unitCostMills
+        : centsToMills(updates.unitCostCents!);
       const revalue = await this.revalueLotCostMills({
         lotId,
-        productCostMills: centsToMills(updates.unitCostCents),
+        productCostMills,
         costSource: "manual",
         reason: "manual_lot_update",
         requiredCostSource: "manual",
@@ -1156,6 +1232,7 @@ export class COGSService {
           productCostMills: centsToMills(entry.unitCostCents),
           costSource: "backfill",
           reason: "backfill",
+          skipVariantRollup: true,
         });
         if (revalue) {
           cogsRowsUpdated += revalue.cogsRowsUpdated;

@@ -1,4 +1,4 @@
-import { readIntegerCents } from "@shared/money-read";
+import { readIntegerCents, centsToMills, dollarsToMills, millsToCents } from "@shared/utils/money";
 import React, { useState, useMemo } from "react";
 import { HistoricalCostAdjustments } from "@/features/purchasing/HistoricalCostAdjustments";
 import { useInventoryQuantityCapabilities } from "@/hooks/use-inventory-quantity-capabilities";
@@ -92,6 +92,18 @@ function formatPct(pct: number): string {
 
 function isLandedPendingLot(lot: any): boolean {
   return Number(lot?.cost_provisional || 0) === 1 && Boolean(lot?.inbound_shipment_id);
+}
+
+function parseManualCostInput(raw: string, fieldLabel: string): { cents: number; mills: number } {
+  const cleaned = raw.trim().replace(/[$,\s]/g, "");
+  if (cleaned.includes(".")) {
+    // Decimal input (e.g. "0.0120" or "0.0038") is parsed as exact 4-decimal USD mills.
+    const mills = dollarsToMills(cleaned);
+    return { cents: millsToCents(mills), mills };
+  }
+  // Whole-integer input preserves the legacy integer-cents contract.
+  const cents = readIntegerCents(cleaned, fieldLabel);
+  return { cents, mills: centsToMills(cents) };
 }
 
 // ─── Main Component ─────────────────────────────────────────────────
@@ -1081,12 +1093,18 @@ function ManualEntrySection() {
 
   const createMutation = useMutation({
     mutationFn: async () => {
+      const parsedUnit = parseManualCostInput(unitCost, "unit cost");
+      const parsedLanded = landedCost.trim()
+        ? parseManualCostInput(landedCost, "landed cost")
+        : undefined;
       const res = await apiRequest("POST", "/api/cogs/manual-entry", {
         productVariantId: parseInt(variantId),
         warehouseLocationId: parseInt(locationId),
         qty: parseInt(qty),
-        unitCostCents: readIntegerCents(unitCost, "unit cost"),
-        landedCostCents: landedCost ? readIntegerCents(landedCost, "landed cost") : undefined,
+        unitCostMills: parsedUnit.mills,
+        unitCostCents: parsedUnit.cents,
+        landedCostMills: parsedLanded?.mills,
+        landedCostCents: parsedLanded?.cents,
         batchNumber: batchNumber || undefined,
         receivedAt: receivedAt || undefined,
         notes: notes || undefined,
@@ -1136,7 +1154,7 @@ function ManualEntrySection() {
               <CardTitle className="text-lg">Manual Cost Entry</CardTitle>
               <CardDescription>
                 Create cost lots for existing inventory without PO linkage.
-                All costs in cents per piece.
+                All costs in cents per piece (or 4-decimal USD with a decimal point, e.g. 0.0038).
               </CardDescription>
             </div>
             <Button variant="outline" size="sm" disabled={!legacyQuantityImportAllowed} onClick={() => setShowBulkDialog(true)}>
@@ -1451,8 +1469,10 @@ function EditManualLotDialog({ lot, onClose }: { lot: any; onClose: () => void }
 
   const updateMutation = useMutation({
     mutationFn: async () => {
+      const parsed = parseManualCostInput(unitCost, "unit cost");
       const res = await apiRequest("PATCH", `/api/cogs/manual-lots/${lot.id}`, {
-        unitCostCents: readIntegerCents(unitCost, "unit cost"),
+        unitCostMills: parsed.mills,
+        unitCostCents: parsed.cents,
         batchNumber: batchNumber || undefined,
         notes: notes || undefined,
       });

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000072000021670001_product_variant_cost_mills.sql",
+  "generation": 72,
+  "pr": 2167,
+  "ordinal": 1,
+  "after": [
+    "900000071000021260001_variant_pack_shopify_metafields.sql"
+  ]
+}

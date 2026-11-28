@@ -6,13 +6,14 @@ export function parseReceivingImportCsv(text: string): { lines: ReceivingImportR
   if (parsed.errors.length) return { error: `CSV could not be read: ${parsed.errors[0].message}` };
   const [rawHeader = [], ...rows] = parsed.data;
   const header = rawHeader.map((value) => value.trim().toLowerCase());
-  const columns = { sku: -1, qty: -1, location: -1, damaged_qty: -1, unit_cost: -1, barcode: -1, notes: -1 };
+  const columns = { sku: -1, qty: -1, location: -1, damaged_qty: -1, unit_cost: -1, unit_cost_basis: -1, barcode: -1, notes: -1 };
   const aliases: Record<keyof typeof columns, readonly string[]> = {
     sku: ["sku", "product_sku"],
     qty: ["qty", "quantity", "count"],
     location: ["location", "bin", "loc"],
     damaged_qty: ["damaged_qty", "damaged"],
     unit_cost: ["unit_cost", "cost", "price"],
+    unit_cost_basis: ["unit_cost_basis", "cost_basis", "price_basis"],
     barcode: ["barcode", "upc", "ean"],
     notes: ["notes", "note", "comments"],
   };
@@ -24,7 +25,7 @@ export function parseReceivingImportCsv(text: string): { lines: ReceivingImportR
     }
     columns[field] = matches[0] ?? -1;
   }
-  const { sku, qty, location, damaged_qty: damaged, unit_cost: cost, barcode, notes } = columns;
+  const { sku, qty, location, damaged_qty: damaged, unit_cost: cost, unit_cost_basis: costBasis, barcode, notes } = columns;
   if (sku < 0 || qty < 0) return { error: "CSV must have 'sku' and 'qty' columns" };
   // Papa's array mode does not reject extra or missing cells. Validate shape
   // before mapping so unquoted commas cannot silently change received counts.
@@ -41,6 +42,7 @@ export function parseReceivingImportCsv(text: string): { lines: ReceivingImportR
   // parseInt here would silently turn fractional/malformed counts into stock.
   return { lines: rows.map((row) => ({ sku: cell(row, sku) ?? "", qty: cell(row, qty),
     location: cell(row, location), damaged_qty: cell(row, damaged), unit_cost: cell(row, cost),
+    ...(costBasis >= 0 && cell(row, costBasis) ? { unit_cost_basis: cell(row, costBasis) as "per_piece" | "per_variant" } : {}),
     barcode: cell(row, barcode), notes: cell(row, notes) })) };
 }
 
